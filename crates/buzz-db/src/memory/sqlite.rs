@@ -239,6 +239,49 @@ impl SqliteMetadataStore {
         &self.db_path
     }
 
+    /// Fetches a document by workspace and source URI.
+    pub fn get_document_by_uri(&self, workspace_path: &str, source_uri: &str) -> Result<Option<Document>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source_type, source_uri, workspace_path, content_hash,
+                        mtime_ns, size_bytes, permissions, metadata, created_at, updated_at
+                 FROM orbit_documents WHERE workspace_path = ?1 AND source_uri = ?2;",
+            )
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+
+        let res = stmt
+            .query_row(params![workspace_path, source_uri], |row| {
+                let id_str: String = row.get(0)?;
+                let permissions_str: String = row.get(7)?;
+                let metadata_str: String = row.get(8)?;
+                let created_str: String = row.get(9)?;
+                let updated_str: String = row.get(10)?;
+
+                Ok(Document {
+                    id: Uuid::parse_str(&id_str).unwrap_or_default(),
+                    source_type: row.get(1)?,
+                    source_uri: row.get(2)?,
+                    workspace_path: row.get(3)?,
+                    content_hash: row.get(4)?,
+                    mtime_ns: row.get(5)?,
+                    size_bytes: row.get(6)?,
+                    permissions: serde_json::from_str(&permissions_str).unwrap_or(serde_json::Value::Null),
+                    metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null),
+                    created_at: DateTime::parse_from_rfc3339(&created_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    updated_at: DateTime::parse_from_rfc3339(&updated_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })
+            .optional()
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+
+        Ok(res)
+    }
+
     /// Stores or updates an entity record.
     pub fn upsert_entity(&self, entity: &Entity) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -633,9 +676,11 @@ impl MetadataStore for SqliteMetadataStore {
                 id, source_type, source_uri, workspace_path, content_hash,
                 mtime_ns, size_bytes, permissions, metadata, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-            ON CONFLICT(workspace_path, content_hash) DO UPDATE SET
+            ON CONFLICT(id) DO UPDATE SET
                 source_type = excluded.source_type,
                 source_uri = excluded.source_uri,
+                workspace_path = excluded.workspace_path,
+                content_hash = excluded.content_hash,
                 mtime_ns = excluded.mtime_ns,
                 size_bytes = excluded.size_bytes,
                 permissions = excluded.permissions,

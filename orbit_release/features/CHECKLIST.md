@@ -12,7 +12,7 @@
 |---|----------------|-----------|----------|--------|--------------|--------|
 | **01** | Storage Foundation (Embedded Local-First Store) | `01_storage_foundation/` | P0 | Sprint 1 | None | `[x] Completed` |
 | **02** | Embedding & Reranker Engine | `02_embedding_engine/` | P0 | Sprint 1 | F01 | `[x] Completed` |
-| **03** | Ingestion Pipeline (L1 $\rightarrow$ L2) | `03_ingestion_pipeline/` | P0 | Sprint 2 | F01, F02 | `[ ] Not Started` |
+| **03** | Ingestion Pipeline (L1 $\rightarrow$ L2) | `03_ingestion_pipeline/` | P0 | Sprint 2 | F01, F02 | `[x] Completed` |
 | **04** | SuperRAG Retrieval Layer (Data Re-Trial & Reranking)| `04_multi_rag_search/` | P0 | Sprint 2 | F01, F02 | `[ ] Not Started` |
 | **05** | Knowledge Graph (L3 Bi-temporal Memory) | `05_knowledge_graph/` | P1 | Sprint 3 | F01, F03 | `[ ] Not Started` |
 | **06** | Recall Agent (9 IDE Parsers) | `06_recall_agent/` | P1 | Sprint 3 | F01, F02, F03 | `[ ] Not Started` |
@@ -38,9 +38,9 @@
 - [x] **F02**: API keys securely stored via `buzz-auth` OS keyring (DPAPI, Keychain, Secret Service)
 
 ### Phase 2: Ingestion & SuperRAG Retrieval (Sprint 2)
-- [ ] **F03**: `buzz-ingest` file watcher monitors workspace changes using `notify`
-- [ ] **F03**: Tree-sitter AST chunker chunks Rust, TS, Python, Go, and Markdown with provenance
-- [ ] **F03**: Git history ingested (commits, authors, diffs) with SHA hashes
+- [x] **F03**: `buzz-ingest` file watcher monitors workspace changes using `notify`
+- [x] **F03**: Tree-sitter AST chunker chunks Rust, TS, Python, Go, and Markdown with provenance
+- [x] **F03**: Git history ingested (commits, authors, diffs) with SHA hashes
 - [ ] **F04**: Pre-Retrieval Data Re-Trial & Query Routing Arbiter classifies intents and checks semantic cache
 - [ ] **F04**: Multi-Modal candidate retrieval executes over embedded VectorStore + SQLite FTS5
 - [ ] **F04**: Reciprocal Rank Fusion (RRF) combines scores with temporal decay ($e^{-\lambda \Delta t}$) and authority weighting

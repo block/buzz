@@ -13,6 +13,7 @@ members = [
     "crates/buzz-acp",
     "crates/buzz-agent",
     "crates/buzz-ai",
+    "crates/buzz-ingest",
     "crates/sprig",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",
@@ -148,6 +149,7 @@ buzz-deletion = { path = "crates/buzz-deletion" }
 buzz-feature-flags = { path = "crates/buzz-feature-flags" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-ai = { path = "crates/buzz-ai" }
+buzz-ingest = { path = "crates/buzz-ingest" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }

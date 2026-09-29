@@ -61,3 +61,26 @@ Notes:
 Follow-up: Advance to Feature 03 (Ingestion Pipeline).
 ```
 
+```text
+Date: 2026-09-30
+Feature: 03 - Ingestion Pipeline (Watcher, AST Chunker, Git Enrichment, Pipeline)
+Build/commit: local-build-f03
+Automated tests:
+  - buzz-ingest::watcher::tests (2 tests: ignore rules, scan change detection) -> PASS
+  - buzz-ingest::chunker::tests (3 tests: Rust AST, Markdown headings, Python blocks) -> PASS
+  - buzz-ingest::git::tests (1 test: workspace git metadata extraction) -> PASS
+  - buzz-ingest::f03_ingestion_pipeline_tests (4 tests: TC-F03-001/002 incremental & dedup, TC-F03-003 deletion cascade, secret redaction, full workspace batch ingestion) -> PASS
+  - buzz-db regression (6 tests) -> PASS (zero regressions)
+  - buzz-ai regression (9 tests) -> PASS (zero regressions)
+Manual tests: Verified that modifying a source file updates its content hash while preserving document ID and re-indexes AST chunks. Verified that unchanged files skip re-indexing via SHA-256 deduplication. Verified that file deletion cascades across SQLite and vector store. Verified that secrets are scrubbed prior to embedding and persistence.
+Environment: Windows 11, Rust 1.88, tokio 1.52
+Result: PASS
+Notes:
+  - `buzz-ingest` crate created and integrated into workspace.
+  - Multi-language AST semantic chunking preserves function, struct, and markdown heading integrity.
+  - WorkspaceWatcher supports ignore lists (`.git`, `target`, `node_modules`, `dist`) with mtime change detection.
+  - IngestionPipeline connects SecretRedactor -> AstChunker -> LocalOnnxEmbedder -> EmbeddedMemoryStore.
+Follow-up: Advance to Feature 04 (SuperRAG Retrieval Layer).
+```
+
+
