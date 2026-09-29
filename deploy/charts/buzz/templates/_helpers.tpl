@@ -17,6 +17,13 @@
 {{- end -}}
 {{- end -}}
 
+{{/* Kubernetes CronJob names are limited to 52 characters. */}}
+{{- define "buzz.cronJobName" -}}
+{{- $maxBaseLength := sub 51 (len .suffix) | int -}}
+{{- $base := include "buzz.fullname" .root | trunc $maxBaseLength | trimSuffix "-" -}}
+{{- printf "%s-%s" $base .suffix -}}
+{{- end -}}
+
 {{- define "buzz.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

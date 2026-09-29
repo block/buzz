@@ -25,7 +25,7 @@ use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
 use crate::nip_fi_http::http_denial;
-use crate::readiness::{self, ReadinessEvaluation, ReadinessReason};
+use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
 
 // ── NIP-FI fail-closed assertion guard ───────────────────────────────────────
@@ -318,12 +318,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )
         .route(
+            "/operator/listener/pubkeys",
+            post(api::operator::register_listener_pubkeys)
+                .delete(api::operator::remove_listener_pubkeys),
+        )
+        .route(
             "/operator/communities/archive",
             post(api::operator::archive_community),
         )
         .route(
             "/operator/communities/unarchive",
             post(api::operator::unarchive_community),
+        )
+        .route(
+            "/operator/communities/delete",
+            post(api::operator::delete_community),
         )
         .route(
             "/operator/communities/availability",
@@ -567,6 +576,71 @@ async fn nip11_or_ws_handler(
         return Json(nip11_document(&state, raw_host).await).into_response();
     }
 
+    // NIP-FI assertion gate at WebSocket upgrade.
+    //
+    // Strategy: belt-and-suspenders. Two fire-points cover the two ways an
+    // HTTP request can become a WebSocket upgrade request on this handler:
+    //
+    // HTTP/1.1 path (RFC 6455, currently the only live WebSocket path):
+    // detected by the `Upgrade: websocket` + `Connection: Upgrade` header pair.
+    // The gate fires BEFORE `WebSocketUpgrade::from_request` so denial is
+    // returned on the raw HTTP connection. This also keeps the gate independently
+    // testable via tower `oneshot` (which provides no real hyper `OnUpgrade`
+    // extension and would cause the extractor to return
+    // `ConnectionNotUpgradable`).
+    //
+    // HTTP/2 extended-CONNECT (latent — workspace Axum does not enable
+    // `http2`; the `/` route uses `get()` and Axum requires CONNECT routing
+    // for h2 WebSockets): not currently reachable. The gate inside `Ok(ws)`
+    // below is structural hardening for when `http2` is enabled. [F3-H2-GATE]
+    //
+    // Together these two fire-points ensure that every shape the extractor
+    // accepts is also gated — no hand-rolled predicate can diverge from the
+    // extractor's accepted shapes when `http2` is eventually enabled.
+    //
+    // Zero DB cost invariant: the active HTTP/1.1 fire-point runs before
+    // `bind_community`, so denied h1 upgrades pay zero DB cost
+    // [FI-TRACE-TRANSPORT-CLOSED], and tests that assert 401/503 are not
+    // pre-empted by a 404 from an unseeded DB. The latent h2 fire-point inside
+    // `Ok(ws)` runs after `bind_community`; it is unreachable until `http2`
+    // is enabled.
+    //
+    // Keying on the header pair (not on `Accept`) means an HTML Accept header
+    // on a real WS upgrade is still gated correctly.
+    let nip_fi_assertion = {
+        let is_h1_ws_upgrade = headers
+            .get(axum::http::header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("websocket"))
+            .unwrap_or(false)
+            && headers
+                .get(axum::http::header::CONNECTION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| {
+                    // Connection header is a comma-separated token list; per RFC 7230
+                    // each token is case-insensitive. A genuine WS upgrade carries
+                    // "Upgrade" (or "keep-alive, Upgrade") as a Connection token.
+                    v.split(',')
+                        .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+                })
+                .unwrap_or(false);
+        if is_h1_ws_upgrade {
+            use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+            let mode = state.config.nip_fi.mode;
+            let verifier = state.nip_fi_verifier.as_deref();
+            match check_nip_fi_at_upgrade(&headers, verifier, mode) {
+                NipFiUpgradeOutcome::NotRequired => None,
+                NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
+                NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+            }
+        } else {
+            // Not an HTTP/1.1 WS upgrade — could be an HTTP/2 extended-CONNECT,
+            // a NIP-11 request, or a plain browser GET. Do not gate here; the
+            // `Ok(ws)` arm below gates any extractor-accepted h2 upgrade. [F3-H2-GATE]
+            None
+        }
+    };
+
     // Row zero: bind the connection to its community from the request host
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
@@ -574,6 +648,9 @@ async fn nip11_or_ws_handler(
     // tenant. NIP-11 above is served before binding and stays fail-open: an
     // unmapped host still gets the document (with host-scoped fields like
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
+    //
+    // The active HTTP/1.1 NIP-FI gate runs above (before bind_community) so
+    // denied h1 upgrades pay zero DB cost; the latent h2 gate runs below.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -589,8 +666,33 @@ async fn nip11_or_ws_handler(
     };
 
     let max_frame_bytes = state.config.max_frame_bytes;
+
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
+            // [F3-H2-GATE] Structural hardening for HTTP/2 extended-CONNECT
+            // WebSocket upgrades. H2 CONNECT is currently latent (workspace
+            // Axum does not enable `http2` and the route uses `get()` rather
+            // than CONNECT routing), but the gate here future-proofs against
+            // enabling h2: if the extractor ever accepts an h2 shape that the
+            // pre-extractor predicate missed (no `Upgrade` header on CONNECT),
+            // the gate fires here instead of admitting the upgrade silently.
+            // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
+            // and this block is unreachable (the h1 denial is returned before
+            // we get here).
+            let nip_fi_assertion = if nip_fi_assertion.is_none() {
+                // Only re-check if the pre-extractor gate did not fire (h2 path).
+                use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+                let mode = state.config.nip_fi.mode;
+                let verifier = state.nip_fi_verifier.as_deref();
+                match check_nip_fi_at_upgrade(&headers, verifier, mode) {
+                    NipFiUpgradeOutcome::NotRequired => None,
+                    NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
+                    NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+                }
+            } else {
+                nip_fi_assertion
+            };
+
             // Shutting down: refuse new sockets instead of accepting a
             // connection onto a dying pod. Readiness already returns 503, but
             // that only stops K8s routing — direct and in-flight upgrades
@@ -600,8 +702,22 @@ async fn nip11_or_ws_handler(
             if state.shutting_down.load(Ordering::Relaxed) {
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
+            // Capture the upgrade instant here — before the on_upgrade callback
+            // fires — so the NIP-FI session partition is rooted at the HTTP
+            // handshake, not the post-community-active-check instant.
+            // [FI-TRACE-LEASE-BOUND]
+            let connection_time = chrono::Utc::now();
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    handle_connection(
+                        socket,
+                        state,
+                        addr,
+                        tenant,
+                        nip_fi_assertion,
+                        connection_time,
+                    )
+                })
                 .into_response()
         }
         Err(_) => {
@@ -616,7 +732,7 @@ async fn nip11_or_ws_handler(
                     }
                 }
             }
-            // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
+            // Not a WS upgrade request — serve NIP-11 as fallback.
             Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
@@ -640,60 +756,48 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Compatibility endpoint on the public listener. It evaluates dependencies
-/// and preserves the existing response contract but never records rollout
-/// telemetry.
+/// Compatibility endpoint on the public listener. Same lifecycle answer as the
+/// probe, but public traffic must never move rollout telemetry.
 async fn public_readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if !state.readiness.public_evaluation_allowed() {
-        return readiness_response(ReadinessEvaluation::shutting_down(), false);
-    }
-
-    let evaluation = state.readiness.evaluate(&state.db, &state.redis_pool).await;
-    let evaluation = state.readiness.finish_public_evaluation(evaluation);
-    readiness_response(evaluation, false)
+    readiness_response(readiness_reason(&state))
 }
 
-/// Kubernetes health-listener endpoint. All rollout metrics flow through the
-/// process-owned coordinator so shutdown and probe generations are ordered.
+/// Kubernetes health-listener endpoint — the only source of rollout readiness
+/// telemetry. Its single lifecycle sample determines every observable result
+/// of this request: counter, gauge, HTTP status, and body.
 async fn kubernetes_readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let readiness::ProbeStart::Evaluate(ticket) = state.readiness.begin_probe() else {
-        return readiness_response(ReadinessEvaluation::shutting_down(), true);
-    };
-
-    let evaluation = state.readiness.evaluate(&state.db, &state.redis_pool).await;
-    let evaluation = state.readiness.finish_probe(ticket, evaluation);
-    readiness_response(evaluation, true)
+    let reason = readiness_reason(&state);
+    readiness::record_readiness_probe(reason);
+    readiness_response(reason)
 }
 
-fn readiness_response(
-    evaluation: ReadinessEvaluation,
-    include_reason: bool,
-) -> axum::response::Response {
-    if evaluation.reason == ReadinessReason::ShuttingDown {
-        return (
+/// Readiness answers for this process only.
+///
+/// Shared Postgres, Redis, and deletion-catalog health used to gate this
+/// answer, which meant one shared outage removed every replica from the load
+/// balancer simultaneously and left a reconnect burst with nowhere to land.
+/// Those checks now report on `/_status`. The health listener does not bind
+/// until the database, migrations, Redis, and pub/sub are up (see
+/// `buzz-relay/src/main.rs`), so an answering process is a booted process and
+/// needs no separate startup state.
+fn readiness_reason(state: &AppState) -> ReadinessReason {
+    if state.shutting_down.load(Ordering::Acquire) {
+        ReadinessReason::ShuttingDown
+    } else {
+        ReadinessReason::Ready
+    }
+}
+
+fn readiness_response(reason: ReadinessReason) -> axum::response::Response {
+    match reason {
+        ReadinessReason::Ready => {
+            (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
+        }
+        ReadinessReason::ShuttingDown => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "shutting_down"})),
         )
-            .into_response();
-    }
-
-    let pg_ok = evaluation.postgres_ready();
-    let redis_ok = evaluation.redis_ready();
-    let deletion_catalog_ok = evaluation.deletion_catalog_ready();
-
-    if evaluation.is_ready() {
-        (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
-    } else {
-        let mut payload = json!({
-            "status": "not_ready",
-            "postgres": pg_ok,
-            "redis": redis_ok,
-            "deletion_catalog": deletion_catalog_ok
-        });
-        if include_reason {
-            payload["reason"] = json!(evaluation.reason.label());
-        }
-        (StatusCode::SERVICE_UNAVAILABLE, Json(payload)).into_response()
+            .into_response(),
     }
 }
 
@@ -710,9 +814,44 @@ fn status_payload(uptime_secs: u64) -> serde_json::Value {
     })
 }
 
-/// Status endpoint — service name, version, uptime, and intrinsic build identity.
+/// The dependency fields the readiness body used to carry, now a diagnostic
+/// read of the sampler's cache.
+///
+/// `sample` is always present so a reader can never mistake a cached verdict
+/// for a current one: `not_yet_sampled` before the sampler's first evaluation
+/// completes, then `fresh` or `stale` alongside the report's own age.
+fn dependency_diagnostics_payload(snapshot: DependencySnapshot) -> serde_json::Value {
+    let interval_seconds = readiness::DEPENDENCY_SAMPLE_INTERVAL.as_secs();
+    match snapshot {
+        DependencySnapshot::NotYetSampled => json!({
+            "sample": "not_yet_sampled",
+            "sample_interval_seconds": interval_seconds,
+        }),
+        DependencySnapshot::Sampled { report, age, stale } => json!({
+            "sample": if stale { "stale" } else { "fresh" },
+            "sample_interval_seconds": interval_seconds,
+            "sample_age_seconds": age.as_secs(),
+            "postgres": report.postgres_ready(),
+            "redis": report.redis_ready(),
+            "deletion_catalog": report.deletion_catalog_ready(),
+            "reason": report.reason.label(),
+        }),
+    }
+}
+
+/// Status endpoint — service name, version, uptime, intrinsic build identity,
+/// and the cached shared-dependency diagnostics.
+///
+/// Health-listener only, and never wired to a Kubernetes probe: this is where
+/// an operator looks to tell "the pod is fine, Postgres is not" apart from "the
+/// pod is broken". It reads only what
+/// [`readiness::run_dependency_sampler`] has already cached, so however often
+/// it is polled it adds no load to the shared pools.
 async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(status_payload(state.started_at.elapsed().as_secs()))
+    let mut payload = status_payload(state.started_at.elapsed().as_secs());
+    payload["dependencies"] =
+        dependency_diagnostics_payload(state.dependency_diagnostics.snapshot());
+    Json(payload)
 }
 
 /// `/_mesh` — live mesh status: peer table, connection/phi state, per-peer
@@ -756,7 +895,6 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
 
@@ -765,91 +903,63 @@ mod tests {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tokio::net::TcpListener;
-    use tokio::sync::{mpsc, Notify};
+    use tokio::sync::mpsc;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
     use tower::ServiceBuilder;
     use tracing::Instrument as _;
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::readiness::DependencyReport;
 
-    struct ScriptedReadinessEvaluator {
-        evaluations: Mutex<VecDeque<ReadinessEvaluation>>,
+    struct ScriptedDependencyEvaluator {
+        evaluations: Mutex<VecDeque<DependencyReport>>,
+        evaluations_started: std::sync::atomic::AtomicUsize,
     }
 
-    impl ScriptedReadinessEvaluator {
-        fn new(evaluations: impl IntoIterator<Item = ReadinessEvaluation>) -> Self {
+    impl ScriptedDependencyEvaluator {
+        fn new(evaluations: impl IntoIterator<Item = DependencyReport>) -> Self {
             Self {
                 evaluations: Mutex::new(evaluations.into_iter().collect()),
+                evaluations_started: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
-        fn push(&self, evaluation: ReadinessEvaluation) {
+        fn push(&self, evaluation: DependencyReport) {
             self.evaluations
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push_back(evaluation);
         }
+
+        /// How many times a caller actually reached the shared dependencies.
+        fn evaluations_started(&self) -> usize {
+            self.evaluations_started.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait::async_trait]
-    impl readiness::ReadinessEvaluator for ScriptedReadinessEvaluator {
+    impl readiness::DependencyEvaluator for ScriptedDependencyEvaluator {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
             _redis_pool: &deadpool_redis::Pool,
-        ) -> ReadinessEvaluation {
+        ) -> DependencyReport {
+            self.evaluations_started.fetch_add(1, Ordering::SeqCst);
             self.evaluations
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .pop_front()
-                .expect("scripted readiness evaluation")
+                .expect("scripted dependency report")
         }
     }
 
-    struct BarrierReadinessEvaluator {
-        calls: AtomicUsize,
-        first_started: Notify,
-        release_first: Notify,
-        first: ReadinessEvaluation,
-        second: ReadinessEvaluation,
-    }
-
-    impl BarrierReadinessEvaluator {
-        fn new(first: ReadinessEvaluation, second: ReadinessEvaluation) -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-                first_started: Notify::new(),
-                release_first: Notify::new(),
-                first,
-                second,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl readiness::ReadinessEvaluator for BarrierReadinessEvaluator {
-        async fn evaluate(
-            &self,
-            _db: &buzz_db::Db,
-            _redis_pool: &deadpool_redis::Pool,
-        ) -> ReadinessEvaluation {
-            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
-                self.first_started.notify_waiters();
-                self.release_first.notified().await;
-                self.first
-            } else {
-                self.second
-            }
-        }
-    }
-
-    fn readiness_evaluation(
+    fn dependency_report(
         postgres: readiness::PostgresOutcome,
         redis: readiness::RedisOutcome,
         deletion_catalog: readiness::DeletionCatalogOutcome,
-    ) -> ReadinessEvaluation {
-        ReadinessEvaluation::from_results(
+    ) -> DependencyReport {
+        DependencyReport::from_results(
             readiness::TimedOutcome::new(postgres, Duration::from_millis(35)),
             readiness::TimedOutcome::new(redis, Duration::from_millis(20)),
             readiness::TimedOutcome::new(deletion_catalog, Duration::from_millis(15)),
@@ -857,8 +967,8 @@ mod tests {
         )
     }
 
-    fn ready_evaluation() -> ReadinessEvaluation {
-        readiness_evaluation(
+    fn ready_report() -> DependencyReport {
+        dependency_report(
             readiness::PostgresOutcome::Success,
             readiness::RedisOutcome::Success,
             readiness::DeletionCatalogOutcome::Success,
@@ -898,7 +1008,7 @@ mod tests {
     /// Relay state serving both bundles: the admin SPA on `admin.example` and
     /// the public SPA on any other host.
     async fn spa_state(admin_dir: &std::path::Path, web_dir: &std::path::Path) -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.web_dir = Some(web_dir.to_path_buf());
@@ -940,10 +1050,19 @@ mod tests {
         Arc::new(state)
     }
 
-    async fn readiness_state(evaluator: Arc<dyn readiness::ReadinessEvaluator>) -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+    async fn readiness_state(evaluator: Arc<dyn readiness::DependencyEvaluator>) -> Arc<AppState> {
+        let mut state = unreachable_dependency_state().await;
+        Arc::get_mut(&mut state)
+            .expect("sole reference")
+            .set_dependency_evaluator(evaluator);
+        state
+    }
+
+    /// A relay process whose shared Postgres and Redis are both unroutable.
+    async fn unreachable_dependency_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1 -- local test-only credentials on a closed port
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -963,7 +1082,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (mut state, _audit_shutdown) = AppState::new(
+        let (state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -975,7 +1094,6 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
-        state.set_readiness_evaluator(evaluator);
         Arc::new(state)
     }
 
@@ -996,20 +1114,305 @@ mod tests {
         (status, payload)
     }
 
+    async fn status_request(router: Router) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .oneshot(
+                Request::get("/_status")
+                    .body(Body::empty())
+                    .expect("status request"),
+            )
+            .await
+            .expect("status response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("status response body");
+        let payload = serde_json::from_slice(&body).expect("status JSON");
+        (status, payload)
+    }
+
+    /// The incident regression. Shared Postgres and Redis pressure took every
+    /// replica out of the load balancer at once, so a reconnect burst had
+    /// nowhere to land. Readiness answers for this process only: a pod whose
+    /// shared dependencies are unreachable is still a healthy pod, and only a
+    /// local shutdown may withdraw it.
+    #[tokio::test]
+    async fn readiness_answers_from_local_lifecycle_not_shared_dependencies() {
+        let state = unreachable_dependency_state().await;
+
+        for router in [
+            build_health_router(state.clone()),
+            build_router(state.clone()),
+        ] {
+            assert_eq!(
+                readiness_request(router).await,
+                (StatusCode::OK, json!({"status": "ready"})),
+                "unreachable shared dependencies must not deroute a healthy pod"
+            );
+        }
+
+        state.begin_shutdown();
+
+        for router in [
+            build_health_router(state.clone()),
+            build_router(state.clone()),
+        ] {
+            assert_eq!(
+                readiness_request(router).await,
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"status": "shutting_down"})
+                ),
+                "a draining pod must still withdraw itself"
+            );
+        }
+    }
+
+    /// Dependency health did not disappear with the probe — it moved to the
+    /// diagnostic endpoint, which is never wired to a Kubernetes probe. The
+    /// fields the readiness body used to carry are still there, now qualified
+    /// by how old the sample behind them is.
+    #[tokio::test]
+    async fn status_retains_dependency_diagnostics_off_the_probe_path() {
+        let evaluator = Arc::new(ScriptedDependencyEvaluator::new([dependency_report(
+            readiness::PostgresOutcome::Success,
+            readiness::RedisOutcome::PoolTimeout,
+            readiness::DeletionCatalogOutcome::Success,
+        )]));
+        let state = readiness_state(evaluator).await;
+        state
+            .dependency_diagnostics
+            .sample(&state.db, &state.redis_pool)
+            .await;
+
+        let (status, payload) = status_request(build_health_router(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["service"], "buzz-relay");
+        assert_eq!(
+            payload["dependencies"],
+            json!({
+                "sample": "fresh",
+                "sample_interval_seconds": 30,
+                "sample_age_seconds": 0,
+                "postgres": true,
+                "redis": false,
+                "deletion_catalog": true,
+                "reason": "redis_pool_timeout"
+            })
+        );
+    }
+
+    /// `/_status` is an operator diagnostic, not a dependency driver. Evaluating
+    /// per request let operator curiosity — and anything that polls the
+    /// endpoint — add Postgres, Redis, and deletion-catalog work to a shared
+    /// dependency that is already under pressure, with no bound on how many
+    /// evaluations could be in flight at once. The endpoint reads the cached
+    /// report the per-pod sampler owns and starts nothing.
+    #[tokio::test]
+    async fn status_reads_the_cached_report_and_never_starts_a_dependency_check() {
+        let evaluator = Arc::new(ScriptedDependencyEvaluator::new([ready_report()]));
+        let state = readiness_state(evaluator.clone()).await;
+        let health = build_health_router(state.clone());
+
+        for _ in 0..3 {
+            let (status, payload) = status_request(health.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                payload["dependencies"],
+                json!({
+                    "sample": "not_yet_sampled",
+                    "sample_interval_seconds": 30,
+                }),
+                "before the first sample completes there is no report to serve"
+            );
+        }
+
+        assert_eq!(
+            evaluator.evaluations_started(),
+            0,
+            "a status request must never reach the shared dependencies"
+        );
+
+        // Once the sampler has a report, and only then, the endpoint serves it.
+        state
+            .dependency_diagnostics
+            .sample(&state.db, &state.redis_pool)
+            .await;
+        let (status, payload) = status_request(health).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["dependencies"]["sample"], json!("fresh"));
+        assert_eq!(payload["dependencies"]["reason"], json!("ready"));
+        assert_eq!(
+            evaluator.evaluations_started(),
+            1,
+            "the sampler is the only caller that evaluates"
+        );
+    }
+
+    /// Always answers, recording how many evaluations started and the peak
+    /// number in flight, so a loop test can assert cadence and single-flight
+    /// without a scripted queue to exhaust.
+    struct ObservedDependencyEvaluator {
+        report: DependencyReport,
+        duration: Duration,
+        started: std::sync::atomic::AtomicUsize,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ObservedDependencyEvaluator {
+        fn new(report: DependencyReport, duration: Duration) -> Self {
+            Self {
+                report,
+                duration,
+                started: std::sync::atomic::AtomicUsize::new(0),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                peak_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn started(&self) -> usize {
+            self.started.load(Ordering::SeqCst)
+        }
+
+        fn peak_in_flight(&self) -> usize {
+            self.peak_in_flight.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl readiness::DependencyEvaluator for ObservedDependencyEvaluator {
+        async fn evaluate(
+            &self,
+            _db: &buzz_db::Db,
+            _redis_pool: &deadpool_redis::Pool,
+        ) -> DependencyReport {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+            if !self.duration.is_zero() {
+                tokio::time::sleep(self.duration).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.report
+        }
+    }
+
+    /// Runs the production sampler on a paused clock for `window`, then cancels
+    /// it and returns the evaluator's observations.
+    async fn run_sampler_for(
+        evaluator: Arc<ObservedDependencyEvaluator>,
+        window: Duration,
+    ) -> Arc<ObservedDependencyEvaluator> {
+        let state = readiness_state(evaluator.clone()).await;
+        let cancel = state.dependency_sampler_cancel.clone();
+        let sampler = tokio::spawn(readiness::run_dependency_sampler(
+            state.clone(),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(window).await;
+        cancel.cancel();
+        sampler.await.expect("sampler task");
+        evaluator
+    }
+
+    /// Dependency telemetry must keep describing the shared dependencies whether
+    /// or not anyone reads `/_status`. Request-driven evaluation meant a quiet
+    /// endpoint produced a flat dashboard during the exact outage it existed to
+    /// explain.
+    #[test]
+    fn the_dependency_sampler_emits_telemetry_without_any_request() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            crate::metrics::describe_readiness_metrics();
+            runtime.block_on(async {
+                // The first tick fires immediately, then one per cadence.
+                let evaluator = run_sampler_for(
+                    Arc::new(ObservedDependencyEvaluator::new(
+                        ready_report(),
+                        Duration::ZERO,
+                    )),
+                    readiness::DEPENDENCY_SAMPLE_INTERVAL * 3 + Duration::from_secs(1),
+                )
+                .await;
+
+                assert_eq!(evaluator.started(), 4);
+                let rendered = handle.render();
+                assert_eq!(
+                    metric_value(
+                        &rendered,
+                        "buzz_readiness_dependency_checks_total{dependency=\"postgres\",outcome=\"success\"}"
+                    ),
+                    4.0,
+                    "every sampling cycle must publish its dependency outcomes"
+                );
+                assert_eq!(
+                    metric_value(
+                        &rendered,
+                        "buzz_readiness_check_duration_seconds_count{check=\"overall\"}"
+                    ),
+                    4.0
+                );
+                assert!(
+                    !rendered.contains("buzz_readiness_checks_total{"),
+                    "sampling is not a readiness probe and must not move probe telemetry"
+                );
+            });
+        });
+    }
+
+    /// The bound that replaces the request-driven design's lack of one. The
+    /// sampler awaits each evaluation before taking the next tick, so a
+    /// dependency slower than the cadence lowers the sampling rate instead of
+    /// stacking probes on top of the slowness that caused it.
+    #[test]
+    fn the_dependency_sampler_never_runs_two_evaluations_at_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+
+        runtime.block_on(async {
+            let slow = readiness::DEPENDENCY_SAMPLE_INTERVAL * 2 + Duration::from_secs(1);
+            let window = readiness::DEPENDENCY_SAMPLE_INTERVAL * 10;
+            let evaluator = run_sampler_for(
+                Arc::new(ObservedDependencyEvaluator::new(ready_report(), slow)),
+                window,
+            )
+            .await;
+
+            assert_eq!(
+                evaluator.peak_in_flight(),
+                1,
+                "the sampler must own the only in-flight evaluation"
+            );
+            // 61-second evaluations run back to back from t=0 in a 300-second
+            // window: five, not the ten ticks the cadence offered. An
+            // evaluation started per tick regardless of the last one would
+            // have started ten and held several open at once.
+            assert_eq!(evaluator.started(), 5);
+            assert!(
+                evaluator.started()
+                    < (window.as_secs() / readiness::DEPENDENCY_SAMPLE_INTERVAL.as_secs()) as usize,
+                "a slow dependency must throttle sampling, not be sampled on every tick"
+            );
+        });
+    }
+
     fn readiness_metric_lines(rendered: &str) -> Vec<&str> {
         rendered
             .lines()
             .filter(|line| line.starts_with("buzz_readiness"))
             .collect()
-    }
-
-    fn sorted_readiness_metric_lines(rendered: &str) -> Vec<String> {
-        let mut lines = readiness_metric_lines(rendered)
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        lines.sort();
-        lines
     }
 
     fn metric_value(rendered: &str, exact_prefix: &str) -> f64 {
@@ -1023,16 +1426,23 @@ mod tests {
             .unwrap_or_else(|| panic!("missing metric line: {exact_prefix}"))
     }
 
+    /// The frozen telemetry contract for the health listener.
+    ///
+    /// Readiness is lifecycle-only: its counter carries exactly two reasons and
+    /// its gauge is the latest private readiness-probe observation, never a
+    /// dependency or a transition-owned lifecycle mirror. Dependency families
+    /// are still exported, but only by the per-pod sampler, and neither
+    /// public-listener traffic nor an `/_status` request moves anything.
     #[test]
-    fn production_readiness_routes_export_the_frozen_health_only_contract() {
+    fn production_health_routes_export_the_frozen_telemetry_contract() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("current-thread runtime");
-        let evaluator = Arc::new(ScriptedReadinessEvaluator::new(std::iter::repeat_n(
-            ready_evaluation(),
-            4,
-        )));
+        // Seeded with the first sampling cycle only; the coverage loop below
+        // pushes the rest, one per cycle, so the evaluator never serves a
+        // report the assertions did not choose.
+        let evaluator = Arc::new(ScriptedDependencyEvaluator::new([ready_report()]));
         let (recorder, handle) = crate::metrics::readiness_test_recorder();
 
         metrics::with_local_recorder(&recorder, || {
@@ -1057,138 +1467,130 @@ mod tests {
                     readiness_request(health.clone()).await,
                     (StatusCode::OK, json!({"status": "ready"}))
                 );
-                let first_scrape = handle.render();
+                let after_probe = handle.render();
 
-                assert!(first_scrape.contains("# TYPE buzz_readiness_checks_total counter"));
-                assert!(first_scrape
-                    .contains("# TYPE buzz_readiness_dependency_checks_total counter"));
-                assert!(first_scrape
-                    .contains("# TYPE buzz_readiness_check_duration_seconds histogram"));
-                assert!(first_scrape.contains("# TYPE buzz_readiness_state gauge"));
+                assert!(after_probe.contains("# TYPE buzz_readiness_checks_total counter"));
+                assert!(after_probe.contains("# TYPE buzz_readiness_state gauge"));
                 assert_eq!(
-                    metric_value(
-                        &first_scrape,
-                        "buzz_readiness_checks_total{reason=\"ready\"}"
-                    ),
+                    metric_value(&after_probe, "buzz_readiness_checks_total{reason=\"ready\"}"),
                     1.0
                 );
                 assert_eq!(
+                    metric_value(&after_probe, "buzz_readiness_state{check=\"overall\"}"),
+                    1.0
+                );
+                assert!(
+                    !after_probe.contains("buzz_readiness_dependency_checks_total{"),
+                    "the probe must not touch a shared dependency"
+                );
+                assert!(
+                    !after_probe.contains("buzz_readiness_check_duration_seconds_count"),
+                    "the probe must not record a dependency latency sample"
+                );
+
+                // Dependency telemetry now belongs to the sampler; the
+                // endpoint only reads what the sampler cached.
+                state
+                    .dependency_diagnostics
+                    .sample(&state.db, &state.redis_pool)
+                    .await;
+                let (status, payload) = status_request(health.clone()).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(payload["dependencies"]["sample"], json!("fresh"));
+                assert_eq!(payload["dependencies"]["reason"], json!("ready"));
+                let after_status = handle.render();
+                assert!(
+                    after_status.contains("# TYPE buzz_readiness_dependency_checks_total counter")
+                );
+                assert!(
+                    after_status.contains("# TYPE buzz_readiness_check_duration_seconds histogram")
+                );
+                assert_eq!(
                     metric_value(
-                        &first_scrape,
+                        &after_status,
                         "buzz_readiness_dependency_checks_total{dependency=\"postgres\",outcome=\"success\"}"
                     ),
                     1.0
                 );
-                assert_eq!(
-                    metric_value(
-                        &first_scrape,
-                        "buzz_readiness_state{check=\"overall\"}"
-                    ),
-                    1.0
-                );
                 for bucket in ["2", "2.5", "+Inf"] {
-                    assert!(first_scrape.contains(&format!(
+                    assert!(after_status.contains(&format!(
                         "buzz_readiness_check_duration_seconds_bucket{{check=\"overall\",le=\"{bucket}\"}}"
                     )));
                 }
-                assert!(!first_scrape.contains("result="));
-                assert!(!first_scrape
+                assert!(!after_status.contains("result="));
+                assert!(!after_status
                     .lines()
                     .filter(|line| line.starts_with("buzz_readiness_check_duration_seconds"))
                     .any(|line| line.contains("outcome=")));
+                for dependency in ["postgres", "redis", "deletion_catalog"] {
+                    assert!(
+                        !after_status
+                            .contains(&format!("buzz_readiness_state{{check=\"{dependency}\"}}")),
+                        "dependency health has no publishable readiness gauge"
+                    );
+                }
 
-                let before_public_failure = sorted_readiness_metric_lines(&first_scrape);
-                evaluator.push(readiness_evaluation(
-                    readiness::PostgresOutcome::Success,
-                    readiness::RedisOutcome::PoolTimeout,
-                    readiness::DeletionCatalogOutcome::Success,
-                ));
-                assert_eq!(
-                    readiness_request(public.clone()).await,
+                // A failing dependency is reported and changes nothing about
+                // whether this pod stays in the load balancer. This set also
+                // covers every valid dependency/outcome pair, so the series
+                // total below is exact rather than merely bounded.
+                let coverage = [
                     (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        json!({
-                            "status": "not_ready",
-                            "postgres": true,
-                            "redis": false,
-                            "deletion_catalog": true
-                        })
-                    )
-                );
-                assert_eq!(
-                    sorted_readiness_metric_lines(&handle.render()),
-                    before_public_failure
-                );
-
-                let contract_evaluations = [
-                    readiness_evaluation(
                         readiness::PostgresOutcome::PoolTimeout,
-                        readiness::RedisOutcome::Success,
-                        readiness::DeletionCatalogOutcome::Success,
+                        readiness::RedisOutcome::PoolTimeout,
+                        readiness::DeletionCatalogOutcome::OperationTimeout,
                     ),
-                    readiness_evaluation(
+                    (
                         readiness::PostgresOutcome::PoolError,
-                        readiness::RedisOutcome::Success,
-                        readiness::DeletionCatalogOutcome::Success,
+                        readiness::RedisOutcome::PoolError,
+                        readiness::DeletionCatalogOutcome::OperationError,
                     ),
-                    readiness_evaluation(
+                    (
                         readiness::PostgresOutcome::QueryTimeout,
                         readiness::RedisOutcome::Success,
                         readiness::DeletionCatalogOutcome::Success,
                     ),
-                    readiness_evaluation(
+                    (
                         readiness::PostgresOutcome::QueryError,
                         readiness::RedisOutcome::Success,
                         readiness::DeletionCatalogOutcome::Success,
                     ),
-                    readiness_evaluation(
-                        readiness::PostgresOutcome::Success,
-                        readiness::RedisOutcome::PoolTimeout,
-                        readiness::DeletionCatalogOutcome::Success,
-                    ),
-                    readiness_evaluation(
-                        readiness::PostgresOutcome::Success,
-                        readiness::RedisOutcome::PoolError,
-                        readiness::DeletionCatalogOutcome::Success,
-                    ),
-                    readiness_evaluation(
-                        readiness::PostgresOutcome::Success,
-                        readiness::RedisOutcome::Success,
-                        readiness::DeletionCatalogOutcome::OperationTimeout,
-                    ),
-                    readiness_evaluation(
-                        readiness::PostgresOutcome::Success,
-                        readiness::RedisOutcome::Success,
-                        readiness::DeletionCatalogOutcome::OperationError,
-                    ),
-                    readiness_evaluation(
-                        readiness::PostgresOutcome::PoolTimeout,
-                        readiness::RedisOutcome::PoolTimeout,
-                        readiness::DeletionCatalogOutcome::OperationTimeout,
-                    ),
-                    readiness_evaluation(
-                        readiness::PostgresOutcome::PoolError,
-                        readiness::RedisOutcome::PoolError,
-                        readiness::DeletionCatalogOutcome::Success,
-                    ),
                 ];
-                for evaluation in contract_evaluations {
-                    evaluator.push(evaluation);
-                    let (status, payload) = readiness_request(health.clone()).await;
-                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-                    assert_eq!(payload["reason"], json!(evaluation.reason.label()));
+                for (index, (postgres, redis, deletion_catalog)) in
+                    coverage.into_iter().enumerate()
+                {
+                    evaluator.push(dependency_report(postgres, redis, deletion_catalog));
+                    state
+                        .dependency_diagnostics
+                        .sample(&state.db, &state.redis_pool)
+                        .await;
+                    let (status, degraded) = status_request(health.clone()).await;
+                    assert_eq!(status, StatusCode::OK);
+                    if index == 0 {
+                        assert_eq!(
+                            degraded["dependencies"],
+                            json!({
+                                "sample": "fresh",
+                                "sample_interval_seconds": 30,
+                                "sample_age_seconds": 0,
+                                "postgres": false,
+                                "redis": false,
+                                "deletion_catalog": false,
+                                "reason": "overall_timeout"
+                            })
+                        );
+                    }
+                    assert_eq!(
+                        readiness_request(health.clone()).await,
+                        (StatusCode::OK, json!({"status": "ready"})),
+                        "a failing dependency must never deroute this pod"
+                    );
                 }
 
-                let before_shutdown = handle.render();
-                let histogram_counts_before = ["overall", "postgres", "redis", "deletion_catalog"]
-                    .map(|check| {
-                        metric_value(
-                            &before_shutdown,
-                            &format!(
-                                "buzz_readiness_check_duration_seconds_count{{check=\"{check}\"}}"
-                            ),
-                        )
-                    });
+                let histogram_count_before = metric_value(
+                    &handle.render(),
+                    "buzz_readiness_check_duration_seconds_count{check=\"overall\"}",
+                );
                 state.begin_shutdown();
                 assert_eq!(
                     readiness_request(public).await,
@@ -1197,10 +1599,18 @@ mod tests {
                         json!({"status": "shutting_down"})
                     )
                 );
-                let after_public_shutdown = handle.render();
-                assert!(after_public_shutdown
+                assert!(handle
+                    .render()
                     .lines()
                     .all(|line| !line.contains("reason=\"shutting_down\"")));
+                assert_eq!(
+                    metric_value(
+                        &handle.render(),
+                        "buzz_readiness_state{check=\"overall\"}"
+                    ),
+                    1.0,
+                    "shutdown and public traffic must not update the private probe gauge"
+                );
 
                 assert_eq!(
                     readiness_request(health).await,
@@ -1210,16 +1620,14 @@ mod tests {
                     )
                 );
                 let final_scrape = handle.render();
-                let histogram_counts_after = ["overall", "postgres", "redis", "deletion_catalog"]
-                    .map(|check| {
-                        metric_value(
-                            &final_scrape,
-                            &format!(
-                                "buzz_readiness_check_duration_seconds_count{{check=\"{check}\"}}"
-                            ),
-                        )
-                    });
-                assert_eq!(histogram_counts_after, histogram_counts_before);
+                assert_eq!(
+                    metric_value(
+                        &final_scrape,
+                        "buzz_readiness_check_duration_seconds_count{check=\"overall\"}"
+                    ),
+                    histogram_count_before,
+                    "shutdown must not fabricate a dependency latency sample"
+                );
                 assert_eq!(
                     metric_value(
                         &final_scrape,
@@ -1228,13 +1636,27 @@ mod tests {
                     1.0
                 );
                 assert_eq!(
-                    metric_value(
-                        &final_scrape,
-                        "buzz_readiness_state{check=\"overall\"}"
-                    ),
+                    metric_value(&final_scrape, "buzz_readiness_state{check=\"overall\"}"),
                     0.0
                 );
                 assert!(!final_scrape.contains("sensitive-sql-or-url"));
+                // Freshness is part of the frozen contract: one unlabelled
+                // gauge carrying when the cached report completed. The sampler
+                // advances it and the publisher re-emits it, so
+                // `time() - <gauge>` ages a stalled sampler out from a scrape
+                // alone.
+                assert!(final_scrape.contains(
+                    "# TYPE buzz_readiness_dependency_sample_completed_timestamp_seconds gauge"
+                ));
+                assert_eq!(
+                    final_scrape
+                        .lines()
+                        .filter(|line| line.starts_with(
+                            "buzz_readiness_dependency_sample_completed_timestamp_seconds"
+                        ))
+                        .count(),
+                    1
+                );
 
                 let exported_reasons = final_scrape
                     .lines()
@@ -1244,138 +1666,7 @@ mod tests {
                 assert_eq!(
                     readiness_metric_lines(&final_scrape).len(),
                     readiness::READINESS_RAW_SERIES_PER_POD,
-                    "readiness series contract must stay at or below its 99-series cap"
-                );
-            });
-        });
-    }
-
-    fn run_out_of_order_route_case(
-        first: ReadinessEvaluation,
-        second: ReadinessEvaluation,
-    ) -> (serde_json::Value, serde_json::Value, String) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("current-thread runtime");
-        let evaluator = Arc::new(BarrierReadinessEvaluator::new(first, second));
-        let (recorder, handle) = crate::metrics::readiness_test_recorder();
-
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                let state = readiness_state(evaluator.clone()).await;
-                let health = build_health_router(state);
-                let first_started = evaluator.first_started.notified();
-                let slow_first = tokio::spawn(readiness_request(health.clone()));
-                first_started.await;
-
-                let (_, second_payload) = readiness_request(health).await;
-                evaluator.release_first.notify_one();
-                let (_, first_payload) = slow_first.await.expect("slow first probe task");
-                (first_payload, second_payload, handle.render())
-            })
-        })
-    }
-
-    #[test]
-    fn real_health_route_generation_fence_covers_both_completion_orders() {
-        let failure = readiness_evaluation(
-            readiness::PostgresOutcome::Success,
-            readiness::RedisOutcome::PoolTimeout,
-            readiness::DeletionCatalogOutcome::Success,
-        );
-
-        let (older_failure, newer_success, success_scrape) =
-            run_out_of_order_route_case(failure, ready_evaluation());
-        assert_eq!(older_failure["reason"], json!("redis_pool_timeout"));
-        assert_eq!(newer_success, json!({"status": "ready"}));
-        assert_eq!(
-            metric_value(&success_scrape, "buzz_readiness_state{check=\"overall\"}"),
-            1.0
-        );
-        assert_eq!(
-            metric_value(&success_scrape, "buzz_readiness_state{check=\"redis\"}"),
-            1.0
-        );
-
-        let (older_success, newer_failure, failure_scrape) =
-            run_out_of_order_route_case(ready_evaluation(), failure);
-        assert_eq!(older_success, json!({"status": "ready"}));
-        assert_eq!(newer_failure["reason"], json!("redis_pool_timeout"));
-        assert_eq!(
-            metric_value(&failure_scrape, "buzz_readiness_state{check=\"overall\"}"),
-            0.0
-        );
-        assert_eq!(
-            metric_value(&failure_scrape, "buzz_readiness_state{check=\"redis\"}"),
-            0.0
-        );
-        for scrape in [&success_scrape, &failure_scrape] {
-            assert_eq!(
-                metric_value(scrape, "buzz_readiness_checks_total{reason=\"ready\"}"),
-                1.0
-            );
-            assert_eq!(
-                metric_value(
-                    scrape,
-                    "buzz_readiness_checks_total{reason=\"redis_pool_timeout\"}"
-                ),
-                1.0
-            );
-        }
-    }
-
-    #[test]
-    fn real_health_route_shutdown_fence_dominates_an_in_flight_success() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("current-thread runtime");
-        let evaluator = Arc::new(BarrierReadinessEvaluator::new(
-            ready_evaluation(),
-            ready_evaluation(),
-        ));
-        let (recorder, handle) = crate::metrics::readiness_test_recorder();
-
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                let state = readiness_state(evaluator.clone()).await;
-                let health = build_health_router(state.clone());
-                let first_started = evaluator.first_started.notified();
-                let in_flight = tokio::spawn(readiness_request(health));
-                first_started.await;
-
-                state.begin_shutdown();
-                evaluator.release_first.notify_one();
-                assert_eq!(
-                    in_flight.await.expect("in-flight readiness task"),
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        json!({"status": "shutting_down"})
-                    )
-                );
-
-                let scrape = handle.render();
-                assert_eq!(
-                    metric_value(&scrape, "buzz_readiness_state{check=\"overall\"}"),
-                    0.0
-                );
-                assert!(scrape
-                    .lines()
-                    .all(|line| !line.starts_with("buzz_readiness_state{check=\"postgres\"}")));
-                assert_eq!(
-                    metric_value(
-                        &scrape,
-                        "buzz_readiness_checks_total{reason=\"shutting_down\"}"
-                    ),
-                    1.0
-                );
-                assert_eq!(
-                    metric_value(
-                        &scrape,
-                        "buzz_readiness_dependency_checks_total{dependency=\"postgres\",outcome=\"success\"}"
-                    ),
-                    1.0
+                    "readiness series contract must stay at or below its 87-series cap"
                 );
             });
         });
@@ -1623,6 +1914,589 @@ mod tests {
         );
     }
 
+    // ── NIP-FI built-router gate: both WS ingresses ───────────────────────────
+    //
+    // Drive the REAL built router (via tower `oneshot`) for both the root `/`
+    // and the huddle audio `/huddle/{id}/audio` WebSocket ingresses in NIP-FI
+    // enforce mode. These tests prove that both gate call sites live in
+    // production: deleting either gate call (the pre-extractor h1 block in
+    // `nip11_or_ws_handler`, or at the top of `ws_audio_handler` in
+    // `audio/handler.rs`) causes the request to proceed past the pre-101 check
+    // and receive a 404 (tenant not found) instead of the expected denial,
+    // turning these tests red.
+    //
+    // ## F3 structural proof
+    //
+    // The NIP-FI gate uses a belt-and-suspenders approach. The HTTP/1.1
+    // path is the only currently live WebSocket upgrade shape (workspace
+    // Axum does not enable `http2`; the route uses `get()` not CONNECT routing):
+    //
+    // HTTP/1.1 WebSocket (RFC 6455, currently live): the gate fires BEFORE
+    // `WebSocketUpgrade::from_request` using the `Upgrade: websocket` +
+    // `Connection: Upgrade` header predicate. These tests drive this path via
+    // tower `oneshot` — `oneshot` provides no real hyper `OnUpgrade` extension
+    // so the extractor would return `ConnectionNotUpgradable`; the pre-extractor
+    // gate catches the denial first and returns it before the extractor runs.
+    //
+    // HTTP/2 extended-CONNECT (latent, future-proofing): Axum's `http2`
+    // feature is NOT currently enabled (workspace `axum = { features = ["ws",
+    // "macros"] }` — no `http2`). The `[F3-H2-GATE]` backstop inside `Ok(ws)`
+    // is structural hardening: if `http2` is ever enabled, any h2 CONNECT that
+    // the extractor accepts but the pre-extractor predicate misses (no `Upgrade`
+    // header) is caught at the backstop. A live integration test for h2 CONNECT
+    // is not provided because the path is currently latent.
+    //
+    // Mutation evidence:
+    //   A) Delete the pre-extractor gate call in `nip11_or_ws_handler` → root
+    //      request returns 404 (no community) instead of 401/503 → assert_eq
+    //      panics.
+    //   B) Delete the [F3-H2-GATE] backstop in the `Ok(ws)` arm → h2 extended-
+    //      CONNECT upgrades would bypass the gate when `http2` is eventually
+    //      enabled; h1 tests still pass but the latent path loses its safety net.
+    //   C) Delete the gate call in `ws_audio_handler` → audio request returns
+    //      404 (no community) instead of 401/503 → assert_eq panics.
+    //   D) Switch `Enforce` to `Off` in the test state → both ingresses skip
+    //      the gate and return 404 (no community) → status assertions panic.
+
+    /// Build AppState with NIP-FI enforce mode and no verifier (simulates
+    /// startup with no JWKS yet warmed). The verifier is `None` because
+    /// `jwks_configs` is empty and `ProductionJwksSource::new` returns `None`
+    /// for an empty list; the mode field is set directly so no env is needed.
+    ///
+    /// The NIP-FI gate fires in the pre-extractor h1 block (before
+    /// `bind_community`), so these tests exercise the gate seam independently
+    /// of DB / host-resolution state. The lazy PG pool is kept so
+    /// `AppState::new` compiles; it is never queried by any of these router
+    /// tests.
+    async fn nip_fi_enforce_state() -> Arc<AppState> {
+        nip_fi_state(buzz_auth::NipFiMode::Enforce).await
+    }
+
+    /// Off-mode twin of [`nip_fi_enforce_state`]: the mode is set directly on
+    /// `config.nip_fi`, so no env is involved.
+    async fn nip_fi_off_state() -> Arc<AppState> {
+        nip_fi_state(buzz_auth::NipFiMode::Off).await
+    }
+
+    async fn nip_fi_state(mode: buzz_auth::NipFiMode) -> Arc<AppState> {
+        use crate::nip_fi_config::NipFiRelayConfig;
+        use buzz_auth::IssuerRegistry;
+
+        // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally,
+        // so this fixture never races nip_fi_config's own tests. [FI-TRACE-ENV-RACE]
+        let mut config = crate::config::Config::for_test();
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        // No issuers configured — the verifier is None (no JWKS source). In
+        // Enforce that is the startup-race condition that must return 503 for
+        // a token-carrying request.
+        config.nip_fi = NipFiRelayConfig {
+            mode,
+            registry: IssuerRegistry::new(),
+            jwks_configs: vec![],
+            max_connection_lifetime_secs: 3600,
+        };
+
+        // Unreachable database: port 1 refuses every connection, so each
+        // request that reaches `bind_community` fails the same way (generic
+        // 404) regardless of local database contents or host load. sqlx
+        // retries refused connects until the acquire timeout, so keep it short.
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy(&config.database_url)
+            .expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    /// Drive a request through the real built router. Returns the HTTP status code.
+    /// For WebSocket upgrade paths, sends proper upgrade headers so axum's
+    /// WebSocketUpgrade extractor doesn't reject with 400 before the handler runs.
+    async fn nip_fi_gate_status(
+        state: Arc<AppState>,
+        path: &str,
+        extra_header_name: Option<&str>,
+        extra_header_value: Option<&str>,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut builder = Request::get(path)
+            .header(axum::http::header::HOST, "relay.example")
+            // WebSocket upgrade headers so axum's WebSocketUpgrade extractor
+            // doesn't reject with 400/426 before the handler body runs.
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+        if let (Some(name), Some(value)) = (extra_header_name, extra_header_value) {
+            builder = builder.header(name, value);
+        }
+        let req = builder.body(Body::empty()).expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    /// Off mode reads no identity header: an upgrade with no header and one
+    /// with a malformed header get the same status, outside {401, 403, 503}.
+    /// This proves the NIP-FI gate is bypassed, not that the upgrade succeeds:
+    /// without a database the request can stop later (e.g. tenant lookup 404).
+    async fn assert_off_mode_ignores_header(path: &str, malformed: bool) {
+        let absent = nip_fi_gate_status(nip_fi_off_state().await, path, None, None).await;
+        let status = if malformed {
+            nip_fi_gate_status(
+                nip_fi_off_state().await,
+                path,
+                Some("Nostr-Federated-Identity"),
+                Some("Basic not-a-bearer-token"),
+            )
+            .await
+        } else {
+            absent
+        };
+        for s in [absent, status] {
+            assert!(
+                !matches!(s.as_u16(), 401 | 403 | 503),
+                "Off mode must not gate {path} (malformed={malformed}); got {s}"
+            );
+        }
+        assert_eq!(status, absent, "Off mode must ignore the header on {path}");
+    }
+
+    #[tokio::test]
+    async fn nip_fi_off_root_passes_without_header() {
+        assert_off_mode_ignores_header("/", false).await;
+    }
+
+    #[tokio::test]
+    async fn nip_fi_off_root_ignores_malformed_header() {
+        assert_off_mode_ignores_header("/", true).await;
+    }
+
+    #[tokio::test]
+    async fn nip_fi_off_audio_passes_without_header() {
+        let path = format!("/huddle/{}/audio", uuid::Uuid::new_v4());
+        assert_off_mode_ignores_header(&path, false).await;
+    }
+
+    #[tokio::test]
+    async fn nip_fi_off_audio_ignores_malformed_header() {
+        let path = format!("/huddle/{}/audio", uuid::Uuid::new_v4());
+        assert_off_mode_ignores_header(&path, true).await;
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_root_denies_missing_assertion_401() {
+        let state = nip_fi_enforce_state().await;
+        let status = nip_fi_gate_status(state, "/", None, None).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "root WebSocket upgrade without assertion must be denied 401 in enforce mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_audio_denies_missing_assertion_401() {
+        let state = nip_fi_enforce_state().await;
+        let channel_id = uuid::Uuid::new_v4();
+        let path = format!("/huddle/{channel_id}/audio");
+        let status = nip_fi_gate_status(state, &path, None, None).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "audio WebSocket upgrade without assertion must be denied 401 in enforce mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_root_denies_token_when_no_verifier_503() {
+        let state = nip_fi_enforce_state().await;
+        // A plausible but unverifiable bearer token on the correct header —
+        // verifier is None (no JWKS). Expect 503 authorization unavailable.
+        let status = nip_fi_gate_status(
+            state,
+            "/",
+            Some("Nostr-Federated-Identity"),
+            Some("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "root WebSocket upgrade with token but no verifier must be denied 503 in enforce mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_audio_denies_token_when_no_verifier_503() {
+        let state = nip_fi_enforce_state().await;
+        let channel_id = uuid::Uuid::new_v4();
+        let path = format!("/huddle/{channel_id}/audio");
+        let status = nip_fi_gate_status(
+            state,
+            &path,
+            Some("Nostr-Federated-Identity"),
+            Some("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "audio WebSocket upgrade with token but no verifier must be denied 503 in enforce mode"
+        );
+    }
+
+    // ── B4: non-upgrade document requests bypass the NIP-FI gate ─────────────
+    //
+    // A plain browser GET / or a NIP-11 content-negotiated request must reach
+    // the NIP-11 fallback path, never the enforcement gate. The gate fires only
+    // on genuine WebSocket upgrades (Connection/Upgrade headers present).
+    //
+    // Because the gate runs before bind_community, the WS-upgrade 401/503 tests
+    // above are DB-free. Plain-GET requests, however, do reach bind_community
+    // (the gate's non-upgrade else-branch skips the gate and falls through).
+    // With an unseeded lazy pool, bind_community returns 404 — but that is NOT
+    // a gate denial. These tests assert that the response is neither 401 nor 503
+    // (gate denial codes), which holds regardless of host resolution state.
+    //
+    // Fix 6: corrected the DB-free comment (bind_community is reached by plain
+    // GETs; only WS-upgrade requests pay zero DB cost via the pre-gate path).
+    //
+    // Mutation evidence:
+    //   A) Move the NIP-FI gate to fire on plain GETs too → response becomes
+    //      401/503 → assertion `status != 401 && status != 503` panics.
+    //   B) Key the gate on the Accept header → a WS request with Accept:
+    //      text/html bypasses it → the 401/503 test below returns 101 → panics.
+
+    /// Drive a plain (non-WS) GET request through the built router. Returns
+    /// the HTTP status and, for NIP-11 responses, validates the JSON content.
+    async fn nip_fi_non_upgrade_status(
+        state: Arc<AppState>,
+        path: &str,
+        accept: Option<&str>,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut builder = Request::get(path).header(axum::http::header::HOST, "relay.example");
+        if let Some(accept_value) = accept {
+            builder = builder.header("Accept", accept_value);
+        }
+        let req = builder.body(Body::empty()).expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_plain_get_not_gated_401_or_503() {
+        let state = nip_fi_enforce_state().await;
+        // A plain GET / without WS upgrade headers is not a WebSocket upgrade.
+        // In enforce mode the NIP-FI gate must NOT intercept it — the response
+        // must not be a gate denial (401/503). It may be a 404 from bind_community
+        // (unseeded host) or 200 (NIP-11) with a seeded host; the gate invariant
+        // holds either way.
+        let status = nip_fi_non_upgrade_status(state, "/", None).await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "plain GET / in enforce mode must not be gated 401"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "plain GET / in enforce mode must not be gated 503"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_nip11_content_negotiation_serves_200_not_401() {
+        let state = nip_fi_enforce_state().await;
+        // application/nostr+json short-circuits before the WS check; the
+        // NIP-FI gate must never intercept it regardless of mode.
+        let status = nip_fi_non_upgrade_status(state, "/", Some("application/nostr+json")).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "NIP-11 content-negotiated GET in enforce mode must return 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn nip_fi_enforce_ws_upgrade_with_html_accept_is_gated_401() {
+        let state = nip_fi_enforce_state().await;
+        // A genuine WS upgrade request that also carries Accept: text/html
+        // must still be gated. The gate must NOT key on Accept — it must key
+        // on the Connection/Upgrade headers that make it a real WS upgrade.
+        let status = nip_fi_gate_status(state, "/", Some("Accept"), Some("text/html")).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "WS upgrade with Accept: text/html in enforce mode must still be denied 401"
+        );
+    }
+
+    // ── B4 negative: single-header requests bypass the NIP-FI gate ───────────
+    //
+    // The gate fires ONLY when BOTH `Upgrade: websocket` AND a `Connection`
+    // header carrying the `upgrade` token are present. A request with only one
+    // of the two headers is not a valid WebSocket upgrade and must not be
+    // intercepted by the NIP-FI enforcement gate.
+    //
+    // Mutation evidence:
+    //   A) Change the gate to key on `Upgrade: websocket` alone (drop the
+    //      Connection check) → the Upgrade-only test gets denied 401 instead of
+    //      passing through → the assertion panics.
+    //   B) Change the gate to key on `Connection: Upgrade` alone (drop the
+    //      Upgrade check) → the Connection-only test gets denied 401 → panics.
+
+    /// Drive a request that carries exactly `Upgrade: websocket` but no
+    /// `Connection` header. Must not be gated — returns whatever the NIP-11
+    /// or HTTP handler produces (not 401/503 from the NIP-FI gate).
+    async fn nip_fi_upgrade_only_status(
+        state: Arc<AppState>,
+        path: &str,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let req = Request::get(path)
+            .header(axum::http::header::HOST, "relay.example")
+            .header("Upgrade", "websocket")
+            // Deliberately omit Connection header.
+            .body(Body::empty())
+            .expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    /// Drive a request that carries `Connection: Upgrade` but no `Upgrade`
+    /// header. Must not be gated by the NIP-FI enforcement logic.
+    async fn nip_fi_connection_only_status(
+        state: Arc<AppState>,
+        path: &str,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let req = Request::get(path)
+            .header(axum::http::header::HOST, "relay.example")
+            .header("Connection", "Upgrade")
+            // Deliberately omit Upgrade header.
+            .body(Body::empty())
+            .expect("request");
+        build_router(state)
+            .oneshot(req)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn b4_upgrade_only_no_connection_header_not_gated() {
+        let state = nip_fi_enforce_state().await;
+        // Upgrade: websocket present, Connection absent → not a valid WS
+        // upgrade handshake → must NOT be denied by the NIP-FI gate.
+        // The request falls through to the NIP-11 / HTTP handler, which
+        // returns 200 (NIP-11 JSON) or 426 (Upgrade Required) — not 401/503.
+        let status = nip_fi_upgrade_only_status(state, "/").await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "B4: Upgrade-only request (no Connection header) must not be denied 401 by NIP-FI gate"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "B4: Upgrade-only request (no Connection header) must not be denied 503 by NIP-FI gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn b4_connection_upgrade_only_no_upgrade_header_not_gated() {
+        let state = nip_fi_enforce_state().await;
+        // Connection: Upgrade present, Upgrade absent → not a valid WS
+        // upgrade handshake → must NOT be denied by the NIP-FI gate.
+        let status = nip_fi_connection_only_status(state, "/").await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::UNAUTHORIZED,
+            "B4: Connection-only request (no Upgrade header) must not be denied 401 by NIP-FI gate"
+        );
+        assert_ne!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "B4: Connection-only request (no Upgrade header) must not be denied 503 by NIP-FI gate"
+        );
+    }
+
+    // ── F6: document fallback (postgres-only) ───────────────────────────────────
+    //
+    // A no-`Accept` plain GET / to a successfully mapped host must bypass the
+    // NIP-FI gate, pass `bind_community`, and reach the NIP-11 document fallback
+    // at `router.rs:493`. The test seeds a community, fires a plain GET with the
+    // community's host, and asserts 200 + NIP-11 JSON content.
+    //
+    // A lazy-pool state cannot seed the community — this test belongs in the
+    // isolated postgres lane so it has a real DB. It is gated `#[ignore]` so it
+    // does not run in the unit-test lane where no DB is available.
+    mod postgres_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        async fn real_db_state() -> Option<Arc<AppState>> {
+            let db_url = crate::test_support::database_url();
+            let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
+
+            let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+            config.require_relay_membership = false;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            config.database_url = db_url;
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _shutdown) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Some(Arc::new(state))
+        }
+
+        /// F6: a no-Accept plain GET to a mapped host returns 200 + NIP-11 JSON.
+        ///
+        /// The test seeds a community, sends a plain GET with the community's
+        /// host (no Accept header), and asserts 200. This proves the no-Accept
+        /// path reaches the NIP-11 document fallback (`router.rs:493`) and that
+        /// the NIP-FI gate does not intercept plain GET traffic.
+        ///
+        /// ## Mutation oracle
+        ///
+        /// A) Move the document fallback behind an additional NIP-FI gate check →
+        ///    plain GET is denied (401/503) → assertion panics.
+        ///
+        /// B) Remove `bind_community` from the router path → every plain GET
+        ///    returns 404 regardless of the host → 200 assertion panics.
+        ///
+        /// C) Serve plain GET from a different code path (e.g., gate fires before
+        ///    `bind_community`) → 401 is returned → 200 assertion panics.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn f6_plain_get_mapped_host_returns_nip11_200() {
+            use axum::body::Body;
+            use axum::http::Request;
+            use tower::ServiceExt;
+            use uuid::Uuid;
+
+            let state = real_db_state()
+                .await
+                .expect("F6: PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres");
+            let pool = state.db.pool().clone();
+
+            // Seed a community with a unique host.
+            let community_id = Uuid::new_v4();
+            let host = format!("f6-test-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("F6: seed community");
+
+            // Plain GET / with the community's host — no Accept header.
+            let req = Request::get("/")
+                .header(axum::http::header::HOST, &host)
+                .body(Body::empty())
+                .expect("F6: build request");
+
+            let response = build_router(state)
+                .oneshot(req)
+                .await
+                .expect("F6: router response");
+
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::OK,
+                "F6: plain GET to a mapped host must return 200 (NIP-11 document fallback);\n                 Mutation oracle A: gate intercepts plain GET → 401/503 → panics.\n                 Mutation oracle B: bind_community removed → 404 → panics."
+            );
+
+            // Assert the body is NIP-11 JSON (has `supported_nips` field).
+            let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 64)
+                .await
+                .expect("F6: read body");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body_bytes).expect("F6: body must be valid JSON");
+            assert!(
+                body.get("supported_nips").is_some(),
+                "F6: response body must be NIP-11 JSON with `supported_nips` field; got {body}"
+            );
+        }
+    }
+
     // ── nip_fi_assertion_guard: fail-closed classification tests ─────────────
     //
     // ## What these tests prove
@@ -1860,7 +2734,7 @@ mod tests {
 
         // Build a DenyProtected-mode state using the same SPA helper, but with
         // the NIP-FI mode overridden after config construction.
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.web_dir = Some(web_dir.path().to_path_buf());
@@ -1959,7 +2833,7 @@ mod tests {
             write_admin_bundle(admin_dir);
             write_bundle(web_dir);
 
-            let mut config = crate::config::Config::from_env().expect("default config loads");
+            let mut config = crate::config::Config::for_test();
             config.require_relay_membership = false;
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config.web_dir = Some(web_dir.to_path_buf());

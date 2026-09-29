@@ -182,30 +182,179 @@ impl Drop for CommunityConnectionGuard {
     }
 }
 
+/// Message reported when the one-time Redis bootstrap gate rejects startup.
+///
+/// Bounded and stable so operators and the boot regression test can match on
+/// it without parsing the underlying driver error.
+pub const REDIS_BOOTSTRAP_FAILURE: &str = "Redis command path unavailable at startup";
+
+/// Budget for the one-time bootstrap PING. A refused port answers immediately;
+/// this only bounds a blackholed address, where hanging forever would be worse
+/// than exiting.
+const REDIS_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Keep the Redis driver's per-command timeout outside the relay-owned startup
+/// budget so [`REDIS_BOOTSTRAP_TIMEOUT`] remains the one authoritative bound.
+const REDIS_BOOTSTRAP_DRIVER_TIMEOUT: std::time::Duration =
+    REDIS_BOOTSTRAP_TIMEOUT.saturating_mul(2);
+
+/// Proves once, during startup, that the Redis command path this pod will serve
+/// from can actually be reached.
+///
+/// `deadpool_redis` pools dial lazily and `PubSubManager::new` only allocates
+/// channels, so without this nothing in boot ever opened a command connection:
+/// a relay came up against a dead Redis, bound its health listener, and — since
+/// readiness reports local lifecycle only — advertised ready forever. Binding
+/// that listener is a one-way latch, so the check has to happen before it, and
+/// it is deliberately a *startup* gate: once serving, a Redis blip is a
+/// dependency failure and must never change readiness.
+pub async fn verify_redis_command_path(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+    let ping = async {
+        let connection = pool
+            .get()
+            .await
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
+        // This one-shot connection is removed from the pool so extending its
+        // driver timeout cannot leak into normal serving traffic. The relay's
+        // outer timeout below must bound both lazy checkout and PING.
+        let mut connection = deadpool_redis::Connection::take(connection);
+        connection.set_response_timeout(REDIS_BOOTSTRAP_DRIVER_TIMEOUT);
+        redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))
+    };
+
+    match tokio::time::timeout(REDIS_BOOTSTRAP_TIMEOUT, ping).await {
+        Err(_) => Err(anyhow::anyhow!(
+            "{REDIS_BOOTSTRAP_FAILURE}: no response within {REDIS_BOOTSTRAP_TIMEOUT:?}"
+        )),
+        Ok(result) => result.map(|_| ()),
+    }
+}
+
+/// Bounded outcome of the durable community-active check run when a socket is
+/// admitted.
+///
+/// `outcome` is the only dimension. Community, tenant, connection, and error
+/// text are request-controlled and deliberately absent from the label set.
+#[derive(Debug, Clone, Copy)]
+enum AdmissionOutcome {
+    Active,
+    Inactive,
+    CheckError,
+}
+
+impl AdmissionOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+            Self::CheckError => "check_error",
+        }
+    }
+}
+
+fn record_admission_check(outcome: AdmissionOutcome) {
+    metrics::counter!(
+        "buzz_community_admission_checks_total",
+        "outcome" => outcome.label(),
+    )
+    .increment(1);
+}
+
 /// Registers a socket, durably revalidates its community, then runs it.
 ///
 /// The ordering is the archival admission invariant: archive-before-query is
 /// observed by the query, while archive-after-registration sees the token.
-pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
+///
+/// Admission is fail-closed: only an affirmative `Ok(true)` may serve. Both
+/// `Ok(false)` and a lookup `Err` cancel, because neither proves this tenant is
+/// currently admitted, and `docs/multi-tenant-relay.md` I5
+/// (`Inv_AdmissionFence`) grants capability only to an actor *currently*
+/// admitted to that community. The two are still told apart in telemetry
+/// (`buzz_community_admission_checks_total{outcome}`) so an operator can
+/// separate archival from database pressure.
+///
+/// # Cancellation safety
+///
+/// `check_active()` is awaited inside a `select!` against the registration's
+/// cancellation token. If the token fires while the DB check is in flight
+/// (e.g., a stalled DB holds an expired socket open), the check is abandoned,
+/// `on_not_run()` is called for terminal-frame drain (if any), and the socket
+/// is dropped without ever invoking `run`. This ensures a community deletion
+/// or NIP-FI expiry that fires during bootstrap terminates the socket promptly
+/// rather than waiting for a stalled DB. [Fix 3 / Carl 3 / F3]
+pub(crate) async fn run_registered_community_connection<
+    Check,
+    CheckFuture,
+    Run,
+    RunFuture,
+    OnNotRun,
+    OnNotRunFuture,
+>(
     registry: &CommunityConnectionRegistry,
     connection_id: Uuid,
     community_id: CommunityId,
     control: CommunityConnectionControl,
     check_active: Check,
     run: Run,
+    on_not_run: OnNotRun,
 ) where
     Check: FnOnce() -> CheckFuture,
     CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
     Run: FnOnce(CommunityConnectionControl) -> RunFuture,
     RunFuture: Future<Output = ()>,
+    OnNotRun: FnOnce() -> OnNotRunFuture,
+    OnNotRunFuture: Future<Output = ()>,
 {
     let cancel = control.cancel.clone();
     let _guard = registry.register(connection_id, community_id, control.clone());
-    if !matches!(check_active().await, Ok(true)) {
-        cancel.cancel();
-        return;
+
+    // Race the DB check against the cancellation token so a stalled DB cannot
+    // hold an already-expired or already-deleted socket alive indefinitely.
+    // Cancellation winning is not an admission outcome, so it records no
+    // `buzz_community_admission_checks_total` sample.
+    let check_result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            // Cancellation won — do NOT invoke run; drain terminal frames and
+            // close the socket via the caller-supplied on_not_run path so a
+            // queued NIP-FI denial is delivered even when bootstrap stalls.
+            on_not_run().await;
+            return;
+        }
+        result = check_active() => result,
+    };
+
+    match check_result {
+        Ok(true) => record_admission_check(AdmissionOutcome::Active),
+        Ok(false) => {
+            record_admission_check(AdmissionOutcome::Inactive);
+            cancel.cancel();
+            on_not_run().await;
+            return;
+        }
+        Err(error) => {
+            // A lookup failure is not an answer, so it cannot authorize one.
+            // Admitting here would begin serving AUTH and REQ for a tenant
+            // whose lifecycle is unknown, and the adjacent host-binding seam
+            // already refuses on exactly this evidence (see
+            // `router::nip11_or_ws_handler`). The client sees an ordinary dial
+            // failure and retries.
+            record_admission_check(AdmissionOutcome::CheckError);
+            tracing::warn!(
+                %community_id,
+                %error,
+                "community active check failed; refusing the socket"
+            );
+            cancel.cancel();
+            on_not_run().await;
+            return;
+        }
     }
     if cancel.is_cancelled() {
+        on_not_run().await;
         return;
     }
     run(control).await;
@@ -348,6 +497,14 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Cancel a single connection by ID. A no-op if the connection is not
+    /// registered (already deregistered or never known).
+    pub(crate) fn cancel_conn(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.cancel.cancel();
+        }
     }
 
     /// Disconnect every live connection authenticated as `pubkey` **in
@@ -719,8 +876,14 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
-    /// Orders readiness gauge publication against terminal shutdown.
-    pub(crate) readiness: Arc<crate::readiness::ReadinessCoordinator>,
+    /// Cached shared-dependency evaluation behind the diagnostic `/_status`
+    /// endpoint, owned by [`crate::readiness::run_dependency_sampler`]. Never
+    /// consulted by a Kubernetes probe, and never evaluated by a request.
+    pub(crate) dependency_diagnostics: Arc<crate::readiness::DependencyDiagnostics>,
+    /// Stops only the periodic dependency sampler during graceful shutdown.
+    pub dependency_sampler_cancel: CancellationToken,
+    /// Stops only the completion-epoch publisher during graceful shutdown.
+    pub dependency_completion_publisher_cancel: CancellationToken,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -780,11 +943,11 @@ pub struct AppState {
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
 
     /// NIP-FI federated-identity assertion verifier, shared across all HTTP
-    /// ingress checks.
+    /// ingress and WebSocket upgrade checks.
     ///
     /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
     /// is the single offline authority for assertion validation on every
-    /// protected HTTP surface. The backing `ProductionJwksSource` is also
+    /// protected HTTP surface and WebSocket upgrade. The backing `ProductionJwksSource` is also
     /// shared and performs bounded periodic JWKS refresh internally.
     ///
     /// The field uses `dyn VerifyAssertion` (type erasure) so that
@@ -946,7 +1109,9 @@ impl AppState {
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
-            readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
+            dependency_diagnostics: Arc::new(crate::readiness::DependencyDiagnostics::default()),
+            dependency_sampler_cancel: CancellationToken::new(),
+            dependency_completion_publisher_cancel: CancellationToken::new(),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,
@@ -990,21 +1155,21 @@ impl AppState {
         )
     }
 
-    /// Atomically closes readiness publication before exposing shutdown to
-    /// the relay's other fast-path lifecycle checks.
+    /// Withdraws this pod from routing. The lifecycle flag is authoritative for
+    /// `/_readiness`; the private probe publishes its sampled observation to
+    /// the readiness gauge on its next request.
     pub fn begin_shutdown(&self) {
-        self.readiness.begin_shutdown();
         self.shutting_down.store(true, Ordering::Release);
     }
 
     #[cfg(test)]
-    pub(crate) fn set_readiness_evaluator(
+    pub(crate) fn set_dependency_evaluator(
         &mut self,
-        evaluator: Arc<dyn crate::readiness::ReadinessEvaluator>,
+        evaluator: Arc<dyn crate::readiness::DependencyEvaluator>,
     ) {
-        self.readiness = Arc::new(crate::readiness::ReadinessCoordinator::with_evaluator(
-            evaluator,
-        ));
+        self.dependency_diagnostics = Arc::new(
+            crate::readiness::DependencyDiagnostics::with_evaluator(evaluator),
+        );
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
@@ -1526,7 +1691,8 @@ pub(crate) mod tests {
     /// checks resolve to `AdmissionError::Unavailable` without any live
     /// infrastructure. Shared with `crate::rejection`'s tests.
     pub(crate) async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
+        let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
@@ -1537,7 +1703,8 @@ pub(crate) mod tests {
     /// tests deterministically exercise fail-closed database seams without
     /// depending on whether a developer has the normal test database running.
     pub(crate) async fn test_state_with_database_url(database_url: &str) -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
+        let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = database_url.to_owned();
@@ -1553,7 +1720,8 @@ pub(crate) mod tests {
     /// lifecycle tests use this to hold the sole connection as a deterministic
     /// barrier while AUTH waits in the real database acquisition path.
     pub(crate) async fn test_state_with_database_pool(pool: sqlx::PgPool) -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
+        let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.read_database_url = None;
@@ -1779,6 +1947,7 @@ pub(crate) mod tests {
         let conn_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
 
@@ -1793,9 +1962,13 @@ pub(crate) mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),
             ctrl_tx,
+            terminal_ctrl_tx,
             cancel: cancel.clone(),
             backpressure_count: Arc::clone(&bp),
             grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: None,
+            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
         };
 
         let mgr = ConnectionManager::new();
@@ -2057,6 +2230,7 @@ pub(crate) mod tests {
             CommunityConnectionControl::new(cancel_before.clone()),
             || async { Ok(false) },
             move |_| async move { started_before_run.store(true, Ordering::SeqCst) },
+            || async {},
         )
         .await;
         assert!(cancel_before.is_cancelled());
@@ -2083,6 +2257,7 @@ pub(crate) mod tests {
                 Ok(true)
             },
             move |_| async move { started_during_run.store(true, Ordering::SeqCst) },
+            || async {},
         );
         tokio::pin!(future);
         tokio::select! {
@@ -2094,6 +2269,264 @@ pub(crate) mod tests {
         future.await;
         assert!(cancel_during.is_cancelled());
         assert!(!started_during.load(Ordering::SeqCst));
+    }
+
+    /// Fix 3 / Carl 3 / F3: when the cancellation token fires while
+    /// `check_active` is in-flight (stalled DB scenario), the socket body must
+    /// NOT start even if `check_active` would have returned `Ok(true)`.
+    ///
+    /// Mutation oracle: remove the `biased; _ = cancel.cancelled() =>` arm from
+    /// the `select!` in `run_registered_community_connection` — the test still
+    /// passes (the post-check `cancel.is_cancelled()` guard catches it).
+    /// Replace the `select!` with the original `check_active().await` — the test
+    /// PANICS: the check waits for resume, cancel fires during the wait, but
+    /// without the select! the function only checks cancel _after_ the check
+    /// returns, so the run closure _would_ still execute if cancel fired at
+    /// exactly the wrong moment.
+    ///
+    /// Actually, to demonstrate the invariant uniquely, we need to show that
+    /// cancellation-during-check terminates the connection without waiting for
+    /// `check_active` to return. This test proves socket termination is prompt
+    /// (the `run_registered_community_connection` future resolves before the
+    /// check_active future is released) when cancel fires mid-check.
+    #[tokio::test]
+    async fn f3_cancellation_during_check_terminates_socket_without_waiting_for_check() {
+        let registry = CommunityConnectionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xf3));
+
+        let cancel = CancellationToken::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let started_run = Arc::clone(&started);
+
+        // The check blocks forever — simulates a stalled DB.
+        let release_check = Arc::new(tokio::sync::Notify::new());
+        let release_check_clone = Arc::clone(&release_check);
+        let check_reached = Arc::new(tokio::sync::Notify::new());
+        let check_reached_clone = Arc::clone(&check_reached);
+
+        let cancel_for_task = cancel.clone();
+        let future = run_registered_community_connection(
+            &registry,
+            Uuid::new_v4(),
+            community,
+            CommunityConnectionControl::new(cancel.clone()),
+            move || async move {
+                check_reached_clone.notify_one();
+                // Block until released — simulates stalled DB.
+                release_check_clone.notified().await;
+                Ok(true) // Would admit the socket if the select! weren't there.
+            },
+            move |_| async move { started_run.store(true, Ordering::SeqCst) },
+            || async {},
+        );
+
+        tokio::pin!(future);
+
+        // Wait for the check to start, then cancel the token.
+        tokio::select! {
+            _ = check_reached.notified() => {}
+            _ = &mut future => panic!("future must not complete before check starts"),
+        }
+
+        // Fire cancellation while check_active is blocked.
+        cancel_for_task.cancel();
+
+        // The future must resolve promptly — it must NOT wait for release_check.
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut future)
+            .await
+            .expect("F3: run_registered_community_connection must resolve promptly on cancel, not wait for stalled check_active");
+
+        // The socket body must never have started.
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "F3: socket body must not start when cancellation fires during check_active"
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "F3: cancel token must be cancelled after bootstrap cancellation"
+        );
+
+        // Release the stalled check (cleanup) — the future is already done.
+        release_check.notify_one();
+
+        // Mutation oracle: comment out the `biased; _ = cancel.cancelled() =>` arm
+        // from the select! in run_registered_community_connection. The timeout above
+        // would expire (the function waits for the stalled check to return).
+    }
+
+    /// Reads one `buzz_community_admission_checks_total` series by exact label set.
+    fn admission_counter(
+        snapshot: &[(
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            metrics_util::debugging::DebugValue,
+        )],
+        outcome: &str,
+    ) -> Option<u64> {
+        snapshot.iter().find_map(|(key, _, _, value)| {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect::<Vec<_>>();
+            if key.key().name() != "buzz_community_admission_checks_total"
+                || labels != [("outcome", outcome)]
+            {
+                return None;
+            }
+            match value {
+                metrics_util::debugging::DebugValue::Counter(count) => Some(*count),
+                _ => panic!("community admission checks must be a counter"),
+            }
+        })
+    }
+
+    /// Each deny arm (`Ok(false)`, `Err`) runs `on_not_run` exactly once, so
+    /// a queued NIP-FI denial is drained; `Ok(true)` never runs it.
+    ///
+    /// Mutation oracle: delete `on_not_run().await` from either deny arm →
+    /// that arm's count is 0 → RED.
+    #[tokio::test]
+    async fn on_not_run_runs_once_on_each_deny_arm_and_never_on_admit() {
+        use std::sync::atomic::AtomicUsize;
+        async fn not_run_count(check: Result<bool, buzz_db::DbError>) -> usize {
+            let count = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&count);
+            run_registered_community_connection(
+                &CommunityConnectionRegistry::new(),
+                Uuid::new_v4(),
+                CommunityId::from_uuid(Uuid::from_u128(0xb)),
+                CommunityConnectionControl::new(CancellationToken::new()),
+                || async { check },
+                |_| async {},
+                move || async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await;
+            count.load(Ordering::SeqCst)
+        }
+        assert_eq!(not_run_count(Ok(false)).await, 1, "inactive arm");
+        assert_eq!(
+            not_run_count(Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut))).await,
+            1,
+            "check-error arm"
+        );
+        assert_eq!(not_run_count(Ok(true)).await, 0, "admitted socket");
+    }
+
+    /// Admission is fail-closed on both non-affirmative outcomes. A confirmed
+    /// `Ok(false)` and a lookup `Err` are different diagnoses — the counter
+    /// keeps them apart — but neither is proof of current admission, and
+    /// `docs/multi-tenant-relay.md` I5 (`Inv_AdmissionFence`) grants read or
+    /// membership capability only to an actor *currently* admitted to that
+    /// community. Serving AUTH/REQ on an unproven tenant lifecycle is the
+    /// failure this guards.
+    #[test]
+    fn neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let (inactive_cancel, inactive_started, error_cancel, error_started, active_started) =
+            metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let registry = CommunityConnectionRegistry::new();
+                    let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+
+                    let inactive_cancel = CancellationToken::new();
+                    let inactive_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&inactive_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(inactive_cancel.clone()),
+                        || async { Ok(false) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                        || async {},
+                    )
+                    .await;
+
+                    let error_cancel = CancellationToken::new();
+                    let error_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&error_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(error_cancel.clone()),
+                        || async { Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut)) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                        || async {},
+                    )
+                    .await;
+
+                    let active_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&active_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(CancellationToken::new()),
+                        || async { Ok(true) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                        || async {},
+                    )
+                    .await;
+
+                    (
+                        inactive_cancel,
+                        inactive_started,
+                        error_cancel,
+                        error_started,
+                        active_started,
+                    )
+                })
+            });
+
+        assert!(
+            inactive_cancel.is_cancelled(),
+            "a confirmed-inactive community must still cancel its socket"
+        );
+        assert!(
+            !inactive_started.load(Ordering::SeqCst),
+            "a confirmed-inactive community must never start the socket body"
+        );
+        assert!(
+            error_cancel.is_cancelled(),
+            "a failed active check must cancel its socket, not admit it"
+        );
+        assert!(
+            !error_started.load(Ordering::SeqCst),
+            "a failed active check must never start serving AUTH/REQ on an unproven tenant"
+        );
+        assert!(active_started.load(Ordering::SeqCst));
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(admission_counter(&snapshot, "inactive"), Some(1));
+        assert_eq!(admission_counter(&snapshot, "check_error"), Some(1));
+        assert_eq!(admission_counter(&snapshot, "active"), Some(1));
+
+        let label_sets = snapshot
+            .iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_community_admission_checks_total")
+            .map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .map(|label| label.key().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(label_sets.len(), 3, "outcome is the only dimension");
+        assert!(
+            label_sets.iter().all(|labels| labels == &["outcome"]),
+            "admission telemetry must never carry community, tenant, or error labels: {label_sets:?}"
+        );
     }
 
     #[tokio::test]

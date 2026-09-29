@@ -25,6 +25,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
@@ -38,6 +39,7 @@ import '../forum/forum_posts_view.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
@@ -605,7 +607,11 @@ class ChannelDetailPage extends HookConsumerWidget {
                       context: context,
                       channel: resolvedChannel,
                       currentPubkey: currentPubkey,
-                      onMemberTap: showUserProfileSheet,
+                      onMemberTap: (context, pubkey) => showUserProfileSheet(
+                        context,
+                        pubkey,
+                        names: channelIdentityNamesProvider(resolvedChannel.id),
+                      ),
                       sectionId: ref
                           .read(channelSectionsProvider)
                           .store
@@ -715,12 +721,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                                 titleContentHeight: appBarTitleContentHeight,
                               ),
                             ),
-                            child: Center(
-                              child: Text(
-                                'Failed to load messages',
-                                style: context.textTheme.bodyMedium?.copyWith(
-                                  color: context.colors.error,
-                                ),
+                            child: LoadErrorView(
+                              message: 'Failed to load messages',
+                              onRetry: () => ref.invalidate(
+                                channelMessagesProvider(channel.id),
                               ),
                             ),
                           ),
@@ -789,7 +793,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                   alignment: Alignment.bottomCenter,
                   child: typingEntries.isEmpty
                       ? const SizedBox.shrink()
-                      : ChannelTypingIndicator(entries: typingEntries),
+                      : ChannelTypingIndicator(
+                          channelId: resolvedChannel.id,
+                          entries: typingEntries,
+                        ),
                 ),
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
@@ -817,7 +824,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                         alignment: Alignment.bottomCenter,
                         child: typingEntries.isEmpty
                             ? const SizedBox.shrink()
-                            : ChannelTypingIndicator(entries: typingEntries),
+                            : ChannelTypingIndicator(
+                                channelId: resolvedChannel.id,
+                                entries: typingEntries,
+                              ),
                       ),
                       ComposeBar(
                         channelId: channel.id,

@@ -14,6 +14,57 @@ EVENT, REQ, REST, media, git, search, workflow, or pub/sub handling. Unknown
 hosts fail closed, and NIP-98/API-token stamps must agree with the host-derived
 community rather than overriding it.
 
+Deployment-root community management uses operator-signed NIP-98 HTTP requests.
+`POST /operator/communities/delete` accepts only an exact normalized, archived
+community whose asserted pubkey is still its owner. The caller supplies the
+request UUID as the stable correlation/idempotency identity; the durable row
+records operator-attested owner intent, mediating operator, and acknowledgement
+version. Admission returns `202` at the `submitted` stage and performs no
+inventory, approval,
+quiescing, object-store access, or deletion execution synchronously. While that
+non-aborted request exists, unarchive and ownership transfer conflict and owner
+management lists suppress the archived row. Replaying the same UUID converges
+to its current stage; a different UUID conflicts with the existing one-active-
+request invariant until that request is aborted.
+
+Owner consent on this path is asserted, not proven. The mediating operator
+authenticates the owner and collects the deletion acknowledgement out of band,
+upstream of the relay; the request itself carries only the operator's NIP-98
+signature. The relay verifies operator authority and that the asserted pubkey
+is still the community's owner, then records the owner pubkey, mediating
+operator pubkey, and acknowledgement version as durable provenance for that
+upstream ceremony. No owner-signed attestation is required or checked, and
+owners have no self-service cancellation. Recovery is a privileged abort,
+which stays open across the reversible `submitted`, `inventoried`, `approved`,
+and `fenced` stages — releasing the request fence while leaving the community
+archived — and closes from `drained` onward, when tenant-state destruction may
+have begun.
+
+Manual operator handoff converges on an admitted owner request only when
+`buzz-admin deletions submit --requested-by` repeats the owner pubkey recorded
+on the row. Owner provenance pins `requested_by` to `owner_pubkey`, so passing
+the operator's own pubkey does not converge — it conflicts with the existing
+one-active-request invariant instead.
+
+The privileged one-shot `buzz-admin deletions drain` process gives already-
+approved work priority. When none is ready, it may claim only an
+operator-attested owner-origin `submitted` request under the same durable
+generation lease used for execution, inventory it with lease-loss cancellation,
+and atomically freeze the inventory plus a digest-bound `owner_automatic`
+approval. The mediating operator remains the approval actor; the owner
+acknowledgement is pre-inventory
+intent, not a claim that the owner reviewed the digest. The retained lease then
+enters the unchanged approved-request executor. Operator-origin requests never
+auto-progress and still require explicit inventory and approval. Owner
+admission still has no owner-facing cancellation or grace period; the
+privileged abort described above remains the recovery path.
+
+Ownership is mutable only while a community is active. Archiving freezes the
+current owner. Normal transfer and deployment-root legacy convergence take the
+same community-row lock as owner-deletion admission, then reject archived,
+quiescing, deleted, or deletion-pending rotation without changing membership.
+Initial owner bootstrap for a newly created community remains supported.
+
 Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---
@@ -644,7 +695,7 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 | GET | `/.well-known/nostr.json` | NIP-05 identity |
 | GET | `/health` | Health check |
 | GET | `/_liveness` | Liveness probe |
-| GET | `/_readiness` | Readiness probe |
+| GET | `/_readiness` | Readiness probe — local process lifecycle only |
 | POST | `/events` | Submit a signed Nostr event over HTTP (same ingest path as WebSocket `EVENT`) |
 | POST | `/query` | Query Nostr events over HTTP with NIP-01 filters |
 | POST | `/count` | Count Nostr events over HTTP with NIP-45 filters |
@@ -713,9 +764,22 @@ Subcommands:
 | `remove-member` | Remove a pubkey from the relay membership list (`--pubkey`, optional `--role` guard); publishes kind:13534 roster |
 | `list-members` | List all relay members |
 | `generate-key` | Generate a new Nostr keypair (for bootstrapping) |
+| `deletions` | Submit, inspect, approve, abort, unblock, run, or drain durable whole-community deletion requests |
+| `storage-snapshot` | Run one isolated S3 accounting scan and publish its complete Postgres snapshot |
 | `reconcile-channels` | Emit kind:39000/39002 discovery events for channels missing them (idempotent) |
 
 The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/buzz-admin`) and is the recommended way to manage relay membership in production. Use `./run.sh add-member`, `./run.sh remove-member`, and `./run.sh list-members` in Docker Compose deployments.
+
+Kubernetes deployments may schedule the typed one-shot
+`buzz-admin deletions drain` command directly. The pod owns its bounded
+Postgres/Redis clients and S3 client; it does not call relay HTTP. Durable
+requests, leases, retry timing, and checkpoints in Postgres are the handoff and
+execution authority, so Kubernetes uses `Forbid` concurrency and zero Job
+retries rather than introducing a second retry system.
+The same drain first claims runnable approved work and, only when none exists,
+may prepare one owner-origin submission. Inventory, automatic approval, and
+execution share one generation lease and the existing retry/block/checkpoint
+records; there is no preparation worker, command, queue, or retry authority.
 
 ---
 

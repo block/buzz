@@ -66,3 +66,6 @@ pub fn resolve_ttl(event: &nostr::Event, ephemeral_ttl_override: Option<i32>) ->
         (ttl, _) => ttl,
     }
 }
+
+/// NIP-AR artifact lifecycle.
+pub mod artifact;

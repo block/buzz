@@ -499,7 +499,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
         KIND_PROFILE => Ok(Scope::UsersWrite),
-        KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
+        KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
         | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
@@ -834,6 +834,34 @@ pub(crate) async fn check_channel_membership(
     } else {
         Err("restricted: not a channel member".to_string())
     }
+}
+
+/// The kind-9 channel write gates (token scope, membership or open channel,
+/// not archived) for a channel other than the event's own `h`.
+pub(crate) async fn check_channel_write(
+    tenant: &TenantContext,
+    state: &AppState,
+    auth: &IngestAuth,
+    ch_id: Uuid,
+) -> Result<(), String> {
+    check_token_channel_access(auth, ch_id)?;
+    let channel = state
+        .db
+        .get_channel_for_event_write(tenant.community(), ch_id)
+        .await
+        .ok();
+    check_channel_membership(
+        tenant,
+        state,
+        ch_id,
+        &auth.pubkey().to_bytes(),
+        channel.as_ref(),
+    )
+    .await?;
+    if channel.is_some_and(|ch| ch.archived_at.is_some()) {
+        return Err("invalid: channel is archived".into());
+    }
+    Ok(())
 }
 
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
@@ -2313,6 +2341,33 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
+    if kind_u32 == buzz_core::kind::KIND_ARTIFACT
+        && event.pubkey == *auth.pubkey()
+        && state
+            .db
+            .artifact_accepted(tenant.community(), event.id.as_bytes())
+            .await
+            .map_err(|e| IngestError::Internal(e.to_string()))?
+    {
+        emit(
+            tracer,
+            TraceAction::WriteDuplicate {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                channel: channel_label(
+                    extract_channel_id(&event)
+                        .ok_or_else(|| IngestError::Rejected("invalid: missing home".into()))?,
+                ),
+                claimed_community: claimed_community_from_event(&event),
+            },
+            state_for_request(tenant, auth.pubkey()),
+        );
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
@@ -2795,6 +2850,24 @@ async fn ingest_event_inner(
                 }
             }
         }
+    }
+
+    // Artifact revisions passed the same home-channel write gates as kind 9
+    // above; they are stored and published without conversation side effects.
+    if kind_u32 == buzz_core::kind::KIND_ARTIFACT {
+        let result = super::artifact::accept(state, tenant, &event, &auth).await?;
+        if let Some(ch_id) = channel_id {
+            emit(
+                tracer,
+                TraceAction::WriteInsert {
+                    msg_id: msg_id_label(event.id.as_bytes()),
+                    channel: channel_label(ch_id),
+                    claimed_community: claimed_community_from_event(&event),
+                },
+                state_for_request(tenant, auth.pubkey()),
+            );
+        }
+        return Ok(result);
     }
 
     // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
@@ -5815,7 +5888,7 @@ mod postgres_tests {
                 .await
                 .expect("pubsub manager"),
         );
-        let mut config = crate::config::Config::from_env().expect("relay config from env");
+        let mut config = crate::config::Config::for_test();
         config.database_url = db_url.clone();
         config.redis_url = FAKE_REDIS_URL.to_string();
         config.require_relay_membership = false;
@@ -6098,7 +6171,7 @@ mod postgres_tests {
                 .await
                 .expect("pubsub manager"),
         );
-        let mut config = crate::config::Config::from_env().expect("relay config from env");
+        let mut config = crate::config::Config::for_test();
         config.database_url = db_url.to_owned();
         config.redis_url = FAKE_REDIS_URL.to_string();
         config.require_relay_membership = false;

@@ -1100,6 +1100,38 @@ void main() {
     expect(_reqs(socket).where((req) => req[1] == 'l-1'), hasLength(1));
   });
 
+  test('a deadline CLOSED retries a live sub but fails history', () async {
+    final timers = <_ManualTimer>[];
+    final socket = _RecordingRelaySocket();
+    final statuses = <RelaySubscriptionStatus>[];
+    final session = RelaySessionNotifier(
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        timers.add(timer);
+        return timer;
+      },
+    );
+    session.debugAttachSocketForTest(socket);
+    final subscribe = session.subscribeWithStatus(
+      _channelFilter,
+      (_) {},
+      onStatusChanged: statuses.add,
+    );
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+
+    session.debugHandleMessage(['CLOSED', 'l-1', 'error: query timed out']);
+    expect(statuses.last, RelaySubscriptionStatus.retrying);
+    timers.single.fire();
+    await Future<void>.delayed(Duration.zero);
+    expect(_reqs(socket).where((req) => req[1] == 'l-1'), hasLength(2));
+
+    final history = session.fetchHistory(_channelFilter);
+    final historyId = _reqs(socket).last[1] as String;
+    session.debugHandleMessage(['CLOSED', historyId, 'error: query timed out']);
+    await expectLater(history, throwsA(isA<Exception>()));
+  });
+
   test('unsubscribe and dispose cancel CLOSED retry timers', () async {
     final timers = <_ManualTimer>[];
     final socket = _RecordingRelaySocket();

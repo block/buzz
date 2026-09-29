@@ -40,15 +40,18 @@ Widget _testable(
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Builder(
-        builder: (context) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(disableAnimations: disableAnimations),
-          // The app states its code style here, above the navigator.
-          child: AppMarkdownTheme(child: Scaffold(body: child)),
-        ),
+      // Use MaterialApp.builder so the MediaQuery override (including
+      // disableAnimations) applies to every pushed route, not just the
+      // home scaffold.  Navigator-pushed routes (e.g. MediaVideoViewerPage)
+      // skip a home-level Builder wrapper entirely.
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(
+          context,
+        ).copyWith(disableAnimations: disableAnimations),
+        // AppMarkdownTheme must wrap all routes that render message content.
+        child: AppMarkdownTheme(child: child!),
       ),
+      home: Scaffold(body: child),
     ),
   );
 }
@@ -2216,6 +2219,7 @@ Photos
                   ],
                 ],
               ),
+              disableAnimations: true,
             ),
           );
           await tester.pumpAndSettle();
@@ -2284,6 +2288,7 @@ Photos
                 ],
               ],
             ),
+            disableAnimations: true,
           ),
         );
         await tester.pumpAndSettle();

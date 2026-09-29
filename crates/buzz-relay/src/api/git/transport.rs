@@ -2367,7 +2367,7 @@ mod track_c_tests {
 
     async fn finalize_test_state() -> (Arc<AppState>, sqlx::PgPool) {
         const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -4055,7 +4055,7 @@ mod off_mode_precedence_tests {
         );
 
         async fn off_mode_state() -> Option<Arc<AppState>> {
-            let mut config = crate::config::Config::from_env().ok()?;
+            let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = buzz_auth::NipFiMode::Off;
             config.require_auth_token = false;
             config.require_relay_membership = false;
@@ -4438,10 +4438,7 @@ mod off_mode_precedence_tests {
         async fn enforce_mode_git_info_refs_missing_assertion_exact_bytes() {
             use buzz_auth::NipFiMode;
 
-            let mut config = match crate::config::Config::from_env() {
-                Ok(c) => c,
-                Err(_) => panic!("local Postgres not reachable (enforce git): config"),
-            };
+            let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
             config.require_auth_token = false;
             config.require_relay_membership = false;
@@ -4580,10 +4577,7 @@ mod off_mode_precedence_tests {
         async fn enforce_mode_git_pack_routes_missing_assertion_exact_bytes() {
             use buzz_auth::NipFiMode;
 
-            let mut config = match crate::config::Config::from_env() {
-                Ok(c) => c,
-                Err(_) => panic!("local Postgres not reachable (pack routes): config"),
-            };
+            let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
             config.require_auth_token = false;
             config.require_relay_membership = false;

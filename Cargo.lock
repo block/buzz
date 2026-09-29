@@ -1525,6 +1525,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
+ "buzz-db",
  "metrics",
  "sqlx",
  "thiserror 2.0.18",

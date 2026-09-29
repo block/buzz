@@ -26,6 +26,8 @@ pub mod feed;
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Deployment-global operator-listener mention registrations and delivery queues.
+pub mod operator_listener;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
@@ -60,3 +62,11 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
+
+mod artifact_query;
+
+#[cfg(test)]
+mod artifact_postgres_tests;

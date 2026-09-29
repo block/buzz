@@ -487,6 +487,7 @@ test("mismatched not-modified hash falls back to a full list", async ({
   page,
 }) => {
   await seedSnapshot(page, { hash: "persisted-stale-hash" });
+  await trackSnapshotRows(page);
   await installMockBridge(page, {
     channelsReadDelayMs: READ_DELAY_MS,
     channelsNotModifiedResponses: 1,
@@ -494,9 +495,11 @@ test("mismatched not-modified hash falls back to a full list", async ({
   await page.goto("/");
 
   const snapshotRows = page.locator('[data-channel-id^="snapshot-"]');
-  await expect(snapshotRows).toHaveCount(FULL_SNAPSHOT.length, {
-    timeout: 500,
-  });
+  // Record the transient boot frame independently of test-runner scheduling;
+  // cold-boot coverage separately enforces the snapshot paint deadline.
+  await expect
+    .poll(() => getTrackedSnapshotRows(page))
+    .toEqual(FULL_SNAPSHOT.map((channel) => channel.id));
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: "persisted-stale-hash" }, { knownHash: null }]);

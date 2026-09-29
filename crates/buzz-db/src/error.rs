@@ -84,5 +84,17 @@ pub enum DbError {
     LastOperator,
 }
 
+impl DbError {
+    /// Whether Postgres cancelled the statement (SQLSTATE 57014:
+    /// `statement_timeout` or an explicit cancel). Re-running such a query on
+    /// the writer would only repeat the same expensive work.
+    pub fn is_statement_cancelled(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        )
+    }
+}
+
 /// Convenience alias for `Result<T, DbError>`.
 pub type Result<T> = std::result::Result<T, DbError>;

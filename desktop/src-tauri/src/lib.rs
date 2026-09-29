@@ -10,6 +10,8 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+#[cfg_attr(not(test), allow(dead_code))]
+mod hpke_key_backup;
 mod huddle;
 mod identity_storage;
 mod initial_window;
