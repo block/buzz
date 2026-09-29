@@ -32,10 +32,10 @@ export type ChannelLinkSidePanelChrome = {
  * right-hand idle auxiliary panel with independent expand + close.
  * Both states slide in via the focus drawer; default open matches Projects
  * width (channel sliver); expand goes true full-bleed. Thread override
- * stays always-on (#63).
+ * stays always-on (#63). ChannelScreen and Inbox (HomeView) both mount this.
  *
- * Leaving the channel route (Projects, etc.) clears the panel so a
- * fullscreen webview cannot cover the destination.
+ * Leaving a host route clears the panel so a fullscreen webview cannot cover
+ * the destination.
  */
 export function useChannelLinkSidePanel(): ChannelLinkSidePanelChrome | null {
   const store = React.useSyncExternalStore(

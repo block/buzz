@@ -14,6 +14,11 @@ export type AppView =
   | "projects"
   | "pin";
 
+/** Views that host the RHS link slide-out (channel + Inbox). */
+export function shouldPersistLinkSidePanel(selectedView: AppView): boolean {
+  return selectedView === "channel" || selectedView === "home";
+}
+
 const WINDOW_DRAG_HANDLE_HEIGHT = 44;
 const TAURI_DRAG_REGION_ATTR = "data-tauri-drag-region";
 const WINDOW_DRAG_INTERACTIVE_SELECTOR =

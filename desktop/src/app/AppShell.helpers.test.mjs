@@ -7,6 +7,7 @@ import {
   activateDesktopNotificationTarget,
   createDesktopNotificationActivationQueue,
   shouldBounceForChannelNotification,
+  shouldPersistLinkSidePanel,
 } from "./AppShell.helpers.ts";
 
 test("deriveShellRoute maps pinned site paths", () => {
@@ -256,4 +257,12 @@ test("markAllReadSources skips the active marker without projected activity", ()
   });
 
   assert.deepEqual(calls, ["channels"]);
+});
+
+test("shouldPersistLinkSidePanel keeps channel and Inbox hosts", () => {
+  assert.equal(shouldPersistLinkSidePanel("channel"), true);
+  assert.equal(shouldPersistLinkSidePanel("home"), true);
+  assert.equal(shouldPersistLinkSidePanel("projects"), false);
+  assert.equal(shouldPersistLinkSidePanel("browsers"), false);
+  assert.equal(shouldPersistLinkSidePanel("pin"), false);
 });

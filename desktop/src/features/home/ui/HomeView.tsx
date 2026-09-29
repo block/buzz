@@ -5,6 +5,14 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
+import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
+import { IdleAuxiliaryPanel } from "@/features/channels/ui/IdleAuxiliaryPanel";
+import {
+  resolveIdleFocusDrawerLeftPx,
+  shouldEnableIdleFocusDrawerEscape,
+} from "@/features/channels/ui/ChannelPane.helpers";
+import { THREAD_FOCUS_SLIVER_WIDTH_PX } from "@/features/channels/lib/threadFocusLayout";
+import { useChannelLinkSidePanel } from "@/features/link-panel/ui/useChannelLinkSidePanel";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
 import {
   type InboxFilter,
@@ -238,6 +246,16 @@ export function HomeView({
     onResizeStart: handleThreadPanelResizeStart,
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
+  // Same RHS link consumer as ChannelScreen: Markdown opens openLinkSidePanel;
+  // without this mount, Inbox clicks update the store but nothing renders.
+  const linkSidePanel = useChannelLinkSidePanel();
+  const linkSidePanelLeftPx = resolveIdleFocusDrawerLeftPx(
+    linkSidePanel?.idleAuxiliaryExpanded,
+    THREAD_FOCUS_SLIVER_WIDTH_PX,
+  );
+  const linkSidePanelEscapeEnabled = shouldEnableIdleFocusDrawerEscape(
+    linkSidePanel?.idleAuxiliaryExpanded,
+  );
   const {
     canResetInboxListWidth,
     handleInboxListResizeStart,
@@ -992,6 +1010,33 @@ export function HomeView({
                 open={true}
               />
             </RightAuxiliaryPane>
+          ) : null}
+          {linkSidePanel ? (
+            <FocusThreadDrawer
+              channelName="Inbox"
+              coverAppChrome={linkSidePanel.idleAuxiliaryCoverAppChrome}
+              escapeEnabled={linkSidePanelEscapeEnabled}
+              key="inbox-link-side-panel"
+              label={linkSidePanel.idleAuxiliaryTitle || "Link"}
+              leftPx={linkSidePanelLeftPx}
+              onClose={linkSidePanel.onCloseIdleAuxiliaryPanel}
+            >
+              <IdleAuxiliaryPanel
+                bodyClassName={linkSidePanel.idleAuxiliaryBodyClassName}
+                canResetWidth={canResetThreadPanelWidth}
+                headerControls={linkSidePanel.idleAuxiliaryHeaderActions}
+                isFocusDrawer
+                isSinglePanelView={isSinglePanelAuxiliaryView}
+                onClose={linkSidePanel.onCloseIdleAuxiliaryPanel}
+                onResetWidth={handleThreadPanelWidthReset}
+                onResizeStart={handleThreadPanelResizeStart}
+                title={linkSidePanel.idleAuxiliaryTitle}
+                useSplitAuxiliaryPane={false}
+                widthPx={threadPanelWidthPx}
+              >
+                {linkSidePanel.idleAuxiliaryPanel}
+              </IdleAuxiliaryPanel>
+            </FocusThreadDrawer>
           ) : null}
         </div>
       </div>

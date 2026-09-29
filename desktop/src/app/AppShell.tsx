@@ -2,7 +2,11 @@ import * as React from "react";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
-import { deriveShellRoute, markAllReadSources } from "@/app/AppShell.helpers";
+import {
+  deriveShellRoute,
+  markAllReadSources,
+  shouldPersistLinkSidePanel,
+} from "@/app/AppShell.helpers";
 import { useTerminalContext } from "@/app/useTerminalContext";
 import { AppShellProvider } from "@/app/AppShellContext";
 import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
@@ -249,8 +253,9 @@ export function AppShell() {
     if (selectedView !== "pin") {
       void hideAllPinWebviews();
     }
-    // Leaving channels (Projects, Inbox, etc.) must clear fullscreen link web.
-    if (selectedView !== "channel") {
+    // Tear down fullscreen link web when leaving hosts that render it
+    // (channel + Inbox). Keep it on those views so message links can open.
+    if (!shouldPersistLinkSidePanel(selectedView)) {
       closeLinkSidePanel();
     }
   }, [selectedView]);
