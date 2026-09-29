@@ -3,6 +3,13 @@ use thiserror::Error;
 /// Errors returned by [`crate::NostrWsConnection`] and related operations.
 #[derive(Debug, Error)]
 pub enum WsClientError {
+    /// Configured transport or replay-buffer budget was exceeded; connection closed.
+    #[error("WebSocket resource limit exceeded")]
+    ResourceLimit,
+    /// A required connection budget was zero or inconsistent.
+    #[error("Invalid WebSocket connection options")]
+    InvalidConnectionOptions,
+
     /// A WebSocket transport error occurred.
     #[error("WebSocket error: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
