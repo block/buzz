@@ -303,7 +303,7 @@ pub fn build_drive_screen_caption(
     lines.join("\n")
 }
 
-fn imeta_tag_for_blob(blob: &crate::commands::media::BlobDescriptor) -> Vec<String> {
+pub(crate) fn imeta_tag_for_blob(blob: &crate::commands::media::BlobDescriptor) -> Vec<String> {
     let mut tag = vec![
         "imeta".into(),
         format!("url {}", blob.url),

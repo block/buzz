@@ -384,13 +384,15 @@ pub fn observe_poll(p: ObservePollParams) -> Result<CallToolResult, ErrorData> {
                 "browser_get_viewport",
                 "browser_set_viewport",
                 "browser_snapshot",
+                "browser_record_start",
+                "browser_record_stop_and_post",
                 "browser_drive",
                 "browser_fill_field",
                 "browser_runbook_get",
                 "browser_runbook_propose"
             ]
         },
-        "runbookNote": "runbook.agentBrief + active procedures + driveProtocol. Prefer surfaceId. browser_snapshot waits inline. browser_fill_field for forms. browser_runbook_propose auto-activates unless the title is human-persisted. Agent brief is human-owned."
+        "runbookNote": "runbook.agentBrief + active procedures + driveProtocol. Prefer surfaceId. browser_snapshot waits inline. browser_record_start/stop_and_post are OPT-IN section clips only — call when the runbook/user asks for that section; never auto-start on Drive grant. browser_fill_field for forms. browser_runbook_propose auto-activates unless the title is human-persisted. Agent brief is human-owned."
     });
     Ok(CallToolResult::success(vec![Content::text(
         body.to_string(),
@@ -1320,6 +1322,222 @@ pub fn snapshot(p: SnapshotParams) -> Result<CallToolResult, ErrorData> {
         .to_string(),
     )]))
 }
+
+
+// ── Drive viewport recording ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecordStartParams {
+    #[serde(default)]
+    pub webview_label: Option<String>,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecordStopParams {
+    #[serde(default)]
+    pub webview_label: Option<String>,
+    #[serde(default)]
+    pub surface_id: Option<String>,
+    /// Optional short note included in the posted caption (max ~280 chars on Desktop).
+    #[serde(default)]
+    pub caption: Option<String>,
+    /// Max ms to wait for encode+upload+post (default 90000).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+fn new_record_id() -> String {
+    format!(
+        "r{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+fn write_record_request(dir: &Path, body: &Value) -> Result<(), ErrorData> {
+    fs::create_dir_all(dir).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let path = dir.join("record-request.json");
+    fs::write(&path, body.to_string())
+        .map_err(|e| ErrorData::internal_error(format!("write record-request: {e}"), None))?;
+    let _ = fs::write(dir.join("drive-wake"), format!("{}\n", now_ms()));
+    Ok(())
+}
+
+fn wait_for_record_event(
+    dir: &Path,
+    after_id: u64,
+    request_id: &str,
+    kinds: &[&str],
+    timeout_ms: u64,
+    poll_ms: u64,
+) -> Option<Value> {
+    let started = std::time::Instant::now();
+    let path = dir.join("events.jsonl");
+    loop {
+        if let Ok(file) = fs::File::open(&path) {
+            for line in BufReader::new(file).lines().flatten() {
+                let Ok(ev) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let id = ev.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                if id <= after_id {
+                    continue;
+                }
+                let kind = event_kind(&ev).unwrap_or("");
+                if !kinds.iter().any(|k| *k == kind) {
+                    continue;
+                }
+                let rid = ev
+                    .get("payload")
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if rid == request_id {
+                    return Some(ev);
+                }
+            }
+        }
+        if started.elapsed().as_millis() as u64 >= timeout_ms {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(20)));
+    }
+}
+
+/// Start Drive WKWebView viewport recording for a grant (MCP → Desktop).
+pub fn record_start(p: RecordStartParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_record_start",
+            None,
+        ));
+    };
+    let (dir, grant, label) = require_drive_grant_resolved(
+        &pubkey,
+        p.webview_label.as_deref().unwrap_or(""),
+        p.surface_id.as_deref(),
+    )?;
+    let request_id = new_record_id();
+    let after = last_event_id(&dir);
+    write_record_request(
+        &dir,
+        &json!({
+            "action": "start",
+            "requestId": request_id,
+            "agentPubkey": pubkey,
+            "atMs": now_ms(),
+        }),
+    )?;
+    let ev = wait_for_record_event(
+        &dir,
+        after,
+        &request_id,
+        &["record_started", "record_error"],
+        8_000,
+        40,
+    );
+    let (ok, payload) = match ev {
+        Some(ev) => {
+            let kind = event_kind(&ev).unwrap_or("");
+            let payload = ev.get("payload").cloned().unwrap_or(Value::Null);
+            (kind == "record_started", payload)
+        }
+        None => (
+            false,
+            json!({
+                "ok": false,
+                "error": "record_start timeout — Desktop may be closed or grant webview missing",
+            }),
+        ),
+    };
+    Ok(CallToolResult::success(vec![Content::text(
+        json!({
+            "ok": ok,
+            "requestId": request_id,
+            "webviewLabel": label,
+            "surfaceId": grant_surface_id(&grant),
+            "grant": grant,
+            "result": payload,
+            "note": "Opt-in section recording (~4 fps; safety max ~180s). Call browser_record_stop_and_post when the section is done (ends early) to encode MP4 and post to the grant channel/thread. Do not start unless the runbook/user asked for this clip."
+        })
+        .to_string(),
+    )]))
+}
+
+/// Stop Drive recording, encode MP4, upload, and post to the grant channel/thread.
+pub fn record_stop_and_post(p: RecordStopParams) -> Result<CallToolResult, ErrorData> {
+    let Some(pubkey) = caller_pubkey() else {
+        return Err(ErrorData::invalid_params(
+            "BUZZ_AGENT_PUBKEY required for browser_record_stop_and_post",
+            None,
+        ));
+    };
+    let (dir, grant, label) = require_drive_grant_resolved(
+        &pubkey,
+        p.webview_label.as_deref().unwrap_or(""),
+        p.surface_id.as_deref(),
+    )?;
+    let request_id = new_record_id();
+    let after = last_event_id(&dir);
+    let mut body = json!({
+        "action": "stop",
+        "requestId": request_id,
+        "agentPubkey": pubkey,
+        "atMs": now_ms(),
+    });
+    if let Some(caption) = p
+        .caption
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("caption".into(), json!(caption));
+        }
+    }
+    write_record_request(&dir, &body)?;
+    let timeout_ms = p.timeout_ms.unwrap_or(90_000).clamp(5_000, 180_000);
+    let ev = wait_for_record_event(
+        &dir,
+        after,
+        &request_id,
+        &["record_posted", "record_error"],
+        timeout_ms,
+        80,
+    );
+    let (ok, payload) = match ev {
+        Some(ev) => {
+            let kind = event_kind(&ev).unwrap_or("");
+            let payload = ev.get("payload").cloned().unwrap_or(Value::Null);
+            (kind == "record_posted", payload)
+        }
+        None => (
+            false,
+            json!({
+                "ok": false,
+                "error": "record_stop timeout — encode/upload may still be running; poll browser_observe_poll for record_posted|record_error",
+            }),
+        ),
+    };
+    Ok(CallToolResult::success(vec![Content::text(
+        json!({
+            "ok": ok,
+            "requestId": request_id,
+            "webviewLabel": label,
+            "surfaceId": grant_surface_id(&grant),
+            "channelId": grant.get("channelId"),
+            "threadRoot": grant.get("threadRoot"),
+            "result": payload,
+            "note": "On success Desktop posted ![video](url) as the grant agent into the bound channel/thread."
+        })
+        .to_string(),
+    )]))
+}
+
 
 #[cfg(test)]
 mod tests {

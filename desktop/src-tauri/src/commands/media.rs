@@ -405,6 +405,26 @@ pub(crate) async fn upload_image_bytes(
     do_upload(body, &mime, state, None, None).await
 }
 
+/// Upload a pre-encoded MP4 (Drive browser recording). Skips re-transcode.
+pub(crate) async fn upload_video_bytes(
+    body: Vec<u8>,
+    filename: Option<String>,
+    state: &AppState,
+) -> Result<BlobDescriptor, String> {
+    if body.is_empty() {
+        return Err("empty video upload".into());
+    }
+    let mime = detect_and_validate_mime(&body)?;
+    if mime != "video/mp4" {
+        return Err(format!("expected video/mp4, got {mime}"));
+    }
+    let mut descriptor = do_upload(body, &mime, state, None, None).await?;
+    if let Some(name) = filename {
+        descriptor.filename = Some(sanitize_filename(&name));
+    }
+    Ok(descriptor)
+}
+
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,

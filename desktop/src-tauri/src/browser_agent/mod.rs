@@ -1,7 +1,8 @@
 //! Buzz in-app browser Observe/Drive grants (WKWebView playground).
-//! Pins are out of scope. Not OpenClaw Chromium / CDP.
+//! Not OpenClaw Chromium / CDP.
 
 pub mod drive;
+pub mod drive_record;
 pub mod drive_screen;
 pub mod grant;
 pub mod observe;
@@ -35,7 +36,8 @@ pub struct BrowserAgentState {
     pub grants: BrowserAgentGrantStore,
     pub observe: BrowserObserveBuffer,
     pub drive_screens: drive_screen::DriveScreenTracker,
-    /// Playground labels currently `hide()`d (parked). Theater cursor skips.
+    pub drive_records: drive_record::DriveRecordTracker,
+    /// Playground labels currently hide()d (parked).
     pub webview_hidden: Mutex<HashSet<String>>,
 }
 
@@ -247,11 +249,14 @@ pub fn clear_grants_for_surface(app: &AppHandle, surface_id: &str) {
     };
     let removed = state.grants.clear_surface(surface_id);
     for grant in removed {
-        state.observe.clear(&grant.webview_label);
+        let label = grant.webview_label.as_str();
+        state.observe.clear(label);
+        state.drive_screens.clear(label);
+        state.drive_records.clear(label);
         if let Ok(root) = ensure_data_root(app, &state) {
-            mirror_grant(&root, None, &grant.webview_label, false);
+            mirror_grant(&root, None, label, false);
         }
-        emit_grant(app, None, &grant.webview_label);
+        emit_grant(app, None, label);
     }
 }
 
@@ -262,6 +267,7 @@ pub fn clear_grant_for_label(app: &AppHandle, webview_label: &str) {
     if state.grants.clear(webview_label).is_some() {
         state.observe.clear(webview_label);
         state.drive_screens.clear(webview_label);
+        state.drive_records.clear(webview_label);
         if let Ok(root) = ensure_data_root(app, &state) {
             mirror_grant(&root, None, webview_label, false);
         }
@@ -373,22 +379,16 @@ pub async fn browser_agent_grant_set(
 #[tauri::command]
 pub async fn browser_agent_grant_clear(
     app: AppHandle,
-    state: State<'_, BrowserAgentState>,
+    _state: State<'_, BrowserAgentState>,
     webview_label: String,
 ) -> Result<(), String> {
     let label = webview_label.trim().to_string();
-    let _ = state.grants.clear(&label);
-    state.observe.clear(&label);
-    // Best-effort unlock overlay if page still up.
     let _ = eval_on_label(
         &app,
         &label,
         "(function(){var a=window.__buzzBrowserAgent;if(a)a.setDrive(false);})();",
     );
-    if let Ok(root) = ensure_data_root(&app, &state) {
-        mirror_grant(&root, None, &label, false);
-    }
-    emit_grant(&app, None, &label);
+    clear_grant_for_label(&app, &label);
     Ok(())
 }
 
@@ -693,10 +693,7 @@ fn enrich_drive_payload(
 }
 
 fn emit_observe(app: &AppHandle, label: &str, kind: &str, payload: Option<serde_json::Value>) {
-    let mut body = json!({
-        "webviewLabel": label,
-        "kind": kind,
-    });
+    let mut body = json!({ "webviewLabel": label, "kind": kind });
     if let Some(payload) = payload {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("payload".into(), payload);
@@ -947,9 +944,7 @@ pub async fn browser_drive(
 }
 
 /// Atomically take the inbox file (rename → read → delete temp).
-/// Lines appended during processing land in a fresh `drive-inbox.jsonl`.
-/// Uses `drive-inbox.lock` so MCP appends cannot race mid-line with rename
-/// (that produced `invalid inbox line: EOF while parsing a string …`).
+/// Uses `drive-inbox.lock` so MCP appends cannot race mid-line with rename.
 fn take_drive_inbox(path: &std::path::Path) -> Result<String, String> {
     if !path.exists() {
         return Ok(String::new());
@@ -1009,8 +1004,7 @@ fn inbox_lock_acquire(dir: &std::path::Path) -> Result<InboxLockGuard, String> {
     }
 }
 
-/// Whether Drive inbox actions may run for this grant.
-/// Snapshots still process while Taken; only click/type/scroll/etc. are blocked.
+/// Drive inbox click/type/scroll allowed (blocked while Taken). Snapshots still run.
 fn drive_actions_allowed(grant: &BrowserAgentGrant) -> bool {
     matches!(grant.mode, BrowserAgentMode::Drive) && !grant.user_has_control
 }
@@ -1025,9 +1019,10 @@ async fn process_drive_inbox_for_label(
     };
     let root = ensure_data_root(app, state)?;
     let mut applied = 0u32;
-    // Snapshot requests apply in Observe or Drive — including while Taken.
+    // Snapshots + recording apply in Observe/Drive (incl. Taken).
     applied += process_snapshot_request(app, state, label, &root).await;
-    // Drive actions stay blocked while human has Taken control.
+    applied += drive_record::process_record_request(app, state, label, &root).await;
+    // Drive click/type/etc. blocked while Taken.
     if !drive_actions_allowed(&grant) {
         return Ok(applied);
     }
@@ -1045,8 +1040,7 @@ async fn process_drive_inbox_for_label(
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                // Truncated mid-string lines are a writer/reader race remnant; skip
-                // quietly (lock should prevent new ones). Other parse errors surface.
+                // Truncated mid-line race remnant; skip. Other parse errors surface.
                 let msg = e.to_string();
                 if msg.contains("EOF while parsing") {
                     eprintln!(
@@ -1256,24 +1250,28 @@ fn handle_page_new_tab_intent(
 
 fn label_has_wake(root: &PathBuf, label: &str) -> bool {
     let dir = root.join(label);
-    dir.join("drive-wake").exists()
-        || dir.join("drive-inbox.jsonl").exists()
-        || dir.join("snapshot-request.json").exists()
-        || dir.join("runbook-propose-wake").exists()
-        || dir.join("runbook-propose.jsonl").exists()
-        || dir.join("tab-switch-request.json").exists()
-        || dir.join("viewport-request.json").exists()
+    const NAMES: &[&str] = &[
+        "drive-wake",
+        "drive-inbox.jsonl",
+        "snapshot-request.json",
+        "runbook-propose-wake",
+        "runbook-propose.jsonl",
+        "tab-switch-request.json",
+        "viewport-request.json",
+        "record-request.json",
+    ];
+    NAMES.iter().any(|n| dir.join(n).exists())
 }
 
 fn clear_wake(root: &PathBuf, label: &str) {
     let dir = root.join(label);
-    let _ = std::fs::remove_file(dir.join("drive-wake"));
-    let _ = std::fs::remove_file(dir.join("runbook-propose-wake"));
+    for name in ["drive-wake", "runbook-propose-wake"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
 }
 
-/// Poll live Observe/Drive grants. Sleeps 50ms when a wake/inbox file exists,
-/// otherwise 200ms. Flushes observe, Drive inbox, snapshots, tab-switch, and
-/// emits when MCP queued a runbook propose.
+/// Poll live Observe/Drive grants (50ms busy / 200ms idle). Flushes observe,
+/// Drive inbox, snapshots, recording, tab-switch, viewport; emits runbook propose.
 pub fn spawn_grant_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -1666,7 +1664,6 @@ pub async fn browser_agent_sync_viewport(
     }
     Ok(())
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

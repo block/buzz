@@ -41,6 +41,7 @@ Playground sessions live in a **browser group** (`browserId`, `tabSids[]`, `acti
 
 - Each tab is a normal playground session + its own `playground-{sid}` WKWebView.
 - **Drive screen chat posts:** While a **Drive** grant is active, each nav / full load / soft SPA settle (URL without hash; hash-only churn ignored; same URL may re-post after reload or title change) triggers a host-side viewport screenshot posted as the grant's agent into the bound channel/thread, with a short path caption (bullets from Drive actions since the last post — click/type/key/navigate; typed text never echoed). Ready+quiet probe + short paint settle + min interval; in-flight work cancels on newer nav. Observe-only grants do not post. Agents should not spam `browser_snapshot(screenshot=true)` — chat screens are host-owned.
+- **Drive viewport recording (agent tools, opt-in):** **Never** auto-starts when a Drive grant begins. Agents call `browser_record_start` / `browser_record_stop_and_post` **only** when a runbook step or the user asks for a **section** clip (not the whole session). Desktop records the WKWebView viewport (same snapshot path as Drive stills; not display-capture), encodes H.264 MP4 at ~4 fps (no audio). `browser_record_stop_and_post` **ends early**; ~180s / 720 frames is only a forgotten-recording safety cap. Then it uploads and posts `![video](url)` as the grant agent into the bound channel/thread. Observe-only grants cannot record. One active recording per webview.
 - **New tab from the page:** `window.open` / `target=_blank` is handled as **MVP B** — Rust registers `WebviewBuilder::on_new_window`, emits `playground-webview-new-tab`, schedules a sibling tab in the opener's group, focuses it, and returns **`NewWindowResponse::Deny`** (no random NSWindow). The opener may break (`window.open` return value / `window.opener`) — intentional for this MVP; a later path A can use `Create { window }` with a related webview.
 - **One live WKWebView per playground sid:** label is always `playground-{sid}`. Detach / pin Open / RHS stage **reparent** that child across windows instead of creating `playground-{sid}--{window}` siblings (siblings forked DOM + Drive phase). Pop-out close reparents back to main (hidden) when possible so Observe/Drive stay warm.
 - **Grants:** one agent per browser group. Observe/Drive bind to the **active tab** `surfaceId`. The **main tab** (`tabSids[0]` / `mainTabSid`) is **primary focus** and cannot be dismissed from the strip (Browsers **Remove** still disposes the group). Switching tabs (or focusing a new tab) **rebinds** the grant onto the active tab's webview label (same idea as detach host rebind). Closing a secondary tab disposes that session/webview only.
@@ -56,6 +57,22 @@ Learned how-to knowledge for a **playground session** (`sid:…`) or **pinned si
 - **Procedures** — engineer-readable steps (`active` | `pending` | `archived`). Agents propose via `browser_runbook_propose` (auto-activates). Humans can Persist/lock procedures so agents cannot modify them. Agent brief is human-owned. UI: Settings → Pinned sites → **How to use this site**, and Browsers row **Runbook**.
 - Inject is brief + active titles/summaries only; full steps via `browser_runbook_get`.
 - Community pins sync brief + active procedures in the pin payload.
+
+#### Recording a section (runbook pattern)
+
+Drive recording is **prescribed**, not ambient. Put `browser_record_start` / `browser_record_stop_and_post` only around the steps you want as an MP4 clip. Do the quiet preamble (login, 2FA, navigate) **before** start; stop as soon as the section is done.
+
+Example procedure steps:
+
+1. Navigate to the portal and complete login (username → password → submit).
+2. Complete 2FA / MFA prompts.
+3. Open **Statements** (or the target area) and wait until the page is settled.
+4. Call `browser_record_start` (prefer `surface_id`) — begin the clip for this section only.
+5. Open the statements period dropdown, choose the period, and confirm the table refreshes (the actions you want in the video).
+6. Call `browser_record_stop_and_post` with a short `caption` (e.g. “Statements period dropdown”) — encodes + posts the clip early; do not wait for the ~180s safety cap.
+7. Continue any non-recorded follow-up steps.
+
+Spoken / chat equivalent: user says “record the dropdown part” → agent drives to that UI first, then start → interact → stop_and_post. Host Drive still screenshots on nav remain separate and unchanged.
 
 ### Non-goals
 
@@ -163,6 +180,8 @@ Prefer **Desktop-managed / local ACP** agents that can call Desktop-side tools:
 | `browser_observe_poll` | Drain observe events. Prefer `surface_id`; `webview_label` optional. |
 | `browser_drive` | Drive action or `actions` batch (Drive mode only). Prefer `surface_id`. Validates `kind`; waits for results unless `queue_only`. |
 | `browser_snapshot` | Request DOM/a11y snapshot. Prefer `surface_id`. Writes `snapshot-request.json`; Desktop fills `kind=snapshot` via `eval_with_callback` (interactives include `ref` + `center`). Optional `screenshot=true`. |
+| `browser_record_start` | **Opt-in** start of a Drive WKWebView viewport recording for a runbook/user-requested **section** only — never on Drive grant begin. Prefer `surface_id`. Writes `record-request.json`; waits for `record_started` / `record_error`. Safety max ~180s. |
+| `browser_record_stop_and_post` | Stop recording **early**, encode MP4, upload, post to grant channel/thread. Prefer `surface_id`. Optional `caption`. Waits for `record_posted` / `record_error`. |
 | `browser_agent_grants` | List grants (`surfaceId` + live `webviewLabel`) for this agent |
 | `browser_tabs` | List tabs in the granted browser group (`mainTabSid` primary; extras from in-page open). Prefer `surface_id`. |
 | `browser_switch_tab` | Focus a tab by `surface_id` (rebinds grant). Poll `tab_switched` or re-call `browser_tabs`. |
@@ -177,5 +196,6 @@ Remote Gateway agents: no CDP bridge in this change — document follow-up conse
 
 - One agent per webview; replace requires confirm.
 - Drive actions require live Drive grant matching caller pubkey.
+- Drive viewport recording is opt-in (runbook/user); Desktop never auto-starts recording when a Drive grant is set.
 - Observe has no PHI scrub (product decision).
 - Never routes through OpenClaw browser debug ports (already blocked for playground URLs).

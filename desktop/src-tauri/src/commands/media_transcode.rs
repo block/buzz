@@ -32,7 +32,7 @@ fn ffmpeg_command(path: &std::path::Path) -> std::process::Command {
 /// Locate ffmpeg using the same discovery logic as managed agents
 /// (login shell PATH, /opt/homebrew/bin, /usr/local/bin, etc.).
 /// Returns the resolved absolute path on success.
-pub(super) fn find_ffmpeg() -> Result<std::path::PathBuf, String> {
+pub(crate) fn find_ffmpeg() -> Result<std::path::PathBuf, String> {
     let ffmpeg_path = resolve_command("ffmpeg").ok_or_else(|| {
         "ffmpeg is required for video uploads but was not found.\n\n\
          Install it:\n  \
@@ -567,6 +567,86 @@ pub(super) fn transcode_and_extract_poster_with_cancellation(
     let _ = std::fs::remove_file(&transcoded);
 
     Ok((video_bytes?, poster_bytes))
+}
+
+
+/// Encode a contiguous `frame_0001.png`… sequence into H.264 MP4 (no audio).
+///
+/// Output matches the relay video constraints used by composer uploads
+/// (yuv420p, even dimensions, faststart). Caller must clean up the returned path
+/// and the frames directory.
+pub(crate) fn encode_png_sequence_to_mp4(
+    frames_dir: &std::path::Path,
+    fps: u32,
+) -> Result<std::path::PathBuf, String> {
+    if fps == 0 || fps > 30 {
+        return Err("fps must be 1..=30".into());
+    }
+    let pattern = frames_dir.join("frame_%04d.png");
+    let first = frames_dir.join("frame_0001.png");
+    if !first.exists() {
+        return Err("no recording frames to encode".into());
+    }
+    let ffmpeg = find_ffmpeg()?;
+    let output =
+        std::env::temp_dir().join(format!("buzz-drive-record-{}.mp4", uuid::Uuid::new_v4()));
+    let result = run_ffmpeg_with_cancellation(
+        ffmpeg_command(&ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+                "-framerate",
+                &fps.to_string(),
+                "-start_number",
+                "1",
+                "-i",
+            ])
+            .arg(&pattern)
+            .args([
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-movflags",
+                "+faststart",
+                "-map_metadata",
+                "-1",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-metadata",
+                "encoder=",
+            ])
+            .arg(&output)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()),
+        FFMPEG_TIMEOUT,
+        None,
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&output);
+    })?;
+    if !result.status.success() {
+        let _ = std::fs::remove_file(&output);
+        let err = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("ffmpeg encode failed: {err}"));
+    }
+    if !output.exists() {
+        return Err("ffmpeg produced no output file".into());
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
