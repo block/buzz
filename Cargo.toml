@@ -12,6 +12,7 @@ members = [
     "crates/buzz-audit",
     "crates/buzz-acp",
     "crates/buzz-agent",
+    "crates/buzz-ai",
     "crates/sprig",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",
@@ -59,6 +60,7 @@ tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip"
 sqlx = { version = "0.9", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 
 # Redis
 redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
@@ -145,6 +147,7 @@ buzz-db = { path = "crates/buzz-db" }
 buzz-deletion = { path = "crates/buzz-deletion" }
 buzz-feature-flags = { path = "crates/buzz-feature-flags" }
 buzz-auth = { path = "crates/buzz-auth" }
+buzz-ai = { path = "crates/buzz-ai" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }

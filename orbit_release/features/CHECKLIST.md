@@ -10,8 +10,8 @@
 
 | # | Feature Module | Directory | Priority | Sprint | Dependencies | Status |
 |---|----------------|-----------|----------|--------|--------------|--------|
-| **01** | Storage Foundation (Embedded Local-First Store) | `01_storage_foundation/` | P0 | Sprint 1 | None | `[ ] Not Started` |
-| **02** | Embedding & Reranker Engine | `02_embedding_engine/` | P0 | Sprint 1 | F01 | `[ ] Not Started` |
+| **01** | Storage Foundation (Embedded Local-First Store) | `01_storage_foundation/` | P0 | Sprint 1 | None | `[x] Completed` |
+| **02** | Embedding & Reranker Engine | `02_embedding_engine/` | P0 | Sprint 1 | F01 | `[x] Completed` |
 | **03** | Ingestion Pipeline (L1 $\rightarrow$ L2) | `03_ingestion_pipeline/` | P0 | Sprint 2 | F01, F02 | `[ ] Not Started` |
 | **04** | SuperRAG Retrieval Layer (Data Re-Trial & Reranking)| `04_multi_rag_search/` | P0 | Sprint 2 | F01, F02 | `[ ] Not Started` |
 | **05** | Knowledge Graph (L3 Bi-temporal Memory) | `05_knowledge_graph/` | P1 | Sprint 3 | F01, F03 | `[ ] Not Started` |
@@ -29,13 +29,13 @@
 ## Milestones & Gates
 
 ### Phase 1: Core Foundation & Runtimes (Sprint 1)
-- [ ] **F01**: embedded SQLite + LanceDB + Ladybug/Kuzu stores initialize without external services
-- [ ] **F01**: Authoritative SQLite metadata + vector store + graph store initialized
-- [ ] **F01**: Secret redactor prevents sensitive credentials from entering storage
-- [ ] **F02**: `ort` ONNX runtime initializes `bge-small-en-v1.5` embedder on CPU (<5ms / 384-dim)
-- [ ] **F02**: `ort` ONNX runtime initializes `bge-reranker-small` cross-encoder on CPU (<10ms / 50 pairs)
-- [ ] **F02**: Cloud providers (OpenAI, Voyage, Cohere, Gemini, Ollama) implemented behind traits
-- [ ] **F02**: API keys securely stored via `buzz-auth` OS keyring (DPAPI, Keychain, Secret Service)
+- [x] **F01**: embedded SQLite + LanceDB + Ladybug/Kuzu stores initialize without external services
+- [x] **F01**: Authoritative SQLite metadata + vector store + graph store initialized
+- [x] **F01**: Secret redactor prevents sensitive credentials from entering storage
+- [x] **F02**: `ort` ONNX runtime initializes `bge-small-en-v1.5` embedder on CPU (<5ms / 384-dim)
+- [x] **F02**: `ort` ONNX runtime initializes `bge-reranker-small` cross-encoder on CPU (<10ms / 50 pairs)
+- [x] **F02**: Cloud providers (OpenAI, Voyage, Cohere, Gemini, Ollama) implemented behind traits
+- [x] **F02**: API keys securely stored via `buzz-auth` OS keyring (DPAPI, Keychain, Secret Service)
 
 ### Phase 2: Ingestion & SuperRAG Retrieval (Sprint 2)
 - [ ] **F03**: `buzz-ingest` file watcher monitors workspace changes using `notify`

@@ -44,6 +44,8 @@ pub mod tenant;
 pub mod thread_window;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+/// Orbit long-term memory domain types.
+pub mod memory;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

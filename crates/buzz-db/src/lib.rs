@@ -27,6 +27,13 @@ mod store;
 /// Database error types.
 pub mod error;
 
+/// Orbit local-first embedded memory storage engine.
+pub mod memory;
+/// Secret redaction engine.
+pub mod redactor;
+
+pub use redactor::SecretRedactor;
+
 #[cfg(test)]
 mod test_support;
 
