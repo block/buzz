@@ -2,6 +2,7 @@ import type {
   Project,
   ProjectIssue,
   ProjectPullRequest,
+  Repository,
 } from "@/features/projects/hooks";
 import type { ProjectsWorkItemsResult } from "@/features/projects/projectWorkItems";
 import type { FeedItem } from "@/shared/api/types";
@@ -31,11 +32,13 @@ export type ProjectInboxWorkItem =
   | {
       type: "pull-request";
       project: Project;
+      repository: Repository;
       pullRequest: ProjectPullRequest;
     }
   | {
       type: "issue";
       project: Project;
+      repository: Repository;
       issue: ProjectIssue;
     };
 
@@ -82,8 +85,8 @@ export function resolveProjectInboxWorkItem(
   }
 
   const pullRequestEntry = workItems.pullRequests.items.find(
-    ({ project, pullRequest }) =>
-      project.repoAddress === reference.repoAddress &&
+    ({ repository, pullRequest }) =>
+      repository.repoAddress === reference.repoAddress &&
       pullRequest.id === reference.rootId,
   );
   if (pullRequestEntry) {
@@ -91,8 +94,8 @@ export function resolveProjectInboxWorkItem(
   }
 
   const issueEntry = workItems.issues.items.find(
-    ({ issue, project }) =>
-      project.repoAddress === reference.repoAddress &&
+    ({ issue, repository }) =>
+      repository.repoAddress === reference.repoAddress &&
       issue.id === reference.rootId,
   );
   return issueEntry ? { type: "issue", ...issueEntry } : null;

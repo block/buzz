@@ -115,7 +115,6 @@ export function usePersonaActions() {
     React.useState<AgentSnapshotImportResult | null>(null);
   const [snapshotImportConfirmError, setSnapshotImportConfirmError] =
     React.useState<string | null>(null);
-  const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [personaNoticeMessage, setPersonaNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -254,10 +253,6 @@ export function usePersonaActions() {
             setPersonaErrorMessage(
               `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
             );
-          } else {
-            setPersonaNoticeMessage(
-              `Created and started ${created.agent.name}.`,
-            );
           }
           if (created.profileSyncError) {
             setPersonaErrorMessage(
@@ -301,9 +296,10 @@ export function usePersonaActions() {
     persona: AgentPersona,
     active: boolean,
     surface: PersonaFeedbackSurface,
-  ) {
+  ): Promise<AgentPersona | null> {
     clearFeedback(surface);
     try {
+      let updatedPersona: AgentPersona;
       if (active && isCatalogPersona(persona)) {
         const localPersona = findLocalPersonaForCatalogEntry(
           personas,
@@ -312,16 +308,20 @@ export function usePersonaActions() {
 
         if (localPersona) {
           if (!localPersona.isActive) {
-            await setPersonaActiveMutation.mutateAsync({
+            updatedPersona = await setPersonaActiveMutation.mutateAsync({
               id: localPersona.id,
               active: true,
             });
+          } else {
+            updatedPersona = localPersona;
           }
         } else {
-          await createPersonaMutation.mutateAsync({
+          updatedPersona = await createPersonaMutation.mutateAsync({
             displayName: persona.displayName,
             avatarUrl: persona.avatarUrl ?? undefined,
+            description: persona.description ?? undefined,
             systemPrompt: persona.systemPrompt,
+            acpCommand: persona.acpCommand,
             runtime: persona.runtime ?? undefined,
             model: persona.model ?? undefined,
             provider: persona.provider ?? undefined,
@@ -330,6 +330,7 @@ export function usePersonaActions() {
               respondTo:
                 persona.respondTo === "anyone" ? "anyone" : "owner-only",
               parallelism: persona.parallelism ?? undefined,
+              sessionPolicy: persona.sessionPolicy ?? "channel",
             },
             // Provenance on the copy: without it the copy's fresh local id is
             // the only identifier, and the catalog offers "Add" again.
@@ -342,13 +343,17 @@ export function usePersonaActions() {
           });
         }
       } else {
-        await setPersonaActiveMutation.mutateAsync({ id: persona.id, active });
+        updatedPersona = await setPersonaActiveMutation.mutateAsync({
+          id: persona.id,
+          active,
+        });
       }
       setPersonaNoticeMessage(
         active
           ? `Selected ${persona.displayName} for My Agents.`
           : `Deselected ${persona.displayName} from My Agents.`,
       );
+      return updatedPersona;
     } catch (error) {
       setPersonaErrorMessage(
         error instanceof Error
@@ -357,6 +362,7 @@ export function usePersonaActions() {
             ? "Failed to select agent for My Agents."
             : "Failed to deselect agent from My Agents.",
       );
+      return null;
     }
   }
 
@@ -433,12 +439,6 @@ export function usePersonaActions() {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
     setPersonaDialogState(duplicatePersonaDialogState(persona));
-  }
-
-  function openCatalog() {
-    clearFeedback("catalog");
-    void catalogQuery.refetch();
-    setIsCatalogDialogOpen(true);
   }
 
   function openDelete(persona: AgentPersona) {
@@ -581,8 +581,6 @@ export function usePersonaActions() {
     setPersonaToDelete,
     personaToShare,
     setPersonaToShare,
-    isCatalogDialogOpen,
-    setIsCatalogDialogOpen,
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
@@ -593,7 +591,6 @@ export function usePersonaActions() {
     prepareCreate,
     openEdit,
     openDuplicate,
-    openCatalog,
     openDelete,
     openShare,
     personaToExportSnapshot,

@@ -57,9 +57,9 @@ export const MANAGED_AGENT_PAIR_ACTION_LABELS: Record<
   ManagedAgentPairAction,
   string
 > = {
-  start: "Start",
-  stop: "Stop",
-  restart: "Restart",
+  start: "Start Agent",
+  stop: "Stop Agent",
+  restart: "Restart Agent",
 };
 
 /**

@@ -12,7 +12,9 @@ import {
   markPendingCommunityRestore,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
+import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
+import { leaveCommunity } from "@/features/communities/leaveCommunity";
 
 type Communities = ReturnType<typeof useCommunities>;
 type ShellRoute = ReturnType<typeof deriveShellRoute>;
@@ -71,14 +73,38 @@ export function useCommunityNavigationTransitions({
 
   const removeCommunity = React.useCallback(
     async (id: string) => {
-      if (id !== communities.activeCommunity?.id) {
-        communities.removeCommunity(id);
-        return;
-      }
+      const target = communities.communities.find(
+        (community) => community.id === id,
+      );
+      if (!target) return;
+
       const fallback = communities.communities.find(
         (community) => community.id !== id,
       );
-      if (!fallback) return;
+
+      // Do not touch local state until this relay has explicitly accepted the
+      // signed NIP-43 leave request. Rejections and timeouts bubble back to the
+      // dialog so the person can retry without losing their community config.
+      const leaveResult = await leaveCommunity(
+        target.relayUrl,
+        communities.activeCommunity?.relayUrl,
+      );
+
+      if (id !== communities.activeCommunity?.id) {
+        communities.removeCommunity(id);
+        return leaveResult;
+      }
+
+      if (!fallback) {
+        if (!markCommunityDiscoveryAfterLeave()) {
+          throw new Error(
+            "Membership was removed, but community discovery state could not be saved. Restart Buzz and try again.",
+          );
+        }
+        await goHome({ replace: true });
+        communities.removeCommunity(id);
+        return leaveResult;
+      }
 
       await runCommunityViewTransition(async () => {
         saveActiveDestination();
@@ -93,6 +119,7 @@ export function useCommunityNavigationTransitions({
         }
         communities.removeCommunity(id);
       });
+      return leaveResult;
     },
     [communities, goHome, router.history, saveActiveDestination],
   );

@@ -5,9 +5,12 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
+import '../../shared/widgets/load_error_view.dart';
+import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../channels/channel.dart';
 import '../channels/compose_bar.dart';
 import 'forum_models.dart';
@@ -33,11 +36,27 @@ class ForumPostsView extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final postsAsync = ref.watch(forumPostsProvider(channel.id));
     final isComposing = useState(false);
+    // A queued attachment can finish after this view is popped. Capture the
+    // app-level provider container instead of retaining the route's WidgetRef.
+    final providerContainer = ProviderScope.containerOf(context, listen: false);
+    final forumDelivery = ForumEventDelivery.capture(providerContainer);
 
-    // Periodic refresh (every 15s, matching desktop).
+    // Periodic refresh (every 15s, matching desktop). A settled deadline
+    // pauses polling; reopening the forum is the explicit retry.
     useEffect(() {
+      final provider = forumPostsProvider(channel.id);
+      // Only a deadline already settled when this surface mounts is a
+      // reopen; a first load that fails after mounting is not retried.
+      // Hooks run effects during build, so defer the invalidation past it.
+      if (isSettledRelayDeadline(ref.read(provider))) {
+        Future.microtask(() {
+          if (context.mounted) ref.invalidate(provider);
+        });
+      }
       final timer = Stream.periodic(const Duration(seconds: 15)).listen((_) {
-        ref.invalidate(forumPostsProvider(channel.id));
+        if (!isSettledRelayDeadline(ref.read(provider))) {
+          ref.invalidate(provider);
+        }
       });
       return timer.cancel;
     }, [channel.id]);
@@ -60,6 +79,8 @@ class ForumPostsView extends HookConsumerWidget {
                   )
                 : null,
             body: postsAsync.when(
+              // A retry from an error shows loading, not the stale error and its Retry.
+              skipLoadingOnRefresh: !postsAsync.hasError,
               loading: () => Padding(
                 padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
                 child: const Center(
@@ -71,13 +92,9 @@ class ForumPostsView extends HookConsumerWidget {
               ),
               error: (e, _) => Padding(
                 padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-                child: Center(
-                  child: Text(
-                    'Failed to load posts',
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.error,
-                    ),
-                  ),
+                child: LoadErrorView(
+                  message: 'Failed to load posts',
+                  onRetry: () => ref.invalidate(forumPostsProvider(channel.id)),
                 ),
               ),
               data: (response) {
@@ -88,7 +105,7 @@ class ForumPostsView extends HookConsumerWidget {
                     isArchived: channel.isArchived,
                   );
                 }
-                return RefreshIndicator(
+                return BeeRefreshIndicator(
                   onRefresh: () async {
                     ref.invalidate(forumPostsProvider(channel.id));
                     await ref.read(forumPostsProvider(channel.id).future);
@@ -146,8 +163,7 @@ class ForumPostsView extends HookConsumerWidget {
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
                 }) async {
-                  await createForumPost(
-                    ref,
+                  await forumDelivery.createPost(
                     channelId: channel.id,
                     content: content,
                     mentionPubkeys: mentionPubkeys,

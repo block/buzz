@@ -34,16 +34,6 @@ jobs:
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
-      # Rust cache covering both the workspace sidecar build and the Tauri
-      # crate build. shared-key scoped to macos-canary-release so canary runs
-      # warm each other without colliding with CI's debug-profile keys.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-          shared-key: macos-canary-release
-
       - name: Get pnpm store directory
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
@@ -78,6 +68,38 @@ jobs:
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
+      - name: Resolve native toolchain identity
+        id: native_toolchain
+        run: echo "id=$(scripts/desktop-native-toolchain-id.sh macos)" >> "$GITHUB_OUTPUT"
+
+      # Compute this after cargo update so the key describes the graph that is
+      # actually compiled. The helper normalizes only Buzz Desktop's release
+      # version, allowing a canary to warm an otherwise identical tag build.
+      - name: Compute exact release cache key
+        id: rust_cache_key
+        env:
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
+        run: |
+          KEY=$(scripts/desktop-release-cache-key.py \
+            --platform "$RUNNER_OS" \
+            --target aarch64-apple-darwin \
+            --features mesh-llm \
+            --native-inputs "$NATIVE_TOOLCHAIN_ID")
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Release cache key: $KEY"
+
+      - name: Restore exact release Cargo cache
+        id: rust_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: ${{ steps.rust_cache_key.outputs.key }}
+
       - name: Generate non-updating bundle config
         run: |
           cat > desktop/src-tauri/tauri.canary.conf.json <<'JSON'
@@ -93,7 +115,7 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           ./scripts/bundle-sidecars.sh
 
       # Mesh rev derived from Cargo.lock (no lockstep edit on dep bump); cache key tracks it.
@@ -209,6 +231,24 @@ jobs:
           path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Measure release Cargo cache inputs
+        if: always()
+        run: du -sh ~/.cargo/registry ~/.cargo/git target desktop/src-tauri/target 2>/dev/null || true
+
+      # Only this trusted, main-bound canary writes the cache. Excluding bundle
+      # output prevents installers or signed artifacts from entering it.
+      - name: Save exact release Cargo cache
+        if: steps.rust_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: ${{ steps.rust_cache_key.outputs.key }}
 
       - name: Save pnpm store cache
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

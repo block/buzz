@@ -85,6 +85,11 @@ test("normalizeShortcode rejects invalid chars and empties", () => {
   assert.equal(normalizeShortcode(""), null);
 });
 
+test("normalizeShortcode enforces the 64-character boundary", () => {
+  assert.equal(normalizeShortcode("a".repeat(64)), "a".repeat(64));
+  assert.equal(normalizeShortcode("a".repeat(65)), null);
+});
+
 test("suggestShortcodeFromFilename derives a valid name from common filenames", () => {
   assert.equal(
     suggestShortcodeFromFilename("Party Parrot.gif"),

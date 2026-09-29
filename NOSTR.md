@@ -39,7 +39,7 @@ just relay &                         # relay on :3000
 PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
   "INSERT INTO pubkey_allowlist (pubkey) VALUES (decode('<64-char-hex-pubkey>', 'hex'))"
 
-# 5. Connect any NIP-29 + NIP-42 client to ws://localhost:3000
+# 4. Connect any NIP-29 + NIP-42 client to ws://localhost:3000
 ```
 
 ### What Works
@@ -163,6 +163,10 @@ nak req -k 9 --tag "h=<channel-uuid>" --stream \
 nak event -k 7 -c "+" --tag "h=<channel-uuid>" --tag "e=<message-event-id>" \
   --auth --sec <privkey> ws://localhost:3000
 
+# Subscribe to reactions to channel messages — include #h for live delivery (see note below)
+nak req -k 7 --tag "h=<channel-uuid>" --stream \
+  --auth --sec <privkey> ws://localhost:3000
+
 # Delete a message (#h optional; #e required; must be self-authored)
 nak event -k 5 -c "reason" --tag "h=<channel-uuid>" --tag "e=<message-event-id>" \
   --auth --sec <privkey> ws://localhost:3000
@@ -184,6 +188,14 @@ nak event -k 9 -c "Reply text" --tag "h=<channel-uuid>" \
 nak req -k 1059 --tag "p=<your-hex-pubkey>" \
   --auth --sec <privkey> ws://localhost:3000
 ```
+
+> **Note:** The relay derives a reaction's channel from its `#e` target (client `#h` is
+> ignored for channel determination). Reactions to channel-scoped events are therefore
+> channel-scoped. Live fan-out keeps channel-scoped and global subscriptions strictly
+> separate, which means a kinds-only subscription (`{"kinds":[7]}`) receives none of
+> those reactions — subscribe with `{"kinds":[7],"#h":["<channel-uuid>"]}` instead.
+> `#h` matching works whether or not the signed reaction carries an `h` tag: explicit
+> `h` tags are matched directly, and tagless reactions match via their stored channel.
 
 ### Tested Clients (Direct)
 
@@ -354,3 +366,7 @@ but only admins/owners can set it. Full spec:
 ---
 
 ## Further Reading
+
+- [nostr-protocol/nips](https://github.com/nostr-protocol/nips) — the upstream NIP specifications (NIP-01, NIP-29, NIP-42, and the other NIPs referenced throughout this guide).
+- [`docs/nips/`](docs/nips/) — Buzz's own NIP extension documents.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — event kinds, wire protocol, and relay internals.

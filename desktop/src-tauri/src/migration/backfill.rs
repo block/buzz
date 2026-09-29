@@ -26,7 +26,7 @@ use crate::managed_agents::{
 ///   `unwrap_or_default`, env COPIED so later instances inherit a working
 ///   config, quad copied to the definition defaults) and the record gains
 ///   `persona_source_version` = the new definition's content hash, so
-///   neither `spawn_config_hash` nor the drift badge moves.
+///   neither the spawn-config snapshot nor the drift badge moves.
 ///
 /// The manufactured definition's slug is the agent's pubkey: 64-hex passes
 /// the NIP-AP slug grammar on both relay and desktop ends, and agent pubkeys

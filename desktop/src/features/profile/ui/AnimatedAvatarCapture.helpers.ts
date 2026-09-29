@@ -6,7 +6,9 @@ import {
   composeAvatarFrame,
   DEFAULT_PERSON_SCALE,
 } from "@/features/profile/lib/animatedAvatarCapture";
+import { beginAvatarPresentation } from "@/features/profile/avatarPresentationStore";
 import { AVATAR_COLORS } from "@/features/profile/ui/ProfileAvatarEditor.utils";
+import { buildAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 
 export type CapturePhase =
   | "idle"
@@ -29,6 +31,23 @@ export const ENTRANCE_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
 } as const;
+
+/**
+ * Builds the composite animated-avatar URL and starts a temporary local-poster
+ * presentation while the uploaded poster and animation become available.
+ */
+export function presentAnimatedAvatar(
+  poster: { url: string },
+  animation: { url: string },
+  posterBytes: Uint8Array,
+): string {
+  const avatarUrl = buildAnimatedAvatarUrl(poster.url, animation.url);
+  beginAvatarPresentation(
+    avatarUrl,
+    new Blob([Uint8Array.from(posterBytes).buffer], { type: "image/png" }),
+  );
+  return avatarUrl;
+}
 
 /** Keep things draggable but never fully lost off-frame. */
 const MAX_OFFSET = 192;

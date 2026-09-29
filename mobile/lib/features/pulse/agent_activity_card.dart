@@ -5,7 +5,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/utils/string_utils.dart';
 import 'note_card.dart';
 import 'pulse_models.dart';
 
@@ -27,7 +28,7 @@ class AgentActivityCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[group.pubkey])) ??
         ref.read(userCacheProvider.notifier).get(group.pubkey);
-    final name = profile?.label ?? _shortPubkey(group.pubkey);
+    final name = profile?.label ?? shortPubkey(group.pubkey);
 
     return Column(
       children: [
@@ -47,6 +48,7 @@ class AgentActivityCard extends HookConsumerWidget {
                       radius: 18,
                       backgroundColor: context.colors.primaryContainer,
                       fallback: const Icon(LucideIcons.bot, size: 18),
+                      isAgent: true,
                     ),
                     Positioned(
                       right: 0,
@@ -172,6 +174,3 @@ class AgentActivityCard extends HookConsumerWidget {
     );
   }
 }
-
-String _shortPubkey(String pubkey) =>
-    pubkey.length <= 8 ? pubkey : '${pubkey.substring(0, 8)}…';

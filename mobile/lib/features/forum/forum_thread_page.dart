@@ -6,15 +6,20 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/load_error_view.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import '../profile/user_profile_sheet.dart';
 import 'forum_models.dart';
 import 'forum_provider.dart';
@@ -42,12 +47,25 @@ class ForumThreadPage extends HookConsumerWidget {
       forumThreadProvider((channelId: channelId, eventId: postEventId)),
     );
 
-    // Periodic refresh (every 10s, matching desktop).
+    // Periodic refresh (every 10s, matching desktop). A settled deadline
+    // pauses polling; reopening the thread is the explicit retry.
     useEffect(() {
+      final provider = forumThreadProvider((
+        channelId: channelId,
+        eventId: postEventId,
+      ));
+      // Only a deadline already settled when this surface mounts is a
+      // reopen; a first load that fails after mounting is not retried.
+      // Hooks run effects during build, so defer the invalidation past it.
+      if (isSettledRelayDeadline(ref.read(provider))) {
+        Future.microtask(() {
+          if (context.mounted) ref.invalidate(provider);
+        });
+      }
       final timer = Stream.periodic(const Duration(seconds: 10)).listen((_) {
-        ref.invalidate(
-          forumThreadProvider((channelId: channelId, eventId: postEventId)),
-        );
+        if (!isSettledRelayDeadline(ref.read(provider))) {
+          ref.invalidate(provider);
+        }
       });
       return timer.cancel;
     }, [channelId, postEventId]);
@@ -76,6 +94,8 @@ class ForumThreadPage extends HookConsumerWidget {
         ],
       ),
       body: threadAsync.when(
+        // A retry from an error shows loading, not the stale error and its Retry.
+        skipLoadingOnRefresh: !threadAsync.hasError,
         loading: () => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
           child: const Center(
@@ -87,12 +107,10 @@ class ForumThreadPage extends HookConsumerWidget {
         ),
         error: (e, _) => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-          child: Center(
-            child: Text(
-              'Failed to load thread',
-              style: context.textTheme.bodyMedium?.copyWith(
-                color: context.colors.error,
-              ),
+          child: LoadErrorView(
+            message: 'Failed to load thread',
+            onRetry: () => ref.invalidate(
+              forumThreadProvider((channelId: channelId, eventId: postEventId)),
             ),
           ),
         ),
@@ -112,43 +130,46 @@ class ForumThreadPage extends HookConsumerWidget {
     WidgetRef ref,
     ForumThreadResponse thread,
   ) {
-    showModalBottomSheet<void>(
+    showBuzzModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(LucideIcons.copy),
-                title: const Text('Copy text'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  Clipboard.setData(ClipboardData(text: thread.post.content));
-                },
-              ),
-              ListTile(
-                leading: Icon(
-                  LucideIcons.trash2,
-                  color: sheetContext.colors.error,
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(LucideIcons.copy),
+                  title: const Text('Copy text'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    Clipboard.setData(ClipboardData(text: thread.post.content));
+                  },
                 ),
-                title: Text(
-                  'Delete post',
-                  style: TextStyle(color: sheetContext.colors.error),
+                ListTile(
+                  leading: Icon(
+                    LucideIcons.trash2,
+                    color: sheetContext.colors.error,
+                  ),
+                  title: Text(
+                    'Delete post',
+                    style: TextStyle(color: sheetContext.colors.error),
+                  ),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _confirmDeletePost(context, ref, thread.post.eventId);
+                  },
                 ),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  _confirmDeletePost(context, ref, thread.post.eventId);
-                },
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -156,7 +177,7 @@ class ForumThreadPage extends HookConsumerWidget {
   }
 
   void _confirmDeletePost(BuildContext context, WidgetRef ref, String eventId) {
-    showDialog<void>(
+    showBuzzDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Delete post'),
@@ -206,24 +227,33 @@ class _ThreadContent extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Background media delivery may outlive this route's WidgetRef.
+    final providerContainer = ProviderScope.containerOf(context, listen: false);
+    final forumDelivery = ForumEventDelivery.capture(providerContainer);
     final post = thread.post;
     final replies = thread.replies;
 
-    // Preload profiles for all participants.
+    // Preload profiles for all participants and tagged mentions.
     final allPubkeys = useMemoized(() {
-      final pks = <String>{post.pubkey};
+      final pks = <String>{
+        post.pubkey.toLowerCase(),
+        ...post.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+      };
       for (final reply in replies) {
-        pks.add(reply.pubkey);
+        pks
+          ..add(reply.pubkey.toLowerCase())
+          ..addAll(reply.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()));
       }
-      return pks.toList();
+      return pks.toList()..sort();
     }, [post, replies]);
+    final allPubkeysKey = allPubkeys.join('\u0000');
 
     useEffect(() {
       if (allPubkeys.isNotEmpty) {
         ref.read(userCacheProvider.notifier).preload(allPubkeys);
       }
       return null;
-    }, [allPubkeys]);
+    }, [allPubkeysKey]);
 
     return Column(
       children: [
@@ -294,8 +324,7 @@ class _ThreadContent extends HookConsumerWidget {
                   content,
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
-                }) => createForumReply(
-                  ref,
+                }) => forumDelivery.createReply(
                   channelId: channelId,
                   parentEventId: post.eventId,
                   content: content,
@@ -319,10 +348,27 @@ class _OriginalPost extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? _shortPubkey(post.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, post.channelId, pk);
 
     final userCache = ref.watch(userCacheProvider);
-    final mentionNames = _buildMentionNames(post.mentionPubkeys, userCache);
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(post.channelId)),
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: post.mentionPubkeys,
+      profileMentionNames: _buildMentionNames(post.mentionPubkeys, userCache),
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      post.channelId,
+      post.mentionPubkeys,
+    );
 
     return Padding(
       padding: const EdgeInsets.all(Grid.xs),
@@ -332,11 +378,17 @@ class _OriginalPost extends ConsumerWidget {
           Row(
             children: [
               GestureDetector(
-                onTap: () => showUserProfileSheet(context, post.pubkey),
+                onTap: () => showUserProfileSheet(
+                  context,
+                  post.pubkey,
+                  names: channelIdentityNamesProvider(post.channelId),
+                ),
                 child: _Avatar(
+                  key: ValueKey('forum-original-avatar-${post.eventId}'),
                   profile: profile,
                   pubkey: post.pubkey,
                   radius: 16,
+                  isAgent: agentMentionPubkeys.contains(pk),
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -345,7 +397,11 @@ class _OriginalPost extends ConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => showUserProfileSheet(context, post.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          post.pubkey,
+                          names: channelIdentityNamesProvider(post.channelId),
+                        ),
                         child: Text(
                           displayName,
                           maxLines: 1,
@@ -375,11 +431,17 @@ class _OriginalPost extends ConsumerWidget {
           MessageContent(
             content: post.content,
             mentionNames: mentionNames,
+            mentionLabels: mentionLabels,
+            agentMentionPubkeys: agentMentionPubkeys,
             tags: post.tags,
             baseStyle: messageBodyTextStyle.copyWith(
               color: context.colors.onSurface,
             ),
-            onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+            onMentionTap: (pubkey) => showUserProfileSheet(
+              context,
+              pubkey,
+              names: channelIdentityNamesProvider(post.channelId),
+            ),
           ),
         ],
       ),
@@ -406,10 +468,27 @@ class _ReplyRow extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? _shortPubkey(reply.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, channelId, pk);
 
     final userCache = ref.watch(userCacheProvider);
-    final mentionNames = _buildMentionNames(reply.mentionPubkeys, userCache);
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: reply.mentionPubkeys,
+      profileMentionNames: _buildMentionNames(reply.mentionPubkeys, userCache),
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      reply.mentionPubkeys,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -422,11 +501,17 @@ class _ReplyRow extends ConsumerWidget {
           Row(
             children: [
               GestureDetector(
-                onTap: () => showUserProfileSheet(context, reply.pubkey),
+                onTap: () => showUserProfileSheet(
+                  context,
+                  reply.pubkey,
+                  names: channelIdentityNamesProvider(channelId),
+                ),
                 child: _Avatar(
+                  key: ValueKey('forum-reply-avatar-${reply.eventId}'),
                   profile: profile,
                   pubkey: reply.pubkey,
                   radius: 12,
+                  isAgent: agentMentionPubkeys.contains(pk),
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -435,8 +520,11 @@ class _ReplyRow extends ConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () =>
-                            showUserProfileSheet(context, reply.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          reply.pubkey,
+                          names: channelIdentityNamesProvider(channelId),
+                        ),
                         child: Text(
                           displayName,
                           maxLines: 1,
@@ -481,11 +569,17 @@ class _ReplyRow extends ConsumerWidget {
             child: MessageContent(
               content: reply.content,
               mentionNames: mentionNames,
+              mentionLabels: mentionLabels,
+              agentMentionPubkeys: agentMentionPubkeys,
               tags: reply.tags,
               baseStyle: messageBodyTextStyle.copyWith(
                 color: context.colors.onSurface,
               ),
-              onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+              onMentionTap: (pubkey) => showUserProfileSheet(
+                context,
+                pubkey,
+                names: channelIdentityNamesProvider(channelId),
+              ),
             ),
           ),
         ],
@@ -498,44 +592,47 @@ class _ReplyRow extends ConsumerWidget {
         currentPubkey != null &&
         reply.pubkey.toLowerCase() == currentPubkey!.toLowerCase();
 
-    showModalBottomSheet<void>(
+    showBuzzModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(LucideIcons.copy),
-                title: const Text('Copy text'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  Clipboard.setData(ClipboardData(text: reply.content));
-                },
-              ),
-              if (isOwn)
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 ListTile(
-                  leading: Icon(
-                    LucideIcons.trash2,
-                    color: sheetContext.colors.error,
-                  ),
-                  title: Text(
-                    'Delete reply',
-                    style: TextStyle(color: sheetContext.colors.error),
-                  ),
+                  leading: const Icon(LucideIcons.copy),
+                  title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
-                    _confirmDelete(context, ref);
+                    Clipboard.setData(ClipboardData(text: reply.content));
                   },
                 ),
-            ],
+                if (isOwn)
+                  ListTile(
+                    leading: Icon(
+                      LucideIcons.trash2,
+                      color: sheetContext.colors.error,
+                    ),
+                    title: Text(
+                      'Delete reply',
+                      style: TextStyle(color: sheetContext.colors.error),
+                    ),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      _confirmDelete(context, ref);
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -543,7 +640,7 @@ class _ReplyRow extends ConsumerWidget {
   }
 
   void _confirmDelete(BuildContext context, WidgetRef ref) {
-    showDialog<void>(
+    showBuzzDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Delete reply'),
@@ -578,11 +675,14 @@ class _Avatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
   final double radius;
+  final bool isAgent;
 
   const _Avatar({
+    super.key,
     required this.profile,
     required this.pubkey,
     required this.radius,
+    required this.isAgent,
   });
 
   @override
@@ -603,6 +703,7 @@ class _Avatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: isAgent,
     );
   }
 }
@@ -619,9 +720,4 @@ Map<String, String> _buildMentionNames(
     }
   }
   return names;
-}
-
-String _shortPubkey(String pubkey) {
-  if (pubkey.length > 12) return '${pubkey.substring(0, 8)}\u2026';
-  return pubkey;
 }

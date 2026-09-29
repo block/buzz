@@ -30,7 +30,7 @@ import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 export type PulseTab =
   | "search"
@@ -102,6 +102,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       if (!agentsByPubkey.has(agent.pubkey)) {
         agentsByPubkey.set(agent.pubkey, {
           pubkey: agent.pubkey,
+          ownerPubkey: null,
           name: agent.name,
           agentType: agent.agentCommand,
           channels: [],
@@ -127,7 +128,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     [agentPubkeys],
   );
   const agentStatusMap = React.useMemo(() => {
-    const map: Record<string, "online" | "away" | "offline"> = {};
+    const map: Record<string, "online" | "away" | "offline" | "unknown"> = {};
     for (const a of relayAgents) {
       map[a.pubkey] = a.status;
     }
@@ -224,7 +225,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     : null;
   const currentDisplayName =
     currentProfile?.displayName ??
-    (currentPubkey ? truncatePubkey(currentPubkey) : "You");
+    (currentPubkey ? truncateNpub(currentPubkey) : "You");
 
   const pulseMentionMembers = React.useMemo<ChannelMember[]>(() => {
     const members: ChannelMember[] = [];
@@ -396,6 +397,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                       avatarUrl={currentProfile?.avatarUrl ?? null}
                       className="!h-7 !w-7 shrink-0"
                       displayName={currentDisplayName}
+                      shape={
+                        currentProfile?.isAgent === true ? "squircle" : "circle"
+                      }
                     />
                     <span className="max-w-32 truncate text-sm font-medium text-foreground">
                       {currentDisplayName}

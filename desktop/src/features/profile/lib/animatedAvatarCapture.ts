@@ -106,7 +106,10 @@ const PERSON_OUTLINE_OFFSETS = [
 ] as const;
 
 // Pinned to the installed @mediapipe/tasks-vision version so the wasm loader
-// always matches the JS API.
+// always matches the JS API. `script-src` in tauri.conf.json allowlists the
+// jsDelivr path prefix for the @mediapipe npm scope rather than the whole
+// origin, which also serves arbitrary npm and GitHub scripts; this URL must
+// stay under that prefix — `src-tauri/tests/csp.rs` checks that it does.
 const MEDIAPIPE_WASM_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const SELFIE_SEGMENTER_MODEL_URL =

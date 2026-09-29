@@ -161,7 +161,7 @@ test.describe("Doctor panel state screenshots", () => {
           ),
       ),
     );
-    expect(rowHeights[2]).toBeGreaterThan(rowHeights[0]);
+    expect(Math.abs(rowHeights[2] - rowHeights[0])).toBeLessThanOrEqual(1);
     const [gooseColors, codexColors] = await Promise.all(
       ["goose", "codex"].map((runtimeId) =>
         page.getByTestId(`doctor-runtime-${runtimeId}`).evaluate((element) => {
@@ -173,13 +173,19 @@ test.describe("Doctor panel state screenshots", () => {
         }),
       ),
     );
-    expect(codexColors).toEqual(gooseColors);
+    expect(codexColors.backgroundColor).toBe(gooseColors.backgroundColor);
+    for (const runtimeId of ["goose", "codex"]) {
+      await expect(page.getByTestId(`doctor-runtime-${runtimeId}`)).toHaveCSS(
+        "border-radius",
+        "0px",
+      );
+    }
     await expect(
       page
         .getByRole("heading", { name: "Agent runtimes", exact: true })
         .locator("..")
         .locator(".."),
-    ).toHaveCSS("align-items", "center");
+    ).toHaveCSS("align-items", "flex-end");
     for (const runtimeId of ["goose", "claude", "buzz-agent"]) {
       await expect(
         page.getByTestId(`doctor-runtime-menu-${runtimeId}`),
@@ -212,14 +218,12 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(page.getByTestId("doctor-runtime-status-codex")).toHaveText(
       "CLI needed",
     );
-    await expect(
-      page.getByTestId("doctor-runtime-guidance-codex"),
-    ).toContainText("Buzz talks to Codex through the Codex CLI.");
-    await expect(
-      page
-        .getByTestId("doctor-runtime-guidance-codex")
-        .getByRole("button", { name: "CLI setup guide" }),
-    ).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-guidance-codex")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("doctor-runtime-codex")).not.toContainText(
+      "Buzz talks to Codex through the Codex CLI.",
+    );
 
     await runtimeList.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
@@ -295,12 +299,7 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
     await expect(row).not.toContainText("Run `codex login` to authenticate.");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
-    );
+    await expect(row).toHaveCSS("min-height", "64px");
     await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
       page.getByRole("menuitem", { name: "CLI setup guide" }),
@@ -642,12 +641,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await expect(page.getByTestId("doctor-runtime-ready-codex")).toHaveCount(0);
     await expect(row).not.toContainText("Not authenticated");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
-    );
+    await expect(row).toHaveCSS("min-height", "64px");
     await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
       page.getByRole("menuitem", { name: "Sign in with ChatGPT" }),
@@ -695,12 +689,7 @@ test.describe("Doctor panel state screenshots", () => {
     const row = page.getByTestId("doctor-runtime-claude");
     await expect(row).toBeVisible({ timeout: 10_000 });
     await expect(row).not.toContainText("Not authenticated");
-    await expect(row).toHaveCSS(
-      "height",
-      await page
-        .getByTestId("doctor-runtime-goose")
-        .evaluate((element) => getComputedStyle(element).height),
-    );
+    await expect(row).toHaveCSS("min-height", "64px");
     await page.getByTestId("doctor-runtime-menu-claude").click();
     await expect(
       page.getByRole("menuitem", { name: "CLI setup guide" }),
@@ -981,6 +970,93 @@ test.describe("Doctor panel state screenshots", () => {
     await waitForAnimations(page);
     await claudeRow.screenshot({
       path: `${SHOTS}/08-concurrent-installs-and-stale-clear.png`,
+    });
+  });
+  /**
+   * 09 — install observability: the live output line appears while the install
+   * runs and disappears when it settles, and the failure message points at the
+   * install log rather than only the truncated last step.
+   */
+  test("09-install-output-line-and-log-pointer", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        {
+          ...CODEX_NOT_INSTALLED,
+          can_auto_install: true,
+          node_required: false,
+        },
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      installAcpRuntimeDelayMs: 500,
+      installAcpRuntimeOutputLines: [
+        "npm http fetch GET 200 @zed-industries/codex-acp",
+        "npm warn deprecated a transitive dependency",
+      ],
+      installAcpRuntimeResult: {
+        success: false,
+        steps: [
+          {
+            step: "adapter",
+            command: "npm install -g @zed-industries/codex-acp",
+            success: false,
+            stdout: "",
+            stderr: "npm ERR! code E404",
+            exit_code: 1,
+          },
+        ],
+        log_path: "/tmp/buzz-install-codex.log",
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    const row = page.getByTestId("doctor-runtime-codex");
+    await expect(row).toBeVisible({ timeout: 10_000 });
+
+    const installButton = page.getByTestId("doctor-runtime-install-codex");
+    await expect(installButton).toBeEnabled();
+    await installButton.click();
+
+    // The bridge emits the attempt-start clear and the first line synchronously
+    // with the install invocation — before React commits the pending state — so
+    // observing this line proves the listener was already mounted at the click.
+    // A subscription that waited for the install state would have missed both.
+    const outputLine = page.getByTestId("doctor-runtime-install-output-codex");
+    await expect(outputLine).toContainText("npm http fetch", {
+      timeout: 5_000,
+    });
+
+    // Each new line replaces the previous one rather than accumulating.
+    await expect(outputLine).toContainText("npm warn deprecated", {
+      timeout: 5_000,
+    });
+    await expect(outputLine).not.toContainText("npm http fetch");
+
+    // Settled: the line clears, so a finished install leaves no stale output
+    // under a fresh Install button.
+    const installError = page.getByTestId("doctor-runtime-install-error-codex");
+    await expect(installError).toBeVisible({ timeout: 5_000 });
+    await expect(outputLine).toHaveCount(0);
+
+    // The failure points at the log holding bounded output for every attempt.
+    await expect(installError).toContainText("npm ERR! code E404");
+    await expect(installError).toContainText("/tmp/buzz-install-codex.log");
+
+    await row.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await row.screenshot({
+      path: `${SHOTS}/09-install-output-line-and-log-pointer.png`,
+    });
+
+    // A second install shows its own output. The backend sequence restarts per
+    // run, so a display that kept the previous run's sequence number would
+    // reject every event of this one and show nothing at all.
+    await installButton.click();
+    await expect(outputLine).toContainText("npm http fetch", {
+      timeout: 5_000,
     });
   });
 });

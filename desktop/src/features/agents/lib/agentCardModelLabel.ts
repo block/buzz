@@ -1,4 +1,7 @@
-import { formatAgentModelLabel } from "./formatAgentModelLabel";
+import {
+  formatAgentModelLabel,
+  resolveModelLabel,
+} from "./formatAgentModelLabel";
 import type { ManagedAgent } from "@/shared/api/types";
 
 /**
@@ -19,26 +22,33 @@ import type { ManagedAgent } from "@/shared/api/types";
  * than falling through to "inherited" for lack of an instance.
  */
 export function resolveAgentCardModelLabel(input: {
-  agent: Pick<ManagedAgent, "modelSource" | "model"> | undefined;
+  agent: Pick<ManagedAgent, "modelSource" | "model" | "provider"> | undefined;
   personaModel: string | null | undefined;
+  /** Inference provider for the persona/agent — threads provider-qualified label lookup. */
+  provider?: string | null | undefined;
   defaultModel: string;
 }): string {
   if (input.agent) {
     const isInherited =
       !input.agent.modelSource || input.agent.modelSource === "global";
     if (isInherited) {
-      return formatDefaultModelLabel(input.defaultModel);
+      return formatDefaultModelLabel(input.defaultModel, input.agent.provider);
     }
     return input.agent.model?.trim()
-      ? formatAgentModelLabel(input.agent.model)
-      : formatDefaultModelLabel(input.defaultModel);
+      ? formatAgentModelLabel(input.agent.model, input.agent.provider)
+      : formatDefaultModelLabel(input.defaultModel, input.agent.provider);
   }
   return input.personaModel?.trim()
-    ? formatAgentModelLabel(input.personaModel)
-    : formatDefaultModelLabel(input.defaultModel);
+    ? formatAgentModelLabel(input.personaModel, input.provider)
+    : formatDefaultModelLabel(input.defaultModel, input.provider);
 }
 
-export function formatDefaultModelLabel(defaultModel: string) {
+export function formatDefaultModelLabel(
+  defaultModel: string,
+  provider?: string | null | undefined,
+) {
   const model = defaultModel.trim();
-  return model ? `Default model (${model})` : "Default model";
+  return model
+    ? `Default model (${resolveModelLabel(model, undefined, provider)})`
+    : "Default model";
 }

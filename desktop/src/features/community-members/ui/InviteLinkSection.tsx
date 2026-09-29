@@ -1,4 +1,5 @@
-import { Check, ChevronDown, Link2 } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -12,7 +13,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Separator } from "@/shared/ui/separator";
+import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 
 const TTL_OPTIONS: { label: string; value: number }[] = [
@@ -34,13 +35,14 @@ const MAX_USE_OPTIONS: { label: string; value: number | null }[] = [
 export const DEFAULT_INVITE_TTL_SECS = TTL_OPTIONS[1].value;
 
 type CopyStatus = "idle" | "copying" | "copied";
+type GenerationStatus = "idle" | "generating" | "failed";
 
 /**
  * Share-with-link footer for the community invite dialog.
  *
- * Each copy action mints a fresh database-backed invite code and places its
- * shareable landing-page URL on the clipboard. Invites may be unlimited or
- * capped to a caller-selected number of successful joins.
+ * A database-backed invite link is minted when this section opens and whenever
+ * its settings change. Invites may be unlimited or capped to a caller-selected
+ * number of successful joins.
  */
 export function InviteLinkSection({
   onTtlSecsChange,
@@ -50,18 +52,40 @@ export function InviteLinkSection({
   ttlSecs: number;
 }) {
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
+  const [generationStatus, setGenerationStatus] =
+    React.useState<GenerationStatus>("generating");
+  const [inviteUrl, setInviteUrl] = React.useState("");
   const [maxUses, setMaxUses] = React.useState<number | null>(null);
+  const generationRequestId = React.useRef(0);
+  // React StrictMode replays effects in development. Keep one in-flight mint
+  // per setting set so the replay observes the original request instead of
+  // creating a second durable invite.
+  const inviteRequests = React.useRef(
+    new Map<string, ReturnType<typeof mintInvite>>(),
+  );
+  const shouldReduceMotion = useReducedMotion();
   const ttlLabel =
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
   const maxUsesLabel =
     MAX_USE_OPTIONS.find((option) => option.value === maxUses)?.label ??
     "No limit";
-  const copyLabel =
-    copyStatus === "copying"
-      ? "Copying…"
-      : copyStatus === "copied"
-        ? "Copied"
-        : "Copy link";
+  const isGenerating = generationStatus === "generating";
+  const hasGenerationFailed = generationStatus === "failed";
+  const inviteSettingsKey = `${ttlSecs}:${maxUses ?? "no-limit"}`;
+  const isWorking = isGenerating || copyStatus === "copying";
+  const copyLabel = hasGenerationFailed
+    ? "Retry"
+    : copyStatus === "copied"
+      ? "Copied"
+      : "Copy link";
+  const copyButtonWidth = isWorking
+    ? "6.25rem"
+    : copyStatus === "copied"
+      ? "5.25rem"
+      : "4.5rem";
+  const copyButtonTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : { duration: 0.12, ease: [0.77, 0, 0.175, 1] as const };
 
   React.useEffect(() => {
     if (copyStatus !== "copied") return;
@@ -69,12 +93,55 @@ export function InviteLinkSection({
     return () => window.clearTimeout(resetTimer);
   }, [copyStatus]);
 
+  const generateInviteLink = React.useCallback(async () => {
+    const requestId = generationRequestId.current + 1;
+    generationRequestId.current = requestId;
+    setGenerationStatus("generating");
+    setInviteUrl("");
+    setCopyStatus("idle");
+    const existingRequest = inviteRequests.current.get(inviteSettingsKey);
+    const inviteRequest = existingRequest ?? mintInvite({ ttlSecs, maxUses });
+    if (!existingRequest) {
+      inviteRequests.current.set(inviteSettingsKey, inviteRequest);
+    }
+
+    try {
+      const invite = await inviteRequest;
+      if (inviteRequests.current.get(inviteSettingsKey) === inviteRequest) {
+        inviteRequests.current.delete(inviteSettingsKey);
+      }
+      if (generationRequestId.current === requestId) {
+        setInviteUrl(invite.url);
+        setGenerationStatus("idle");
+      }
+    } catch {
+      if (inviteRequests.current.get(inviteSettingsKey) === inviteRequest) {
+        inviteRequests.current.delete(inviteSettingsKey);
+      }
+      if (generationRequestId.current === requestId) {
+        setGenerationStatus("failed");
+        toast.error("Couldn’t create an invite link.");
+      }
+    }
+  }, [inviteSettingsKey, maxUses, ttlSecs]);
+
+  React.useEffect(() => {
+    void generateInviteLink();
+    return () => {
+      generationRequestId.current += 1;
+    };
+  }, [generateInviteLink]);
+
+  function retryInviteGeneration() {
+    if (!hasGenerationFailed) return;
+    void generateInviteLink();
+  }
+
   async function handleCopy() {
-    if (copyStatus === "copying") return;
+    if (!inviteUrl || isGenerating || copyStatus === "copying") return;
     setCopyStatus("copying");
     try {
-      const invite = await mintInvite({ ttlSecs, maxUses });
-      await writeTextToClipboard(invite.url);
+      await writeTextToClipboard(inviteUrl);
       setCopyStatus("copied");
       toast.success("Invite link copied");
     } catch {
@@ -84,8 +151,61 @@ export function InviteLinkSection({
   }
 
   return (
-    <section className="pt-2" data-testid="community-invite-link-section">
-      <div className="space-y-5">
+    <section data-testid="community-invite-link-section">
+      <div className="relative">
+        <Input
+          aria-label="Community invite link"
+          className="h-11 pr-28 text-transparent caret-transparent selection:bg-transparent"
+          data-testid="invite-link-url"
+          disabled={isGenerating}
+          placeholder={
+            hasGenerationFailed
+              ? "Couldn’t create invite link"
+              : "Creating invite link…"
+          }
+          readOnly
+          value={inviteUrl}
+        />
+        {inviteUrl ? (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 left-3 right-28 flex items-center truncate text-sm text-muted-foreground"
+            data-testid="invite-link-preview"
+          >
+            {inviteUrl}
+          </span>
+        ) : null}
+        <motion.div
+          className="absolute right-1 top-1"
+          animate={{ width: copyButtonWidth }}
+          initial={false}
+          transition={copyButtonTransition}
+        >
+          <Button
+            className="h-9 w-full px-3"
+            data-copy-status={copyStatus}
+            data-testid="copy-invite-link"
+            disabled={
+              !hasGenerationFailed &&
+              (isGenerating || !inviteUrl || copyStatus === "copying")
+            }
+            onClick={() =>
+              hasGenerationFailed ? retryInviteGeneration() : void handleCopy()
+            }
+            size="sm"
+            type="button"
+          >
+            {isWorking ? (
+              <Spinner aria-hidden="true" className="h-4 w-4 border-2" />
+            ) : copyStatus === "copied" ? (
+              <Check aria-hidden="true" className="h-4 w-4" />
+            ) : null}
+            {copyLabel}
+          </Button>
+        </motion.div>
+      </div>
+
+      <div className="mt-3 space-y-3">
         <div className="flex items-center justify-between gap-4">
           <span className="text-sm font-medium">Expires after</span>
           <DropdownMenu>
@@ -94,7 +214,7 @@ export function InviteLinkSection({
                 aria-label="Choose invite expiry"
                 className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                 data-testid="invite-link-ttl-trigger"
-                disabled={copyStatus === "copying"}
+                disabled={isGenerating || copyStatus === "copying"}
                 size="sm"
                 type="button"
                 variant="ghost"
@@ -129,7 +249,7 @@ export function InviteLinkSection({
                 aria-label="Choose maximum invite uses"
                 className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                 data-testid="invite-link-max-uses-trigger"
-                disabled={copyStatus === "copying"}
+                disabled={isGenerating || copyStatus === "copying"}
                 size="sm"
                 type="button"
                 variant="ghost"
@@ -158,28 +278,6 @@ export function InviteLinkSection({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-      </div>
-      <Separator className="my-4 bg-input/40" />
-      <div className="flex justify-end">
-        <Button
-          className="shrink-0 border-border shadow-none"
-          data-copy-status={copyStatus}
-          data-testid="copy-invite-link"
-          disabled={copyStatus === "copying"}
-          onClick={() => void handleCopy()}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {copyStatus === "copying" ? (
-            <Spinner aria-hidden="true" className="h-4 w-4 border-2" />
-          ) : copyStatus === "copied" ? (
-            <Check aria-hidden="true" className="h-4 w-4" />
-          ) : (
-            <Link2 aria-hidden="true" className="h-4 w-4" />
-          )}
-          {copyLabel}
-        </Button>
       </div>
     </section>
   );

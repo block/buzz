@@ -16,6 +16,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+mod common;
+use common::approve_permission;
+
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -57,22 +60,55 @@ async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     url
 }
 
+struct CannedResponse {
+    status: u16,
+    body: Value,
+}
+
 /// Like `spawn_fake_llm` but also captures the full JSON request body from each
 /// incoming HTTP request. Returns (url, captured_requests).
 async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    spawn_capturing_fake_llm_with_statuses(
+        responses
+            .into_iter()
+            .map(|body| CannedResponse { status: 200, body })
+            .collect(),
+    )
+    .await
+}
+
+async fn spawn_capturing_fake_llm_with_statuses(
+    responses: Vec<CannedResponse>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let url = spawn_capturing_fake_llm_core(responses, captures.clone(), None).await;
+    (url, captures)
+}
+
+/// Shared connection loop for the capturing fake LLM: reads each request,
+/// records its JSON body into `captures`, and replies with the next canned
+/// response. When `gate` is `Some`, the FIRST request's response is withheld
+/// until the gate fires; when `None`, every response is served immediately.
+async fn spawn_capturing_fake_llm_core(
+    responses: Vec<CannedResponse>,
+    captures: Arc<Mutex<Vec<Value>>>,
+    gate: Option<Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>>,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
-    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let captures_clone = captures.clone();
     tokio::spawn(async move {
+        let mut request_num = 0usize;
         loop {
             let (mut sock, _) = match listener.accept().await {
                 Ok(p) => p,
                 Err(_) => return,
             };
             let queue = queue.clone();
-            let captures = captures_clone.clone();
+            let captures = captures.clone();
+            let gate = gate.clone();
+            request_num += 1;
+            let req_num = request_num;
             tokio::spawn(async move {
                 // Read headers.
                 let mut buf = Vec::new();
@@ -121,22 +157,52 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
                     captures.lock().await.push(parsed);
                 }
 
+                // Hold the first request's response until the gate opens.
+                if req_num == 1 {
+                    if let Some(gate) = &gate {
+                        if let Some(rx) = gate.lock().await.take() {
+                            let _ = rx.await;
+                        }
+                    }
+                }
+
                 // Send canned response.
-                let body = queue
-                    .lock()
-                    .await
-                    .pop_front()
-                    .unwrap_or_else(|| json!({ "error": "no canned response" }));
-                let body_s = serde_json::to_string(&body).unwrap();
+                let response = queue.lock().await.pop_front().unwrap_or(CannedResponse {
+                    status: 500,
+                    body: json!({ "error": "no canned response" }),
+                });
+                let body_s = serde_json::to_string(&response.body).unwrap();
+                let reason = if response.status == 200 {
+                    "OK"
+                } else {
+                    "Error"
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_s.len(), body_s,
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.status,
+                    reason,
+                    body_s.len(),
+                    body_s,
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
                 let _ = sock.shutdown().await;
             });
         }
     });
+    url
+}
+
+/// A capturing fake LLM whose FIRST provider response is withheld until
+/// `gate` fires. Later responses are served immediately. Used to make
+/// round-boundary races deterministic: hold round 1 open until a client action
+/// (e.g. a steer) is confirmed, so the second round observes it. Request bodies
+/// are recorded into `captures` exactly as `spawn_capturing_fake_llm` does.
+async fn spawn_gated_capturing_fake_llm(
+    responses: Vec<CannedResponse>,
+    captures: Arc<Mutex<Vec<Value>>>,
+    gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let url = spawn_capturing_fake_llm_core(responses, captures.clone(), Some(gate)).await;
     (url, captures)
 }
 
@@ -313,6 +379,159 @@ async fn tool_call_then_end_turn() {
     // Final response.
     let v = h.recv_until(|v| v["id"] == json!(p_id)).await;
     assert_eq!(v["result"]["stopReason"], "end_turn");
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_image_response_recovers_without_replaying_image() {
+    let responses = vec![
+        CannedResponse {
+            status: 200,
+            body: openai_tool_call("call_image", "fake__tool_0", json!({})),
+        },
+        CannedResponse {
+            status: 404,
+            body: json!({
+                "error": { "message": "No endpoints found that support image input" }
+            }),
+        },
+        CannedResponse {
+            status: 200,
+            body: openai_text("recovered"),
+        },
+    ];
+    let (url, captures) = spawn_capturing_fake_llm_with_statuses(responses).await;
+    let mut h = Harness::spawn(&url).await;
+
+    h.send(
+        "initialize",
+        json!({"protocolVersion":2,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    let session_id = h
+        .send(
+            "session/new",
+            json!({
+                "cwd": "/tmp",
+                "mcpServers": [{
+                    "name": "fake",
+                    "command": env!("CARGO_BIN_EXE_fake-mcp"),
+                    "args": [],
+                    "env": [{ "name": "FAKE_MCP_IMAGE_RESULT", "value": "1" }],
+                }],
+            }),
+        )
+        .await;
+    let session = h.recv_until(|v| v["id"] == json!(session_id)).await;
+    let sid = session["result"]["sessionId"].as_str().unwrap();
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{"type":"text","text":"inspect the image"}],
+            }),
+        )
+        .await;
+    loop {
+        let message = h.recv().await;
+        if message.get("method") == Some(&json!("session/request_permission")) {
+            h.write(approve_permission(&message)).await;
+        } else if message["id"] == json!(prompt_id) {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+
+    let requests = captures.lock().await;
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected tool, rejection, recovery requests"
+    );
+    let rejected = requests[1].to_string();
+    assert!(
+        rejected.contains("data:image/png;base64,aW1n"),
+        "second request must contain the MCP image: {rejected}"
+    );
+    let recovered = requests[2].to_string();
+    assert!(
+        !recovered.contains("image_url") && !recovered.contains("data:image"),
+        "recovery request must not replay image input: {recovered}"
+    );
+    assert!(
+        recovered.contains("does not support image input")
+            && recovered.contains("text-based inspection"),
+        "recovery request must give the model actionable guidance: {recovered}"
+    );
+    assert!(
+        recovered.contains("call_image") && recovered.contains("tool_call_id"),
+        "recovery must preserve tool-call/result pairing: {recovered}"
+    );
+    drop(requests);
+    h.shutdown().await;
+}
+
+/// The recovery path must only fire when it actually removed an image. If the
+/// provider emits the unsupported-image phrase while history holds no image
+/// (a misclassification, or a provider that returns the phrase for an
+/// unrelated reason), mutating nothing and continuing would spin the turn loop
+/// forever — `max_rounds` defaults to 0 (unlimited) in production, so nothing
+/// downstream bounds it. The turn must fail with the typed error instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_image_without_image_in_history_fails_instead_of_looping() {
+    // Five rejections but MAX_ROUNDS=4: if the guard is removed the loop
+    // re-requests without ever mutating history and drains the queue.
+    let responses = (0..5)
+        .map(|_| CannedResponse {
+            status: 404,
+            body: json!({
+                "error": { "message": "No endpoints found that support image input" }
+            }),
+        })
+        .collect();
+    let (url, captures) = spawn_capturing_fake_llm_with_statuses(responses).await;
+    let mut h = Harness::spawn(&url).await;
+
+    h.send(
+        "initialize",
+        json!({"protocolVersion":2,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    let session_id = h
+        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let session = h.recv_until(|v| v["id"] == json!(session_id)).await;
+    let sid = session["result"]["sessionId"].as_str().unwrap();
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{"type":"text","text":"no image here"}],
+            }),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+
+    assert!(
+        reply.get("result").is_none(),
+        "an unrecoverable image rejection must not complete the turn: {reply}"
+    );
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("image input unsupported"),
+        "the typed error must surface to the caller: {reply}"
+    );
+    assert_eq!(
+        captures.lock().await.len(),
+        1,
+        "the loop must not re-request after a rejection it could not repair"
+    );
     h.shutdown().await;
 }
 
@@ -594,14 +813,37 @@ async fn recv_active_run_id(h: &mut Harness) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_folds_into_active_turn_without_cancelling() {
+    use tokio::sync::oneshot;
+
     // A two-round turn (tool call → text). A steer sent once the run is live
     // must (a) be accepted with the matching runId, (b) NOT cancel the turn —
     // it still ends with end_turn — and (c) reach the provider as a user turn.
-    let (url, captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_steer", "fake__noop", json!({})),
-        openai_text("acknowledged the steer"),
-    ])
-    .await;
+    //
+    // The steer is drained only at a round boundary (before the next provider
+    // request), so it must be enqueued before round 2 begins. Without
+    // synchronization a fast worker can complete round 1, drain an empty steer
+    // queue at the round-2 boundary, and dispatch round 2 before the steer is
+    // even sent — the steer then lands after the turn ends and never reaches
+    // the provider. To make this deterministic, the FIRST provider response is
+    // gated: it is withheld until the steer has been sent AND observed
+    // accepted, so round 1 cannot complete (and round 2 cannot start its drain)
+    // until the steer is already queued.
+    let (gate_tx, gate_rx) = oneshot::channel::<()>();
+    let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
+
+    let responses = vec![
+        CannedResponse {
+            status: 200,
+            body: openai_tool_call("call_steer", "fake__noop", json!({})),
+        },
+        CannedResponse {
+            status: 200,
+            body: openai_text("acknowledged the steer"),
+        },
+    ];
+    let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let (url, _) = spawn_gated_capturing_fake_llm(responses, captures.clone(), gate_rx).await;
+
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
 
@@ -615,7 +857,8 @@ async fn steer_folds_into_active_turn_without_cancelling() {
         )
         .await;
 
-    // Learn the run id, then steer into it before the turn finishes.
+    // Learn the run id (advertised before the gated round-1 request), then steer
+    // into the live turn while round 1 is still held.
     let run_id = recv_active_run_id(&mut h).await;
     let steer_text = "STEER-CANARY: also consider the edge case";
     let s_id = h
@@ -629,9 +872,12 @@ async fn steer_folds_into_active_turn_without_cancelling() {
         )
         .await;
 
-    // Steer is accepted and echoes the run id it landed in.
+    // Steer is accepted and echoes the run id it landed in. Only after this
+    // confirmation do we release the gate, so the steer is guaranteed queued
+    // before round 2's boundary drains it.
     let mut steer_ok = false;
     let mut end_turn = false;
+    let mut gate = Some(gate_tx);
     for _ in 0..40 {
         let v = h.recv().await;
         if v["id"] == json!(s_id) {
@@ -647,6 +893,11 @@ async fn steer_folds_into_active_turn_without_cancelling() {
                 "steer reply carries a messageId"
             );
             steer_ok = true;
+            // Steer accepted — release round 1 so the turn proceeds to round 2,
+            // whose boundary now drains the queued steer.
+            if let Some(tx) = gate.take() {
+                let _ = tx.send(());
+            }
         } else if v["id"] == json!(p_id) {
             // The turn was NOT cancelled — it completed normally.
             assert_eq!(v["result"]["stopReason"], "end_turn");
@@ -933,6 +1184,135 @@ async fn no_usage_turn_emits_no_usage_notification() {
     h.shutdown().await;
 }
 
+/// Usage must be reported after EVERY provider round, not only once the turn
+/// returns.
+///
+/// A turn is many provider round-trips over many minutes. While the only report
+/// was the one `session/prompt` sends after the turn returns, a turn whose
+/// process was killed mid-flight reported nothing at all: its counters lived in
+/// the prompt task's stack frame, the provider had already billed them, and no
+/// consumer ever saw them. That is not a corner case for a long-horizon
+/// benchmark — every phase of a `continue_until_timeout` run is terminated
+/// mid-turn by design, which under-reported one measured run's cost several-fold.
+///
+/// Two rounds with distinct usage. The assertion that matters is the FIRST
+/// notification: it must carry round 1's counts alone, proving it was sent
+/// before round 2 had returned, so a kill between the rounds would still have
+/// left round 1 on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_is_reported_after_each_round_not_only_at_turn_end() {
+    let url = spawn_fake_llm(vec![
+        openai_tool_call_with_usage("call_round1", "fake__noop", json!({}), 15, 6),
+        openai_text_with_usage("done", 20, 8),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+
+    let (frames_before, response) = recv_until_with_drain(&mut h, |v| v["id"] == p_id).await;
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "turn must complete with end_turn"
+    );
+
+    let usage: Vec<&Value> = frames_before
+        .iter()
+        .filter(|v| is_usage_update(v))
+        .collect();
+    assert!(
+        usage.len() >= 2,
+        "expected a usage_update per round (2 rounds), got {}; frames: {frames_before:#?}",
+        usage.len()
+    );
+
+    // Round 1 alone — emitted while round 2 was still outstanding.
+    assert_eq!(
+        usage[0]["params"]["update"]["accumulatedInputTokens"],
+        json!(15u64),
+        "first notification must carry round 1's input tokens only"
+    );
+    assert_eq!(
+        usage[0]["params"]["update"]["accumulatedOutputTokens"],
+        json!(6u64),
+        "first notification must carry round 1's output tokens only"
+    );
+
+    // The last one is the turn total and is what a high-water-mark consumer keeps.
+    let last = usage[usage.len() - 1];
+    assert_eq!(
+        last["params"]["update"]["accumulatedInputTokens"],
+        json!(35u64),
+        "final notification must carry the turn total 15+20=35"
+    );
+    assert_eq!(
+        last["params"]["update"]["accumulatedOutputTokens"],
+        json!(14u64),
+        "final notification must carry the turn total 6+8=14"
+    );
+
+    h.shutdown().await;
+}
+
+/// A mid-turn report must be SESSION-cumulative, not turn-local.
+///
+/// The baseline handed to the run loop is a snapshot taken when the turn began;
+/// if it were dropped, a consumer taking the high-water mark per session would
+/// see turn 2's first round (a small number) arrive after turn 1's total and
+/// discard it, silently losing turn 2 for any turn that never completed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_turn_usage_includes_earlier_turns() {
+    let url = spawn_fake_llm(vec![
+        openai_text_with_usage("turn one", 10, 5),
+        openai_tool_call_with_usage("call_t2", "fake__noop", json!({}), 20, 8),
+        openai_text_with_usage("turn two done", 30, 9),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 1"}]}),
+        )
+        .await;
+    let (_, _) = recv_until_with_drain(&mut h, |v| v["id"] == p1).await;
+
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 2"}]}),
+        )
+        .await;
+    let (frames_before, _) = recv_until_with_drain(&mut h, |v| v["id"] == p2).await;
+
+    let first = frames_before
+        .iter()
+        .find(|v| is_usage_update(v))
+        .unwrap_or_else(|| {
+            panic!("expected a usage_update during turn 2; frames: {frames_before:#?}")
+        });
+    assert_eq!(
+        first["params"]["update"]["accumulatedInputTokens"],
+        json!(30u64),
+        "turn 2 round 1 must report 10 (turn 1) + 20 (this round), not 20"
+    );
+    assert_eq!(
+        first["params"]["update"]["accumulatedOutputTokens"],
+        json!(13u64),
+        "turn 2 round 1 must report 5 (turn 1) + 8 (this round), not 8"
+    );
+
+    h.shutdown().await;
+}
+
 /// When a turn is cancelled AFTER the provider has already returned a response
 /// (so token counts are observed), buzz-agent must still emit the usage
 /// notification before the cancelled `session/prompt` response.
@@ -940,7 +1320,7 @@ async fn no_usage_turn_emits_no_usage_notification() {
 /// Setup: round 1 is a tool call WITH usage (tokens are captured). After the
 /// tool_call_update notification (proving round 1 is fully processed), we gate
 /// the round-2 LLM response behind a `oneshot` barrier that only releases after
-/// cancel is sent. This guarantees the turn exits with `stopReason: "cancelled"`
+/// cancel is acknowledged. This guarantees the turn exits with `stopReason: "cancelled"`
 /// deterministically, even on a slow CI worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_turn_with_usage_emits_notification_before_response() {
@@ -955,7 +1335,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // in-flight TCP request can resolve. The queue is empty for round 2, so the
     // agent receives the fallback "no canned response" body which it treats as
     // an LLM error; the cancel check at the round boundary fires first because
-    // the gate is only released after cancel is enqueued.
+    // the gate is only released after cancel is acknowledged.
     let responses = vec![openai_tool_call_with_usage(
         "call_cancel_test",
         "fake__noop",
@@ -991,7 +1371,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                     }
                 }
                 // For request 2+ (round 2), wait for the gate to open before
-                // responding. This ensures cancel is sent before round 2 resolves,
+                // responding. This ensures cancel is processed before round 2 resolves,
                 // making stopReason: cancelled deterministic.
                 if req_num >= 2 {
                     let rx = gate.lock().await.take();
@@ -1035,20 +1415,27 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    // Writing to stdin does not prove the agent processed cancel. Keep the
+    // provider blocked until the acknowledgement, retaining all earlier frames
+    // so usage/prompt ordering is checked even if the turn finishes before ACK.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    let (frames_before_cancel_ack, cancel_ack) =
+        recv_until_with_drain(&mut h, |v| v["id"] == json!(c_id)).await;
+    assert_eq!(cancel_ack.get("result"), Some(&Value::Null), "{cancel_ack}");
+    assert!(cancel_ack.get("error").is_none(), "{cancel_ack}");
     let _ = gate_tx.send(()); // unblock round 2
 
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
     let mut saw_prompt_response = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
+    let mut pending_frames = VecDeque::from(frames_before_cancel_ack);
+    let frame_budget = 40 + pending_frames.len();
+    for _ in 0..frame_budget {
+        let v = match pending_frames.pop_front() {
+            Some(v) => v,
+            None => h.recv().await,
+        };
+        if is_usage_update(&v) {
             saw_usage = true;
             if !saw_prompt_response {
                 saw_usage_before_prompt_response = true;
@@ -1061,11 +1448,14 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                 "turn must end with stopReason: cancelled"
             );
         }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
+        if saw_usage && saw_prompt_response {
             break;
         }
     }
-    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
+    assert!(
+        saw_prompt_response,
+        "session/prompt did not finish after cancel"
+    );
     assert!(
         saw_usage,
         "expected usage_update notification for cancelled turn with observed tokens"

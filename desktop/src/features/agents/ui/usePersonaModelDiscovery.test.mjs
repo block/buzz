@@ -312,3 +312,130 @@ test("isSuccessfulEmptyDiscovery_stillPending_isFalse", () => {
     false,
   );
 });
+
+// ── Discovered rows resolve through the shared label resolver ────────────────
+// Discovery can return a Databricks endpoint with a null or blank `name`
+// (v1 catalogs, and any harness that echoes IDs only). Those rows must still
+// show the curated registry name rather than the raw endpoint ID.
+
+test("discoveredRow_knownDatabricksIdWithNullName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [{ id: "databricks-gpt-5-5", name: null, description: null }],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5" },
+  ]);
+});
+
+test("discoveredRow_knownDatabricksIdWithBlankName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-claude-opus-4-7", name: "   ", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-claude-opus-4-7", label: "Claude Opus 4.7" },
+  ]);
+});
+
+test("discoveredRow_unknownCustomEndpointWithNoName_showsRawId", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-team-2025-01", name: null, description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-team-2025-01", label: "databricks-team-2025-01" },
+  ]);
+});
+
+test("discoveredRow_nonblankDiscoveredName_winsOverRegistry", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-gpt-5-5", name: "Workspace GPT", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "Workspace GPT" },
+  ]);
+});
+
+// ── Real buzz-agent discovery shape: name echoes the id ─────────────────────
+// buzz-agent's Databricks discovery emits {id, name: id} on every path (the
+// API has no display-name field). The echoed name must not short-circuit the
+// registry tier, so a known id still shows its curated label.
+
+test("discoveredRow_knownDatabricksIdEchoedName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "databricks-gpt-5-5",
+          name: "databricks-gpt-5-5",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5" },
+  ]);
+});
+
+test("discoveredRow_unknownDatabricksIdEchoedName_showsRawId", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "databricks-team-2025-01",
+          name: "databricks-team-2025-01",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-team-2025-01", label: "databricks-team-2025-01" },
+  ]);
+});
+
+test("discoveredRow_defaultCatalogSuffixedName_winsOverRegistry", () => {
+  // The auth-empty fallback carries a distinct curated+suffixed name; tier 1
+  // correctly keeps it rather than re-deriving the bare label.
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "databricks-gpt-5-5",
+          name: "GPT-5.5 (default catalog)",
+          description: null,
+        },
+      ],
+    }),
+    "databricks_v2",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5 (default catalog)" },
+  ]);
+});

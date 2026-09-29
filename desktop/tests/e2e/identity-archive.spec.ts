@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import { installMockBridge } from "../helpers/bridge";
 
@@ -33,7 +34,9 @@ async function openAliceProfile(page: import("@playwright/test").Page) {
   await aliceMessage.locator("button", { hasText: "alice" }).first().click();
   const panel = page.getByTestId("user-profile-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText(ALICE_PUBKEY.slice(0, 8));
+  // The panel's public key row renders through the shared <PubKey> widget,
+  // which displays the canonical npub form — assert the npub prefix.
+  await expect(panel).toContainText(npubEncode(ALICE_PUBKEY).slice(0, 8));
 }
 
 async function openProfileSettingsMenu(page: import("@playwright/test").Page) {
@@ -77,9 +80,8 @@ test.describe("NIP-IA archive button gate", () => {
       archivedIdentities: [],
     });
     await openAliceProfile(page);
-    await openProfileSettingsMenu(page);
     await expect(
-      page.getByTestId("user-profile-archive-identity"),
+      page.getByTestId("user-profile-archive-agent-row"),
     ).toBeVisible();
   });
 
@@ -92,9 +94,8 @@ test.describe("NIP-IA archive button gate", () => {
       archivedIdentities: [],
     });
     await openAliceProfile(page);
-    await openProfileSettingsMenu(page);
     await expect(
-      page.getByTestId("user-profile-archive-identity"),
+      page.getByTestId("user-profile-archive-agent-row"),
     ).toBeVisible();
   });
 
@@ -116,6 +117,9 @@ test.describe("NIP-IA archive button gate", () => {
     await expect(
       page.getByTestId("user-profile-unarchive-identity"),
     ).toHaveCount(0);
+    await expect(
+      page.getByTestId("user-profile-archive-agent-row"),
+    ).toHaveCount(0);
   });
 
   test("case 5 — Alice archived: flair + Unarchive button (under admin gate)", async ({
@@ -129,12 +133,11 @@ test.describe("NIP-IA archive button gate", () => {
     });
     await openAliceProfile(page);
     await expect(page.getByTestId("user-profile-archived-flair")).toBeVisible();
-    await openProfileSettingsMenu(page);
     await expect(
-      page.getByTestId("user-profile-unarchive-identity"),
+      page.getByTestId("user-profile-unarchive-agent-row"),
     ).toBeVisible();
-    await expect(page.getByTestId("user-profile-archive-identity")).toHaveCount(
-      0,
-    );
+    await expect(
+      page.getByTestId("user-profile-archive-agent-row"),
+    ).toHaveCount(0);
   });
 });

@@ -11,10 +11,12 @@ use super::{load_managed_agents, load_personas, AgentDefinition, ManagedAgentRec
 #[cfg(test)]
 use super::{BackendKind, RespondTo};
 use crate::app_state::AppState;
-use crate::relay::relay_ws_url_with_override;
+use crate::commands::{capture_relay_target, fetch_archived_pubkeys_at};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::managed_agents::discovery::known_skill_dirs;
@@ -46,7 +48,7 @@ const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
-const NEST_AGENTS_VERSION: u32 = 4;
+const NEST_AGENTS_VERSION: u32 = 5;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
@@ -60,12 +62,6 @@ const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
 
 /// Nest directory name for production builds.
 const NEST_DIR_PROD: &str = ".buzz";
-
-/// Nest directory name for dev builds. Dev builds (those whose Tauri app-data
-/// directory name starts with `"xyz.block.buzz.app.dev"`) use a separate nest
-/// so that the DMG and dev-build instances don't clobber each other's
-/// `.repos-dir` dotfile and `REPOS` symlink.
-const NEST_DIR_DEV: &str = ".buzz-dev";
 
 /// Process-lifetime nest directory. Initialized once at startup via
 /// [`init_nest_dir`] before any call to [`nest_dir`].
@@ -86,8 +82,8 @@ static NEST_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new
 /// when the Tauri app-data directory name starts with `"xyz.block.buzz.app.dev"`.
 /// Pass `false` for production (signed DMG) builds.
 pub fn init_nest_dir(is_dev: bool) {
-    let suffix = if is_dev { NEST_DIR_DEV } else { NEST_DIR_PROD };
-    let path = dirs::home_dir().map(|h| h.join(suffix));
+    let suffix = crate::build_identity::nest_name(is_dev);
+    let path = dirs::home_dir().map(|h| h.join(suffix.as_ref()));
     // set() is a no-op when already initialized, which is correct: only the
     // first call (at boot, before any filesystem work) should win.
     let _ = NEST_DIR.set(path);
@@ -104,31 +100,6 @@ pub fn nest_dir() -> Option<PathBuf> {
         // Not yet initialized — fall back to prod path. Covers test code.
         None => dirs::home_dir().map(|h| h.join(NEST_DIR_PROD)),
     }
-}
-
-/// Returns `true` iff `path` ends with the dev-nest directory name (`.buzz-dev`).
-///
-/// Pure function — no globals — so it can be unit-tested without touching the
-/// process-lifetime [`NEST_DIR`] `OnceLock`.
-fn path_is_dev_nest(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n == NEST_DIR_DEV)
-        .unwrap_or(false)
-}
-
-/// Returns `true` when the running binary is using the dev nest (`~/.buzz-dev`).
-///
-/// This is `true` for all dev builds — `just staging` and `just dev` — because
-/// [`init_nest_dir`] is called with `is_dev = true` when the Tauri app-data
-/// directory starts with `"xyz.block.buzz.app.dev"`.
-///
-/// Returns `false` when:
-/// - The nest is the production nest (`~/.buzz`, signed DMG).
-/// - [`init_nest_dir`] has not been called yet (unit tests, home dir
-///   unresolvable) — the fallback path is always the prod nest.
-pub fn nest_is_dev() -> bool {
-    nest_dir().map(|p| path_is_dev_nest(&p)).unwrap_or(false)
 }
 
 /// Creates the Buzz nest at `~/.buzz` if it doesn't already exist.
@@ -338,12 +309,8 @@ fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
 /// Dev builds (`is_dev = true`) use `"buzz-dev"` so that a running DMG and a
 /// concurrent dev build each own a separate link and never clobber each other —
 /// the same isolation that separates `~/.buzz` (prod) from `~/.buzz-dev` (dev).
-pub fn cli_link_name(is_dev: bool) -> &'static str {
-    if is_dev {
-        "buzz-dev"
-    } else {
-        "buzz"
-    }
+pub fn cli_link_name(is_dev: bool) -> String {
+    crate::build_identity::cli_name(is_dev)
 }
 
 /// Ensures `~/.local/bin/buzz` (prod) or `~/.local/bin/buzz-dev` (dev) is a
@@ -548,19 +515,35 @@ fn escape_md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// True iff the relay has archived this instance's identity. Membership is
+/// tested against the relay's `kind:13535` snapshot (lowercased hex); an empty
+/// set (relay unreachable) fails open — see [`regenerate_nest_context`].
+fn is_archived(record: &ManagedAgentRecord, archived: &HashSet<String>) -> bool {
+    archived.contains(&record.pubkey.to_ascii_lowercase())
+}
+
 pub fn render_dynamic_section(
     personas: &[AgentDefinition],
     agents: &[ManagedAgentRecord],
+    archived: &HashSet<String>,
     relay_url: &str,
 ) -> String {
-    let active_agents = if agents.is_empty() {
+    // Every managed agent is eligible on every community — `relay_url` is a
+    // legacy creation-era field that `effective_agent_relay_url()` deliberately
+    // ignores, and snapshot-imported records store it empty by design. The only
+    // roster filter is identity-archive.
+    let live: Vec<&ManagedAgentRecord> = agents
+        .iter()
+        .filter(|a| !is_archived(a, archived))
+        .collect();
+    let active_agents = if live.is_empty() {
         "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
             .to_string()
     } else {
         let mut table =
             "## Active Agents\n\n| Name | Persona | How to address |\n|------|---------|----------------|"
                 .to_string();
-        for agent in agents {
+        for agent in live {
             let role = agent
                 .persona_id
                 .as_deref()
@@ -670,7 +653,134 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
     Ok(())
 }
 
-pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
+/// One regeneration worker with a latest-request-wins write fence. Startup
+/// persona backfill can request hundreds of renders: intermediate requests must
+/// supersede stale writes without each doing their own archive snapshot read.
+///
+/// Claiming, finishing and committing share one lock. A trigger during a read
+/// leaves one latest-generation follow-up; a trigger at worker shutdown either
+/// becomes that follow-up or starts a new worker. No debounce or cached archive
+/// state is needed. Once a newer generation is requested, an older one cannot
+/// publish, even if the newer render fails (the next trigger can try again).
+struct NestRegenGate {
+    state: Mutex<NestRegenState>,
+}
+
+struct NestRegenState {
+    highest_requested: u64,
+    running: bool,
+}
+
+impl NestRegenGate {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(NestRegenState {
+                highest_requested: 0,
+                running: false,
+            }),
+        }
+    }
+
+    /// Claim synchronously, before spawning. Only the idle-to-running caller
+    /// owns a worker; all other callers just advance the pending generation.
+    fn claim(&self) -> (u64, bool) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.highest_requested += 1;
+        let start_worker = !state.running;
+        state.running = true;
+        (state.highest_requested, start_worker)
+    }
+
+    /// Return work only to the caller that starts the worker. The callback is
+    /// the real regeneration path, supplied here so tests can hold its I/O.
+    fn request<'a, F, Fut>(
+        &'a self,
+        mut regenerate: F,
+    ) -> Option<impl std::future::Future<Output = ()> + 'a>
+    where
+        F: FnMut(u64) -> Fut + 'a,
+        Fut: std::future::Future<Output = Result<(), String>> + 'a,
+    {
+        let (mut generation, start_worker) = self.claim();
+        if !start_worker {
+            return None;
+        }
+        Some(async move {
+            loop {
+                if let Err(error) = regenerate(generation).await {
+                    eprintln!("buzz-desktop: nest context regeneration failed: {error}");
+                }
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                if state.highest_requested == generation {
+                    state.running = false;
+                    return;
+                }
+                generation = state.highest_requested;
+            }
+        })
+    }
+
+    /// Probe the exact claim/commit lock, including inside the commit hook.
+    #[cfg(test)]
+    fn try_claim(&self) -> Option<u64> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        state.highest_requested += 1;
+        state.running = true;
+        Some(state.highest_requested)
+    }
+
+    /// Commit `content` for `generation`, dropping the write once a newer
+    /// generation has been *requested* (regardless of whether that newer
+    /// generation has written or ever will). Returns whether the file was
+    /// written. The lock spans the compare and the write so the check-and-write
+    /// is atomic and no await occurs while it is held.
+    fn commit(&self, agents_md: &Path, content: &str, generation: u64) -> io::Result<bool> {
+        self.commit_hooked(agents_md, content, generation, || {})
+    }
+
+    /// [`commit`] with a hook invoked while the lock is held, after the
+    /// eligibility compare and before the write. Production passes a no-op, so
+    /// this is exactly [`commit`]; tests pass a hook that calls [`try_claim`]
+    /// to prove no claim can land inside the compare-then-write window — the
+    /// probe reports the lock held here, whereas the flawed
+    /// separate-watermark/separate-write-lock design would report it free. The
+    /// `impl FnOnce` monomorphizes the no-op away.
+    fn commit_hooked(
+        &self,
+        agents_md: &Path,
+        content: &str,
+        generation: u64,
+        under_lock: impl FnOnce(),
+    ) -> io::Result<bool> {
+        let requested = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("nest regen gate lock poisoned"))?;
+        if generation < requested.highest_requested {
+            return Ok(false);
+        }
+        under_lock();
+        upsert_managed_section(agents_md, content)?;
+        Ok(true)
+    }
+}
+
+// A best-effort roster refresh must not strand every newer edit behind an old
+// relay's unbounded NIP-11 body or admission wait. Bound the complete archive
+// operation, not just request headers; timeout preserves the existing fail-open.
+const NEST_ARCHIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Process-wide regeneration owner and ordered write gate.
+static NEST_REGEN: NestRegenGate = NestRegenGate::new();
+
+pub async fn regenerate_nest_context<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    generation: u64,
+) -> Result<(), String> {
     let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
     let agents_md = nest.join("AGENTS.md");
 
@@ -681,23 +791,59 @@ pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
     let personas = load_personas(app)?;
     let agents = load_managed_agents(app)?;
     let state = app.state::<AppState>();
-    let relay_url = relay_ws_url_with_override(&state);
-    let content = render_dynamic_section(&personas, &agents, &relay_url);
-    upsert_managed_section(&agents_md, &content)
+    // Capture the relay target once, before any network work, so this
+    // generation's rendered footer, NIP-11 signer, and snapshot query all
+    // belong to one relay even if a workspace switch changes the override
+    // between the two archive awaits below.
+    let target = capture_relay_target(&state);
+    // Identity-archived agents live only in the relay's `kind:13535` snapshot;
+    // local records all read `is_active: true`. Fails open (empty set → render
+    // everyone) so an unreachable relay can't blank the roster. The archive read
+    // uses the same captured target as the rendered relay; a later generation's
+    // task always wins the commit, so a fallback-relay boot render cannot bury a
+    // later apply_workspace render.
+    let archived: HashSet<String> = match tokio::time::timeout(
+        NEST_ARCHIVE_TIMEOUT,
+        fetch_archived_pubkeys_at(&state, &target),
+    )
+    .await
+    {
+        Ok(pubkeys) => pubkeys.into_iter().collect(),
+        Err(_) => {
+            eprintln!(
+                "buzz-desktop: nest archive read timed out; rendering without archive filter"
+            );
+            HashSet::new()
+        }
+    };
+    let content = render_dynamic_section(&personas, &agents, &archived, &target.ws_url);
+    NEST_REGEN
+        .commit(&agents_md, &content, generation)
         .map_err(|e| format!("regenerate nest context: {e}"))?;
 
     Ok(())
 }
 
-/// Convenience wrapper: regenerates nest context, logging a warning on failure.
-///
-/// All call sites treat regeneration as fire-and-forget — agents run fine with
-/// a stale AGENTS.md, so we warn and continue rather than propagating the error.
-pub fn try_regenerate_nest(app: &AppHandle) {
-    if let Err(error) = regenerate_nest_context(app) {
-        eprintln!("buzz-desktop: nest context regeneration failed: {error}");
+/// Fire-and-forget regeneration: one worker reads the latest state, with one
+/// pending follow-up if another trigger arrives. Failures still warn and leave
+/// the file for the next trigger; they never strand the worker as running.
+/// Archive/unarchive can race the relay's snapshot update, so an archived agent
+/// may still linger until the next trigger, as before.
+pub fn try_regenerate_nest<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    if let Some(work) = NEST_REGEN.request(move |generation| {
+        let app = app.clone();
+        async move { regenerate_nest_context(&app, generation).await }
+    }) {
+        tauri::async_runtime::spawn(work);
     }
 }
 
+#[cfg(test)]
+mod regen_tests;
+#[cfg(test)]
+mod regen_trigger_tests;
+#[cfg(test)]
+mod render_tests;
 #[cfg(test)]
 mod tests;

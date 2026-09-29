@@ -1,5 +1,9 @@
 import * as React from "react";
 
+import {
+  PROJECT_TASK_CATEGORIES,
+  type ProjectTaskCategory,
+} from "@/features/projects/projectTaskCategories";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -15,6 +19,7 @@ const FIELD_CONTROL_CLASS =
 export type CreateProjectWorkItemDialogInput = {
   title: string;
   body: string;
+  category?: ProjectTaskCategory;
 };
 
 export function CreateProjectWorkItemDialog({
@@ -44,16 +49,18 @@ export function CreateProjectWorkItemDialog({
 }) {
   const [workItemTitle, setWorkItemTitle] = React.useState("");
   const [body, setBody] = React.useState("");
+  const [category, setCategory] = React.useState<ProjectTaskCategory>("issue");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const titleInputRef = React.useRef<HTMLInputElement>(null);
   const submitInFlightRef = React.useRef(false);
   const testIdPrefix = `create-${itemName}`;
-  const itemLabel = itemName === "issue" ? "issue" : "pull request";
+  const itemLabel = itemName === "issue" ? "task" : "review";
 
   React.useEffect(() => {
     if (!open) return;
     setWorkItemTitle("");
     setBody("");
+    setCategory("issue");
     setErrorMessage(null);
     const timerId = globalThis.setTimeout(
       () => titleInputRef.current?.focus(),
@@ -70,7 +77,11 @@ export function CreateProjectWorkItemDialog({
     submitInFlightRef.current = true;
     setErrorMessage(null);
     try {
-      await onCreate({ title: trimmedTitle, body: body.trim() });
+      await onCreate({
+        title: trimmedTitle,
+        body: body.trim(),
+        ...(itemName === "issue" ? { category } : {}),
+      });
       onOpenChange(false);
     } catch (error) {
       setErrorMessage(
@@ -122,6 +133,37 @@ export function CreateProjectWorkItemDialog({
           onSubmit={(event) => void handleSubmit(event)}
         >
           {children}
+          {itemName === "issue" ? (
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor={`${testIdPrefix}-category`}
+              >
+                Category
+              </label>
+              <div className={FIELD_SHELL_CLASS}>
+                <select
+                  className={cn(
+                    "h-11 w-full px-3 text-sm",
+                    FIELD_CONTROL_CLASS,
+                  )}
+                  data-testid={`${testIdPrefix}-category`}
+                  disabled={isCreating}
+                  id={`${testIdPrefix}-category`}
+                  onChange={(event) =>
+                    setCategory(event.target.value as ProjectTaskCategory)
+                  }
+                  value={category}
+                >
+                  {PROJECT_TASK_CATEGORIES.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          ) : null}
           <div className="space-y-1.5">
             <label
               className="text-sm font-medium text-foreground"

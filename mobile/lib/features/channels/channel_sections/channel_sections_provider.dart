@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -68,6 +69,11 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       onChanged: () => _emitManagerState(manager),
     );
     _manager = manager;
+
+    // Resume re-read catches an EVENT a healthy socket never delivered.
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    });
 
     ref.onDispose(() {
       manager.dispose();

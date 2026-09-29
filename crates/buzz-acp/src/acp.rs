@@ -14,11 +14,16 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
-use crate::usage::{TurnUsage, UsageTracker};
+use crate::usage::{
+    PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
+};
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+
+/// Package and binary name used by Buzz's Pi ACP fork.
+pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -206,11 +211,12 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Usage tracker — accumulates cumulative token counts from
-    /// `_goose/unstable/session/update` notifications and computes per-turn
-    /// deltas. Both goose and buzz-agent emit this notification; goose gates
-    /// on client capability advertisement, buzz-agent emits unconditionally.
+    /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
+    /// Per-turn prompt-response usage and Claude's optional cumulative cost.
+    standard_usage: StandardUsageTracker,
+    /// Known adapter identity for prompt-response usage mapping.
+    standard_adapter: Option<StandardAdapterKind>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -454,11 +460,32 @@ impl AcpClient {
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
+        Self::spawn_with_env(command, args, extra_env, has_generated_codex_config, &[]).await
+    }
+
+    /// Spawn with authoritative launch environment overrides. Unlike persona
+    /// defaults, these values take precedence over the inherited environment.
+    pub(crate) async fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+        launch_env: &[(String, String)],
+    ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
         let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
+        cmd.args(args);
+        if crate::config::normalize_agent_command_identity(command) == BUZZ_PI_ACP_NAME {
+            if !args.iter().any(|arg| arg == "--") {
+                cmd.arg("--");
+            }
+            // Desktop launches buzz-acp in the Buzz nest; adapters inherit that
+            // workspace. Keep managed skills tied to launch CWD across sessions.
+            cmd.arg("--skill")
+                .arg(std::env::current_dir()?.join(".agents/skills"));
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Inherit stderr so agent logs are visible in the harness terminal.
             .stderr(Stdio::inherit())
@@ -513,6 +540,32 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // The harness composes the entire Git config block once. It must replace
+        // inherited counts/PATH rather than mixing two independently indexed blocks.
+        for (name, value) in extra_env
+            .iter()
+            .filter(|(name, _)| crate::git::is_managed_env(name))
+        {
+            cmd.env(name, value);
+        }
+        // Git applies this older injection channel after GIT_CONFIG_COUNT.
+        // Keeping it would let an ambient user.name or signing setting win
+        // over the harness-owned agent identity in native shells.
+        cmd.env_remove("GIT_CONFIG_PARAMETERS");
+        cmd.env_remove("NOSTR_PRIVATE_KEY");
+        if extra_env.iter().any(|(name, _)| name == "GIT_CONFIG_COUNT") {
+            // Native shells inherit these overrides, while buzz-agent clears
+            // them for MCP. Let both paths use the harness's agent identity.
+            for name in [
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ] {
+                cmd.env_remove(name);
+            }
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -523,6 +576,15 @@ impl AcpClient {
         // console-subsystem child process spawned from a GUI/non-console parent.
         configure_no_window(&mut cmd);
 
+        let standard_adapter =
+            match crate::config::normalize_agent_command_identity(command).as_str() {
+                "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+                    Some(StandardAdapterKind::Claude)
+                }
+                "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+                _ => None,
+            };
+        cmd.envs(launch_env.iter().cloned());
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -550,6 +612,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            standard_usage: StandardUsageTracker::default(),
+            standard_adapter,
         })
     }
 
@@ -619,29 +683,51 @@ impl AcpClient {
     /// Send `session/new` and return the full response alongside the session ID.
     ///
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
-    /// `system_prompt` is included in the request when `Some` — agents that
-    /// support the field will use it; others ignore unknown fields per JSON-RPC.
+    ///
+    /// `system_prompt` controls how the prompt text is delivered:
+    ///
+    /// - `None` — no system-prompt field in the request (legacy framing).
+    /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
+    ///   (ACP protocol v2, buzz-agent; goose unused).
+    /// - `Some(SystemPromptTransport::PiMeta(text))` — `_meta.systemPrompt`
+    ///   as a replacement string for the Buzz pi-acp fork.
+    /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
+    ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
+    ///
     /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
     /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one.
+    /// member from a null one. Metadata prompt transports and the title are
+    /// merged into a single object.
+    ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
-        system_prompt: Option<&str>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
-        if let Some(sp) = system_prompt {
-            params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        match system_prompt {
+            Some(SystemPromptTransport::Field(sp)) => {
+                params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
+            Some(SystemPromptTransport::PiMeta(sp)) => {
+                params["_meta"]["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
+            Some(SystemPromptTransport::ClaudeMeta(sp)) => {
+                // Merge into _meta so sessionTitle (set below) is not clobbered.
+                params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
+            }
+            None => {}
         }
         if let Some(title) = session_title {
-            params["_meta"] = serde_json::json!({ "sessionTitle": title });
+            // Merge — _meta may already carry a system prompt from an adapter extension.
+            params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -663,7 +749,7 @@ impl AcpClient {
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
-        system_prompt: Option<&str>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<String, AcpError> {
         Ok(self
@@ -672,7 +758,7 @@ impl AcpClient {
             .session_id)
     }
 
-    /// Send Goose's custom system-prompt request after `session/new`.
+    /// Replace Goose's native system prompt after `session/new`.
     pub async fn session_set_goose_system_prompt(
         &mut self,
         session_id: &str,
@@ -682,7 +768,7 @@ impl AcpClient {
             "_goose/unstable/session/system-prompt/set",
             serde_json::json!({
                 "sessionId": session_id,
-                "mode": "append",
+                "mode": "set",
                 "key": "buzz",
                 "text": text,
             }),
@@ -759,6 +845,7 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        self.standard_usage.begin_turn(session_id);
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -804,7 +891,7 @@ impl AcpClient {
                 self.current_hard_deadline = None;
             }
         }
-        self.parse_stop_reason(&result?)
+        self.parse_prompt_response(session_id, &result?)
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -850,18 +937,24 @@ impl AcpClient {
         self.steering_supported
     }
 
-    /// Consume and return the per-turn usage record computed from the most
-    /// recent `_goose/unstable/session/update` notification.
-    ///
-    /// Returns `None` if no usage update arrived since the last call (i.e.
-    /// the harness did not emit one for this turn, or this is not a goose
-    /// agent). Must be called at most once per turn; subsequent calls return
-    /// `None` until the next `usage_update` notification is recorded.
-    ///
-    /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
-    /// publish a kind 44200 NIP-AM event.
+    /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
+    /// exclusive cumulative path; standard ACP prompt usage is used only when
+    /// goose emitted nothing for this turn.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
-        self.goose_usage.take()
+        let goose_usage = self.goose_usage.take();
+        let standard_usage = self.standard_usage.take();
+        goose_usage.or(standard_usage)
+    }
+
+    /// Notify the usage tracker that buzz-acp just spawned a new session.
+    ///
+    /// Seeds a zero baseline so the first usage notification for `session_id`
+    /// produces `delta_reliable: true` (turn delta == cumulative from zero).
+    /// Must be called only when buzz-acp created the session via `session/new`;
+    /// never when attaching to a pre-existing session.
+    pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
+        self.goose_usage.seed_zero_baseline(session_id);
+        self.standard_usage.seed_zero_baseline(session_id);
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1021,7 +1114,7 @@ impl AcpClient {
                 remaining,
             )
             .await?;
-        self.parse_stop_reason(&result)
+        self.parse_prompt_response(session_id, &result)
     }
 
     /// Serialize `value` as a single NDJSON line and flush to the agent's stdin.
@@ -1590,7 +1683,9 @@ impl AcpClient {
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
                                                 );
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             Some(_) => {
                                                 let renew_now = Instant::now();
@@ -1602,7 +1697,9 @@ impl AcpClient {
                                                         "steer success: renewed hard deadline ({max_duration:?} from now)"
                                                     );
                                                 }
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             None => {
                                                 // Report the raw string when
@@ -1800,12 +1897,40 @@ impl AcpClient {
                 }
                 false
             }
+            "usage_update" => {
+                self.handle_standard_usage_update(msg);
+                false
+            }
             "keepalive" => false,
             other => {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
             }
         }
+    }
+
+    /// Record the standard ACP cumulative cost notification when emitted by
+    /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
+    /// are intentionally not mapped to token accounting.
+    fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
+        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
+            return;
+        }
+        let session_id = match msg
+            .pointer("/params/sessionId")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(session_id) => session_id,
+            None => return,
+        };
+        let cost = match msg
+            .pointer("/params/update/cost/amount")
+            .and_then(serde_json::Value::as_f64)
+        {
+            Some(cost) => cost,
+            None => return,
+        };
+        self.standard_usage.record_cost(session_id, cost);
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -1832,8 +1957,8 @@ impl AcpClient {
                     tracing::debug!(
                         target: "acp::usage",
                         session_id = %notif.session_id,
-                        input = payload.accumulated_input_tokens,
-                        output = payload.accumulated_output_tokens,
+                        input = ?payload.accumulated_input_tokens,
+                        output = ?payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
                         // price it at the provider's cached rate. Always emitted,
                         // including as 0, so a parser can tell "no cache hits"
@@ -1939,6 +2064,28 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Parse a completed prompt response and retain its optional per-turn usage.
+    fn parse_prompt_response(
+        &mut self,
+        session_id: &str,
+        result: &serde_json::Value,
+    ) -> Result<StopReason, AcpError> {
+        let stop_reason = self.parse_stop_reason(result)?;
+        if let Some(adapter) = self.standard_adapter {
+            match serde_json::from_value::<PromptResponseUsage>(result["usage"].clone()) {
+                Ok(usage) => self
+                    .standard_usage
+                    .record_prompt_usage(session_id, usage, adapter),
+                Err(_) if result.get("usage").is_some() => tracing::debug!(
+                    target: "acp::usage",
+                    "session/prompt response contained malformed standard usage"
+                ),
+                Err(_) => {}
+            }
+        }
+        Ok(stop_reason)
+    }
+
     /// Parse `stopReason` from a `session/prompt` result value.
     fn parse_stop_reason(&self, result: &serde_json::Value) -> Result<StopReason, AcpError> {
         let raw = result["stopReason"].as_str().ok_or_else(|| {
@@ -2038,6 +2185,24 @@ pub struct SessionNewResponse {
     pub raw: serde_json::Value,
 }
 
+/// How to deliver a system prompt on `session/new`.
+///
+/// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`PiMeta`** — `_meta.systemPrompt: text`, used by the Buzz pi-acp fork
+///   to replace Pi's native system prompt.
+/// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
+///   `claude-agent-acp` to append to the adapter's own native system prompt
+///   while keeping its tool-use preset intact.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SystemPromptTransport<'a> {
+    /// Deliver as a bare top-level `systemPrompt` field.
+    Field(&'a str),
+    /// Deliver as `_meta.systemPrompt: text`.
+    PiMeta(&'a str),
+    /// Deliver as `_meta.systemPrompt: {"append": text}`.
+    ClaudeMeta(&'a str),
+}
+
 /// How to switch to a particular model on a session.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "type")]
@@ -2073,6 +2238,28 @@ pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_jso
 /// Returns the `models` object if present: `{ currentModelId, availableModels: [...] }`.
 pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Value> {
     result.get("models").cloned()
+}
+
+/// Extract the `configId` for the `thought_level` category option from a
+/// `session/new` result, if the adapter advertised one.
+///
+/// Claude Code's adapter uses `category: "thought_level"` in its `configOptions`.
+/// The configId is adapter-defined (e.g. `"effort"` on claude-agent-acp) and must
+/// not be hardcoded in the harness — this function discovers it at session time so
+/// the spawn-scoped effort application forwards the adapter's real id. Accepts both
+/// `configId` (ACP spec) and `id` (claude-agent-acp), matching the model-switch path.
+pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<String> {
+    let arr = result["configOptions"].as_array()?;
+    for opt in arr {
+        if opt.get("category").and_then(|c| c.as_str()) == Some("thought_level") {
+            let config_id = opt
+                .get("configId")
+                .or_else(|| opt.get("id"))
+                .and_then(|v| v.as_str())?;
+            return Some(config_id.to_string());
+        }
+    }
+    None
 }
 
 /// Match a desired model ID against a fresh `session/new` response.
@@ -2645,6 +2832,54 @@ mod tests {
     }
 
     #[test]
+    fn extract_thought_level_config_id_finds_config_id() {
+        let result = serde_json::json!({
+            "sessionId": "sess-1",
+            "configOptions": [
+                { "configId": "model", "category": "model" },
+                {
+                    "configId": "effort",
+                    "category": "thought_level",
+                    "options": [{ "value": "high" }, { "value": "low" }]
+                }
+            ]
+        });
+        assert_eq!(
+            super::extract_thought_level_config_id(&result).as_deref(),
+            Some("effort")
+        );
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_falls_back_to_id_key() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "id": "effort", "category": "thought_level" }
+            ]
+        });
+        assert_eq!(
+            super::extract_thought_level_config_id(&result).as_deref(),
+            Some("effort")
+        );
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_none_without_category() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "configId": "model", "category": "model" }
+            ]
+        });
+        assert!(super::extract_thought_level_config_id(&result).is_none());
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_none_without_config_options() {
+        let result = serde_json::json!({ "sessionId": "sess-1" });
+        assert!(super::extract_thought_level_config_id(&result).is_none());
+    }
+
+    #[test]
     fn resolve_prefers_stable_over_unstable() {
         let result = serde_json::json!({
             "configOptions": [{
@@ -2850,6 +3085,30 @@ mod tests {
         AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
+    }
+
+    #[cfg(unix)]
+    async fn spawn_named_script(name: &str, script: &str) -> (AcpClient, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp adapter dir");
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/usr/bin/env bash\n{script}\n"))
+            .expect("write fake adapter");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("adapter metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
+        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
+            .await
+            .expect("spawn named fake adapter");
+        (client, dir)
     }
 
     /// Spawn a probe script whose file name carries a runtime identity (e.g.
@@ -3271,7 +3530,12 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], Some("Custom system prompt"), None)
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::Field("Custom system prompt")),
+                None,
+            )
             .await
             .expect("session_new_full should succeed");
 
@@ -3285,7 +3549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goose_system_prompt_request_uses_append_contract() {
+    async fn goose_system_prompt_request_uses_set_contract() {
         let script = r#"
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
@@ -3302,7 +3566,7 @@ mod tests {
             "_goose/unstable/session/system-prompt/set"
         );
         assert_eq!(received["params"]["sessionId"], "ses_goose");
-        assert_eq!(received["params"]["mode"], "append");
+        assert_eq!(received["params"]["mode"], "set");
         assert_eq!(received["params"]["key"], "buzz");
         assert_eq!(received["params"]["text"], "Be terse");
     }
@@ -3423,44 +3687,9 @@ mod tests {
         );
     }
 
-    // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
+    // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
 
-    /// Helper: spawn an inert `cat` subprocess so we have a real AcpClient
-    /// to drive `handle_session_update` against. `cat` never writes back,
-    /// which is fine — these tests don't read from the agent, they just
-    /// feed JSON into the parser.
-    async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
-            .await
-            .expect("spawn cat as inert client")
-    }
-
-    /// Build a `session/update` JSON-RPC notification carrying a
-    /// `session_info_update` with the given `_meta.goose.activeRunId` value.
-    /// Pass `None` to omit the `activeRunId` field entirely.
-    ///
-    /// `_meta` is nested inside the `update` object (per the ACP
-    /// `SessionInfoUpdate` schema), matching what goose and buzz-agent
-    /// emit on the wire.
-    fn session_info_update_msg(active_run_id: Option<serde_json::Value>) -> serde_json::Value {
-        let mut goose = serde_json::Map::new();
-        if let Some(v) = active_run_id {
-            goose.insert("activeRunId".to_string(), v);
-        }
-        let mut meta = serde_json::Map::new();
-        meta.insert("goose".to_string(), serde_json::Value::Object(goose));
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {
-                "sessionId": "test-session",
-                "update": {
-                    "sessionUpdate": "session_info_update",
-                    "_meta": serde_json::Value::Object(meta),
-                },
-            }
-        })
-    }
+    include!("acp/system_prompt_tests.rs");
 
     #[tokio::test]
     async fn active_run_id_sets_on_string() {
@@ -3670,7 +3899,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3731,7 +3960,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3915,7 +4144,7 @@ mod tests {
             "_session/steering must not carry expectedRunId; wrote: {written}"
         );
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected outcome must ack Success, got {ack:?}"
         );
     }
@@ -3947,7 +4176,7 @@ mod tests {
         // no `outcome`) — the OutcomeRejected guard applies only to
         // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "goose success result must ack Success, got {ack:?}"
         );
     }
@@ -4052,7 +4281,7 @@ mod tests {
         assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected must ack Success, got {ack:?}"
         );
     }
@@ -4109,7 +4338,7 @@ mod tests {
         // rather than released — hence Success, not an Err.
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "startedNewTurn is a delivery success, got {ack:?}"
         );
     }
@@ -4140,6 +4369,254 @@ mod tests {
             crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
             other => panic!("expected Err(ExpectedRunIdMissing), got {other:?}"),
         }
+    }
+
+    // ── Standard ACP prompt-response usage ─────────────────────────────────
+
+    fn prompt_response_usage(
+        input: u64,
+        output: u64,
+        total: u64,
+        cached_read: Option<u64>,
+        cached_write: Option<u64>,
+    ) -> serde_json::Value {
+        let mut usage = serde_json::json!({
+            "inputTokens": input,
+            "outputTokens": output,
+            "totalTokens": total,
+        });
+        if let Some(cached_read) = cached_read {
+            usage["cachedReadTokens"] = serde_json::json!(cached_read);
+        }
+        if let Some(cached_write) = cached_write {
+            usage["cachedWriteTokens"] = serde_json::json!(cached_write);
+        }
+        serde_json::json!({"stopReason": "end_turn", "usage": usage})
+    }
+
+    fn standard_cost_update(session_id: &str, cost: f64) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "cost": {"amount": cost, "currency": "USD"}
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn claude_prompt_response_usage_merges_with_cumulative_cost() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("claude-session");
+        client.standard_usage.begin_turn("claude-session");
+        client.handle_session_update(&standard_cost_update("claude-session", 0.042));
+        assert_eq!(
+            client
+                .parse_prompt_response(
+                    "claude-session",
+                    &prompt_response_usage(100, 20, 175, Some(30), Some(25)),
+                )
+                .unwrap(),
+            StopReason::EndTurn
+        );
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable, "response tokens need no baseline");
+        assert_eq!(usage.turn_input_tokens, Some(155));
+        assert_eq!(usage.turn_output_tokens, Some(20));
+        assert_eq!(
+            usage.turn_total_tokens, None,
+            "Claude total is adapter-derived"
+        );
+        assert_eq!(usage.turn_cache_read_tokens, Some(30));
+        assert_eq!(usage.turn_cache_write_tokens, Some(25));
+        assert_eq!(usage.turn_cost_usd, Some(0.042));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.042));
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn codex_prompt_response_usage_preserves_provider_total_without_cost() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        client.standard_usage.begin_turn("codex-session");
+        client.handle_session_update(&standard_cost_update("codex-session", 0.042));
+        client
+            .parse_prompt_response(
+                "codex-session",
+                &prompt_response_usage(90, 10, 140, Some(40), None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(130));
+        assert_eq!(usage.turn_output_tokens, Some(10));
+        assert_eq!(usage.turn_total_tokens, Some(140));
+        assert_eq!(usage.turn_cache_read_tokens, Some(40));
+        assert_eq!(usage.turn_cache_write_tokens, None);
+        assert_eq!(
+            usage.cumulative_cost_usd, None,
+            "Codex cost update is ignored"
+        );
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn standard_prompt_input_overflow_fails_closed() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("overflow-session");
+        client
+            .parse_prompt_response(
+                "overflow-session",
+                &prompt_response_usage(u64::MAX, 10, u64::MAX, Some(1), None),
+            )
+            .unwrap();
+
+        assert!(
+            client.take_turn_usage().is_none(),
+            "overflow without another valid signal must not emit all-null usage"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_named_adapter_wire_lifecycle_records_prompt_and_cost() {
+        let script = r#"
+            read -r REQ
+            ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"wire-session","update":{"sessionUpdate":"usage_update","cost":{"amount":0.5,"currency":"USD"}}}}'
+            echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10,"cachedReadTokens":2}}}'
+            sleep 1
+        "#;
+        let (mut client, dir) = spawn_named_script("claude-code", script).await;
+        assert_eq!(client.standard_adapter, Some(StandardAdapterKind::Claude));
+        client.notify_session_spawned("wire-session");
+
+        let stop = client
+            .session_prompt_with_idle_timeout(
+                "wire-session",
+                "hello",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("wire prompt");
+        assert_eq!(stop, StopReason::EndTurn);
+
+        let usage = client.take_turn_usage().expect("wire usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_input_tokens, Some(9));
+        assert_eq!(usage.turn_output_tokens, Some(3));
+        assert_eq!(usage.turn_cost_usd, Some(0.5));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.5));
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claude_cost_only_record_survives_missing_prompt_usage() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("cost-only-session");
+        client.standard_usage.begin_turn("cost-only-session");
+        client.handle_session_update(&standard_cost_update("cost-only-session", 0.125));
+
+        let usage = client.take_turn_usage().expect("cost-only usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, None);
+        assert_eq!(usage.turn_cost_usd, Some(0.125));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.125));
+    }
+
+    #[tokio::test]
+    async fn attached_claude_session_does_not_invent_first_cost_delta() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("attached-session");
+        client.handle_session_update(&standard_cost_update("attached-session", 1.25));
+        client
+            .parse_prompt_response(
+                "attached-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("attached usage");
+        assert_eq!(usage.turn_cost_usd, None);
+        assert_eq!(usage.cumulative_cost_usd, Some(1.25));
+    }
+
+    #[tokio::test]
+    async fn standard_usage_two_prompts_preserve_both_monotonic_sequences() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("two-prompt-session");
+
+        client.standard_usage.begin_turn("two-prompt-session");
+        client.handle_session_update(&standard_cost_update("two-prompt-session", 0.1));
+        client
+            .parse_prompt_response(
+                "two-prompt-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+        let initial = client.take_turn_usage().expect("initial prompt usage");
+
+        client.standard_usage.begin_turn("two-prompt-session");
+        client.handle_session_update(&standard_cost_update("two-prompt-session", 0.25));
+        client
+            .parse_prompt_response(
+                "two-prompt-session",
+                &prompt_response_usage(20, 3, 23, None, None),
+            )
+            .unwrap();
+        let user = client.take_turn_usage().expect("user prompt usage");
+
+        assert_eq!((initial.turn_seq, user.turn_seq), (1, 2));
+        assert_eq!(
+            (initial.turn_input_tokens, user.turn_input_tokens),
+            (Some(10), Some(20))
+        );
+        assert_eq!(
+            (initial.turn_cost_usd, user.turn_cost_usd),
+            (Some(0.1), Some(0.15))
+        );
+    }
+
+    #[tokio::test]
+    async fn goose_usage_stays_exclusive_and_drains_standard_usage() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.goose_usage.begin_turn("goose-session");
+        client.standard_usage.begin_turn("goose-session");
+        client.handle_goose_usage_update(&goose_usage_update_msg("goose-session", 1000, 200, None));
+        client
+            .parse_prompt_response(
+                "goose-session",
+                &prompt_response_usage(100, 20, 120, None, None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("goose usage");
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(
+            usage.turn_input_tokens, None,
+            "goose first delta remains exclusive"
+        );
+        assert!(
+            client.take_turn_usage().is_none(),
+            "standard usage was drained"
+        );
     }
 
     // ── Goose usage notification integration ──────────────────────────────
@@ -4187,8 +4664,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.

@@ -43,6 +43,7 @@ bootstrap:
         cp .env.example .env
         echo "Created .env from .env.example — review it before running just dev."
     fi
+    ./scripts/ensure-local-relay-key.sh .env
 
 # Start Docker services, run migrations, install desktop deps
 setup: bootstrap
@@ -91,8 +92,23 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+# Run repo lint, formatting, and repository policy checks
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+
+# Validate the trusted security-review workflow support and renderer contract.
+security-review-check:
+    node --check .github/scripts/codex-security-review.js
+    node --test .github/scripts/codex-security-review.test.js
+    actionlint .github/workflows/codex-security-review.yml
+
+# Run the repository-wide differential file-size ratchet and its policy tests.
+# The ratchet inspects only files changed from the merge base, so this stays
+# cheap enough to run unconditionally without duplicating path filters.
+file-size-check:
+    node --test scripts/check-file-sizes-core.test.mjs
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
 
 # Format all Rust code
 fmt:
@@ -120,7 +136,7 @@ desktop-check:
 
 # Fix desktop lint and format issues
 desktop-fix:
-    cd {{desktop_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{desktop_dir}} && pnpm exec biome check --write .
 
 # Run desktop TS helper unit tests
 desktop-test:
@@ -155,7 +171,11 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${SIDECARS[@]}"; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
@@ -191,8 +211,13 @@ _ensure-migrations: _ensure-services
     ./scripts/seed-local-community.sh
 
 # Run clippy on the desktop Tauri Rust crate
+# Features are additive, so a single invocation lints only one cfg graph.
+# Both graphs ship (release-windows builds without mesh-llm), so lint both:
+# the default graph covers the `#[cfg(not(feature = "mesh-llm"))]` arms and
+# the feature-enabled graph covers the mesh code.
 desktop-tauri-clippy: _ensure-sidecar-stubs
-    cargo clippy --manifest-path {{desktop_tauri_manifest}} --all-targets -- -D warnings
+    cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets -- -D warnings
+    cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets --features mesh-llm -- -D warnings
 
 # Check the desktop Tauri Rust crate compiles
 desktop-tauri-check: _ensure-sidecar-stubs
@@ -200,31 +225,54 @@ desktop-tauri-check: _ensure-sidecar-stubs
 
 # Run desktop Tauri Rust unit tests
 desktop-tauri-test: _ensure-sidecar-stubs
-    cd desktop/src-tauri && cargo test
+    cd desktop/src-tauri && cargo test --workspace
 
-# Verify compiled-flag behavior under both compile states (clean + internal).
-# Runs the observer_archive focused test twice with independently supplied
-# expected values; build.rs rerun-if-env-changed triggers recompilation.
+# Run the native terminal latency gate explicitly on a known-idle host.
+# This is intentionally excluded from shared CI: scheduler contention makes a
+# wall-clock assertion flaky, and the release profile is the shipped shape.
+desktop-terminal-performance-test:
+    cargo test --manifest-path desktop/src-tauri/crates/buzz-terminal/Cargo.toml --release --test latency g3_renderer_acquire_stays_within_frame_budget -- --ignored --exact --nocapture
+
+# Verify compiled-flag behavior under both compile states (clean + capability set).
+# Runs the auto-connect and owner-only access focused tests twice with
+# independently supplied expected values; build.rs rerun-if-env-changed
+# triggers recompilation.
 desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     cd desktop/src-tauri
     echo "=== Clean build (no flag) → expect false ==="
-    env -u BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT \
-      -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
-      BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=false \
-      cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
     env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
       BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
       cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
+      cargo test --lib
+    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
+      cargo test compiled_policy_matches_expected -- --ignored --nocapture
     echo "=== Internal build (flags set) → expect true ==="
-    BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT=1 \
-      BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=true \
-      cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
     BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
       BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
       cargo test compiled_flag_matches_expected -- --ignored --nocapture
-    echo "Both compiled states verified."
+    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+      cargo test --lib
+    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+      cargo test compiled_policy_matches_expected -- --ignored --nocapture
+    echo "=== Maximum accepted demo name reaches Rust build validation ==="
+    DEMO_CONFIG="$(node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..31})" /dev/null 1234567812345678)"
+    DEMO_SLUG="$(node -e 'console.log(JSON.parse(process.argv[1]).slug)' "$DEMO_CONFIG")"
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" \
+      BUZZ_TEST_EXPECTED_DEMO_SLUG="$DEMO_SLUG" \
+      cargo test compiled_demo_slug_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" cargo test --workspace
+    if node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..32})" /dev/null 1234567812345678; then
+      echo "A 32-character demo name unexpectedly passed JavaScript validation" >&2
+      exit 1
+    fi
+    echo "Both compiled states and the accepted/rejected demo-name boundary verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
@@ -236,11 +284,46 @@ desktop-release-build target="aarch64-apple-darwin":
     mkdir -p desktop/src-tauri/binaries
     touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+    if [[ "$TARGET" != *windows* ]]; then
+        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
+    fi
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+
+# Build an unsigned named macOS demo DMG with isolated app and runtime identities.
+desktop-demo-build demo_name target="aarch64-apple-darwin":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TARGET={{target}}
+    [[ "$(uname -s)" == "Darwin" && "$TARGET" == *-apple-darwin ]] || { echo "Demo DMGs require a macOS Apple target" >&2; exit 2; }
+    CONFIG_PATH="$(mktemp "${TMPDIR:-/tmp}/buzz-demo-config.XXXXXX")"
+    trap 'rm -f "$CONFIG_PATH"' EXIT
+    DEMO_BUILD_ID="$(node -e 'console.log(require("node:crypto").randomBytes(8).toString("hex"))')"
+    DEMO_CONFIG="$(node desktop/scripts/demo-build-config.mjs {{quote(demo_name)}} "$CONFIG_PATH" "$DEMO_BUILD_ID")"
+    read_config() { node -e 'console.log(JSON.parse(process.argv[1])[process.argv[2]])' "$DEMO_CONFIG" "$1"; }
+    PRODUCT_NAME="$(read_config productName)"
+    DMG_VOLUME_NAME="$(read_config dmgVolumeName)"
+    DMG_FILE_STEM="$(read_config dmgFileStem)"
+    DEMO_SLUG="$(read_config slug)"
+    cargo build --release --target "$TARGET" \
+      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
+      -p git-credential-nostr -p buzz-cli
+    ./scripts/bundle-sidecars.sh "$TARGET"
+    pnpm install
+    cd {{desktop_dir}}
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
+    cd ..
+    VERSION="$(node -p "require('./desktop/package.json').version")"
+    DMG_ARCH="${TARGET%%-*}"; [[ "$DMG_ARCH" == "x86_64" ]] && DMG_ARCH=x64
+    APP_PATH="desktop/src-tauri/target/$TARGET/release/bundle/macos/$PRODUCT_NAME.app"
+    PLIST="$APP_PATH/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $PRODUCT_NAME" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName $PRODUCT_NAME" "$PLIST"
+    codesign --force --deep --sign - "$APP_PATH"
+    VOL_NAME="$DMG_VOLUME_NAME" ./desktop/scripts/package-macos-dmg.sh "$APP_PATH" "desktop/src-tauri/target/$TARGET/release/bundle/dmg/${DMG_FILE_STEM}_${VERSION}_${DMG_ARCH}.dmg"
 
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
@@ -256,6 +339,10 @@ desktop-e2e-smoke:
 # Run desktop relay-backed e2e tests
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
+
+# Run the deterministic desktop correctness smoke against an isolated local relay
+desktop-release-smoke:
+    ./scripts/run-desktop-release-smoke.sh
 
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
@@ -274,15 +361,44 @@ test:
 # Run unit tests only (no infra needed)
 test-unit:
     #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        cargo nextest run -p buzz-audit --lib
+        # buzz-auth NIP-FI verifier doctests. The sealed-authority
+        # `compile_fail` doctests prove the default-feature public API alone
+        # cannot forge the issuer→JWKS authority; nextest does not run
+        # doctests, hence this separate step. The verifier's regression suite
+        # lives in the in-crate `#[cfg(test)] mod tests`, so `--lib` above
+        # already runs it.
+        cargo test -p buzz-auth --doc
+        cargo nextest run -p buzz-voice --lib
+        cargo nextest run -p buzz-cli
+        # buzz-sdk builder/validation unit tests: pure event-builder and input
+        # validation (e.g. the canvas writer-discipline/skew guard and the
+        # canvas_write_survived predicate), no infra. `--lib` runs all unit
+        # tests without the rustdoc dependency-resolution flake the full-package
+        # invocation hits. Enumerated explicitly because nothing in CI runs
+        # `cargo test --workspace` — membership buys clippy/check, not tests.
+        cargo nextest run -p buzz-sdk --lib
+        # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
+        # forged relay events cannot regain a path into agent routing unnoticed.
+        cargo nextest run -p buzz-acp
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
-        # They guard the embedded-migrator invariant (exactly the consolidated
-        # 0001; cutover/backfill stays an operator script, not startup state)
-        # and the tenant-scoping lints. The Postgres-backed buzz-db tests are
+        # They guard the embedded-migrator invariant (the complete checked-in
+        # additive migration set; legacy cutover/backfill remains an operator
+        # script, not startup state) and the tenant-scoping lints. The
+        # Postgres-backed buzz-db tests are
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # Storage accounting crosses three crates whose focused regression
+        # suites are otherwise absent from the infra-free unit lane.
+        cargo nextest run -p buzz-media --lib \
+            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
+        cargo nextest run -p buzz-admin \
+            -E 'test(storage_snapshot)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -291,6 +407,121 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        cargo nextest run -p buzz-push-gateway --features personal-dev-app-attest
+        # Kubernetes backend provider: the decision layers (state machine, GC
+        # planner, env precedence, naming, wire) are pure functions with a fake
+        # substrate, so they belong in the unit job. Enumerated explicitly
+        # because nothing in CI runs `cargo test --workspace` — workspace
+        # membership alone buys clippy/check, not a single executed test.
+        cargo nextest run -p buzz-backend-kubernetes
+        # Feature-flag crate coverage: run once with LaunchDarkly enabled.
+        # This includes all default tests plus the cfg(feature="launchdarkly")
+        # tests, avoiding duplicate default-only execution in the unit lane.
+        cargo nextest run -p buzz-feature-flags --features launchdarkly
+        # buzz-agent: two infra-free concerns run together by executing the
+        # whole crate (lib + integration tests), because nothing in CI runs
+        # `cargo test --workspace`, so without this stanza neither the crate's
+        # library tests nor its integration tests execute remotely.
+        #   * model-capabilities corpus (lib): the Rust half of the
+        #     cross-language drift guard. `model_capabilities.rs` embeds
+        #     scripts/model-capabilities.json + scripts/normative-corpus.json via
+        #     include_str! and replays the full locked corpus as pure in-process
+        #     tests; without it a manifest edit that diverges Rust from the
+        #     corpus ships green.
+        #   * OAuth auth coordinator (lib concurrency matrix + databricks
+        #     integration tests): lock single-flight, cooldown, cross-process
+        #     crash recovery — infra-free via a stub OIDC provider and an
+        #     injected browser opener, no network or Postgres.
+        cargo nextest run -p buzz-agent
+        # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
+        # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
+        # the admin.localhost origin/advertisement/canonical-URL pins, and the
+        # host-oracle/credential-first checks. These are the regression guard for
+        # the /api/admin/v1 moderation auth surface. Enumerated explicitly because
+        # nothing in CI runs `cargo test --workspace`, `just test-unit` did not
+        # enumerate `buzz-relay --lib`, and Backend Integration selects only the
+        # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
+        # and a red one could ship green (exactly how a broken admin test slipped
+        # past every gate once). Scoped to api::admin, not the whole buzz-relay
+        # --lib, because api::media has non-ignored tests that require Postgres.
+        # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
+        # lane; the non-ignored ones reject before touching the database. Any
+        # new non-ignored test here must stay DB-free: without a database, a
+        # DB fallthrough only "passes" by waiting out the ~30s sqlx acquire
+        # timeout.
+        # The second clause adds the relay's pure authorization-decision tests:
+        # the NIP-29 channel membership grid (handlers::channel_authz), the
+        # moderation capability grid (handlers::moderation_authz), and the pure
+        # helpers in handlers::side_effects. They ran in NO lane before —
+        # `test(/^api::admin::/)` never matched them, and the PostgreSQL lane
+        # pairs `--run-ignored ignored-only` with a `postgres_tests::`
+        # default-filter — so a red one shipped green, exactly the gap the
+        # api::admin clause above was added to close.
+        # Deliberately scoped to these three modules instead of all of
+        # `handlers::`: the wider set is mostly Postgres-backed, and five of its
+        # non-postgres_tests cases only "pass" without a database by waiting out
+        # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
+        # unit job either. The REQ subscription-lifecycle tests are picked by
+        # exact name for the same reason: the rest of handlers::req needs a DB.
+        # The third clause adds the NIP-FI HTTP ingress and its router/config
+        # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
+        # and the Git transport off_mode_precedence_tests. All are infra-free
+        # and finish in well under a second with no DATABASE_URL, so none wait
+        # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
+        # `tests::` module (JWKS refresh cadence) and `composition_tests::`
+        # (JWKS source + refresh-loop composition), which `--lib` cannot reach
+        # because they live in the binary target; the nested
+        # `tests::postgres_tests::` stays in the PostgreSQL lane.
+        cargo nextest run -p buzz-relay --lib --bin buzz-relay \
+            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
+        # Note on audio::join::tests scope: the full suite is infra-free (no DB,
+        # no Redis). The infra-free audio/FI regression witnesses — bootstrap
+        # ordering barrier, CommitConfirmed arm, pending-close invisibility,
+        # abnormal-stream-close fanout, and never-ready-sink writer witnesses —
+        # are all selected by audio::join::tests and audio::handler::tests.
+        # DB-backed audio join tests use #[ignore] and run in the postgres lane.
+        # NIP-FI (S3) relay witnesses: the wholly-new nip_fi_upgrade module,
+        # the auth metrics contract module, plus the exact NIP-FI tests added,
+        # or whose assertions changed, in mixed modules (audio::room,
+        # connection, handlers::*, state). nip_fi_config and router are
+        # selected whole by the command above. Mixed modules are listed by exact
+        # name so main's unselected tests (several wait out the ~30s sqlx
+        # acquire timeout) stay out. NIP-FI tests that need Postgres live in
+        # postgres_tests and
+        # run in the PostgreSQL lane. Keep scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-relay --lib -E '
+                test(/^nip_fi_upgrade::/)
+                + test(/^metrics::contract_tests::/)
+                + test(=audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative)
+                + test(=connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge)
+                + test(=audio::room::tests::b1_pending_peer_removed_before_commit_emits_no_delta)
+                + test(=audio::room::tests::b2_commit_peer_emits_exactly_one_joined_delta_and_marks_visible)
+                + test(=audio::room::tests::b3_commit_peer_revision_is_monotone_between_concurrent_events)
+                + test(=audio::room::tests::f7a_pending_peer_excluded_from_snapshot_until_committed)
+                + test(=connection::tests::b2_cancelled_connection_event_frame_not_dispatched)
+                + test(=connection::tests::b3_expiry_denial_precedes_close_through_send_loop)
+                + test(=connection::tests::b3_root_pairing_denial_precedes_close_through_send_loop)
+                + test(=connection::tests::cancellation_during_select_with_fi_denial_routes_through_bounded_path)
+                + test(=connection::tests::cancelled_never_ready_sink_with_queued_fi_denial_exits_within_timeout)
+                + test(=connection::tests::deadline_exp_is_earliest_selects_exp)
+                + test(=connection::tests::deadline_max_connection_lifetime_is_earliest_selects_partition)
+                + test(=connection::tests::deadline_no_lifetime_returns_upstream_only)
+                + test(=connection::tests::expiry_notice_queued_on_ctrl_before_cancel)
+                + test(=connection::tests::f3_root_outer_wrapper_delivers_denial_on_bootstrap_cancellation)
+                + test(=connection::tests::f3_root_pre_built_expired_gate_terminates_connection)
+                + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
+                + test(=handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable)
+                + test(=handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected)
+                + test(=handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path)
+                + test(=handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence)
+                + test(=handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack)
+                + test(=handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission)
+                + test(=state::tests::f3_cancellation_during_check_terminates_socket_without_waiting_for_check)
+                + test(=state::tests::on_not_run_runs_once_on_each_deny_arm_and_never_on_admit)'
+        # ACP author-gate and queue tests protect the trust boundary between
+        # relay events and agent prompts. They are infra-free; ignored lifecycle
+        # tests remain excluded and run in their dedicated integration lanes.
+        cargo nextest run -p buzz-acp --lib
     else
         ./scripts/run-tests.sh unit
     fi
@@ -298,6 +529,15 @@ test-unit:
 # Run integration tests only (starts services if needed)
 test-integration:
     ./scripts/run-tests.sh integration
+
+# Regenerate the model-capability normative corpus from the production Rust
+# resolver. The corpus is a golden snapshot, never hand-edited: this runs the
+# `#[ignore]`d writer test in buzz-agent, which serializes `resolve()` over the
+# inputs-only question table to scripts/normative-corpus.json. Run this after
+# any model-capabilities.json edit, then commit the regenerated file. The
+# `corpus_matches_generated_snapshot` gate fails CI if the committed file drifts.
+regen-model-corpus:
+    cargo test -p buzz-agent --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
 
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.
@@ -327,26 +567,23 @@ mesh-dev-fresh:
 mesh-e2e-hardware:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    cargo run -p buzz-relay --example mesh_serve_client_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_serve_client_smoke
 
 # Three isolated node processes: trusted member joins and infers; stranger is rejected.
 # Uses temp homes and explicit mesh owner keystores. Never reads the Buzz Keychain.
 mesh-e2e-admission:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    cargo run -p buzz-relay --example mesh_admission_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_admission_smoke
 
 # Full hardware confidence suite: routing, owner admission, and real agent inference.
 mesh-e2e-confidence:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo build --release -p buzz-agent -p buzz-dev-mcp
-    cargo run -p buzz-relay --example mesh_serve_client_smoke
-    cargo run -p buzz-relay --example mesh_admission_smoke
-    cargo run -p buzz-relay --example mesh_agent_e2e
+    cargo run -p buzz-mesh-smoke --example mesh_serve_client_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_admission_smoke
+    cargo run -p buzz-mesh-smoke --example mesh_agent_e2e
 
 # Take desktop screenshots using the mock bridge
 desktop-screenshot *ARGS:
@@ -368,43 +605,67 @@ relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay
+
+# Post one root + N replies (and a few reactions) to the local dev relay, for eyeballing long threads
+seed-long-thread replies="187":
+    ./scripts/seed-long-thread.sh {{replies}}
 
 # Start the relay with the built web UI served from it
 relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
 
-# Build and run the private read-only admin dashboard
+# Build and run the private admin dashboard
 admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
     export BUZZ_ADMIN_WEB_DIR="${BUZZ_ADMIN_WEB_DIR:-{{justfile_directory()}}/admin-web/dist}"
+    # Default to disabled auth locally: localhost is the network boundary and a
+    # NIP-07 signer extension can't be assumed in dev. Override per run with
+    # BUZZ_ADMIN_AUTH=nip98 (plus RELAY_OPERATOR_PUBKEYS or RELAY_OWNER_PUBKEY)
+    # to exercise the authenticated path.
+    export BUZZ_ADMIN_AUTH="${BUZZ_ADMIN_AUTH:-disabled}"
     echo "Admin dashboard: http://${BUZZ_ADMIN_HOST}/reports"
+    echo "Auth mode: ${BUZZ_ADMIN_AUTH} (set BUZZ_ADMIN_AUTH=nip98 to require a signed operator)"
     cargo run -p buzz-relay
 
 # Seed deterministic reports and product feedback for local admin dashboard review
 admin-seed: _ensure-migrations
     ./scripts/seed-admin-dashboard.sh
 
-# Run focused relay and browser checks for the read-only admin dashboard
+# Run focused relay and browser checks for the admin dashboard
 admin-check: fmt-check
     cargo check -p buzz-relay --all-targets
     cargo test -p buzz-relay api::admin
     cargo test -p buzz-relay router::tests
     pnpm -C admin-web check
-    pnpm -C admin-web exec playwright test
+    pnpm -C admin-web test:e2e
 
 # Start the relay server in release mode
-relay-release: _ensure-migrations
+relay-release: bootstrap _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay --release
 
 
@@ -413,6 +674,9 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
     health_port="${BUZZ_HEALTH_PORT:-8080}"
@@ -428,10 +692,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
             fi
         done
     fi
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
-    if [[ -n "{{mesh}}" ]]; then
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    fi
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
     # Docker Desktop's forwarded MinIO port can stall under the deployment
     # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
     # the bounded profile already used by the relay test launcher.
@@ -475,10 +736,10 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
         cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
@@ -496,7 +757,11 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     fi
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
-    pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+    fi
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs
@@ -504,19 +769,27 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     pnpm install  # unconditional: staging must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
+    # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
+    # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
+    # exe dir for executable buzz-backend-* files, so the non-executable stub that
+    # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    STAGING_SIDECARS=(buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        STAGING_SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${STAGING_SIDECARS[@]}"; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
     cd {{desktop_dir}}
-    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    export BUZZ_RELAY_URL="wss://buzz.test.blockstaging.build"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
@@ -531,17 +804,25 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     pnpm install  # unconditional: production must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
+    # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
+    # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
+    # exe dir for executable buzz-backend-* files, so the non-executable stub that
+    # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    PRODUCTION_SIDECARS=(buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        PRODUCTION_SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${PRODUCTION_SIDECARS[@]}"; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
     source ../scripts/instance-env.sh
@@ -582,7 +863,7 @@ web-check:
 
 # Fix web lint and format issues
 web-fix:
-    cd {{web_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{web_dir}} && pnpm exec biome check --write .
 
 # Run web TypeScript checks
 web-typecheck:
@@ -614,16 +895,31 @@ mobile-fix:
 
 # Run mobile lint and format checks
 mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
 
 # Run mobile tests
 mobile-test:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
+    /bin/bash ./scripts/test-mobile-gateway-recipes.sh
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test test/shared/push/push_unconfigured_build_test.dart
+
+# Regenerate the emoji dataset asset from desktop's emoji-mart install.
+# Output is committed — rerun after bumping @emoji-mart/data.
+mobile-emoji-data:
+    node {{mobile_dir}}/scripts/generate-emoji-data.mjs
 
 # Compile an unsigned Android debug APK (worktree-aware debug identity)
 mobile-build-android:
+    #!/usr/bin/env bash
+    set -euo pipefail
     ./scripts/mobile-worktree-overrides.sh
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
+    set -- build apk --debug --no-pub
+    if [[ -n "${BUZZ_PUSH_GATEWAY_URL:-}" ]]; then
+        set -- "$@" --dart-define="BUZZ_PUSH_GATEWAY_URL=${BUZZ_PUSH_GATEWAY_URL}"
+    fi
+    unset GIT_DIR GIT_WORK_TREE
+    cd {{mobile_dir}}
+    flutter "$@"
 
 # Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
@@ -634,9 +930,18 @@ mobile-dev:
         sleep 3
     fi
     ./scripts/mobile-worktree-overrides.sh
+    gateway_url="${BUZZ_PUSH_GATEWAY_URL:-}"
+    overrides_file="{{mobile_dir}}/ios/Flutter/AppOverrides.xcconfig"
+    if [[ -z "$gateway_url" && -f "$overrides_file" ]]; then
+        gateway_url="$(sed -nE 's/^[[:space:]]*BUZZ_PUSH_GATEWAY_URL[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' "$overrides_file" | tail -n 1 | sed 's/\$()//g')"
+    fi
+    set -- run
+    if [[ -n "$gateway_url" ]]; then
+        set -- "$@" --dart-define="BUZZ_PUSH_GATEWAY_URL=${gateway_url}"
+    fi
     cd {{mobile_dir}}
     unset GIT_DIR GIT_WORK_TREE
-    flutter run
+    flutter "$@"
 
 # Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
 mobile-clean:
@@ -719,7 +1024,7 @@ bump-relay-version version:
     cargo update -p buzz-relay
     echo "Bumped buzz-relay to {{ version }} and regenerated Cargo.lock"
 
-# Open or update the desktop release PR (signed desktop app)
+# Open or update the desktop release PR from an immutable origin/main snapshot
 release-desktop *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -729,7 +1034,7 @@ release-desktop *ARGS:
     else
         VERSION="$ARG"
     fi
-    just _release-pr desktop "$VERSION"
+    scripts/prepare-desktop-release.sh "$VERSION"
 
 # Open or update the relay release PR (ghcr.io/block/buzz image)
 release-relay *ARGS:
@@ -915,13 +1220,38 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
 
 # ─── Benchmarking ─────────────────────────────────────────────────────────────
 
-# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+# Run the Buzz orchestra benchmark — TB defaults to leaderboard-eligible k=5; Buzz task layers default to regression k=1 and workflow k=3. Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --layer, --include-task, --attempts, --manifest, --dry-run, ...)
 benchmark *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Run the benchmark adapter + testbed gate exactly as CI does (pytest + ruff, pinned ruff from pyproject)
+benchmark-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
+    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
+    # which ruff lints. Read the pin from there so this recipe cannot drift
+    # from the workflow (a floating specifier once meant CI failed on RUF100
+    # while the locked local ruff passed).
+    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
+    for project in . testbed; do
+        (
+            cd "$project"
+            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
+            uv run --frozen pytest -q
+            uvx "ruff@$ruff_pin" check .
+            uvx "ruff@$ruff_pin" format --check .
+        )
+    done
+    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
+    # need the harness config passed explicitly to stay linted.
+    echo "── buzz-dataset (ruff $ruff_pin)"
+    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
+    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:

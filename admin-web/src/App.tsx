@@ -6,9 +6,17 @@ import {
   useMemo,
   useState,
 } from "react";
-import { ApiFailure, request } from "./api";
+import {
+  type AuthMode,
+  ApiFailure,
+  mutate,
+  probeAuthMode,
+  request,
+  requestObjectUrl,
+} from "./api";
 import type {
   FeedbackDetail,
+  FeedbackStatus,
   FeedbackSummary,
   Report,
   ReportDetail as ReportDetailData,
@@ -85,9 +93,9 @@ function StateView<T>({
   return resource.data ? children(resource.data) : null;
 }
 
-function Reports() {
+function Reports({ authMode }: { authMode: AuthMode }) {
   const resource = useResource(
-    () => request<Report[]>("/reports?status=open&limit=100"),
+    () => request<Report[]>("/reports?status=open&limit=100", authMode),
     "reports",
   );
   return (
@@ -135,9 +143,9 @@ function Reports() {
   );
 }
 
-function ReportDetail({ id }: { id: string }) {
+function ReportDetail({ id, authMode }: { id: string; authMode: AuthMode }) {
   const resource = useResource(
-    () => request<ReportDetailData>(`/reports/${id}`),
+    () => request<ReportDetailData>(`/reports/${id}`, authMode),
     id,
   );
   return (
@@ -210,28 +218,29 @@ function ReportDetail({ id }: { id: string }) {
   );
 }
 
-function FeedbackList() {
+function FeedbackList({ authMode }: { authMode: AuthMode }) {
   const resource = useResource(
-    () => request<FeedbackSummary[]>("/feedback"),
+    () => request<FeedbackSummary[]>("/feedback", authMode),
     "feedback",
   );
   const [query, setQuery] = useState("");
   const [community, setCommunity] = useState("all");
   const [timeRange, setTimeRange] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [statuses, setStatuses] = useState(loadFeedbackStatuses);
+  // Successful PATCH responses override the server-loaded status so the row
+  // reflects the new value without a full refetch. Keyed by feedback id.
+  const [overrides, setOverrides] = useState<Record<string, FeedbackStatus>>(
+    {},
+  );
 
-  const updateStatus = (id: string, event: ChangeEvent<HTMLInputElement>) => {
-    const checked = event.target.checked;
-    setStatuses((current) => {
-      const next = {
-        ...current,
-        [id]: checked,
-      };
-      saveFeedbackStatuses(next);
-      return next;
-    });
-  };
+  // Mutations require a named principal; disabled mode's server rejects them
+  // (probe reports canAct: false), so the write control is hidden there rather
+  // than offering an action that can only fail.
+  const canWrite = authMode === "nip98";
+
+  const applyStatus = useCallback((id: string, status: FeedbackStatus) => {
+    setOverrides((current) => ({ ...current, [id]: status }));
+  }, []);
 
   return (
     <Page
@@ -249,7 +258,7 @@ function FeedbackList() {
               community={community}
               timeRange={timeRange}
               statusFilter={statusFilter}
-              statuses={statuses}
+              overrides={overrides}
             >
               {({ communities, filtered }) => (
                 <>
@@ -301,8 +310,9 @@ function FeedbackList() {
                         }
                       >
                         <option value="all">Any status</option>
-                        <option value="pending">Needs action</option>
-                        <option value="acted-on">Acted on</option>
+                        <option value="new">New</option>
+                        <option value="reviewed">Reviewed</option>
+                        <option value="archived">Archived</option>
                       </select>
                     </label>
                   </div>
@@ -327,22 +337,18 @@ function FeedbackList() {
                               <CategoryTag category={item.category} />
                               <strong>{item.bodySummary}</strong>
                               <span className="record-provenance">
-                                {item.communityHost}
+                                <Provenance host={item.communityHost} />
                                 <code>{short(item.submitterPubkey)}</code>
                               </span>
                             </div>
                           </Link>
-                          <label className="feedback-status">
-                            <input
-                              type="checkbox"
-                              checked={statuses[item.id] ?? false}
-                              onChange={(event) => updateStatus(item.id, event)}
-                            />
-                            Acted on
-                            <span className="visually-hidden">
-                              feedback from {item.communityHost}
-                            </span>
-                          </label>
+                          <FeedbackStatusControl
+                            id={item.id}
+                            status={overrides[item.id] ?? item.status}
+                            authMode={authMode}
+                            canWrite={canWrite}
+                            onApplied={applyStatus}
+                          />
                           <div className="record-date">
                             <span>Received</span>
                             <time>{date(item.receivedAt)}</time>
@@ -352,7 +358,7 @@ function FeedbackList() {
                             className="record-open-link"
                           >
                             <span className="visually-hidden">
-                              Open feedback from {item.communityHost}
+                              Open feedback from {hostLabel(item.communityHost)}
                             </span>
                             <ArrowIcon />
                           </Link>
@@ -372,13 +378,101 @@ function FeedbackList() {
   );
 }
 
+const STATUS_LABELS: Record<FeedbackStatus, string> = {
+  new: "New",
+  reviewed: "Reviewed",
+  archived: "Archived",
+};
+
+const STATUS_OPTIONS: FeedbackStatus[] = ["new", "reviewed", "archived"];
+
+/// The per-row lifecycle control. In writable mode it PATCHes the relay and
+/// adopts the status from the PATCH response (never optimistically — a failed
+/// write leaves the prior status and surfaces an error). In read-only mode it
+/// shows the authoritative status as a static badge, since disabled-mode
+/// mutations are rejected server-side.
+function FeedbackStatusControl({
+  id,
+  status,
+  authMode,
+  canWrite,
+  onApplied,
+}: {
+  id: string;
+  status: FeedbackStatus;
+  authMode: AuthMode;
+  canWrite: boolean;
+  onApplied: (id: string, status: FeedbackStatus) => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(false);
+
+  if (!canWrite) {
+    return (
+      <span className="feedback-status">
+        <span className={`status status-${status}`}>
+          {STATUS_LABELS[status]}
+        </span>
+      </span>
+    );
+  }
+
+  const onChange = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const next = event.target.value as FeedbackStatus;
+    setPending(true);
+    setError(false);
+    try {
+      const updated = await mutate<{ status: FeedbackStatus }>(
+        `/feedback/${encodeURIComponent(id)}`,
+        "PATCH",
+        { status: next },
+        authMode,
+      );
+      onApplied(id, updated.status);
+    } catch {
+      setError(true);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <label className="feedback-status">
+      <span className="visually-hidden">Status</span>
+      <select value={status} onChange={onChange} disabled={pending}>
+        {STATUS_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {STATUS_LABELS[option]}
+          </option>
+        ))}
+      </select>
+      {error ? (
+        <span className="status-error" role="alert">
+          Update failed
+        </span>
+      ) : null}
+    </label>
+  );
+}
+
+/// Feedback whose source community was purged carries no host. Render an
+/// explicit provenance-unavailable marker rather than an empty slot.
+function Provenance({ host }: { host: string | null }) {
+  if (host) return host;
+  return <span className="provenance-unavailable">Community unavailable</span>;
+}
+
+function hostLabel(host: string | null): string {
+  return host ?? "an unavailable community";
+}
+
 function FeedbackResults({
   items,
   query,
   community,
   timeRange,
   statusFilter,
-  statuses,
+  overrides,
   children,
 }: {
   items: FeedbackSummary[];
@@ -386,7 +480,7 @@ function FeedbackResults({
   community: string;
   timeRange: string;
   statusFilter: string;
-  statuses: FeedbackStatuses;
+  overrides: Record<string, FeedbackStatus>;
   children: (results: {
     communities: string[];
     filtered: FeedbackSummary[];
@@ -394,14 +488,14 @@ function FeedbackResults({
 }) {
   const results = useMemo(() => {
     const communities = [...new Set(items.map((item) => item.communityHost))]
-      .filter(Boolean)
+      .filter((host): host is string => Boolean(host))
       .sort((left, right) => left.localeCompare(right));
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const after = timeRangeStart(timeRange);
     const filtered = items.filter((item) => {
+      const status = overrides[item.id] ?? item.status;
       if (community !== "all" && item.communityHost !== community) return false;
-      if (statusFilter === "pending" && statuses[item.id]) return false;
-      if (statusFilter === "acted-on" && !statuses[item.id]) return false;
+      if (statusFilter !== "all" && status !== statusFilter) return false;
       if (after !== undefined) {
         const receivedAt = new Date(item.receivedAt).valueOf();
         if (Number.isNaN(receivedAt) || receivedAt < after) return false;
@@ -409,19 +503,25 @@ function FeedbackResults({
       if (!normalizedQuery) return true;
       return [
         item.bodySummary,
-        item.communityHost,
+        item.communityHost ?? "",
         item.category ?? "uncategorized",
         item.submitterPubkey,
       ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
     });
     return { communities, filtered };
-  }, [items, query, community, timeRange, statusFilter, statuses]);
+  }, [items, query, community, timeRange, statusFilter, overrides]);
   return children(results);
 }
 
-function FeedbackDetailView({ id }: { id: string }) {
+function FeedbackDetailView({
+  id,
+  authMode,
+}: {
+  id: string;
+  authMode: AuthMode;
+}) {
   const resource = useResource(
-    () => request<FeedbackDetail>(`/feedback/${id}`),
+    () => request<FeedbackDetail>(`/feedback/${id}`, authMode),
     id,
   );
   return (
@@ -434,11 +534,16 @@ function FeedbackDetailView({ id }: { id: string }) {
     >
       <StateView resource={resource}>
         {(feedback) => {
-          const attachments = feedbackAttachments(
-            feedback.id,
-            feedback.tags,
-            feedback.communityHost,
-          );
+          // Without an authoritative host we cannot validate attachment URLs or
+          // derive their fetch paths safely, so we render none and mark the
+          // provenance unavailable rather than guessing an origin.
+          const attachments = feedback.communityHost
+            ? feedbackAttachments(
+                feedback.id,
+                feedback.tags,
+                feedback.communityHost,
+              )
+            : [];
           const body = stripAttachmentMarkdown(feedback.body, attachments);
           return (
             <article className="detail">
@@ -448,7 +553,9 @@ function FeedbackDetailView({ id }: { id: string }) {
                 </span>
                 <div>
                   <CategoryTag category={feedback.category} />
-                  <h2>{feedback.communityHost}</h2>
+                  <h2>
+                    <Provenance host={feedback.communityHost} />
+                  </h2>
                 </div>
               </div>
               <dl>
@@ -460,8 +567,9 @@ function FeedbackDetailView({ id }: { id: string }) {
                     <dd className="attachments">
                       {attachments.map((attachment) => (
                         <Attachment
-                          key={`${attachment.hash}-${attachment.url}`}
+                          key={`${attachment.hash}-${attachment.path}`}
                           attachment={attachment}
+                          authMode={authMode}
                         />
                       ))}
                     </dd>
@@ -488,35 +596,14 @@ function FeedbackDetailView({ id }: { id: string }) {
   );
 }
 
-type FeedbackStatuses = Record<string, boolean>;
-
 interface FeedbackAttachment {
-  url: string;
+  path: string;
   sourceUrl: string;
   mimeType: string;
   hash: string;
   size?: number;
   dimensions?: string;
   filename?: string;
-}
-
-const FEEDBACK_STATUS_KEY = "buzz-admin-feedback-status";
-
-function loadFeedbackStatuses(): FeedbackStatuses {
-  try {
-    const stored = localStorage.getItem(FEEDBACK_STATUS_KEY);
-    return stored ? (JSON.parse(stored) as FeedbackStatuses) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveFeedbackStatuses(statuses: FeedbackStatuses) {
-  try {
-    localStorage.setItem(FEEDBACK_STATUS_KEY, JSON.stringify(statuses));
-  } catch {
-    // The controls remain useful for the current session if storage is blocked.
-  }
 }
 
 function timeRangeStart(range: string) {
@@ -551,7 +638,7 @@ function feedbackAttachments(
     const parsedSize = Number(values.get("size"));
     return [
       {
-        url: `/api/admin/v1/feedback/${encodeURIComponent(feedbackId)}/attachments/${hash}`,
+        path: `/feedback/${encodeURIComponent(feedbackId)}/attachments/${hash}`,
         sourceUrl: safeUrl,
         mimeType,
         hash,
@@ -595,8 +682,17 @@ function stripAttachmentMarkdown(
     .trim();
 }
 
-function Attachment({ attachment }: { attachment: FeedbackAttachment }) {
-  const url = attachment.url;
+function Attachment({
+  attachment,
+  authMode,
+}: {
+  attachment: FeedbackAttachment;
+  authMode: AuthMode;
+}) {
+  const [objectUrl, setObjectUrl] = useState<string>();
+  const [objectType, setObjectType] = useState<string>();
+  const [failed, setFailed] = useState(false);
+  const path = attachment.path;
   const name =
     attachment.filename ?? `attachment-${attachment.hash.slice(0, 8)}`;
   const metadata = [
@@ -607,33 +703,74 @@ function Attachment({ attachment }: { attachment: FeedbackAttachment }) {
     .filter(Boolean)
     .join(" · ");
 
-  if (attachment.mimeType.startsWith("image/")) {
+  useEffect(() => {
+    // The API requires an Authorization header, so the bytes are fetched here
+    // and handed to the DOM as an object URL revoked on replacement/unmount.
+    let url: string | undefined;
+    let active = true;
+    setObjectUrl(undefined);
+    setObjectType(undefined);
+    setFailed(false);
+    requestObjectUrl(path, authMode)
+      .then((created) => {
+        if (!active) {
+          URL.revokeObjectURL(created.url);
+          return;
+        }
+        url = created.url;
+        setObjectUrl(created.url);
+        setObjectType(created.type);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [path, authMode]);
+
+  const detail = failed ? "Could not load attachment" : metadata;
+
+  // Inline rendering is gated on the server-VERIFIED blob type, never the
+  // reporter-supplied `attachment.mimeType`: the relay only labels sniffed
+  // passive raster images as `image/*` and forces everything else to
+  // `application/octet-stream`, so a hostile payload can never render inline.
+  if (objectUrl && objectType?.startsWith("image/")) {
     return (
       <figure className="image-attachment">
-        <a href={url} target="_blank" rel="noreferrer">
-          <img src={url} alt={name} loading="lazy" />
+        <a href={objectUrl} target="_blank" rel="noreferrer">
+          <img src={objectUrl} alt={name} />
         </a>
         <figcaption>
           <span>{name}</span>
-          <small>{metadata}</small>
+          <small>{detail}</small>
         </figcaption>
       </figure>
     );
   }
 
-  return (
-    <a
-      className="file-attachment"
-      href={url}
-      target="_blank"
-      rel="noreferrer"
-      download={name}
-    >
+  const label = (
+    <>
       <FileIcon />
       <span>
         <strong>{name}</strong>
-        <small>{metadata}</small>
+        <small>{detail}</small>
       </span>
+    </>
+  );
+
+  // Until the bytes are fetched there is nothing a link could point at: the
+  // API path itself would open unauthenticated in a new tab.
+  if (!objectUrl) return <div className="file-attachment">{label}</div>;
+
+  // Non-image (or not-yet-typed) payloads are download-only. The object URL
+  // already wraps `application/octet-stream` bytes, and the `download`
+  // attribute with no `target="_blank"` means clicking saves the file rather
+  // than navigating to a typed document on the admin origin.
+  return (
+    <a className="file-attachment" href={objectUrl} download={name}>
+      {label}
       <ArrowIcon />
     </a>
   );
@@ -797,18 +934,72 @@ function ArrowIcon() {
   );
 }
 
+/// Shown in nip98 mode when no NIP-07 extension is available. Instructs the
+/// operator to install nos2x or Alby before continuing.
+function Nip07Screen() {
+  return (
+    <div className="app">
+      <div className="state auth-prompt">
+        <h2>Nostr extension required</h2>
+        <p>
+          This relay uses NIP-98 HTTP Auth. Install a NIP-07 browser extension
+          such as{" "}
+          <a
+            href="https://github.com/fiatjaf/nos2x"
+            target="_blank"
+            rel="noreferrer"
+          >
+            nos2x
+          </a>{" "}
+          or{" "}
+          <a href="https://getalby.com" target="_blank" rel="noreferrer">
+            Alby
+          </a>
+          , then reload this page. Your Nostr key will be used to sign each
+          request.
+        </p>
+        <button type="button" onClick={() => location.reload()}>
+          Reload
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const { path } = usePath();
+
+  // Probe the relay once to discover the auth mode. `null` means the probe is
+  // still in flight. Once resolved, the mode is stable for the session.
+  const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  useEffect(() => {
+    let active = true;
+    probeAuthMode().then((mode) => {
+      if (active) setAuthMode(mode);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const report = path.match(/^\/reports\/([^/]+)$/);
   const feedback = path.match(/^\/feedback\/([^/]+)$/);
+
+  // Probe still in flight — render nothing to avoid a visible flash.
+  if (authMode === null) return null;
+
+  // NIP-98 mode: require a NIP-07 extension.
+  if (authMode === "nip98" && !(window as Window & { nostr?: unknown }).nostr)
+    return <Nip07Screen />;
+
   const content = report ? (
-    <ReportDetail id={report[1]} />
+    <ReportDetail id={report[1]} authMode={authMode} />
   ) : feedback ? (
-    <FeedbackDetailView id={feedback[1]} />
+    <FeedbackDetailView id={feedback[1]} authMode={authMode} />
   ) : path === "/feedback" ? (
-    <FeedbackList />
+    <FeedbackList authMode={authMode} />
   ) : (
-    <Reports />
+    <Reports authMode={authMode} />
   );
   return (
     <div className="app">

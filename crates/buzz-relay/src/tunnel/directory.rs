@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use buzz_core::CommunityId;
 use buzz_relay_mesh::{FencedHeader, MeshError, Profile, RuntimeId};
-use redis::Script;
 use uuid::Uuid;
 
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
+/// Bound on one Redis pool checkout (wait, create, or recycle).
+pub(crate) const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const ACQUIRE_SCRIPT: &str = r#"
 local lease_key = KEYS[1]
@@ -73,6 +74,20 @@ end
 return {'lost', current, redis.call('GET', generation_key) or current_generation or ''}
 "#;
 
+/// Build a one-round-trip `EVAL` of `script`.
+///
+/// `redis::Script` retries a cache miss as `EVALSHA` → `SCRIPT LOAD` →
+/// `EVALSHA`; plain `EVAL` keeps every script call to a single driver
+/// response timeout, which the session-permit worst case counts on.
+fn eval(script: &str, keys: &SessionKeys) -> redis::Cmd {
+    let mut cmd = redis::cmd("EVAL");
+    cmd.arg(script)
+        .arg(2)
+        .arg(&keys.lease)
+        .arg(&keys.generation);
+    cmd
+}
+
 const VALIDATE_SCRIPT: &str = r#"
 local lease_key = KEYS[1]
 local generation_key = KEYS[2]
@@ -87,6 +102,7 @@ return {current, known_generation}
 pub struct SessionDirectory {
     pool: deadpool_redis::Pool,
     lease_ttl: Duration,
+    db: Option<buzz_db::Db>,
 }
 
 /// Active session ownership lease read from Redis.
@@ -179,6 +195,9 @@ pub enum DirectoryError {
     /// Lease TTL cannot be represented in Redis milliseconds.
     #[error("lease ttl must be at least 1ms and fit in i64 milliseconds")]
     InvalidLeaseTtl,
+    /// Durable community deletion fence rejected a Redis mutation.
+    #[error("community write fenced: {0}")]
+    CommunityWriteFenced(String),
 }
 
 impl SessionDirectory {
@@ -187,9 +206,52 @@ impl SessionDirectory {
         Self::with_lease_ttl(pool, DEFAULT_LEASE_TTL)
     }
 
+    /// Create a serving directory whose Redis mutations use durable,
+    /// heartbeat-backed community write leases.
+    pub fn with_db(pool: deadpool_redis::Pool, db: buzz_db::Db) -> Self {
+        Self {
+            pool,
+            lease_ttl: DEFAULT_LEASE_TTL,
+            db: Some(db),
+        }
+    }
+
     /// Create a directory backed by `pool` with an explicit lease TTL.
     pub fn with_lease_ttl(pool: deadpool_redis::Pool, lease_ttl: Duration) -> Self {
-        Self { pool, lease_ttl }
+        Self {
+            pool,
+            lease_ttl,
+            db: None,
+        }
+    }
+
+    /// Check out a Redis connection within [`POOL_CHECKOUT_TIMEOUT`] in total.
+    ///
+    /// Callers may hold a session effect permit, so an exhausted or unhealthy
+    /// pool must end as an ordinary error rather than an indefinite wait. One
+    /// outer deadline covers the permit wait, creation, and deadpool's
+    /// retry-on-failed-recycle loop, which per-stage `Timeouts` would each reset.
+    /// Dropping `get()` is safe: deadpool 0.13 returns the permit and detaches
+    /// any half-recycled or half-created object.
+    async fn connection(&self) -> Result<deadpool_redis::Connection, deadpool_redis::PoolError> {
+        tokio::time::timeout(POOL_CHECKOUT_TIMEOUT, self.pool.get())
+            .await
+            .unwrap_or(Err(deadpool_redis::PoolError::Timeout(
+                deadpool_redis::TimeoutType::Wait,
+            )))
+    }
+
+    async fn begin_serving_write(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Option<buzz_deletion::ServingWriteGuard>, DirectoryError> {
+        match &self.db {
+            Some(db) => buzz_deletion::acquire_serving_write(db, community_id, "session_directory")
+                .await
+                .map(Some)
+                .map_err(|error| DirectoryError::CommunityWriteFenced(error.to_string())),
+            None => Ok(None),
+        }
     }
 
     /// Attempt to create/take over the session lease.
@@ -204,23 +266,83 @@ impl SessionDirectory {
         owner_runtime_id: RuntimeId,
         profile: Profile,
     ) -> Result<AcquireResult, DirectoryError> {
+        let serving_write = self.begin_serving_write(community_id).await?;
         let keys = SessionKeys::new(community_id, session_id);
         let ttl_ms = ttl_ms(self.lease_ttl)?;
-        let mut conn = self.pool.get().await?;
-        let (status, value, _known_generation): (String, String, String) =
-            Script::new(ACQUIRE_SCRIPT)
-                .key(&keys.lease)
-                .key(&keys.generation)
+        let mut conn = self.connection().await?;
+        let mutation = async {
+            let reply = eval(ACQUIRE_SCRIPT, &keys)
                 .arg(owner_runtime_id.to_hex())
                 .arg(profile.as_wire_str())
                 .arg(ttl_ms)
-                .invoke_async(&mut *conn)
-                .await?;
+                .query_async::<(String, String, String)>(&mut *conn)
+                .await;
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::after_directory_cas(community_id).await;
+            reply
+        };
+        let (reply, verified) = match &serving_write {
+            Some(guard) => guard
+                .protect_landed(mutation)
+                .await
+                .map_err(|error| DirectoryError::CommunityWriteFenced(error.to_string()))?,
+            None => (mutation.await, Ok(())),
+        };
+        let (status, value, _known_generation) = reply?;
         let lease = parse_lease(community_id, session_id, &value)?;
+        if let Err(error) = verified {
+            // The CAS landed but its fence proof lapsed before it was confirmed:
+            // the caller gets the fenced outcome and no usable lease, so the
+            // lease this call minted must not outlive it.
+            if status == "acquired" {
+                self.discard_unverified(&mut conn, &keys, &lease).await;
+            }
+            return Err(DirectoryError::CommunityWriteFenced(error.to_string()));
+        }
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::after_directory_acquire(community_id).await;
+        if let Some(guard) = serving_write {
+            // The Redis write already landed under a verified fence, so failing
+            // to delete the bookkeeping row must not drop the lease handle: the
+            // caller owns and releases it. A row left behind self-expires.
+            if let Err(error) = guard.finish().await {
+                tracing::warn!(%community_id, %session_id, "serving write lease release failed after acquire: {error}");
+            }
+        }
         match status.as_str() {
             "acquired" => Ok(AcquireResult::Acquired(lease)),
             "exists" => Ok(AcquireResult::Exists(lease)),
             _ => Err(DirectoryError::UnexpectedScriptStatus { status }),
+        }
+    }
+
+    /// Delete a lease this process minted but could not confirm under its
+    /// fence, matching the exact owner and generation.
+    ///
+    /// It takes no serving-write lease, so it still runs while the community
+    /// is quiescing, fenced, or its database is unreachable. That is safe
+    /// because it only removes the key this call itself wrote: a generation is
+    /// minted once, so it can never match another owner's lease, and a delete
+    /// cannot recreate state a deletion drain has already purged. On failure
+    /// the key expires with its TTL.
+    async fn discard_unverified(
+        &self,
+        conn: &mut deadpool_redis::Connection,
+        keys: &SessionKeys,
+        lease: &SessionLease,
+    ) {
+        let discarded = eval(RELEASE_SCRIPT, keys)
+            .arg(lease.owner_runtime_id.to_hex())
+            .arg(lease.generation)
+            .query_async::<(String, String, String)>(&mut **conn)
+            .await;
+        if let Err(error) = discarded {
+            tracing::warn!(
+                community_id = %lease.community_id,
+                session_id = %lease.session_id,
+                generation = lease.generation,
+                "unverified session lease discard failed; it expires with its TTL: {error}"
+            );
         }
     }
 
@@ -244,18 +366,32 @@ impl SessionDirectory {
     /// Renew a lease only if the current Redis value exactly matches the
     /// caller's owner runtime and generation.
     pub async fn renew(&self, lease: &SessionLease) -> Result<RenewResult, DirectoryError> {
+        let serving_write = self.begin_serving_write(lease.community_id).await?;
         let keys = SessionKeys::new(lease.community_id, lease.session_id);
         let ttl_ms = ttl_ms(self.lease_ttl)?;
-        let mut conn = self.pool.get().await?;
-        let (status, value, known_generation): (String, String, String) = Script::new(RENEW_SCRIPT)
-            .key(&keys.lease)
-            .key(&keys.generation)
-            .arg(lease.owner_runtime_id.to_hex())
-            .arg(lease.generation)
-            .arg(ttl_ms)
-            .invoke_async(&mut *conn)
-            .await?;
+        let mut conn = self.connection().await?;
+        let mutation = async {
+            eval(RENEW_SCRIPT, &keys)
+                .arg(lease.owner_runtime_id.to_hex())
+                .arg(lease.generation)
+                .arg(ttl_ms)
+                .query_async(&mut *conn)
+                .await
+        };
+        let (status, value, known_generation): (String, String, String) = match &serving_write {
+            Some(guard) => guard
+                .protect(mutation)
+                .await
+                .map_err(|error| DirectoryError::CommunityWriteFenced(error.to_string()))??,
+            None => mutation.await?,
+        };
         let current = parse_optional_lease(lease.community_id, lease.session_id, &value)?;
+        if let Some(guard) = serving_write {
+            guard
+                .finish()
+                .await
+                .map_err(|error| DirectoryError::CommunityWriteFenced(error.to_string()))?;
+        }
         match status.as_str() {
             "renewed" => Ok(RenewResult::Renewed(
                 current.expect("renewed returns lease"),
@@ -275,17 +411,30 @@ impl SessionDirectory {
     /// Release a lease only if the current Redis value exactly matches the
     /// caller's owner runtime and generation.
     pub async fn release(&self, lease: &SessionLease) -> Result<ReleaseResult, DirectoryError> {
+        let serving_write = self.begin_serving_write(lease.community_id).await?;
         let keys = SessionKeys::new(lease.community_id, lease.session_id);
-        let mut conn = self.pool.get().await?;
-        let (status, value, known_generation): (String, String, String) =
-            Script::new(RELEASE_SCRIPT)
-                .key(&keys.lease)
-                .key(&keys.generation)
+        let mut conn = self.connection().await?;
+        let mutation = async {
+            eval(RELEASE_SCRIPT, &keys)
                 .arg(lease.owner_runtime_id.to_hex())
                 .arg(lease.generation)
-                .invoke_async(&mut *conn)
-                .await?;
+                .query_async(&mut *conn)
+                .await
+        };
+        let (status, value, known_generation): (String, String, String) = match &serving_write {
+            Some(guard) => guard
+                .protect(mutation)
+                .await
+                .map_err(|error| DirectoryError::CommunityWriteFenced(error.to_string()))??,
+            None => mutation.await?,
+        };
         let current = parse_optional_lease(lease.community_id, lease.session_id, &value)?;
+        if let Some(guard) = serving_write {
+            guard
+                .finish()
+                .await
+                .map_err(|error| DirectoryError::CommunityWriteFenced(error.to_string()))?;
+        }
         match status.as_str() {
             "released" => Ok(ReleaseResult::Released(
                 current.expect("released returns lease"),
@@ -309,7 +458,7 @@ impl SessionDirectory {
         session_id: Uuid,
     ) -> Result<Option<SessionLease>, DirectoryError> {
         let keys = SessionKeys::new(community_id, session_id);
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.connection().await?;
         let value: Option<String> = redis::cmd("GET")
             .arg(&keys.lease)
             .query_async(&mut *conn)
@@ -327,7 +476,7 @@ impl SessionDirectory {
         session_id: Uuid,
     ) -> Result<Option<u64>, DirectoryError> {
         let keys = SessionKeys::new(community_id, session_id);
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.connection().await?;
         let value: Option<String> = redis::cmd("GET")
             .arg(&keys.generation)
             .query_async(&mut *conn)
@@ -352,15 +501,11 @@ impl SessionDirectory {
     ) -> Result<(), MeshError> {
         let keys = SessionKeys::new(community_id, fenced.session_id);
         let mut conn = self
-            .pool
-            .get()
+            .connection()
             .await
             .map_err(|e| MeshError::Transport(format!("redis pool: {e}")))?;
-        let (lease_value, known_generation): (String, String) = Script::new(VALIDATE_SCRIPT)
-            .key(&keys.lease)
-            .key(&keys.generation)
-            .invoke_async(&mut *conn)
-            .await?;
+        let (lease_value, known_generation): (String, String) =
+            eval(VALIDATE_SCRIPT, &keys).query_async(&mut *conn).await?;
         let known_from_counter =
             parse_optional_generation(community_id, fenced.session_id, &known_generation)
                 .map_err(|e| MeshError::Transport(e.to_string()))?

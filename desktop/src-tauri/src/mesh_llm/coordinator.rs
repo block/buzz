@@ -132,7 +132,7 @@ pub async fn start_coordinator(app: AppHandle) {
 /// MeshLLM establishes the encrypted peer transport itself.
 async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let peer_ids = {
+    let (peer_ids, relay_url) = {
         let runtime = state.mesh_llm_runtime.lock().await;
         let Some(runtime) = runtime.as_ref() else {
             return Ok(());
@@ -141,10 +141,16 @@ async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
             .status_report_payload()
             .await
             .map_err(|error| error.to_string())?;
-        visible_peer_ids(&payload)
+        let relay_url = runtime
+            .start_request()
+            .relay_url
+            .clone()
+            .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
+        (visible_peer_ids(&payload), relay_url)
     };
 
-    let targets = crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state).await?;
+    let targets =
+        crate::commands::mesh_llm::resolve_buzz_mesh_join_targets_at(&state, &relay_url).await?;
     let Some(target) = targets
         .into_iter()
         .find(|target| !target_is_visible(target, &peer_ids))
@@ -201,8 +207,13 @@ fn target_is_visible(target: &crate::mesh_llm::MeshServeTarget, peer_ids: &[Stri
 enum RosterReconcileAction {
     /// Keep the running allowlist untouched (no-op, or a failure we ride out).
     Keep,
-    /// Restart the node with a freshly resolved roster.
-    Restart(Vec<String>),
+    /// Restart Buzz so MeshLLM is rebuilt with a freshly resolved roster.
+    ///
+    /// MeshLLM's native listeners are process-owned in practice: stopping and
+    /// starting the embedded runtime in one process can terminate Buzz or race
+    /// ports 9337/3131. The process boundary is therefore part of the safety
+    /// contract, not an implementation detail.
+    RestartProcess,
     /// Observed a *shrink* (or empty) once. Hold the current allowlist and
     /// require the same reduced roster on the next poll before tearing down,
     /// so a single transient short-read never drops a member mid-inference.
@@ -224,9 +235,9 @@ fn roster_shrinks(current: &[String], fresh: &[String]) -> bool {
 /// Rules:
 /// - query failed (`Err`)              → `Keep` (never de-admit on a relay blip)
 /// - resolved roster == current        → `Keep` (no-op)
-/// - grows (only additions)            → `Restart` immediately (fast admission)
+/// - grows (only additions)            → `RestartProcess` immediately (fast admission)
 /// - shrinks/empties, first observation → `AwaitConfirm` (hold, re-check next poll)
-/// - shrinks/empties, confirmed         → `Restart` (same reduced roster twice)
+/// - shrinks/empties, confirmed         → `RestartProcess` (same reduced roster twice)
 fn roster_reconcile_action(
     current_owners: &[String],
     pending_shrink: Option<&[String]>,
@@ -248,13 +259,13 @@ fn roster_reconcile_action(
 
     // Growth (pure additions) is safe to apply immediately.
     if !roster_shrinks(current_owners, &fresh) {
-        return RosterReconcileAction::Restart(fresh);
+        return RosterReconcileAction::RestartProcess;
     }
 
     // A shrink (including down to empty) must be confirmed across two
     // consecutive polls with the *same* reduced roster before we tear down.
     match pending_shrink {
-        Some(pending) if pending == fresh => RosterReconcileAction::Restart(fresh),
+        Some(pending) if pending == fresh => RosterReconcileAction::RestartProcess,
         _ => RosterReconcileAction::AwaitConfirm(fresh),
     }
 }
@@ -283,8 +294,13 @@ async fn reconcile_roster(
     // other member on a transient relay blip (the flapping restart loop). Keep
     // the current allowlist and try again on the next poll. A shrink is held
     // for one extra poll (hysteresis) so a single short-read never tears down.
-    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(&state).await;
-    let fresh = match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
+    let relay_url = current_request
+        .relay_url
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
+    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids_at(&state, &relay_url).await;
+    match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
         RosterReconcileAction::Keep => {
             *pending_shrink = None;
             return Ok(());
@@ -294,34 +310,12 @@ async fn reconcile_roster(
             *pending_shrink = Some(reduced);
             return Ok(());
         }
-        RosterReconcileAction::Restart(fresh) => {
+        RosterReconcileAction::RestartProcess => {
             *pending_shrink = None;
-            fresh
         }
-    };
+    }
 
-    let mut request = current_request.clone();
-    request.trusted_owner_ids = Some(fresh);
-    // Bootstrap endpoints are live device state, not configuration. The
-    // endpoint used at the previous start may belong to the member that just
-    // left or to a device whose iroh identity rotated while offline. Resolve a
-    // fresh validated peer for this restart; starting isolated is safe because
-    // the join watcher will converge it when a member next publishes.
-    request.join_token = match crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state)
-        .await
-    {
-        Ok(targets) => targets
-            .into_iter()
-            .next()
-            .map(|target| target.endpoint_addr),
-        Err(error) => {
-            eprintln!(
-                "buzz-mesh: could not refresh bootstrap endpoint for roster restart; starting isolated: {error}"
-            );
-            None
-        }
-    };
-    let mut guard = state.mesh_llm_runtime.lock().await;
+    let guard = state.mesh_llm_runtime.lock().await;
     let startup_pending = match guard.as_ref() {
         Some(runtime) => runtime.is_starting().await,
         None => false,
@@ -342,24 +336,14 @@ async fn reconcile_roster(
         // snapshot.
         return Ok(());
     }
-    let Some(running) = guard.take() else {
+    if guard.is_none() {
         return Ok(());
-    };
-    eprintln!("buzz-mesh: membership roster changed; restarting mesh node with fresh allowlist");
-    if let Err(error) = running.stop().await {
-        drop(guard);
-        eprintln!(
-            "buzz-mesh: stopping mesh node for roster restart failed; restarting Buzz instead of racing the occupied ingress: {error}"
-        );
-        app.request_restart();
-        return Err(format!(
-            "mesh node shutdown failed during roster change: {error}"
-        ));
     }
-    let replacement = crate::mesh_llm::DesktopMeshRuntime::start(request)
-        .await
-        .map_err(|error| format!("mesh node restart after roster change failed: {error:#}"))?;
-    *guard = Some(replacement);
+    drop(guard);
+    eprintln!(
+        "buzz-mesh: membership roster changed; restarting Buzz to rebuild MeshLLM with the fresh community allowlist"
+    );
+    app.request_restart();
     Ok(())
 }
 
@@ -377,11 +361,15 @@ pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
     }
 }
 
-pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
+pub(crate) async fn publish_stopped_status_once_at(
+    app: &AppHandle,
+    relay_url: Option<&str>,
+    reason: &str,
+) {
     let state = app.state::<AppState>();
     match tokio::time::timeout(
         STATUS_PUBLISH_TIMEOUT,
-        publish_stopped_status_for_state(&state),
+        publish_stopped_status_for_state(&state, relay_url),
     )
     .await
     {
@@ -396,26 +384,43 @@ pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
 async fn publish_current_status_for_state(state: &AppState) -> Result<(), String> {
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
-    let mut payload = {
+    let (mut payload, relay_url) = {
         let runtime = state.mesh_llm_runtime.lock().await;
         match runtime.as_ref() {
-            Some(runtime) => runtime
-                .status_report_payload()
-                .await
-                .map_err(|error| error.to_string())?,
-            None => stopped_status_payload(&identity),
+            Some(runtime) => {
+                let payload = runtime
+                    .status_report_payload()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let relay_url = runtime
+                    .start_request()
+                    .relay_url
+                    .clone()
+                    .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(state));
+                (payload, relay_url)
+            }
+            None => (
+                stopped_status_payload(&identity),
+                crate::relay::relay_ws_url_with_override(state),
+            ),
         }
     };
     bind_payload_to_member(state, &identity, &mut payload)?;
-    publish_status_report(state, payload).await
+    publish_status_report_at(state, &relay_url, payload).await
 }
 
-async fn publish_stopped_status_for_state(state: &AppState) -> Result<(), String> {
+async fn publish_stopped_status_for_state(
+    state: &AppState,
+    relay_url: Option<&str>,
+) -> Result<(), String> {
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
     let mut payload = stopped_status_payload(&identity);
     bind_payload_to_member(state, &identity, &mut payload)?;
-    publish_status_report(state, payload).await
+    let relay_url = relay_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(state));
+    publish_status_report_at(state, &relay_url, payload).await
 }
 
 fn stopped_status_payload(identity: &super::identity::OwnerIdentity) -> serde_json::Value {
@@ -469,13 +474,21 @@ pub(crate) fn build_status_report_event(
     .tags([d, k]))
 }
 
-pub(crate) async fn publish_status_report(
+async fn publish_status_report_at(
     state: &AppState,
+    relay_url: &str,
     payload: serde_json::Value,
 ) -> Result<(), String> {
-    crate::relay::submit_event(build_status_report_event(payload)?, state)
-        .await
-        .map(|_| ())
+    let api_base_url = crate::relay::relay_http_base_url(relay_url);
+    let keys = state.signing_keys()?;
+    crate::relay::submit_event_at_with_keys(
+        build_status_report_event(payload)?,
+        state,
+        &api_base_url,
+        &keys,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -554,11 +567,11 @@ mod tests {
 
     // Growth (pure additions) applies immediately — fast admission is fine.
     #[test]
-    fn roster_growth_restarts_immediately() {
+    fn roster_growth_requests_process_restart_immediately() {
         let current = vec!["owner-a".to_string()];
         let fresh = vec!["owner-a".to_string(), "owner-c".to_string()];
-        let action = roster_reconcile_action(&current, None, Ok(fresh.clone()));
-        assert_eq!(action, RosterReconcileAction::Restart(fresh));
+        let action = roster_reconcile_action(&current, None, Ok(fresh));
+        assert_eq!(action, RosterReconcileAction::RestartProcess);
     }
 
     // A shrink is NOT applied on first observation — it must be confirmed.
@@ -572,11 +585,11 @@ mod tests {
 
     // The same reduced roster on two consecutive polls confirms the shrink.
     #[test]
-    fn roster_shrink_restarts_once_confirmed() {
+    fn roster_shrink_requests_process_restart_once_confirmed() {
         let current = vec!["owner-a".to_string(), "owner-b".to_string()];
         let reduced = vec!["owner-a".to_string()];
         let action = roster_reconcile_action(&current, Some(&reduced), Ok(reduced.clone()));
-        assert_eq!(action, RosterReconcileAction::Restart(reduced));
+        assert_eq!(action, RosterReconcileAction::RestartProcess);
     }
 
     // A shrink that changes between polls is not confirmed — it re-holds with
@@ -600,7 +613,7 @@ mod tests {
         assert_eq!(first, RosterReconcileAction::AwaitConfirm(Vec::new()));
         let empty: Vec<String> = Vec::new();
         let confirmed = roster_reconcile_action(&current, Some(&empty), Ok(Vec::new()));
-        assert_eq!(confirmed, RosterReconcileAction::Restart(Vec::new()));
+        assert_eq!(confirmed, RosterReconcileAction::RestartProcess);
     }
 
     // A shrink followed by recovery to the full roster cancels the teardown.

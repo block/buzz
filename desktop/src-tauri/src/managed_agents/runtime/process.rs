@@ -131,7 +131,7 @@ pub(crate) fn process_belongs_to_us(_pid: u32) -> bool {
 /// while never matching another instance's (e.g. a dev build never reaps a DMG
 /// build's agents, and vice versa). This is what lets two Buzzs coexist on
 /// one machine without one's cleanup nuking the other's agents.
-pub(crate) fn current_instance_id(app: &AppHandle) -> String {
+pub(crate) fn current_instance_id<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
     app.config().identifier.clone()
 }
 

@@ -111,39 +111,71 @@ fn buzz_mesh_name_is_stable_and_does_not_expose_the_relay() {
 }
 
 #[test]
-fn readiness_failure_is_catalog_sync_when_model_never_visible() {
-    assert_eq!(
-        classify_mesh_readiness_failure(false),
-        MeshReadinessFailure::CatalogNeverSynced
-    );
+fn sharing_config_keeps_the_community_where_sharing_was_enabled() {
+    let request = mesh_llm::StartMeshNodeRequest {
+        mode: mesh_llm::MeshNodeMode::Serve,
+        model_id: Some("test-model".to_string()),
+        max_vram_gb: Some(24),
+        join_token: None,
+        mesh_name: Some("buzz-community-test".to_string()),
+        relay_url: Some("wss://community.example".to_string()),
+        trusted_owner_ids: Some(Vec::new()),
+    };
+
+    let config = sharing_config_from_request(&request).expect("valid sharing config");
+    assert_eq!(config.relay_url.as_deref(), Some("wss://community.example"));
 }
 
 #[test]
-fn readiness_failure_is_routing_when_model_was_visible() {
-    assert_eq!(
-        classify_mesh_readiness_failure(true),
-        MeshReadinessFailure::RoutingNeverCompleted
-    );
+fn legacy_sharing_config_without_community_binding_still_loads() {
+    let config: MeshSharingConfig = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "modelId": "test-model",
+        "maxVramGb": null
+    }))
+    .expect("legacy sharing config");
+
+    assert_eq!(config.relay_url, None);
+    assert!(!config.start_on_next_launch);
 }
 
 #[test]
-fn readiness_messages_are_distinct_and_actionable() {
-    let catalog = mesh_readiness_failure_message(
-        MeshReadinessFailure::CatalogNeverSynced,
-        "auto",
-        "HTTP 429",
-    );
-    let routing = mesh_readiness_failure_message(
-        MeshReadinessFailure::RoutingNeverCompleted,
-        "auto",
-        "HTTP 503",
-    );
-    // Distinct diagnoses, each names the model and carries the raw detail.
-    assert_ne!(catalog, routing);
-    assert!(catalog.contains("network path"));
-    assert!(catalog.contains("HTTP 429"));
-    assert!(routing.contains("did not complete"));
-    assert!(routing.contains("HTTP 503"));
+fn new_start_checkpoint_prevents_incomplete_download_restore() {
+    let config = MeshSharingConfig {
+        enabled: true,
+        start_on_next_launch: false,
+        model_id: "test-model".to_string(),
+        max_vram_gb: Some(24),
+        relay_url: Some("wss://community.example".to_string()),
+    };
+
+    let checkpoint = pending_new_start_checkpoint(&config);
+    assert!(!checkpoint.enabled);
+    assert!(!checkpoint.start_on_next_launch);
+    assert_eq!(checkpoint.model_id, config.model_id);
+    assert_eq!(checkpoint.max_vram_gb, config.max_vram_gb);
+    assert_eq!(checkpoint.relay_url, config.relay_url);
+}
+
+#[test]
+fn role_switch_checkpoint_starts_exactly_once_after_restart() {
+    let config = MeshSharingConfig {
+        enabled: true,
+        start_on_next_launch: false,
+        model_id: "test-model".to_string(),
+        max_vram_gb: Some(24),
+        relay_url: Some("wss://community.example".to_string()),
+    };
+
+    let restart = one_shot_restart_checkpoint(&config);
+    assert!(!restart.enabled);
+    assert!(restart.start_on_next_launch);
+
+    let consumed = pending_new_start_checkpoint(&restart);
+    assert!(!consumed.enabled);
+    assert!(!consumed.start_on_next_launch);
+    assert_eq!(consumed.model_id, config.model_id);
+    assert_eq!(consumed.relay_url, config.relay_url);
 }
 
 #[test]
@@ -345,6 +377,7 @@ fn ensure_serve_runtime_serves_other_model() {
                         max_vram_gb: None,
                         join_token: None,
                         mesh_name: None,
+                        relay_url: None,
                         trusted_owner_ids: None,
                     })
                     .await

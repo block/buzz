@@ -16,12 +16,14 @@ export function UpdateChecker() {
         description="Keep Buzz up to date with the latest features and fixes."
       />
 
-      <SettingsOptionGroup>
+      <SettingsOptionGroup title="Update status">
         {status.state === "idle" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Check if a new version is available.
               </p>
             </div>
@@ -34,8 +36,10 @@ export function UpdateChecker() {
         {status.state === "checking" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Checking for updates...
               </p>
             </div>
@@ -45,8 +49,10 @@ export function UpdateChecker() {
         {status.state === "up-to-date" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 You're on the latest version.
               </p>
             </div>
@@ -59,8 +65,10 @@ export function UpdateChecker() {
         {status.state === "unavailable" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Automatic updates aren't available on this build. Download the
                 latest release manually.
               </p>
@@ -77,12 +85,13 @@ export function UpdateChecker() {
               <p className="text-sm font-medium">
                 Update available — v{status.version}
               </p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 In-app updates aren't supported on this Linux package. Download
                 the new version from GitHub.{" "}
-                <span className="text-muted-foreground">
-                  Switch to the AppImage build for automatic updates.
-                </span>
+                <span>Switch to the AppImage build for automatic updates.</span>
               </p>
             </div>
             <Button size="sm" onClick={() => void openUrl(status.releaseUrl)}>
@@ -94,8 +103,10 @@ export function UpdateChecker() {
         {status.state === "available" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Preparing update...
               </p>
             </div>
@@ -105,8 +116,10 @@ export function UpdateChecker() {
         {status.state === "downloading" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Downloading update...
               </p>
             </div>
@@ -116,8 +129,10 @@ export function UpdateChecker() {
         {status.state === "installing" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Installing update...
               </p>
             </div>
@@ -127,8 +142,10 @@ export function UpdateChecker() {
         {status.state === "ready" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
-              <p className="text-sm font-normal text-muted-foreground">
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Update downloaded. Click to apply.
               </p>
             </div>
@@ -141,7 +158,6 @@ export function UpdateChecker() {
         {status.state === "error" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p className="text-sm font-normal text-destructive">
                 Update failed: {status.message}
               </p>

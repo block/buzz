@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertCircle, Upload } from "lucide-react";
+import { AlertCircle, Lock, Upload } from "lucide-react";
 
 import type {
   AgentSnapshotImportPreview,
@@ -72,7 +72,7 @@ export function AgentSnapshotImportDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
         aria-describedby={undefined}
-        className="max-w-md"
+        className="max-h-[85vh] max-w-2xl overflow-y-auto"
         data-testid="agent-snapshot-import-dialog"
         showCloseButton={false}
       >
@@ -141,7 +141,7 @@ export function AgentSnapshotImportDialog({
 
 // ── Preview body ──────────────────────────────────────────────────────────────
 
-function PreviewBody({
+export function PreviewBody({
   preview,
   hasMemory,
   memoryLevelLabel,
@@ -159,18 +159,48 @@ function PreviewBody({
       {/* Agent identity */}
       <div className="space-y-1">
         <p className="text-sm font-medium">{preview.displayName}</p>
-        {preview.systemPrompt ? (
-          <p className="line-clamp-3 text-xs text-muted-foreground">
-            {preview.systemPrompt}
-          </p>
-        ) : null}
       </div>
+
+      {/* Locked-card provenance: this file was encrypted to this machine's
+          keys and has been unlocked for review. */}
+      {preview.locked ? (
+        <div
+          className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm"
+          data-testid="agent-snapshot-import-locked-notice"
+        >
+          <Lock className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>
+            This card is <strong>locked</strong> — its agent is encrypted to the
+            original owner and agent keys. Your keys unlocked it; the full
+            decrypted payload is shown below.
+          </p>
+        </div>
+      ) : null}
 
       <AgentDefinitionMetadata
         isBuiltIn={preview.isBuiltIn}
         model={preview.model}
         runtime={preview.runtime}
       />
+
+      {/* Portable behavior — never hide executable configuration behind a summary. */}
+      <section
+        className="space-y-2 rounded-md border border-border p-3"
+        data-testid="agent-snapshot-import-behavior"
+      >
+        <div>
+          <p className="text-sm font-medium">Agent instructions</p>
+          <p className="text-xs text-muted-foreground">
+            Review the instructions this agent will follow after import.
+          </p>
+        </div>
+        <pre
+          className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-3 text-xs"
+          data-testid="agent-snapshot-import-system-prompt"
+        >
+          {preview.systemPrompt || "No system prompt included."}
+        </pre>
+      </section>
 
       <p className="text-sm text-muted-foreground">
         A new agent will be created with a fresh keypair. The imported agent is
@@ -211,9 +241,19 @@ function PreviewBody({
             {preview.sourceAllowlistCount === 1 ? "y" : "ies"})
           </p>
           <p className="text-xs text-muted-foreground">
-            This snapshot includes a source-environment pubkey allowlist. Those
-            identities are not meaningful on your relay.
+            This snapshot includes source-environment pubkeys. Review every key
+            before choosing Keep; Clear is safer when you do not recognize them.
           </p>
+          <ul
+            className="max-h-28 space-y-1 overflow-y-auto rounded bg-muted/60 p-2 font-mono text-xs"
+            data-testid="agent-snapshot-import-allowlist-values"
+          >
+            {preview.sourceAllowlist.map((pubkey) => (
+              <li className="break-all" key={pubkey}>
+                {pubkey}
+              </li>
+            ))}
+          </ul>
           <div className="flex flex-col gap-1.5">
             <label className="flex cursor-pointer items-center gap-2">
               <input
@@ -242,6 +282,22 @@ function PreviewBody({
           </div>
         </div>
       ) : null}
+
+      <details
+        className="rounded-md border border-border p-3"
+        data-testid="agent-snapshot-import-manifest"
+      >
+        <summary className="cursor-pointer text-sm font-medium">
+          Full embedded manifest
+        </summary>
+        <p className="mt-2 text-xs text-muted-foreground">
+          This is the complete portable payload decoded from the file. Secrets,
+          credentials, and source identity are not part of the snapshot format.
+        </p>
+        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-3 text-xs">
+          {preview.manifestJson}
+        </pre>
+      </details>
     </div>
   );
 }

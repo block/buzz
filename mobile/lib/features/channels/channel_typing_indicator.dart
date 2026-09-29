@@ -1,27 +1,49 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
-import '../../shared/utils/string_utils.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_typing_provider.dart';
 import 'small_avatar.dart';
 
 /// Composer-adjacent status for people currently typing in a channel or thread.
 class ChannelTypingIndicator extends ConsumerWidget {
+  final String channelId;
   final List<TypingEntry> entries;
 
-  const ChannelTypingIndicator({super.key, required this.entries});
+  const ChannelTypingIndicator({
+    super.key,
+    required this.channelId,
+    required this.entries,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final userCache = ref.watch(userCacheProvider);
-    final names = entries.map((entry) {
-      final profile =
-          userCache[entry.pubkey.toLowerCase()] ??
-          ref.read(userCacheProvider.notifier).get(entry.pubkey.toLowerCase());
-      return profile?.label ?? shortPubkey(entry.pubkey);
-    }).toList();
+    final normalizedPubkeys = {
+      for (final entry in entries) entry.pubkey.toLowerCase(),
+    };
+    final profiles = {
+      for (final pubkey in normalizedPubkeys)
+        pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
+    };
+    final userCache = {
+      for (final entry in profiles.entries) entry.key: ?entry.value,
+    };
+    for (final pubkey in normalizedPubkeys) {
+      if (profiles[pubkey] == null) {
+        ref.read(userCacheProvider.notifier).get(pubkey);
+      }
+    }
+    final labels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      normalizedPubkeys,
+    );
+    final names = [
+      for (final entry in entries) labels[entry.pubkey.toLowerCase()]!,
+    ];
     final text = switch (names.length) {
       1 => '${names[0]} is typing…',
       2 => '${names[0]} and ${names[1]} are typing…',
@@ -72,17 +94,74 @@ class ChannelTypingIndicator extends ConsumerWidget {
             ),
             const SizedBox(width: Grid.xxs),
             Flexible(
-              child: Text(
+              child: _TypingTextShimmer(
                 text,
                 style: context.textTheme.labelSmall?.copyWith(
-                  color: context.colors.primary,
-                  fontStyle: FontStyle.italic,
+                  color: context.colors.onSurfaceVariant,
                 ),
-                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _TypingTextShimmer extends HookWidget {
+  final String text;
+  final TextStyle? style;
+
+  const _TypingTextShimmer(this.text, {this.style});
+
+  @override
+  Widget build(BuildContext context) {
+    final animation = useAnimationController(
+      duration: const Duration(milliseconds: 2600),
+    );
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final baseColor = style?.color ?? context.colors.onSurfaceVariant;
+    final highlightColor =
+        Color.lerp(context.colors.surface, baseColor, 0.4) ?? baseColor;
+
+    useEffect(() {
+      if (reducedMotion) {
+        animation
+          ..stop()
+          ..value = 0;
+      } else {
+        animation.repeat();
+      }
+      return animation.stop;
+    }, [animation, reducedMotion]);
+
+    final label = Text(text, style: style, overflow: TextOverflow.ellipsis);
+    if (reducedMotion) return label;
+
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: animation,
+        child: label,
+        builder: (context, child) {
+          final center = 1.5 - (animation.value * 3);
+          return ShaderMask(
+            key: const ValueKey('channel-typing-shimmer'),
+            blendMode: BlendMode.srcIn,
+            shaderCallback: (bounds) => LinearGradient(
+              begin: Alignment(center - 1, 0),
+              end: Alignment(center + 1, 0),
+              colors: [
+                baseColor,
+                baseColor,
+                highlightColor,
+                baseColor,
+                baseColor,
+              ],
+              stops: const [0, 0.34, 0.5, 0.66, 1],
+            ).createShader(bounds),
+            child: child,
+          );
+        },
       ),
     );
   }

@@ -1,6 +1,6 @@
 part of '../channel_detail_page.dart';
 
-class _SystemMessageRow extends ConsumerWidget {
+class _SystemMessageRow extends HookConsumerWidget {
   final TimelineMessage message;
   final List<TimelineMessage>? groupedMessages;
   final String channelId;
@@ -21,25 +21,33 @@ class _SystemMessageRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final spotlightKey = useMemoized(() => GlobalKey());
     final systemEvent = message.systemEvent;
     if (systemEvent == null) return const SizedBox.shrink();
 
     final userCache = ref.watch(userCacheProvider);
     final sourceMessages = groupedMessages ?? [message];
     final groupedMembership = _membershipDisplayEvent(sourceMessages);
-    final channelCreator = systemEvent.type == SystemEventType.channelCreated
-        ? systemEvent.actorPubkey?.trim()
-        : null;
+    final messageStyleAction = switch (systemEvent.type) {
+      SystemEventType.channelCreated => 'created this channel',
+      SystemEventType.huddleStarted => 'started a huddle',
+      SystemEventType.huddleEnded => 'ended the huddle',
+      _ => null,
+    };
+    final messageStyleActor = messageStyleAction == null
+        ? null
+        : systemEvent.actorPubkey?.trim();
     final usesMessageStyleLayout =
         groupedMembership != null ||
-        (channelCreator != null && channelCreator.isNotEmpty);
+        (messageStyleActor != null && messageStyleActor.isNotEmpty);
 
+    final identityNames = ref.watch(channelIdentityNamesProvider(channelId));
     String resolveLabel(String? pubkey) {
       if (pubkey == null) return 'Someone';
-      final profile =
-          userCache[pubkey.toLowerCase()] ??
-          ref.read(userCacheProvider.notifier).get(pubkey.toLowerCase());
-      return profile?.label ?? shortPubkey(pubkey);
+      if (userCache[pubkey.toLowerCase()] == null) {
+        ref.read(userCacheProvider.notifier).get(pubkey.toLowerCase());
+      }
+      return identityNames.labelFor(pubkey);
     }
 
     final reactions = groupedMessages == null
@@ -71,64 +79,107 @@ class _SystemMessageRow extends ConsumerWidget {
       }
     }
 
+    void openReactionPopover(Rect anchorRect) {
+      final spotlightRenderObject = spotlightKey.currentContext
+          ?.findRenderObject();
+      final spotlightRect =
+          spotlightRenderObject is RenderBox && spotlightRenderObject.hasSize
+          ? spotlightRenderObject.localToGlobal(Offset.zero) &
+                spotlightRenderObject.size
+          : anchorRect;
+      showMessageActions(
+        context: context,
+        ref: ref,
+        message: message,
+        channelId: channelId,
+        canManageMessage: false,
+        allMessages: null,
+        currentPubkey: currentPubkey,
+        isMember: isMember,
+        isArchived: isArchived,
+        anchorRect: spotlightRect,
+        popoverSpotlightPadding: EdgeInsets.fromLTRB(
+          Grid.xxs,
+          Grid.xxs,
+          Grid.xxs,
+          reactions.isEmpty ? Grid.xxs : Grid.quarter,
+        ),
+      );
+    }
+
     return Material(
       color: Colors.transparent,
       borderRadius: BorderRadius.circular(Radii.md),
       clipBehavior: Clip.antiAlias,
-      child: InkWell(
+      child: MessageLongPressInkWell(
         key: ValueKey('system-message-row-${message.id}'),
+        onLongPress: openReactionPopover,
         borderRadius: BorderRadius.circular(Radii.md),
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
-        onLongPress: () => showMessageActions(
-          context: context,
-          ref: ref,
-          message: message,
-          channelId: channelId,
-          canManageMessage: false,
-          allMessages: null,
-          currentPubkey: currentPubkey,
-          isMember: isMember,
-          isArchived: isArchived,
-        ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          padding: EdgeInsets.only(
+            top: usesMessageStyleLayout ? Grid.xs : Grid.xxs,
+            bottom: usesMessageStyleLayout ? 0 : Grid.xxs,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (groupedMembership != null)
-                _MembershipSystemMessageContent(
-                  event: groupedMembership,
-                  createdAt: message.createdAt,
-                  resolveLabel: resolveLabel,
-                  userCache: userCache,
-                )
-              else if (channelCreator != null && channelCreator.isNotEmpty)
-                _MessageStyleSystemMessageContent(
-                  displayPubkey: channelCreator,
-                  createdAt: message.createdAt,
-                  resolveLabel: resolveLabel,
-                  userCache: userCache,
-                  actionSpans: const [TextSpan(text: 'created this channel')],
-                )
-              else
-                Row(
-                  children: [
-                    _systemEventAvatar(context, systemEvent, userCache),
-                    const SizedBox(width: Grid.xxs),
-                    Expanded(
-                      child: Text(
-                        systemEvent.describe(resolveLabel),
-                        style: systemMessageBodyTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
+              KeyedSubtree(
+                key: spotlightKey,
+                child: groupedMembership != null
+                    ? _MembershipSystemMessageContent(
+                        event: groupedMembership,
+                        channelId: channelId,
+                        createdAt: message.createdAt,
+                        resolveLabel: resolveLabel,
+                        userCache: userCache,
+                      )
+                    : messageStyleActor != null &&
+                          messageStyleActor.isNotEmpty &&
+                          messageStyleAction != null
+                    ? _MessageStyleSystemMessageContent(
+                        displayPubkey: messageStyleActor,
+                        channelId: channelId,
+                        createdAt: message.createdAt,
+                        resolveLabel: resolveLabel,
+                        userCache: userCache,
+                        actionSpans: [TextSpan(text: messageStyleAction)],
+                      )
+                    : Row(
+                        children: [
+                          _systemEventAvatar(
+                            context,
+                            systemEvent,
+                            userCache,
+                            channelId,
+                          ),
+                          const SizedBox(width: Grid.xxs),
+                          Expanded(
+                            child: Text(
+                              systemEvent.describe(resolveLabel),
+                              style: systemMessageBodyTextStyle.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          _messageTimestamp(
+                            context,
+                            message.createdAt,
+                            key: ValueKey(
+                              'system-message-timestamp-${message.id}',
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    _messageTimestamp(
-                      context,
-                      message.createdAt,
-                      key: ValueKey('system-message-timestamp-${message.id}'),
-                    ),
-                  ],
+              ),
+              if (systemEvent.type == SystemEventType.huddleStarted &&
+                  systemEvent.ephemeralChannelId != null)
+                _HuddleJoinSurface(
+                  message: message,
+                  allMessages: allMessages ?? const [],
+                  parentChannelId: channelId,
+                  isMember: isMember,
+                  isArchived: isArchived,
                 ),
               if (reactions.isNotEmpty)
                 Padding(
@@ -140,6 +191,8 @@ class _SystemMessageRow extends ConsumerWidget {
                             : Grid.xxs),
                   ),
                   child: ReactionRow(
+                    messageId: message.id,
+                    channelId: channelId,
                     reactions: reactions,
                     onToggle: groupedMessages == null
                         ? (emoji) => toggleReaction(ref, message, emoji)
@@ -252,12 +305,14 @@ List<TimelineReaction> _aggregateSystemMessageReactions(
 
 class _MembershipSystemMessageContent extends StatelessWidget {
   final _MembershipDisplayEvent event;
+  final String channelId;
   final int createdAt;
   final String Function(String? pubkey) resolveLabel;
   final Map<String, UserProfile> userCache;
 
   const _MembershipSystemMessageContent({
     required this.event,
+    required this.channelId,
     required this.createdAt,
     required this.resolveLabel,
     required this.userCache,
@@ -278,7 +333,12 @@ class _MembershipSystemMessageContent extends StatelessWidget {
       TextSpan(
         text: event.isSelfJoin
             ? 'joined the channel'
-            : 'was added by ${resolveLabel(event.actorPubkey)}',
+            // No "was": the name renders on the line above via
+            // MessageAuthorMeta, so this reads as a status line rather than a
+            // sentence continuing across the metadata row. Matches desktop's
+            // SystemMessageRow. `SystemEvent.describe` keeps "was added by"
+            // because it builds subject and predicate into one string.
+            : 'added by ${resolveLabel(event.actorPubkey)}',
       ),
       if (additionalTargets.isNotEmpty)
         TextSpan(text: event.isSelfJoin ? ' along with ' : ', along with '),
@@ -293,6 +353,7 @@ class _MembershipSystemMessageContent extends StatelessWidget {
 
     return _MessageStyleSystemMessageContent(
       displayPubkey: firstTarget,
+      channelId: channelId,
       createdAt: createdAt,
       resolveLabel: resolveLabel,
       userCache: userCache,
@@ -309,6 +370,7 @@ TextStyle? _systemActionTextStyle(BuildContext context) {
 
 class _MessageStyleSystemMessageContent extends StatelessWidget {
   final String displayPubkey;
+  final String channelId;
   final int createdAt;
   final String Function(String? pubkey) resolveLabel;
   final Map<String, UserProfile> userCache;
@@ -316,6 +378,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
 
   const _MessageStyleSystemMessageContent({
     required this.displayPubkey,
+    required this.channelId,
     required this.createdAt,
     required this.resolveLabel,
     required this.userCache,
@@ -327,35 +390,48 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _UserAvatar(
-          profile: userCache[displayPubkey.toLowerCase()],
-          pubkey: displayPubkey,
-          size: messageAvatarSize,
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => showUserProfileSheet(
+            context,
+            displayPubkey,
+            names: channelIdentityNamesProvider(channelId),
+          ),
+          child: _UserAvatar(
+            profile: userCache[displayPubkey.toLowerCase()],
+            pubkey: displayPubkey,
+            isAgent:
+                userCache[displayPubkey.toLowerCase()]?.ownerPubkey != null,
+            size: messageAvatarSize,
+          ),
         ),
         const SizedBox(width: messageAvatarContentGap),
         Expanded(
-          child: Transform.translate(
-            offset: const Offset(0, -Grid.quarter),
+          child: Padding(
+            padding: const EdgeInsets.only(top: Grid.half),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                MessageAuthorMeta(
-                  displayName: resolveLabel(displayPubkey),
-                  username: messageUsernameLabel(
-                    userCache[displayPubkey.toLowerCase()],
-                  ),
-                  timestamp: formatMessageTime(createdAt),
-                  nameColor: context.colors.onSurface,
-                  metadataColor: context.colors.onSurfaceVariant,
-                  nameStyle: systemMessageHeadingTextStyle,
-                  displayNameKey: ValueKey(
-                    'system-message-author-$displayPubkey',
-                  ),
-                  usernameKey: ValueKey(
-                    'system-message-username-$displayPubkey',
-                  ),
-                  timestampKey: ValueKey(
-                    'system-message-timestamp-$displayPubkey',
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Grid.quarter),
+                  child: MessageAuthorMeta(
+                    displayName: resolveLabel(displayPubkey),
+                    username: messageUsernameLabel(
+                      userCache[displayPubkey.toLowerCase()],
+                    ),
+                    timestamp: formatMessageTime(createdAt),
+                    nameColor: context.colors.onSurface,
+                    metadataColor: context.colors.onSurfaceVariant,
+                    nameStyle: systemMessageHeadingTextStyle,
+                    displayNameKey: ValueKey(
+                      'system-message-author-$displayPubkey',
+                    ),
+                    usernameKey: ValueKey(
+                      'system-message-username-$displayPubkey',
+                    ),
+                    timestampKey: ValueKey(
+                      'system-message-timestamp-$displayPubkey',
+                    ),
                   ),
                 ),
                 Text.rich(
@@ -424,6 +500,7 @@ Widget _systemEventAvatar(
   BuildContext context,
   SystemEvent event,
   Map<String, UserProfile> userCache,
+  String channelId,
 ) {
   final hasTarget =
       event.targetPubkey != null && event.targetPubkey != event.actorPubkey;
@@ -435,12 +512,31 @@ Widget _systemEventAvatar(
       height: 20,
       child: Stack(
         children: [
-          SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => showUserProfileSheet(
+              context,
+              event.actorPubkey!,
+              names: channelIdentityNamesProvider(channelId),
+            ),
+            child: SmallAvatar(
+              pubkey: event.actorPubkey!,
+              userCache: userCache,
+            ),
+          ),
           Positioned(
             left: 12,
-            child: SmallAvatar(
-              pubkey: event.targetPubkey!,
-              userCache: userCache,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showUserProfileSheet(
+                context,
+                event.targetPubkey!,
+                names: channelIdentityNamesProvider(channelId),
+              ),
+              child: SmallAvatar(
+                pubkey: event.targetPubkey!,
+                userCache: userCache,
+              ),
             ),
           ),
         ],
@@ -449,7 +545,15 @@ Widget _systemEventAvatar(
   }
 
   if (event.actorPubkey != null) {
-    return SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showUserProfileSheet(
+        context,
+        event.actorPubkey!,
+        names: channelIdentityNamesProvider(channelId),
+      ),
+      child: SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+    );
   }
 
   // Fallback: generic icon when no actor is available.
@@ -540,8 +644,9 @@ class _ThreadSummaryRow extends ConsumerWidget {
                 TextSpan(
                   children: [
                     TextSpan(
-                      text:
-                          '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
+                      text: summary.isCountPending
+                          ? 'Replies'
+                          : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
                       style: replyPreviewTextStyle.copyWith(
                         color: context.colors.primary,
                       ),

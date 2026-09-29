@@ -10,7 +10,6 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
-import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
   getGlobalAgentConfig,
@@ -23,6 +22,7 @@ import type {
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { useOnboardingCardLayout } from "./OnboardingCard";
 import { OnboardingFooter } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
@@ -32,11 +32,14 @@ import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
 } from "./onboardingRuntimeSelection";
-import type { DefaultConfigStepActions } from "./types";
+import type { DefaultConfigDraft, DefaultConfigStepActions } from "./types";
+import { ONBOARDING_CARD_INPUT_CLASS } from "./onboardingCardStyles";
 
 type DefaultConfigStepProps = {
   actions: DefaultConfigStepActions;
   direction: OnboardingTransitionDirection;
+  draft: DefaultConfigDraft | null;
+  onSavingChange?: (isSaving: boolean) => void;
   readyRuntimeIds: readonly string[];
 };
 
@@ -46,28 +49,43 @@ function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
 }
 
 function AgentDefaultsSection({
+  draft,
+  isPending,
+  onDraftChange,
   onPersistenceStateChange,
+  onUseDifferentHarness,
   readyRuntimeIds,
 }: {
+  draft: DefaultConfigDraft | null;
+  isPending: boolean;
+  onDraftChange: (draft: DefaultConfigDraft) => void;
   onPersistenceStateChange: (state: {
     canComplete: boolean;
-    flush: () => Promise<void>;
+    commit: () => Promise<void>;
   }) => void;
+  onUseDifferentHarness?: () => void;
   readyRuntimeIds: readonly string[];
 }) {
+  const cardLayout = useOnboardingCardLayout();
   const runtimesQuery = useAcpRuntimesQuery();
-  const [config, setConfig] =
-    React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
-  const [isLoading, setIsLoading] = React.useState(true);
-  const [isCustomProvider, setIsCustomProvider] = React.useState(false);
-  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
+  const initialDraftRef = React.useRef(draft);
+  const [config, setConfig] = React.useState<GlobalAgentConfig>(
+    initialDraftRef.current?.config ?? EMPTY_GLOBAL_CONFIG,
+  );
+  const [isLoading, setIsLoading] = React.useState(
+    initialDraftRef.current === null,
+  );
+  const [isCustomProvider, setIsCustomProvider] = React.useState(
+    initialDraftRef.current?.isCustomProvider ?? false,
+  );
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(
+    initialDraftRef.current?.isCustomModelEditing ?? false,
+  );
   const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
-  const coalescerRef = React.useRef<{
-    enqueue: (value: GlobalAgentConfig) => void;
-    flush: () => Promise<void>;
-    cancel: () => void;
-  } | null>(null);
-  const [isSaving, setIsSaving] = React.useState(false);
+  const configRef = React.useRef<GlobalAgentConfig>(
+    initialDraftRef.current?.config ?? EMPTY_GLOBAL_CONFIG,
+  );
+  const isDirtyRef = React.useRef(initialDraftRef.current?.isDirty ?? false);
   const [configIsValid, setConfigIsValid] = React.useState(false);
 
   React.useEffect(() => {
@@ -81,7 +99,11 @@ function AgentDefaultsSection({
 
       if (unmounted) return;
 
-      if (configResult.status === "fulfilled") {
+      if (
+        initialDraftRef.current === null &&
+        configResult.status === "fulfilled"
+      ) {
+        configRef.current = configResult.value;
         setConfig(configResult.value);
       }
       if (bakedEnvResult.status === "fulfilled") {
@@ -92,25 +114,8 @@ function AgentDefaultsSection({
 
     void loadDefaults();
 
-    // The coalescer serializes autosaves and drains any edit that arrived
-    // while a previous save was in flight. Cancel on unmount so a slow
-    // in-flight request never calls setState on an unmounted component.
-    const coalescer = createSaveCoalescer<GlobalAgentConfig>(
-      // set_global_agent_config returns a save result (config + restart
-      // counts); the coalescer round-trips the persisted config only.
-      async (next) => (await setGlobalAgentConfig(next)).config,
-      (saving) => {
-        if (!unmounted) setIsSaving(saving);
-      },
-      (saved) => {
-        if (!unmounted) setConfig(saved);
-      },
-    );
-    coalescerRef.current = coalescer;
-
     return () => {
       unmounted = true;
-      coalescer.cancel();
     };
   }, []);
 
@@ -160,15 +165,33 @@ function AgentDefaultsSection({
     [readyRuntimes],
   );
 
+  const updateDraft = React.useCallback(
+    (next: GlobalAgentConfig, overrides: Partial<DefaultConfigDraft> = {}) => {
+      isDirtyRef.current = overrides.isDirty ?? true;
+      configRef.current = next;
+      setConfig(next);
+      onDraftChange({
+        config: next,
+        isCustomModelEditing,
+        isCustomProvider,
+        isDirty: isDirtyRef.current,
+        ...overrides,
+      });
+    },
+    [isCustomModelEditing, isCustomProvider, onDraftChange],
+  );
+
   const handleHarnessChange = React.useCallback(
     (runtimeId: string) => {
       const next = resetConfigForHarnessChange(config, runtimeId);
       setIsCustomModelEditing(false);
       setIsCustomProvider(false);
-      setConfig(next);
-      coalescerRef.current?.enqueue(next);
+      updateDraft(next, {
+        isCustomModelEditing: false,
+        isCustomProvider: false,
+      });
     },
-    [config],
+    [config, updateDraft],
   );
 
   React.useEffect(() => {
@@ -182,28 +205,34 @@ function AgentDefaultsSection({
     selectedRuntimeId,
   ]);
 
-  const flushPersistence = React.useCallback(
-    () => coalescerRef.current?.flush() ?? Promise.resolve(),
-    [],
-  );
+  const commitPersistence = React.useCallback(async () => {
+    if (!isDirtyRef.current) return;
+    const saved = await setGlobalAgentConfig(configRef.current);
+    isDirtyRef.current = false;
+    configRef.current = saved.config;
+    setConfig(saved.config);
+  }, []);
   React.useEffect(() => {
     onPersistenceStateChange({
       // configIsValid comes from AgentConfigFields' onValidityChange and
       // covers model + provider credentials — a harness selection alone is
       // not a working default (e.g. buzz-agent with no provider configured).
-      canComplete: selectedRuntimeId.length > 0 && configIsValid && !isSaving,
-      flush: flushPersistence,
+      canComplete: selectedRuntimeId.length > 0 && configIsValid,
+      commit: commitPersistence,
     });
   }, [
+    commitPersistence,
     configIsValid,
-    flushPersistence,
-    isSaving,
     onPersistenceStateChange,
     selectedRuntimeId,
   ]);
 
   return (
-    <section className="w-full space-y-4 text-left text-sm">
+    <fieldset
+      aria-busy={isPending}
+      className="w-full space-y-4 text-left text-sm text-primary disabled:pointer-events-none disabled:opacity-70"
+      disabled={isPending}
+    >
       {configSurfaceLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
@@ -215,24 +244,32 @@ function AgentDefaultsSection({
         </p>
       ) : (
         <div className="space-y-7">
-          <div className="space-y-4">
-            <label
-              className="pl-3 text-sm font-medium"
-              htmlFor="global-agent-default-harness"
-            >
-              Default harness
-            </label>
-            <AgentDropdownSelect
-              className="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
-              id="global-agent-default-harness"
-              onValueChange={handleHarnessChange}
-              options={harnessOptions}
-              placeholder="Select a harness"
-              placeholderClassName="text-foreground/70"
-              testId="global-agent-default-harness"
-              value={selectedRuntimeId}
-            />
-          </div>
+          {!onUseDifferentHarness ? (
+            <div className="space-y-4">
+              <div className="pl-3">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="global-agent-default-harness"
+                >
+                  Default harness
+                </label>
+              </div>
+              <AgentDropdownSelect
+                className={
+                  cardLayout
+                    ? `${ONBOARDING_CARD_INPUT_CLASS} py-2 text-sm`
+                    : "h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+                }
+                id="global-agent-default-harness"
+                onValueChange={handleHarnessChange}
+                options={harnessOptions}
+                placeholder="Select a harness"
+                placeholderClassName="text-foreground/70"
+                testId="global-agent-default-harness"
+                value={selectedRuntimeId}
+              />
+            </div>
+          ) : null}
 
           <AgentConfigFields
             bakedEnv={bakedEnv}
@@ -240,115 +277,181 @@ function AgentDefaultsSection({
             config={config}
             isCustomModelEditing={isCustomModelEditing}
             isCustomProvider={isCustomProvider}
-            onConfigChange={(next) => {
-              // Always apply optimistically so the UI never reverts mid-save,
-              // then enqueue the persist — the coalescer serialises multiple
-              // rapid edits into a single trailing request.
-              setConfig(next);
-              coalescerRef.current?.enqueue(next);
+            onConfigChange={updateDraft}
+            onCustomModelEditingChange={(next) => {
+              setIsCustomModelEditing(next);
+              onDraftChange({
+                config: configRef.current,
+                isCustomModelEditing: next,
+                isCustomProvider,
+                isDirty: isDirtyRef.current,
+              });
             }}
-            onCustomModelEditingChange={setIsCustomModelEditing}
-            onIsCustomProviderChange={setIsCustomProvider}
+            onIsCustomProviderChange={(next) => {
+              setIsCustomProvider(next);
+              onDraftChange({
+                config: configRef.current,
+                isCustomModelEditing,
+                isCustomProvider: next,
+                isDirty: isDirtyRef.current,
+              });
+            }}
             onValidityChange={setConfigIsValid}
             placeholderClassName="text-foreground/70"
             runtimeFileConfig={runtimeFileConfig}
-            selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+            selectClassName={
+              cardLayout
+                ? `${ONBOARDING_CARD_INPUT_CLASS} py-2 text-sm`
+                : "h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+            }
+            showApiKeyEnvVarName={!cardLayout}
+            stackModelAndEffortHorizontally={
+              cardLayout && Boolean(onUseDifferentHarness)
+            }
             disclosure="onboarding-essential"
             unstyled
             useCustomSelect
           />
+
+          {onUseDifferentHarness ? (
+            <div className="flex items-baseline gap-1.5 text-sm text-foreground/70">
+              <span>or</span>
+              <Button
+                className="h-auto p-0 text-sm text-foreground"
+                data-testid="onboarding-use-different-harness"
+                disabled={isPending}
+                onClick={onUseDifferentHarness}
+                type="button"
+                variant="link"
+              >
+                Use a different harness
+              </Button>
+            </div>
+          ) : null}
         </div>
       )}
-    </section>
+    </fieldset>
   );
 }
 
 /**
  * Machine onboarding page 4 — default model configuration. Presents the
  * global agent defaults (provider, model, effort, env vars) centered under
- * the mock's "Configure your default model settings" heading.
+ * the onboarding card's "Choose your model settings" heading.
  */
 export function DefaultConfigStep({
   actions,
   direction,
+  draft,
+  onSavingChange,
   readyRuntimeIds,
 }: DefaultConfigStepProps) {
+  const cardLayout = useOnboardingCardLayout();
   const [persistenceState, setPersistenceState] = React.useState<{
     canComplete: boolean;
-    flush: () => Promise<void>;
-  }>({ canComplete: false, flush: () => Promise.resolve() });
-  const [completionError, setCompletionError] = React.useState<string | null>(
-    null,
-  );
-  const [isCompleting, setIsCompleting] = React.useState(false);
+    commit: () => Promise<void>;
+  }>({ canComplete: false, commit: () => Promise.resolve() });
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    onSavingChange?.(isSaving);
+    return () => onSavingChange?.(false);
+  }, [isSaving, onSavingChange]);
 
   const handleComplete = React.useCallback(async () => {
-    setIsCompleting(true);
-    setCompletionError(null);
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
     try {
-      await persistenceState.flush();
+      await persistenceState.commit();
+      actions.discardDraft();
       actions.complete();
-    } catch {
-      setCompletionError("Couldn't save your default harness. Try again.");
-      setIsCompleting(false);
+    } catch (cause) {
+      setSaveError(
+        cause instanceof Error
+          ? cause.message
+          : "Couldn’t save model settings.",
+      );
+    } finally {
+      setIsSaving(false);
     }
-  }, [actions, persistenceState]);
+  }, [actions, isSaving, persistenceState]);
+
+  const handleSkip = React.useCallback(() => {
+    actions.discardDraft();
+    actions.complete();
+  }, [actions]);
 
   return (
     <OnboardingSlideTransition
-      className="flex min-h-full w-full flex-col items-center"
+      className={`flex min-h-full w-full flex-col ${cardLayout ? "items-stretch" : "items-center"}`}
       data-testid="onboarding-page-config"
       direction={direction}
       transitionKey={`default-config-${direction}`}
     >
-      <div className="w-full max-w-[500px] text-center">
+      <div
+        className={`w-full ${cardLayout ? "text-left" : "max-w-[500px] text-center"}`}
+      >
         <h1 className="text-title font-normal text-foreground">
-          Configure your default model settings
+          {actions.useDifferentHarness
+            ? "Connect with an API key"
+            : "Choose your model settings"}
         </h1>
-        <p className="mx-auto mt-3 max-w-[440px] text-sm leading-5 text-foreground/80">
-          This will be set as your default model configuration across Buzz. You
-          can always change this in your Settings or give specific agents a
-          different configuration.
+        <p
+          className={`w-full text-foreground/80 ${cardLayout ? "mt-2 text-base leading-6" : "mx-auto mt-3 max-w-[440px] text-sm leading-5"}`}
+        >
+          {actions.useDifferentHarness
+            ? "Choose your provider and enter an API key to connect to the Buzz harness."
+            : "Select the model and effort level your agents will use by default."}
         </p>
       </div>
 
-      <div className="flex w-full flex-1 items-center justify-center py-10">
-        <div className="w-full max-w-[328px]">
+      <div
+        className={`flex w-full flex-1 py-10 ${cardLayout ? "items-start justify-start" : "items-center justify-center"}`}
+      >
+        <div className="w-full">
           <AgentDefaultsSection
+            draft={draft}
+            isPending={isSaving}
+            onDraftChange={actions.updateDraft}
             onPersistenceStateChange={setPersistenceState}
+            onUseDifferentHarness={actions.useDifferentHarness}
             readyRuntimeIds={readyRuntimeIds}
           />
-          {completionError ? (
-            <p
-              className="mt-3 text-center text-xs text-destructive"
-              role="alert"
-            >
-              {completionError}
-            </p>
-          ) : null}
         </div>
       </div>
 
       <OnboardingFooter>
         <Button
-          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
-          data-testid="onboarding-finish"
-          disabled={!persistenceState.canComplete || isCompleting}
-          onClick={() => void handleComplete()}
-          type="button"
-        >
-          Next
-        </Button>
-
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-back"
-          onClick={actions.back}
+          className="h-9 whitespace-nowrap rounded-full px-6 text-sm text-primary hover:bg-primary/10 hover:text-primary"
+          data-testid="onboarding-config-skip"
+          disabled={isSaving}
+          onClick={handleSkip}
           type="button"
           variant="ghost"
         >
-          Back
+          Skip for now
         </Button>
+        <Button
+          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+          data-testid="onboarding-finish"
+          disabled={!persistenceState.canComplete || isSaving}
+          onClick={() => void handleComplete()}
+          type="button"
+        >
+          {isSaving ? "Saving…" : "Next"}
+        </Button>
+
+        {saveError ? (
+          <p
+            className="w-full text-center text-xs text-destructive"
+            data-testid="onboarding-config-save-error"
+            role="alert"
+          >
+            Couldn’t save model settings. {saveError} Try again.
+          </p>
+        ) : null}
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

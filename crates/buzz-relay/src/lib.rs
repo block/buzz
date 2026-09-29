@@ -3,6 +3,17 @@
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
 mod admission;
+mod build_info;
+mod rejection;
+
+/// NIP-FI session admission gate — per-connection effect-permit and quiescence barrier.
+pub(crate) mod nip_fi_gate;
+pub(crate) mod nip_fi_session;
+/// NIP-FI test hooks — production barriers for deterministic B1/B2 witnesses.
+#[cfg(test)]
+pub(crate) mod nip_fi_test_hooks;
+/// NIP-FI assertion validation at WebSocket upgrade.
+pub(crate) mod nip_fi_upgrade;
 
 /// REST API route handlers.
 pub mod api;
@@ -23,16 +34,28 @@ pub mod error;
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).
 pub mod invite_token;
+/// Fixed-schema evidence for the relay's earliest startup steps.
+pub mod lifecycle;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
 /// Prometheus metrics: recorder, upkeep, HTTP middleware.
 pub mod metrics;
 /// NIP-11 relay information document.
 pub mod nip11;
+mod nip98;
+/// NIP-FI relay configuration: mode, issuer registry, JWKS warm/refresh.
+pub mod nip_fi_config;
+/// NIP-FI HTTP ingress enforcement: assertion extraction, verification,
+/// key-pairing check, and deny-map gate for every protected HTTP surface.
+pub(crate) mod nip_fi_http;
+/// Deployment-global operator-listener mention delivery worker.
+pub mod operator_listener;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
 /// Durable NIP-PL matcher and delivery worker.
 pub mod push_runtime;
+/// Readiness-probe telemetry and the per-pod dependency sampler behind `/_status`.
+pub mod readiness;
 /// Axum router construction.
 pub mod router;
 /// Shared application state.
@@ -44,6 +67,8 @@ pub mod subscription;
 pub mod telemetry;
 /// Row-zero host binding: resolve the request community from the connection host.
 pub mod tenant;
+#[cfg(test)]
+mod test_support;
 /// Relay-side tunnel session directory and routing.
 pub mod tunnel;
 /// Webhook secret generation and constant-time comparison.

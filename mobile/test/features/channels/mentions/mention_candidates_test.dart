@@ -1,7 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 
 final userPubkey = 'a' * 64;
 final memberPubkey = 'b' * 64;
@@ -18,6 +19,21 @@ ChannelMember member(String pubkey, {String role = 'member'}) {
 }
 
 void main() {
+  test('role-only agent mentions fall back to a compact npub label', () {
+    const pubkey =
+        'deadbeef00000000000000000000000000000000000000000000000000000000';
+
+    expect(
+      mentionNamesWithDirectoryLabels(
+        mentionPubkeys: const [pubkey],
+        profileMentionNames: const {},
+        directoryDisplayNames: const {},
+        agentMentionPubkeys: const {pubkey},
+      ),
+      const {pubkey: 'npub1m6k\u20263kf3'},
+    );
+  });
+
   group('agentIsSharedWithUser', () {
     test('anyone-mode agent is shared when a channel overlaps', () {
       final agent = AgentDirectoryEntry(
@@ -46,14 +62,14 @@ void main() {
       expect(formatOwnerLabel(userPubkey, userPubkey, const {}), 'you');
     });
 
-    test('prefers display name, then handle, then pubkey prefix', () {
+    test('prefers display name, then handle, then compact npub', () {
       final profiles = {
         ownerPubkey: UserProfile(pubkey: ownerPubkey, displayName: 'Wes'),
       };
       expect(formatOwnerLabel(ownerPubkey, userPubkey, profiles), 'Wes');
       expect(
         formatOwnerLabel(ownerPubkey, userPubkey, const {}),
-        '${'d' * 8}\u2026',
+        'npub1mhw\u2026dmpv',
       );
     });
 

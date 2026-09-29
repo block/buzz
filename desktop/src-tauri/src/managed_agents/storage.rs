@@ -32,7 +32,7 @@ fn agent_secret_store() -> Option<&'static SecretStore> {
     }
 }
 
-pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn managed_agents_base_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -42,7 +42,9 @@ pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub(crate) fn managed_agents_store_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn managed_agents_store_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("managed-agents.json"))
 }
 
@@ -50,6 +52,34 @@ fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("logs");
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create logs dir: {error}"))?;
     Ok(dir)
+}
+
+/// Install-log path for `runtime_id`, alongside the agent logs.
+pub fn install_log_path(app: &AppHandle, runtime_id: &str) -> Result<PathBuf, String> {
+    Ok(managed_agents_logs_dir(app)?.join(install_log_filename(runtime_id)?))
+}
+
+/// Filename for a runtime's install log, or an error for an id that must not
+/// become one.
+///
+/// The id is validated rather than trusted: ids reach this from user-defined
+/// custom harnesses as well as the catalog, and a `../` or a separator in one
+/// would place the log outside the logs directory. Rejecting beats sanitizing —
+/// a rejected id means no log, while a rewritten one could collide with another
+/// runtime's.
+fn install_log_filename(runtime_id: &str) -> Result<String, String> {
+    if runtime_id.is_empty() || !runtime_id.chars().all(is_safe_id_char) {
+        return Err(format!(
+            "unsafe runtime id for a log filename: {runtime_id}"
+        ));
+    }
+    Ok(format!("install-{runtime_id}.log"))
+}
+
+/// Characters allowed in a runtime id used as a filename. Excludes `/`, `\`,
+/// `:` and `.`, so no id can traverse or escape the logs directory.
+fn is_safe_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
 pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
@@ -208,7 +238,9 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
-fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+fn load_agent_store<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
     let path = managed_agents_store_path(app)?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -231,7 +263,9 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
 /// folded into the same store) are filtered out so every pre-fold call site
 /// keeps seeing exactly the records it always did.
-pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+pub fn load_managed_agents<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
@@ -241,7 +275,9 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
 /// Load the key-less agent *definitions* (former personas) from the unified
 /// store. The persona compatibility shim (`load_personas`) presents these in
 /// the legacy shape via `to_definition_view`.
-pub(crate) fn load_agent_definitions(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+pub(crate) fn load_agent_definitions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| record.pubkey.is_empty());
     Ok(records)
@@ -332,7 +368,10 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
 /// [`load_managed_agents`], and this re-reads the definition half from disk
 /// before the wholesale rewrite so a definition is never dropped by an
 /// instance-side save (and vice versa via [`save_agent_definitions`]).
-pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
+pub fn save_managed_agents<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    records: &[ManagedAgentRecord],
+) -> Result<(), String> {
     let definitions = load_agent_definitions(app).unwrap_or_default();
     let mut sorted = records.to_vec();
     // A caller-supplied key-less record would collide with the definition
@@ -355,8 +394,8 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —
 /// the definition-side mirror of [`save_managed_agents`].
-pub(crate) fn save_agent_definitions(
-    app: &AppHandle,
+pub(crate) fn save_agent_definitions<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     definitions: &[ManagedAgentRecord],
 ) -> Result<(), String> {
     let mut instances = load_agent_store(app)?;
@@ -369,8 +408,8 @@ pub(crate) fn save_agent_definitions(
 /// Serialize definitions + instances into the single unified store file.
 /// Definitions sort first (by slug) for stable diffs; instances keep the
 /// name/pubkey order their save path established.
-fn write_agent_store(
-    app: &AppHandle,
+fn write_agent_store<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     mut definitions: Vec<ManagedAgentRecord>,
     instances: Vec<ManagedAgentRecord>,
 ) -> Result<(), String> {
@@ -606,6 +645,77 @@ pub(crate) fn atomic_write_json_restricted(path: &Path, payload: &[u8]) -> Resul
         .map_err(|e| format!("commit {}: {e}", resolved.display()))
 }
 
+// ── Two-store byte-level rollback ─────────────────────────────────────────
+//
+// Shared by `commands::teams::adopt::apply` (catalog adoption) and
+// `managed_agents::teams` (adopted-team deletion). Identical rollback policy
+// in both paths (I5 / I6).
+
+/// Raw pre-write snapshot of a JSON store file.
+///
+/// `None` means the file did not exist at snapshot time; restoring `None`
+/// removes the file (with `NotFound` treated as success — desired state
+/// already reached).
+pub(crate) type StoreSnapshot = Option<Vec<u8>>;
+
+/// Snapshot the raw bytes of `path`, or `None` if the file is absent.
+pub(crate) fn snapshot_store(path: &Path) -> Result<StoreSnapshot, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("failed to snapshot {}: {e}", path.display())),
+    }
+}
+
+/// Restore `path` from a [`StoreSnapshot`].
+///
+/// `NotFound` when restoring an absent snap is treated as success — the
+/// desired state is already reached (I5).
+pub(crate) fn restore_store(path: &Path, snap: StoreSnapshot) -> Result<(), String> {
+    match snap {
+        Some(bytes) => atomic_write_json_restricted(path, &bytes),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!(
+                "failed to remove {} during restore: {e}",
+                path.display()
+            )),
+        },
+    }
+}
+
+/// Write both stores via the supplied callbacks, rolling back both from
+/// caller-supplied snapshots on any failure.
+///
+/// Both restores are attempted independently, so a restore failure in one
+/// store does not prevent the other; errors from both are aggregated (I5).
+pub(crate) fn commit_stores_with_snapshots(
+    personas_path: &Path,
+    teams_path: &Path,
+    personas_snap: StoreSnapshot,
+    teams_snap: StoreSnapshot,
+    write_personas: impl FnOnce() -> Result<(), String>,
+    write_teams: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if let Err(error) = write_personas().and_then(|()| write_teams()) {
+        let personas_err = restore_store(personas_path, personas_snap).err();
+        let teams_err = restore_store(teams_path, teams_snap).err();
+        let restore_errors: Vec<&str> = [personas_err.as_deref(), teams_err.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !restore_errors.is_empty() {
+            return Err(format!(
+                "{error} (and the local stores could not be restored: {})",
+                restore_errors.join("; ")
+            ));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Maximum log file size before rotation (10 MB).
 const MAX_LOG_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
@@ -632,12 +742,68 @@ pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
         .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
 }
 
+/// Start a new install-log session at `path`: keep the previous run as
+/// `<path>.1` and return a freshly created, empty current file.
+///
+/// Rotating per *run* rather than by size is what bounds this file. A run
+/// writes one record per executed attempt, each capped by the log-scale
+/// capture, so one run's file is bounded by steps × attempts × cap and the
+/// history on disk is bounded at two runs. Size-triggered rotation could not
+/// promise either: it never replaced an existing `.1`, and on Windows —
+/// where rename does not replace its destination — it stopped working
+/// altogether once `.1` existed, leaving the current file to grow.
+///
+/// The old `.1` is therefore *removed* before the rename rather than renamed
+/// over. Every step is best-effort: a rotation that fails must not cost the
+/// user the install, so the session continues with a truncated current file.
+pub(crate) fn start_install_log_session(path: &Path) -> Result<File, String> {
+    if path.exists() {
+        let mut previous = path.as_os_str().to_owned();
+        previous.push(".1");
+        let previous = PathBuf::from(previous);
+        let _ = fs::remove_file(&previous);
+        let _ = fs::rename(path, &previous);
+    }
+    open_install_log(path, /* truncate */ true)
+}
+
+/// Open an install log for appending one more record to the current session.
+pub(crate) fn open_install_log_file(path: &Path) -> Result<File, String> {
+    open_install_log(path, /* truncate */ false)
+}
+
+/// Open an install log owner-only.
+///
+/// The mode is set *in the create* rather than chmod'd afterwards, so the file
+/// is never briefly group/world-readable. Install output can carry registry
+/// tokens and proxy credentials echoed by a failing installer, so the window
+/// matters even though it is short. An existing file's mode is left as-is —
+/// `OpenOptions::mode` only applies on creation, and silently re-tightening a
+/// file the user relaxed is not this function's call to make.
+fn open_install_log(path: &Path, truncate: bool) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.create(true);
+    if truncate {
+        options.write(true).truncate(true);
+    } else {
+        options.append(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
+}
+
 pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String> {
     let mut file = open_log_file(path)?;
     writeln!(file, "{message}").map_err(|error| format!("failed to write log marker: {error}"))
 }
 
-fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn agent_pids_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("agent-pids");
     fs::create_dir_all(&dir)
         .map_err(|error| format!("failed to create agent-pids dir: {error}"))?;
@@ -657,7 +823,10 @@ pub fn write_agent_runtime_receipt(
     atomic_write_json_restricted(&path, &payload)
 }
 
-pub fn remove_agent_runtime_receipt(app: &AppHandle, key: &ManagedAgentRuntimeKey) {
+pub fn remove_agent_runtime_receipt<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    key: &ManagedAgentRuntimeKey,
+) {
     if let Ok(dir) = agent_pids_dir(app) {
         let _ = fs::remove_file(dir.join(format!("{}.json", key.runtime_id())));
     }
@@ -690,7 +859,7 @@ pub fn read_all_agent_runtime_receipts(
 }
 
 /// Remove the PID file for an agent (e.g. on normal stop).
-pub fn remove_agent_pid_file(app: &AppHandle, pubkey: &str) {
+pub fn remove_agent_pid_file<R: tauri::Runtime>(app: &AppHandle<R>, pubkey: &str) {
     if let Ok(dir) = agent_pids_dir(app) {
         let _ = fs::remove_file(dir.join(format!("{pubkey}.pid")));
     }
