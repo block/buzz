@@ -61,17 +61,19 @@ function sameUnsignedEvent(
 }
 
 /**
- * Sign with NIP-07 when available, otherwise use a page-lifetime key.
+ * Sign with NIP-07 when available; otherwise an explicitly supplied key;
+ * otherwise a page-lifetime key.
  *
  * The ephemeral fallback preserves anonymous browsing on open relays. Flows
- * that create durable membership must set `requireNip07` so a reload cannot
- * orphan a relay-membership row.
+ * that create durable membership must either set `requireNip07` or supply a
+ * PERSISTENT `secretKey` (the join-by-address local identity) — either way a
+ * reload cannot orphan a relay-membership row.
  */
 export async function signNostrEvent(
   template: Omit<UnsignedNostrEvent, "created_at"> & {
     created_at?: number;
   },
-  options?: { requireNip07?: boolean },
+  options?: { requireNip07?: boolean; secretKey?: Uint8Array },
 ): Promise<SignedNostrEvent> {
   const unsigned: UnsignedNostrEvent = {
     ...template,
@@ -89,6 +91,14 @@ export async function signNostrEvent(
       typeof signed.sig !== "string"
     ) {
       throw new Error("The NIP-07 extension returned an invalid signed event.");
+    }
+    return signed;
+  }
+
+  if (options?.secretKey) {
+    const signed = finalizeEvent(unsigned, options.secretKey);
+    if (signed.pubkey !== getPublicKey(options.secretKey)) {
+      throw new Error("Failed to sign with the supplied key.");
     }
     return signed;
   }
