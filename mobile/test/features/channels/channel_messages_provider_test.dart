@@ -312,6 +312,57 @@ void main() {
     );
   });
 
+  group('relay deadline owners', () {
+    RelayException deadline() =>
+        RelayException(503, '{"error":"query timed out"}');
+    int threadScans(_RecordingRelaySessionNotifier session) => session
+        .queryFilters
+        .where((filter) => filter.extensions.containsKey('depth_limit'))
+        .length;
+    NostrEvent reply(int i) => _event(
+      id: 'reply-$i',
+      createdAt: 20 + i,
+      extraTags: const [
+        ['e', 'root', '', 'reply'],
+      ],
+    );
+
+    test('a window deadline does not fall back to websocket history', () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [deadline()],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await session.subscribed;
+      await _pumpEventQueue();
+      expect(session.operations, ['subscribe', 'query']);
+      expect(
+        container.read(channelMessagesProvider(_channelId)).hasError,
+        true,
+      );
+    });
+
+    test('a recount deadline ends its retry backoff', () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          deadline(),
+          deadline(),
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await _pumpEventQueue();
+      for (var i = 0; i < 300; i++) {
+        session.emit(reply(i));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 2000));
+      expect(threadScans(session), 1);
+    });
+  });
+
   test('still loads history when live subscription fails', () async {
     final relaySession = _RecordingRelaySessionNotifier(failSubscribe: true);
     final container = _buildContainer(relaySession);

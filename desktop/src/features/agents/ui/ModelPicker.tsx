@@ -26,7 +26,10 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import {
+  disambiguateModelLabels,
+  resolveModelLabel,
+} from "@/features/agents/lib/formatAgentModelLabel";
 
 export function ModelPicker({
   agent,
@@ -86,10 +89,24 @@ export function ModelPicker({
   );
 
   const currentValue = agent.model ?? modelsData?.agentDefaultModel ?? "";
+  const modelRows = React.useMemo(
+    () =>
+      disambiguateModelLabels(
+        (modelsData?.models ?? []).map((model) => ({
+          id: model.id,
+          label: resolveModelLabel(model.id, model.name, agent.provider),
+        })),
+        agent.provider,
+      ),
+    [modelsData, agent.provider],
+  );
+  const rowLabel = (id: string) =>
+    modelRows.find((row) => row.id === id)?.label ??
+    resolveModelLabel(id, null, agent.provider);
   const displayLabel = agent.model
-    ? resolveModelLabel(agent.model, null, agent.provider)
+    ? rowLabel(agent.model)
     : modelsData?.agentDefaultModel
-      ? `${resolveModelLabel(modelsData.agentDefaultModel, null, agent.provider)} (default)`
+      ? `${rowLabel(modelsData.agentDefaultModel)} (default)`
       : hasRequestedModels && loading
         ? "Loading..."
         : "Auto";
@@ -286,9 +303,9 @@ export function ModelPicker({
               onValueChange={handleModelChange}
               value={currentValue}
             >
-              {modelsData.models.map((model) => (
-                <DropdownMenuRadioItem key={model.id} value={model.id}>
-                  {resolveModelLabel(model.id, model.name, agent.provider)}
+              {modelRows.map((row) => (
+                <DropdownMenuRadioItem key={row.id} value={row.id}>
+                  {row.label}
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>

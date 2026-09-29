@@ -15,7 +15,7 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
-    response::Json,
+    response::{IntoResponse, Json, Response},
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -118,12 +118,13 @@ fn klipy_share_request(
         .json(&serde_json::json!({ "customer_id": request.customer_id })))
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn authenticate(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
-) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
+) -> Result<(buzz_core::TenantContext, nostr::PublicKey), Response> {
     let raw_host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -135,23 +136,33 @@ async fn authenticate(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
             )
+            .into_response()
         })?;
 
     let expected_url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let bridge::VerifiedBridgeAuth {
-        pubkey,
-        event_id_bytes,
-        signed_created_at,
-    } = bridge::verify_bridge_auth_with_options(
+
+    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
+        state,
         headers,
-        "POST",
-        &expected_url,
-        Some(body),
-        true,
-        true,
+        bridge::make_nip98_closure_for_admission(
+            headers.clone(),
+            "POST",
+            expected_url,
+            Some(body.to_vec()),
+            true,
+            true,
+        ),
     )?;
-    bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    let pubkey = *admission.proven_pubkey();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
+
+    bridge::enforce_http_admission(state, &tenant, &pubkey)
+        .await
+        .map_err(|e| e.into_response())?;
+    bridge::check_nip98_replay(state, &tenant, event_id_bytes)
+        .await
+        .map_err(|e| e.into_response())?;
     relay_members::enforce_relay_membership(
         state,
         tenant.community(),
@@ -159,7 +170,8 @@ async fn authenticate(
         relay_members::extract_auth_tag_header(headers),
         signed_created_at,
     )
-    .await?;
+    .await
+    .map_err(|e| e.into_response())?;
 
     Ok((tenant, pubkey))
 }
@@ -265,20 +277,35 @@ pub async fn search(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Some(config) = state.config.klipy.as_ref() else {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "GIF search is not configured",
-        ));
-    };
+) -> Response {
+    search_inner(state, headers, body).await.into_response()
+}
+
+async fn search_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, Response> {
+    // Admission first: NIP-98 + NIP-FI must fire before any application-level
+    // check (including provider availability) so the denial contract wins over
+    // config or request-validation errors. [FI-TRACE-HTTP-INGRESS]
     let (tenant, pubkey) = authenticate(&state, &headers, SEARCH_PATH, &body).await?;
-    let request: SearchRequest = serde_json::from_slice(&body)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid GIF search JSON"))?;
-    validate_text("query", &request.query, 200, true)?;
-    validate_text("customer_id", &request.customer_id, 128, false)?;
-    validate_text("locale", &request.locale, 32, false)?;
-    enforce_search_admission(&state, &tenant, &pubkey).await?;
+
+    let Some(config) = state.config.klipy.as_ref() else {
+        return Err(
+            api_error(StatusCode::NOT_FOUND, "GIF search is not configured").into_response(),
+        );
+    };
+    let request: SearchRequest = serde_json::from_slice(&body).map_err(|_| {
+        api_error(StatusCode::BAD_REQUEST, "invalid GIF search JSON").into_response()
+    })?;
+    validate_text("query", &request.query, 200, true).map_err(|e| e.into_response())?;
+    validate_text("customer_id", &request.customer_id, 128, false)
+        .map_err(|e| e.into_response())?;
+    validate_text("locale", &request.locale, 32, false).map_err(|e| e.into_response())?;
+    enforce_search_admission(&state, &tenant, &pubkey)
+        .await
+        .map_err(|e| e.into_response())?;
 
     let endpoint = if request.query.trim().is_empty() {
         "trending"
@@ -294,22 +321,30 @@ pub async fn search(
     if !request.query.trim().is_empty() {
         query.push(("q", request.query.trim()));
     }
-    let url = klipy_url(config.api_key(), &["gifs", endpoint], &query)?;
-    let response = send_upstream(state.gif_http_client.get(url)).await?;
+    let url =
+        klipy_url(config.api_key(), &["gifs", endpoint], &query).map_err(|e| e.into_response())?;
+    let response = send_upstream(state.gif_http_client.get(url))
+        .await
+        .map_err(|e| e.into_response())?;
     if !response.status().is_success() {
         tracing::warn!(status = response.status().as_u16(), "KLIPY search failed");
         return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "GIF provider rejected the search request",
-        ));
+        )
+        .into_response());
     }
 
     // Never forward the provider response wholesale. KLIPY may report an
     // application-level failure with HTTP 200 and include request details in
     // its error fields. Allowlist only successful result data so credentials
     // and provider diagnostics cannot cross the relay boundary.
-    let upstream = limited_json(response).await?;
-    Ok(Json(successful_search_payload(&upstream)?))
+    let upstream = limited_json(response)
+        .await
+        .map_err(|e| e.into_response())?;
+    Ok(Json(
+        successful_search_payload(&upstream).map_err(|e| e.into_response())?,
+    ))
 }
 
 /// Report a selected GIF to KLIPY so the provider can update Recents.
@@ -317,31 +352,44 @@ pub async fn share(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<StatusCode, (StatusCode, Json<Value>)> {
-    let Some(config) = state.config.klipy.as_ref() else {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "GIF search is not configured",
-        ));
-    };
-    authenticate(&state, &headers, SHARE_PATH, &body).await?;
-    let request: ShareRequest = serde_json::from_slice(&body)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid GIF share JSON"))?;
-    validate_text("slug", &request.slug, 200, false)?;
-    validate_text("customer_id", &request.customer_id, 128, false)?;
+) -> Response {
+    share_inner(state, headers, body).await.into_response()
+}
 
-    let response = send_upstream(klipy_share_request(
-        &state.gif_http_client,
-        config.api_key(),
-        &request,
-    )?)
-    .await?;
+async fn share_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, Response> {
+    // Admission first: NIP-98 + NIP-FI must fire before provider availability
+    // check. [FI-TRACE-HTTP-INGRESS]
+    authenticate(&state, &headers, SHARE_PATH, &body).await?;
+
+    let Some(config) = state.config.klipy.as_ref() else {
+        return Err(
+            api_error(StatusCode::NOT_FOUND, "GIF search is not configured").into_response(),
+        );
+    };
+    let request: ShareRequest = serde_json::from_slice(&body).map_err(|_| {
+        api_error(StatusCode::BAD_REQUEST, "invalid GIF share JSON").into_response()
+    })?;
+    validate_text("slug", &request.slug, 200, false).map_err(|e| e.into_response())?;
+    validate_text("customer_id", &request.customer_id, 128, false)
+        .map_err(|e| e.into_response())?;
+
+    let response = send_upstream(
+        klipy_share_request(&state.gif_http_client, config.api_key(), &request)
+            .map_err(|e| e.into_response())?,
+    )
+    .await
+    .map_err(|e| e.into_response())?;
     if !response.status().is_success() {
         tracing::warn!(status = response.status().as_u16(), "KLIPY share failed");
         return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "GIF provider rejected the share request",
-        ));
+        )
+        .into_response());
     }
 
     Ok(StatusCode::NO_CONTENT)

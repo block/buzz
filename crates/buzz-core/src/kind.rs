@@ -437,6 +437,8 @@ pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// content = `{has_more, next_cursor}`. The only authority on exhaustion —
 /// clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
+/// NIP-CW thread-mode query-time bounds, bound to a normalized newest-first thread request.
+pub const KIND_THREAD_WINDOW_BOUNDS: u32 = 39007;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
@@ -548,6 +550,10 @@ pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
 pub const KIND_FORUM_POST: u32 = 45001;
+/// NIP-AR complete artifact revision.
+pub const KIND_ARTIFACT: u32 = 45010;
+/// Relay-authenticated artifact removal.
+pub const KIND_ARTIFACT_REMOVAL: u32 = 45011;
 /// A vote on a forum post.
 pub const KIND_FORUM_VOTE: u32 = 45002;
 /// A comment reply on a forum post.
@@ -694,6 +700,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
+    KIND_THREAD_WINDOW_BOUNDS,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,
@@ -732,6 +739,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_USER_STATUS,
     KIND_READ_STATE,
     KIND_FORUM_POST,
+    KIND_ARTIFACT,
+    KIND_ARTIFACT_REMOVAL,
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
@@ -833,12 +842,14 @@ pub const fn is_command_kind(kind: u32) -> bool {
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_NIP43_MEMBERSHIP_LIST
+        KIND_ARTIFACT_REMOVAL
+            | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_THREAD_WINDOW_BOUNDS
     )
 }
 
@@ -914,6 +925,12 @@ mod tests {
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
+    }
+
+    #[test]
+    fn thread_window_bounds_is_relay_only() {
+        assert_eq!(KIND_THREAD_WINDOW_BOUNDS, 39007);
+        assert!(is_relay_only_kind(KIND_THREAD_WINDOW_BOUNDS));
     }
 
     #[test]

@@ -140,20 +140,22 @@ For local physical-device development, override the identity and sandbox
 environments in the gitignored `mobile/ios/Flutter/AppOverrides.xcconfig`:
 
 ```xcconfig
-BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
-BUZZ_DEVELOPMENT_TEAM = EYF346PHUG
+BUNDLE_IDENTIFIER = com.example.buzz.mobile
+BUZZ_DEVELOPMENT_TEAM = YOUR_TEAM_ID
 BUZZ_IOS_PUSH_ENVIRONMENT = development
 BUZZ_APP_ATTEST_ENVIRONMENT = development
 BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example
 ```
 
-This exercises the client, extension, relay, and gateway integration without
-requiring a dogfood development signing identity. It uses the canonical
-gateway's server-owned App Store profile configured for sandbox in the local
-development gateway; it does not validate the internally distributed dogfood
-artifact or enable the App Store profile in production. Validate dogfood APNs
-end to end by cutting an internal release, waiting for it to reach Mobile
-Releases/Comp Portal, and installing that signed artifact on a physical device.
+Use your personal bundle ID and team above. Provision both the parent and its
+`.NotificationService` extension. Configure an isolated gateway with the matching
+App Attest application ID, APNs topic and sandbox certificate. Development
+attestation requires the explicit `personal-dev-app-attest` gateway build feature
+and `BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`; ordinary gateway builds accept
+production attestation only. See `docs/push-gateway-deployment.md`.
+This validates the personal client/relay/gateway integration, not the internally
+distributed dogfood artifact. Validate dogfood separately using the signed
+internal release and its production gateway configuration.
 
 Parent app identifiers require Apple's Communication
 Notifications capability and a regenerated app provisioning profile. The

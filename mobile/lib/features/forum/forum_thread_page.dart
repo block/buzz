@@ -7,11 +7,13 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
 import '../channels/message_content.dart';
@@ -45,12 +47,25 @@ class ForumThreadPage extends HookConsumerWidget {
       forumThreadProvider((channelId: channelId, eventId: postEventId)),
     );
 
-    // Periodic refresh (every 10s, matching desktop).
+    // Periodic refresh (every 10s, matching desktop). A settled deadline
+    // pauses polling; reopening the thread is the explicit retry.
     useEffect(() {
+      final provider = forumThreadProvider((
+        channelId: channelId,
+        eventId: postEventId,
+      ));
+      // Only a deadline already settled when this surface mounts is a
+      // reopen; a first load that fails after mounting is not retried.
+      // Hooks run effects during build, so defer the invalidation past it.
+      if (isSettledRelayDeadline(ref.read(provider))) {
+        Future.microtask(() {
+          if (context.mounted) ref.invalidate(provider);
+        });
+      }
       final timer = Stream.periodic(const Duration(seconds: 10)).listen((_) {
-        ref.invalidate(
-          forumThreadProvider((channelId: channelId, eventId: postEventId)),
-        );
+        if (!isSettledRelayDeadline(ref.read(provider))) {
+          ref.invalidate(provider);
+        }
       });
       return timer.cancel;
     }, [channelId, postEventId]);
@@ -79,6 +94,8 @@ class ForumThreadPage extends HookConsumerWidget {
         ],
       ),
       body: threadAsync.when(
+        // A retry from an error shows loading, not the stale error and its Retry.
+        skipLoadingOnRefresh: !threadAsync.hasError,
         loading: () => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
           child: const Center(
@@ -90,12 +107,10 @@ class ForumThreadPage extends HookConsumerWidget {
         ),
         error: (e, _) => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-          child: Center(
-            child: Text(
-              'Failed to load thread',
-              style: context.textTheme.bodyMedium?.copyWith(
-                color: context.colors.error,
-              ),
+          child: LoadErrorView(
+            message: 'Failed to load thread',
+            onRetry: () => ref.invalidate(
+              forumThreadProvider((channelId: channelId, eventId: postEventId)),
             ),
           ),
         ),

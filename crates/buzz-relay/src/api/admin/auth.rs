@@ -96,6 +96,15 @@ pub(crate) fn admin_source_str(source: &AdminSource) -> &'static str {
     }
 }
 
+/// Compare an inbound Host against the configured admin host case-insensitively.
+/// Host names are case-insensitive (RFC 3986 §6.2.2.1), and `config.host` is
+/// already lowercased at config load — but a proxy, curl, or non-desktop client
+/// can still send a mixed-case Host header, so the comparison itself must fold
+/// case rather than relying on the inbound value already being lowercase.
+fn host_matches(inbound: &str, configured: &str) -> bool {
+    inbound.eq_ignore_ascii_case(configured)
+}
+
 pub(crate) fn is_admin_host(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(config) = state.config.admin.as_ref() else {
         return false;
@@ -103,7 +112,7 @@ pub(crate) fn is_admin_host(state: &AppState, headers: &HeaderMap) -> bool {
     headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|host| host == config.host)
+        .is_some_and(|host| host_matches(host, &config.host))
 }
 
 /// Scheme for an admin authority: `http://` for loopback hosts (`localhost`,
@@ -443,18 +452,46 @@ fn nostr_credential(value: &str) -> Option<&str> {
 }
 
 fn origin_matches_host(origin: &str, host: &str) -> bool {
-    // Compare against the exact canonical origin: https:// for non-loopback,
-    // http:// for loopback. Accepting either scheme for non-loopback would
-    // allow plaintext origins for production hosts.
-    let expected = format!("{}://{host}", scheme_for_host(host));
-    origin == expected
+    // The scheme is matched exactly — https:// for non-loopback, http:// for
+    // loopback. Accepting either scheme for non-loopback would allow plaintext
+    // origins for production hosts, so the scheme check must not fold anything.
+    // The host portion, by contrast, is case-insensitive (RFC 3986 §6.2.2.1)
+    // and may arrive mixed-case from a browser, so it folds case.
+    let Some(origin_host) = origin
+        .strip_prefix(scheme_for_host(host))
+        .and_then(|rest| rest.strip_prefix("://"))
+    else {
+        return false;
+    };
+    origin_host.eq_ignore_ascii_case(host)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_api_origin, canonical_url, method_has_body, nostr_credential, origin_matches_host,
+        admin_api_origin, canonical_url, host_matches, method_has_body, nostr_credential,
+        origin_matches_host,
     };
+
+    #[test]
+    fn admin_host_compare_is_case_insensitive() {
+        // config.host is lowercased at load, but a proxy/curl/non-desktop
+        // client can still send a mixed-case Host header — it must match.
+        assert!(host_matches(
+            "Admin.Example.Com:8443",
+            "admin.example.com:8443"
+        ));
+        // Exact same-case is trivially a match.
+        assert!(host_matches(
+            "admin.example.com:8443",
+            "admin.example.com:8443"
+        ));
+        // A genuinely different host never matches.
+        assert!(!host_matches(
+            "attacker.example:8443",
+            "admin.example.com:8443"
+        ));
+    }
 
     #[test]
     fn browser_origin_must_match_admin_host() {
@@ -491,6 +528,17 @@ mod tests {
         assert!(!origin_matches_host(
             "https://admin.localhost:3000",
             "admin.localhost:3000"
+        ));
+        // Host is case-insensitive (RFC 3986 §6.2.2.1): a mixed-case Origin
+        // host matches the lowercased configured host, but the scheme is still
+        // matched exactly (http rejected for a non-loopback host).
+        assert!(origin_matches_host(
+            "https://Admin.Example.Com",
+            "admin.example.com"
+        ));
+        assert!(!origin_matches_host(
+            "http://Admin.Example.Com",
+            "admin.example.com"
         ));
     }
 

@@ -1754,6 +1754,67 @@ async fn create_session_and_apply_model(
     Ok(resp.session_id)
 }
 
+/// Run a prepared task with the normal session setup and standing instructions.
+/// The execution owner bounds startup, memory loading, and the turn together.
+pub(crate) async fn run_isolated_prompt(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    prompt: &str,
+    max_duration: Duration,
+    active_session: &mut Option<String>,
+) -> Result<StopReason, AcpError> {
+    let core = if ctx.memory_enabled {
+        if let Some(owner) = &ctx.agent_owner_pubkey {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                crate::engram_fetch::build_core_section(&ctx.rest_client, &ctx.agent_keys, owner),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!("core fetch timed out — emitting no section");
+                None
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let session_id = create_session_and_apply_model(
+        agent,
+        ctx,
+        core.as_deref(),
+        NewSessionChannelContext {
+            huddle_instructions: None,
+            canvas: None,
+            name: None,
+            scope: None,
+            channel_type: None,
+        },
+    )
+    .await?;
+    *active_session = Some(session_id.clone());
+    let prompt = prepend_standing_for_legacy(
+        if agent.has_system_prompt_support() {
+            2
+        } else {
+            1
+        },
+        &crate::queue::StandingContext {
+            base_prompt: ctx.base_prompt.as_deref(),
+            system_prompt: ctx.system_prompt.as_deref(),
+            team_instructions: ctx.team_instructions.as_deref(),
+            agent_core: core.as_deref(),
+            ..Default::default()
+        },
+        prompt,
+    );
+    agent
+        .acp
+        .session_prompt_with_idle_timeout(&session_id, &prompt, ctx.idle_timeout, max_duration)
+        .await
+}
+
 fn mcp_servers_with_git_origin(
     servers: &[McpServer],
     channel_id: Option<Uuid>,

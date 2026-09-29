@@ -10187,6 +10187,62 @@ void main() {
   });
 
   group('Error and loading states', () {
+    Widget errorScope(ChannelMessagesNotifier notifier) => ProviderScope(
+      overrides: [
+        channelMessagesProvider(_channelId).overrideWith(() => notifier),
+        channelTypingProvider(
+          _channelId,
+        ).overrideWith(() => _FakeTypingNotifier([])),
+        userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+        channelsProvider.overrideWith(
+          () => _FakeChannelsNotifier([_testChannel]),
+        ),
+        relayClientProvider.overrideWithValue(
+          RelayClient(baseUrl: 'http://localhost:3000'),
+        ),
+        savedPrefsProvider.overrideWithValue(_testPrefs),
+      ],
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        home: ChannelDetailPage(channel: _testChannel),
+      ),
+    );
+    final retry = find.byKey(const ValueKey('load-error-retry'));
+
+    for (final (name, error) in [
+      (
+        'deadline',
+        RelayException(503, '{"error":"query timed out"}') as Object,
+      ),
+      ('ordinary error', Exception('bridge down') as Object),
+    ]) {
+      testWidgets('Retry after a $name loads once', (tester) async {
+        final notifier = _RetryCountingMessagesNotifier(
+          () => AsyncError(error, StackTrace.current),
+        );
+        await tester.pumpWidget(errorScope(notifier));
+        await tester.pumpAndSettle();
+        expect(find.text('Failed to load messages'), findsOneWidget);
+        expect(notifier.loads, 1);
+        final before = notifier.loads;
+        notifier.nextResult = () => const AsyncData([]);
+        await tester.tap(retry);
+        await tester.pumpAndSettle();
+        expect(notifier.loads, before + 1);
+        expect(retry, findsNothing);
+      });
+    }
+
+    testWidgets('no Retry while messages load', (tester) async {
+      final notifier = _RetryCountingMessagesNotifier(
+        () => const AsyncLoading(),
+      );
+      await tester.pumpWidget(errorScope(notifier));
+      await tester.pump();
+      expect(retry, findsNothing);
+      expect(find.text('Failed to load messages'), findsNothing);
+    });
+
     testWidgets('shows error message on failure', (tester) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -10889,6 +10945,225 @@ void main() {
           tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
       expect(highlightedDecoration.color!.a, greaterThan(0));
       expect(highlightedDecoration.color!.a, lessThan(0.12));
+    });
+
+    group('after a first-load deadline', () {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final mid = _textMsg(
+        id: 'mid',
+        pubkey: 'bob',
+        content: 'Nested parent',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+
+      Future<(_FakeMessagesNotifier, int Function())> openDeadlined(
+        WidgetTester tester,
+        NostrEvent head,
+      ) async {
+        var attempts = 0;
+        final messages = _FakeMessagesNotifier([root, mid]);
+        final timeline = formatTimeline([root, mid]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, mid],
+            messagesNotifier: messages,
+            disableRetries: true,
+            threadReplyLoaders: {
+              'root': () {
+                attempts++;
+                return Future.error(
+                  RelayException(503, '{"error":"query timed out"}'),
+                );
+              },
+            },
+            home: ThreadDetailPage(
+              threadHead: timeline.firstWhere((m) => m.id == head.id),
+              allMessages: timeline,
+              channelId: _testChannel.id,
+              currentPubkey: 'me',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(attempts, 1);
+        return (messages, () => attempts);
+      }
+
+      NostrEvent liveReply(String id, List<List<String>> tags) => _textMsg(
+        id: id,
+        pubkey: 'carol',
+        content: 'Live $id',
+        createdAt: 1200,
+        extraTags: tags,
+      );
+
+      testWidgets('shows an incoming direct reply', (tester) async {
+        final (messages, attempts) = await openDeadlined(tester, root);
+        messages.setMessages([
+          root,
+          mid,
+          liveReply('direct', const [
+            ['e', 'root', '', 'reply'],
+          ]),
+        ]);
+        await tester.pumpAndSettle();
+        expect(find.text('Live direct'), findsOneWidget);
+        expect(find.textContaining('Couldn’t refresh'), findsOneWidget);
+        expect(attempts(), 1);
+      });
+
+      for (final provisional in [false, true]) {
+        testWidgets(
+          'Retry ${provisional ? 'beside provisional replies' : 'in the empty state'} '
+          'loads once',
+          (tester) async {
+            // The empty variant has no reply at all, cached or provisional.
+            final seed = provisional ? [root, mid] : [root];
+            final timeline = formatTimeline(seed);
+            var fail = true;
+            var loads = 0;
+            final messages = _FakeMessagesNotifier(seed);
+            await tester.pumpWidget(
+              _buildTestable(
+                messages: seed,
+                messagesNotifier: messages,
+                disableRetries: true,
+                threadReplyLoaders: {
+                  'root': () {
+                    loads++;
+                    if (!fail) return Future.value(const <NostrEvent>[]);
+                    return Future.error(
+                      RelayException(503, '{"error":"query timed out"}'),
+                    );
+                  },
+                },
+                home: ThreadDetailPage(
+                  threadHead: timeline.firstWhere((m) => m.id == 'root'),
+                  allMessages: timeline,
+                  channelId: _testChannel.id,
+                  currentPubkey: 'me',
+                  isMember: true,
+                  isArchived: false,
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            final retry = find.byKey(const ValueKey('thread-replies-retry'));
+            if (provisional) {
+              messages.setMessages([
+                root,
+                mid,
+                liveReply('direct', const [
+                  ['e', 'root', '', 'reply'],
+                ]),
+              ]);
+              await tester.pumpAndSettle();
+              expect(find.text('Live direct'), findsOneWidget);
+            } else {
+              expect(find.text('Couldn’t load replies'), findsOneWidget);
+            }
+            expect(retry, findsOneWidget);
+            final target = tester.getSize(retry);
+            expect(
+              target.width,
+              greaterThanOrEqualTo(kMinInteractiveDimension),
+            );
+            expect(
+              target.height,
+              greaterThanOrEqualTo(kMinInteractiveDimension),
+            );
+            final before = loads;
+            fail = false;
+            await tester.tap(retry);
+            await tester.pumpAndSettle();
+            expect(loads, before + 1);
+            expect(retry, findsNothing);
+          },
+        );
+      }
+
+      testWidgets('no replies Retry while the scan loads', (tester) async {
+        final timeline = formatTimeline([root, mid]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, mid],
+            threadReplyLoaders: {
+              'root': () => Completer<List<NostrEvent>>().future,
+            },
+            home: ThreadDetailPage(
+              threadHead: timeline.firstWhere((m) => m.id == 'root'),
+              allMessages: timeline,
+              channelId: _testChannel.id,
+              currentPubkey: 'me',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.textContaining('Couldn’t'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('thread-replies-retry')),
+          findsNothing,
+        );
+      });
+
+      testWidgets('shows an incoming nested reply', (tester) async {
+        final (messages, attempts) = await openDeadlined(tester, mid);
+        messages.setMessages([
+          root,
+          mid,
+          liveReply('nested', const [
+            ['e', 'root', '', 'root'],
+            ['e', 'mid', '', 'reply'],
+          ]),
+        ]);
+        await tester.pumpAndSettle();
+        expect(find.text('Live nested'), findsOneWidget);
+        expect(attempts(), 1);
+      });
+
+      testWidgets('keeps a sent reply visible after acceptance', (
+        tester,
+      ) async {
+        final (messages, attempts) = await openDeadlined(tester, root);
+        final sent = _textMsg(
+          id: 'sent',
+          pubkey: 'me',
+          content: 'My reply',
+          createdAt: 1300,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ThreadDetailPage)),
+        );
+        const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+        container.read(threadLocalRepliesProvider(args).notifier).add(sent);
+        await tester.pumpAndSettle();
+        expect(find.text('My reply'), findsOneWidget);
+        // Acceptance: the confirmed reply moves from the optimistic overlay
+        // into the channel cache (cacheConfirmedThreadReplies).
+        messages.setMessages([root, mid, sent]);
+        container.read(threadLocalRepliesProvider(args).notifier).confirm({
+          'sent',
+        });
+        await tester.pumpAndSettle();
+        expect(find.text('My reply'), findsOneWidget);
+        expect(attempts(), 1);
+      });
     });
 
     testWidgets('opens a nested reply in its direct-parent thread', (
@@ -14647,6 +14922,23 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     _messages = messages;
     _hasLoadedMessages = true;
     state = AsyncData(messages);
+  }
+}
+
+/// Counts loads; each settles after mount, like the real network load.
+class _RetryCountingMessagesNotifier extends ChannelMessagesNotifier {
+  _RetryCountingMessagesNotifier(this.nextResult) : super(_channelId);
+
+  AsyncValue<List<NostrEvent>> Function() nextResult;
+  int loads = 0;
+
+  @override
+  AsyncValue<List<NostrEvent>> build() {
+    loads++;
+    final result = nextResult();
+    if (result is AsyncLoading) return result;
+    Future(() => state = result);
+    return const AsyncLoading();
   }
 }
 

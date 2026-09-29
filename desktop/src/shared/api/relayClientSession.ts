@@ -38,6 +38,7 @@ import {
 import { getChannelReconnectRepairEvents } from "@/shared/api/channelReconnectRepair";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { RelayLiveReqDrain } from "./relayLiveReqDrain";
+import { RelayChannelAccessRevocations } from "./relayChannelAccessRevocations";
 import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
 import { activateRateLimitIfSignalled } from "@/shared/api/relayRateLimitGate";
 import {
@@ -90,6 +91,7 @@ export class RelayClient {
   private eventBuffer: SubscriptionEventBufferItem[] = [];
   private flushTimeout: number | null = null;
   private reconnectListeners = new Set<() => void>();
+  private channelAccessRevocations = new RelayChannelAccessRevocations();
   private hasConnectedOnce = false;
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
@@ -176,6 +178,7 @@ export class RelayClient {
     }
     this.eventBuffer = [];
     this.reconnectListeners.clear();
+    this.channelAccessRevocations.clear();
     this.connectionStateEmitter.clear();
     this.onMessageChannel = null;
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
@@ -476,6 +479,11 @@ export class RelayClient {
     return () => {
       this.reconnectListeners.delete(listener);
     };
+  }
+
+  /** Listen for channel access-revocation hints; authoritative state needs a refresh. */
+  subscribeToChannelAccessRevocations(listener: () => void) {
+    return this.channelAccessRevocations.subscribe(listener);
   }
 
   /** Current connection state — synchronous read. */
@@ -834,6 +842,7 @@ export class RelayClient {
     event: RelayEvent,
     timeoutMessage: string,
     sendErrorMessage: string,
+    isCurrent?: () => boolean,
   ) {
     return publishSessionEvent(
       {
@@ -851,6 +860,7 @@ export class RelayClient {
       event,
       timeoutMessage,
       sendErrorMessage,
+      isCurrent,
     );
   }
 
@@ -913,6 +923,7 @@ export class RelayClient {
       return;
     }
     if (type === "CLOSED" && typeof rest[0] === "string") {
+      const subscription = this.subscriptions.get(rest[0]);
       handleRelayClosed({
         subscriptions: this.subscriptions,
         subId: rest[0],
@@ -925,6 +936,7 @@ export class RelayClient {
         closeSubscription: (subId) => this.closeSubscription(subId),
       });
       if (!this.subscriptions.has(rest[0])) this.liveReqDrain.cancel(rest[0]);
+      this.channelAccessRevocations.notify(subscription, rest[1]);
       return;
     }
 

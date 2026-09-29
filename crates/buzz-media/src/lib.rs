@@ -19,7 +19,7 @@ pub use bucket_index::{
     TaxonomySweepOutcome,
 };
 pub use config::{MediaConfig, S3AddressingStyle};
-pub use error::MediaError;
+pub use error::{BlossomDenialKind, MediaError};
 pub use storage::{
     BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage, ObjectVersionEntry,
     ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,

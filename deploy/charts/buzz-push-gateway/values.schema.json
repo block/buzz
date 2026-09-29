@@ -13,8 +13,8 @@
     },
     "gatewayOrigin": {
       "type": "string",
-      "format": "uri",
-      "pattern": "^https://[^/?#@:]+/?$"
+      "description": "Routing origin for the optional HTTPRoute; not passed to the gateway binary.",
+      "pattern": "^(https://[^/?#@:]+/?)?$"
     },
     "maxGrantLifetimeSeconds": {
       "type": "integer",
@@ -306,7 +306,6 @@
   "required": [
     "replicaCount",
     "existingSecret",
-    "gatewayOrigin",
     "maxGrantLifetimeSeconds",
     "profiles",
     "httpRoute",

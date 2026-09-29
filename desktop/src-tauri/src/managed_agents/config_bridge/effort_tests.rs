@@ -98,6 +98,7 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 fn persona(id: &str, env_vars: BTreeMap<String, String>) -> AgentDefinition {
     AgentDefinition {
+        acp_command: None,
         session_policy: Default::default(),
         id: id.to_string(),
         display_name: "P".to_string(),

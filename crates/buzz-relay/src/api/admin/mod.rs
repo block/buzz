@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use auth::{
     admin_role_str, admin_source_str, authorize, require_mutation_principal, require_operator,
-    AdminRole,
+    AdminRole, AdminSource,
 };
 use axum::{
     body::Bytes,
@@ -208,7 +208,7 @@ async fn reports(
     .await?;
     validate(
         query.status.as_deref(),
-        &["open", "resolved", "dismissed", "escalated"],
+        REPORT_STATUS_ALLOWLIST,
         "invalid_status",
     )?;
     validate(query.scope.as_deref(), &["all"], "invalid_scope")?;
@@ -435,6 +435,11 @@ struct ResolveReportBody {
 /// client error, and the cap keeps `Utc::now() + Duration` well clear of the
 /// chrono/`i64` overflow range so the computation can never panic.
 const MAX_TIMEOUT_SECS: u64 = 365 * 24 * 60 * 60;
+
+/// Allowed explicit `status=` values for the `list_reports` endpoint.
+/// Mutation: remove "processing" here → `report_status_accepts_processing` goes RED.
+const REPORT_STATUS_ALLOWLIST: &[&str] =
+    &["open", "processing", "resolved", "dismissed", "escalated"];
 
 /// Convert an attacker-controlled `expiration_secs` into a future timeout
 /// instant, rejecting zero, the over-cap range, and any value that would
@@ -992,7 +997,7 @@ async fn upsert_operator(
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<OperatorEntry>, ApiError> {
     let principal_opt = authorize(
         &state,
         &headers,
@@ -1048,9 +1053,16 @@ async fn upsert_operator(
             _ => ApiError::internal(),
         })?;
 
-    Ok(Json(
-        serde_json::json!({"pubkey": canonical_hex, "role": body.role}),
-    ))
+    // Build the entry from what was just written, in the same shape
+    // `list_operators` returns (the desktop `AdminOperatorDto`). The 409 guard
+    // above excludes config-backed keys, so the effective grant is exactly the
+    // DB row: `body.role` from source `db`. Re-reading the roster here would let
+    // a concurrent DELETE turn a committed write into a 403.
+    Ok(Json(OperatorEntry {
+        pubkey: canonical_hex,
+        effective_role: body.role,
+        sources: vec![admin_source_str(&AdminSource::Db).to_string()],
+    }))
 }
 
 /// DELETE /operators/{pubkey}
@@ -1207,21 +1219,39 @@ fn decode_cursor(token: &str) -> Result<(DateTime<Utc>, Vec<u8>), ApiError> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommunityQuery {
-    community_id: Uuid,
+    community_host: String,
+}
+
+/// Resolve a client-supplied community host to its tenant through the same
+/// fail-closed binder that scopes live connections. The client's own local
+/// community ids are never trusted; an unmapped host is an error, so a wrong
+/// target can never masquerade as an empty result.
+async fn community_for_host(
+    state: &crate::state::AppState,
+    host: &str,
+) -> Result<buzz_core::CommunityId, ApiError> {
+    match crate::tenant::bind_community(&state.db, host).await {
+        Ok(tenant) => Ok(tenant.community()),
+        Err(crate::tenant::BindError::UnmappedHost) => Err(ApiError::bad_request(
+            "unknown_community_host",
+            "no community is served at this host",
+        )),
+        Err(crate::tenant::BindError::Lookup(_)) => Err(ApiError::internal()),
+    }
 }
 
 /// Query params for `GET /members/restrictions`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RestrictionsQuery {
-    community_id: Uuid,
+    community_host: String,
     /// Maximum number of records to return (1–200, default 200).
     limit: Option<i64>,
     /// Opaque continuation cursor from a prior response's `nextCursor` field.
     cursor: Option<String>,
 }
 
-/// GET /members/restrictions?communityId={uuid}[&limit={1-200}][&cursor={token}]
+/// GET /members/restrictions?communityHost={host}[&limit={1-200}][&cursor={token}]
 ///
 /// List currently active bans and timeouts for the given community, newest
 /// first, with stable keyset pagination.
@@ -1232,8 +1262,9 @@ struct RestrictionsQuery {
 /// - `cursor` — opaque token from a prior page's `nextCursor`. Omit for the
 ///   first page. Format: base64url of `{updated_at_micros}_{pubkey_hex}`.
 ///
-/// Returns 400 if `communityId` is absent / invalid, `limit` is out of range,
-/// or `cursor` is malformed. Returns 401 without a valid admin credential.
+/// Returns 400 if `communityHost` is absent or served by no community
+/// (`unknown_community_host`), `limit` is out of range, or `cursor` is
+/// malformed. Returns 401 without a valid admin credential.
 async fn list_member_restrictions(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
@@ -1253,7 +1284,7 @@ async fn list_member_restrictions(
     let page_limit = limit(Some(query.limit.unwrap_or(200)))?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
-    let community = buzz_core::CommunityId::from_uuid(query.community_id);
+    let community = community_for_host(&state, &query.community_host).await?;
     let records = state
         .db
         .list_community_restrictions_page(community, page_limit, cursor)
@@ -1273,7 +1304,7 @@ async fn list_member_restrictions(
     }))
 }
 
-/// DELETE /members/{pubkey}/ban?communityId={uuid}
+/// DELETE /members/{pubkey}/ban?communityHost={host}
 ///
 /// Lift an active ban for the given member in the given community.
 /// Returns 204 on success, 409 if no active ban exists.
@@ -1298,7 +1329,7 @@ async fn unban_member(
     let principal = require_mutation_principal(principal_opt)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
-    let community = buzz_core::CommunityId::from_uuid(query.community_id);
+    let community = community_for_host(&state, &query.community_host).await?;
 
     let actor_authority = match principal.role {
         AdminRole::Operator => "relay_operator",
@@ -1321,7 +1352,7 @@ async fn unban_member(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// DELETE /members/{pubkey}/timeout?communityId={uuid}
+/// DELETE /members/{pubkey}/timeout?communityHost={host}
 ///
 /// Clear an active timeout/write-block for the given member in the given
 /// community. Returns 204 on success, 409 if no active timeout exists.
@@ -1346,7 +1377,7 @@ async fn untimeout_member(
     let principal = require_mutation_principal(principal_opt)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
-    let community = buzz_core::CommunityId::from_uuid(query.community_id);
+    let community = community_for_host(&state, &query.community_host).await?;
 
     let actor_authority = match principal.role {
         AdminRole::Operator => "relay_operator",
@@ -1808,6 +1839,33 @@ mod postgres_tests {
     }
 
     #[test]
+    fn report_status_accepts_processing() {
+        // Wes P2 round-6: explicit status=processing must be accepted by the
+        // allowlist used in list_reports. References the production constant so
+        // removing "processing" from REPORT_STATUS_ALLOWLIST makes this RED
+        // while the omitted-default and scope=all tests stay green.
+        assert!(
+            validate(
+                Some("processing"),
+                REPORT_STATUS_ALLOWLIST,
+                "invalid_status"
+            )
+            .is_ok(),
+            "status=processing must be in the production allowlist"
+        );
+        // Confirm the gate still rejects values outside the set.
+        assert!(
+            validate(
+                Some("unknown_state"),
+                REPORT_STATUS_ALLOWLIST,
+                "invalid_status"
+            )
+            .is_err(),
+            "status=unknown_state must be rejected by the production allowlist"
+        );
+    }
+
+    #[test]
     fn feedback_summary_is_unicode_safe_and_marks_truncation() {
         let body = "🐝".repeat(241);
         let summary = summarize_body(&body, &serde_json::Value::Null);
@@ -1922,6 +1980,7 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
     async fn disabled_mode_allows_unauthenticated_requests_on_the_admin_host() {
         let state = disabled_mode_state().await;
         for uri in read_routes() {
@@ -1935,7 +1994,7 @@ mod postgres_tests {
             )
             .await;
             // The routes return 200 (or 404 for unknown resources) — never 401.
-            // 404 is fine here: there is no real DB, so the row lookups fail.
+            // 404 is fine for unknown resources; the assertion is only that auth is skipped.
             assert_ne!(
                 response.status(),
                 StatusCode::UNAUTHORIZED,
@@ -2009,11 +2068,10 @@ mod postgres_tests {
     #[tokio::test]
     async fn list_restrictions_rejects_missing_credential() {
         let state = test_state().await;
-        let community_id = Uuid::nil();
         let response = status_for(
             state,
             Request::builder()
-                .uri(format!("/members/restrictions?communityId={community_id}"))
+                .uri("/members/restrictions?communityHost=unauth.example")
                 .header(header::HOST, "admin.example")
                 .body(Body::empty())
                 .expect("request"),
@@ -2030,13 +2088,12 @@ mod postgres_tests {
     async fn unban_member_rejects_missing_credential() {
         let state = test_state().await;
         let pubkey_hex = "ab".repeat(32);
-        let community_id = Uuid::nil();
         let response = status_for(
             state,
             Request::builder()
                 .method("DELETE")
                 .uri(format!(
-                    "/members/{pubkey_hex}/ban?communityId={community_id}"
+                    "/members/{pubkey_hex}/ban?communityHost=unauth.example"
                 ))
                 .header(header::HOST, "admin.example")
                 .body(Body::empty())
@@ -2054,13 +2111,12 @@ mod postgres_tests {
     async fn untimeout_member_rejects_missing_credential() {
         let state = test_state().await;
         let pubkey_hex = "ab".repeat(32);
-        let community_id = Uuid::nil();
         let response = status_for(
             state,
             Request::builder()
                 .method("DELETE")
                 .uri(format!(
-                    "/members/{pubkey_hex}/timeout?communityId={community_id}"
+                    "/members/{pubkey_hex}/timeout?communityHost=unauth.example"
                 ))
                 .header(header::HOST, "admin.example")
                 .body(Body::empty())
@@ -2092,9 +2148,7 @@ mod postgres_tests {
         let state = test_state().await;
         let operator_keys = test_operator_keys();
         let pubkey_hex = "ab".repeat(32);
-        let community_id = community_uuid;
-
-        let path = format!("/members/{pubkey_hex}/ban?communityId={community_id}");
+        let path = format!("/members/{pubkey_hex}/ban?communityHost={host}");
         let auth = make_nostr_auth_delete(&operator_keys, &path);
         let response = status_for(
             state,
@@ -2131,9 +2185,7 @@ mod postgres_tests {
         let state = test_state().await;
         let operator_keys = test_operator_keys();
         let pubkey_hex = "ab".repeat(32);
-        let community_id = community_uuid;
-
-        let path = format!("/members/{pubkey_hex}/timeout?communityId={community_id}");
+        let path = format!("/members/{pubkey_hex}/timeout?communityHost={host}");
         let auth = make_nostr_auth_delete(&operator_keys, &path);
         let response = status_for(
             state,
@@ -2216,7 +2268,6 @@ mod postgres_tests {
             .await
             .expect("create test community")
             .id;
-        let community_uuid = *community.as_uuid();
 
         let banned_pubkey = vec![0xAAu8; 32];
         let timed_out_pubkey = vec![0xBBu8; 32];
@@ -2237,7 +2288,7 @@ mod postgres_tests {
         .expect("insert timeout fixture");
 
         let state = nip98_state_with_real_pool(pool).await;
-        let path = format!("/members/restrictions?communityId={community_uuid}");
+        let path = format!("/members/restrictions?communityHost={host}");
         let auth = make_nostr_auth(&test_operator_keys(), &path);
         let response = status_for(
             state,
@@ -2299,6 +2350,57 @@ mod postgres_tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn restrictions_endpoints_reject_an_unknown_host_instead_of_listing_nothing() {
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect test database");
+        let state = nip98_state_with_real_pool(pool).await;
+        let host = format!("unmapped-{}.example", Uuid::new_v4().simple());
+        let target_hex = "ab".repeat(32);
+        for (method, path) in [
+            ("GET", format!("/members/restrictions?communityHost={host}")),
+            (
+                "DELETE",
+                format!("/members/{target_hex}/ban?communityHost={host}"),
+            ),
+            (
+                "DELETE",
+                format!("/members/{target_hex}/timeout?communityHost={host}"),
+            ),
+        ] {
+            let auth = if method == "GET" {
+                make_nostr_auth(&test_operator_keys(), &path)
+            } else {
+                make_nostr_auth_delete(&test_operator_keys(), &path)
+            };
+            let response = status_for(
+                state.clone(),
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header(header::HOST, "admin.example")
+                    .header(header::AUTHORIZATION, auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{method} {path}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            assert!(
+                String::from_utf8_lossy(&body).contains("unknown_community_host"),
+                "{method} {path}"
+            );
+        }
+    }
+
     /// Pagination regression: bind the default=200 cap, SQL LIMIT enforcement,
     /// keyset continuation, exactly-once coverage, and tie-breaker correctness
     /// in a single falsifiable route test.
@@ -2324,7 +2426,6 @@ mod postgres_tests {
             .await
             .expect("create test community")
             .id;
-        let community_uuid = *community.as_uuid();
 
         let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
 
@@ -2400,7 +2501,7 @@ mod postgres_tests {
         let operator_keys = test_operator_keys();
 
         // ── assertion 1: limit=201 → 400 ─────────────────────────────────
-        let bad_path = format!("/members/restrictions?communityId={community_uuid}&limit=201");
+        let bad_path = format!("/members/restrictions?communityHost={host}&limit=201");
         let bad_auth = make_nostr_auth(&operator_keys, &bad_path);
         let bad_response = status_for(
             Arc::clone(&state),
@@ -2421,7 +2522,7 @@ mod postgres_tests {
 
         // ── assertion 2: default limit → exactly 200 items + non-null cursor ─
         // (This is the falsifiable binding of default=200 and max=200.)
-        let first_path = format!("/members/restrictions?communityId={community_uuid}");
+        let first_path = format!("/members/restrictions?communityHost={host}");
         let first_auth = make_nostr_auth(&operator_keys, &first_path);
         let first_response = status_for(
             Arc::clone(&state),
@@ -2471,7 +2572,7 @@ mod postgres_tests {
         let mut page_count = 1usize; // already consumed first page above
 
         while let Some(tok) = cursor_token.clone() {
-            let path = format!("/members/restrictions?communityId={community_uuid}&cursor={tok}");
+            let path = format!("/members/restrictions?communityHost={host}&cursor={tok}");
             let auth = make_nostr_auth(&operator_keys, &path);
             let response = status_for(
                 Arc::clone(&state),
@@ -2538,7 +2639,6 @@ mod postgres_tests {
             .await
             .expect("create other community")
             .id;
-        let community_uuid = *community.as_uuid();
 
         // Insert a permanent ban as the target member.
         let target_pubkey = vec![0xCCu8; 32];
@@ -2574,7 +2674,7 @@ mod postgres_tests {
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
         let target_hex = hex::encode(&target_pubkey);
-        let path = format!("/members/{target_hex}/ban?communityId={community_uuid}");
+        let path = format!("/members/{target_hex}/ban?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
             state,
@@ -2663,7 +2763,6 @@ mod postgres_tests {
             .await
             .expect("create test community")
             .id;
-        let community_uuid = *community.as_uuid();
 
         let target_pubkey = vec![0xDDu8; 32];
         let actor_pubkey = test_operator_keys().public_key().to_bytes().to_vec();
@@ -2704,7 +2803,7 @@ mod postgres_tests {
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
         let target_hex = hex::encode(&target_pubkey);
-        let path = format!("/members/{target_hex}/timeout?communityId={community_uuid}");
+        let path = format!("/members/{target_hex}/timeout?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
             state,
@@ -2801,7 +2900,6 @@ mod postgres_tests {
             .await
             .expect("create test community")
             .id;
-        let community_uuid = *community.as_uuid();
 
         // Insert a ban that already expired.
         let target_pubkey = vec![0xEEu8; 32];
@@ -2819,7 +2917,7 @@ mod postgres_tests {
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
         let target_hex = hex::encode(&target_pubkey);
-        let path = format!("/members/{target_hex}/ban?communityId={community_uuid}");
+        let path = format!("/members/{target_hex}/ban?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
             state,
@@ -5369,6 +5467,95 @@ mod postgres_tests {
         assert_eq!(remaining, 0, "the canonical row must be removed");
     }
 
+    /// Contract seam: PUT /operators/{pubkey} must return the effective
+    /// `OperatorEntry` (camelCase `effectiveRole` + `sources`), not a bare
+    /// `{pubkey, role}` — the desktop types the result as `AdminOperatorDto`.
+    /// Exercises the real HTTP handler so a regression to inline `json!` would
+    /// drop `effectiveRole`/`sources` and fail here. The uppercase-path PUT pins
+    /// that the echoed pubkey is canonicalized to lowercase.
+    #[tokio::test]
+    #[ignore = "requires Postgres — PUT /operators returns the effective OperatorEntry"]
+    async fn upsert_operator_returns_effective_operator_entry() {
+        let operator_keys = nostr::Keys::generate();
+        let state = nip98_state(vec![operator_keys.public_key().to_hex()]).await;
+
+        let target_keys = nostr::Keys::generate();
+        let lower_hex = target_keys.public_key().to_hex();
+
+        // PUT a moderator grant on a fresh, non-config key.
+        let path = format!("/operators/{lower_hex}");
+        let put_body = r#"{"role":"moderator"}"#.as_bytes();
+        let put = status_for(
+            state.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_put(&operator_keys, &path, put_body),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(put_body.to_vec()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(put.status(), StatusCode::OK, "grant PUT must succeed");
+        let put_json: serde_json::Value = {
+            let bytes = axum::body::to_bytes(put.into_body(), 4096)
+                .await
+                .expect("body");
+            serde_json::from_slice(&bytes).expect("json")
+        };
+        assert_eq!(
+            put_json["pubkey"], lower_hex,
+            "response echoes the canonical lowercase pubkey"
+        );
+        assert_eq!(
+            put_json["effectiveRole"], "moderator",
+            "response carries the effective role"
+        );
+        assert_eq!(
+            put_json["sources"],
+            serde_json::json!(["db"]),
+            "a non-config grant resolves to the db source only"
+        );
+
+        // Idempotent re-PUT through an uppercase path: the echoed pubkey must
+        // still be lowercased even though the path param is uppercase.
+        let upper_path = format!("/operators/{}", lower_hex.to_ascii_uppercase());
+        let upper = status_for(
+            state,
+            Request::builder()
+                .method("PUT")
+                .uri(&upper_path)
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_put(&operator_keys, &upper_path, put_body),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(put_body.to_vec()))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            upper.status(),
+            StatusCode::OK,
+            "uppercase-path PUT must succeed"
+        );
+        let upper_json: serde_json::Value = {
+            let bytes = axum::body::to_bytes(upper.into_body(), 4096)
+                .await
+                .expect("body");
+            serde_json::from_slice(&bytes).expect("json")
+        };
+        assert_eq!(
+            upper_json["pubkey"], lower_hex,
+            "uppercase path param must be canonicalized to lowercase in the response"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres — reopen of an open report is 409"]
     async fn reopen_route_rejects_non_terminal_report_with_409() {
@@ -5951,6 +6138,7 @@ mod postgres_tests {
                 reporter_pubkey: "0".repeat(64),
                 target_kind: "pubkey".to_string(),
                 target: hex::encode(target),
+                target_author_pubkey: None,
                 channel_id: None,
                 report_type: "harassment".to_string(),
                 note: None,

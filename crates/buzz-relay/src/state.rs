@@ -182,10 +182,99 @@ impl Drop for CommunityConnectionGuard {
     }
 }
 
+/// Message reported when the one-time Redis bootstrap gate rejects startup.
+///
+/// Bounded and stable so operators and the boot regression test can match on
+/// it without parsing the underlying driver error.
+pub const REDIS_BOOTSTRAP_FAILURE: &str = "Redis command path unavailable at startup";
+
+/// Budget for the one-time bootstrap PING. A refused port answers immediately;
+/// this only bounds a blackholed address, where hanging forever would be worse
+/// than exiting.
+const REDIS_BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Keep the Redis driver's per-command timeout outside the relay-owned startup
+/// budget so [`REDIS_BOOTSTRAP_TIMEOUT`] remains the one authoritative bound.
+const REDIS_BOOTSTRAP_DRIVER_TIMEOUT: std::time::Duration =
+    REDIS_BOOTSTRAP_TIMEOUT.saturating_mul(2);
+
+/// Proves once, during startup, that the Redis command path this pod will serve
+/// from can actually be reached.
+///
+/// `deadpool_redis` pools dial lazily and `PubSubManager::new` only allocates
+/// channels, so without this nothing in boot ever opened a command connection:
+/// a relay came up against a dead Redis, bound its health listener, and — since
+/// readiness reports local lifecycle only — advertised ready forever. Binding
+/// that listener is a one-way latch, so the check has to happen before it, and
+/// it is deliberately a *startup* gate: once serving, a Redis blip is a
+/// dependency failure and must never change readiness.
+pub async fn verify_redis_command_path(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+    let ping = async {
+        let connection = pool
+            .get()
+            .await
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
+        // This one-shot connection is removed from the pool so extending its
+        // driver timeout cannot leak into normal serving traffic. The relay's
+        // outer timeout below must bound both lazy checkout and PING.
+        let mut connection = deadpool_redis::Connection::take(connection);
+        connection.set_response_timeout(REDIS_BOOTSTRAP_DRIVER_TIMEOUT);
+        redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))
+    };
+
+    match tokio::time::timeout(REDIS_BOOTSTRAP_TIMEOUT, ping).await {
+        Err(_) => Err(anyhow::anyhow!(
+            "{REDIS_BOOTSTRAP_FAILURE}: no response within {REDIS_BOOTSTRAP_TIMEOUT:?}"
+        )),
+        Ok(result) => result.map(|_| ()),
+    }
+}
+
+/// Bounded outcome of the durable community-active check run when a socket is
+/// admitted.
+///
+/// `outcome` is the only dimension. Community, tenant, connection, and error
+/// text are request-controlled and deliberately absent from the label set.
+#[derive(Debug, Clone, Copy)]
+enum AdmissionOutcome {
+    Active,
+    Inactive,
+    CheckError,
+}
+
+impl AdmissionOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+            Self::CheckError => "check_error",
+        }
+    }
+}
+
+fn record_admission_check(outcome: AdmissionOutcome) {
+    metrics::counter!(
+        "buzz_community_admission_checks_total",
+        "outcome" => outcome.label(),
+    )
+    .increment(1);
+}
+
 /// Registers a socket, durably revalidates its community, then runs it.
 ///
 /// The ordering is the archival admission invariant: archive-before-query is
 /// observed by the query, while archive-after-registration sees the token.
+///
+/// Admission is fail-closed: only an affirmative `Ok(true)` may serve. Both
+/// `Ok(false)` and a lookup `Err` cancel, because neither proves this tenant is
+/// currently admitted, and `docs/multi-tenant-relay.md` I5
+/// (`Inv_AdmissionFence`) grants capability only to an actor *currently*
+/// admitted to that community. The two are still told apart in telemetry
+/// (`buzz_community_admission_checks_total{outcome}`) so an operator can
+/// separate archival from database pressure.
 pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
     registry: &CommunityConnectionRegistry,
     connection_id: Uuid,
@@ -201,9 +290,29 @@ pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run,
 {
     let cancel = control.cancel.clone();
     let _guard = registry.register(connection_id, community_id, control.clone());
-    if !matches!(check_active().await, Ok(true)) {
-        cancel.cancel();
-        return;
+    match check_active().await {
+        Ok(true) => record_admission_check(AdmissionOutcome::Active),
+        Ok(false) => {
+            record_admission_check(AdmissionOutcome::Inactive);
+            cancel.cancel();
+            return;
+        }
+        Err(error) => {
+            // A lookup failure is not an answer, so it cannot authorize one.
+            // Admitting here would begin serving AUTH and REQ for a tenant
+            // whose lifecycle is unknown, and the adjacent host-binding seam
+            // already refuses on exactly this evidence (see
+            // `router::nip11_or_ws_handler`). The client sees an ordinary dial
+            // failure and retries.
+            record_admission_check(AdmissionOutcome::CheckError);
+            tracing::warn!(
+                %community_id,
+                %error,
+                "community active check failed; refusing the socket"
+            );
+            cancel.cancel();
+            return;
+        }
     }
     if cancel.is_cancelled() {
         return;
@@ -348,6 +457,14 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Cancel a single connection by ID. A no-op if the connection is not
+    /// registered (already deregistered or never known).
+    pub(crate) fn cancel_conn(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.cancel.cancel();
+        }
     }
 
     /// Disconnect every live connection authenticated as `pubkey` **in
@@ -703,7 +820,7 @@ pub struct AppState {
     pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
     /// Media storage client (S3/MinIO).
     pub media_storage: Arc<MediaStorage>,
-    /// Single-flight + cache state for the hourly S3 storage sweep. See
+    /// Cached worker snapshot and storage metric emission bookkeeping. See
     /// `storage_sweep` module docs; shared with the usage-metrics tick via
     /// `Arc` the same way other cross-tick poller state lives on `AppState`.
     pub storage_sweep: Arc<tokio::sync::Mutex<crate::storage_sweep::StorageSweepState>>,
@@ -719,8 +836,14 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
-    /// Orders readiness gauge publication against terminal shutdown.
-    pub(crate) readiness: Arc<crate::readiness::ReadinessCoordinator>,
+    /// Cached shared-dependency evaluation behind the diagnostic `/_status`
+    /// endpoint, owned by [`crate::readiness::run_dependency_sampler`]. Never
+    /// consulted by a Kubernetes probe, and never evaluated by a request.
+    pub(crate) dependency_diagnostics: Arc<crate::readiness::DependencyDiagnostics>,
+    /// Stops only the periodic dependency sampler during graceful shutdown.
+    pub dependency_sampler_cancel: CancellationToken,
+    /// Stops only the completion-epoch publisher during graceful shutdown.
+    pub dependency_completion_publisher_cancel: CancellationToken,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -778,6 +901,27 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+
+    /// NIP-FI federated-identity assertion verifier, shared across all HTTP
+    /// ingress checks.
+    ///
+    /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
+    /// is the single offline authority for assertion validation on every
+    /// protected HTTP surface. The backing `ProductionJwksSource` is also
+    /// shared and performs bounded periodic JWKS refresh internally.
+    ///
+    /// The field uses `dyn VerifyAssertion` (type erasure) so that
+    /// integration tests can inject a `StaticIssuerKeySource`-backed verifier
+    /// without requiring a live JWKS fetch.  Production code always stores a
+    /// `FederatedAssertionVerifier<Arc<ProductionJwksSource>>` here; the type
+    /// erased form costs one vtable dispatch per request, which is negligible
+    /// relative to the JWT crypto.
+    pub nip_fi_verifier: Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+
+    /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
+    /// can warm it at startup and drive the background refresh loop.
+    /// `None` iff `nip_fi_verifier` is `None`.
+    pub nip_fi_jwks_source: Option<Arc<buzz_auth::ProductionJwksSource>>,
 }
 
 impl AppState {
@@ -866,6 +1010,8 @@ impl AppState {
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
+        // Build NIP-FI components before moving config into the state Arc.
+        let (nip_fi_verifier, nip_fi_jwks_source) = build_nip_fi_components(&config);
         let state = Self {
             config: Arc::new(config),
             db,
@@ -923,7 +1069,9 @@ impl AppState {
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
-            readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
+            dependency_diagnostics: Arc::new(crate::readiness::DependencyDiagnostics::default()),
+            dependency_sampler_cancel: CancellationToken::new(),
+            dependency_completion_publisher_cancel: CancellationToken::new(),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,
@@ -955,6 +1103,8 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            nip_fi_verifier,
+            nip_fi_jwks_source,
         };
         (
             state,
@@ -965,21 +1115,21 @@ impl AppState {
         )
     }
 
-    /// Atomically closes readiness publication before exposing shutdown to
-    /// the relay's other fast-path lifecycle checks.
+    /// Withdraws this pod from routing. The lifecycle flag is authoritative for
+    /// `/_readiness`; the private probe publishes its sampled observation to
+    /// the readiness gauge on its next request.
     pub fn begin_shutdown(&self) {
-        self.readiness.begin_shutdown();
         self.shutting_down.store(true, Ordering::Release);
     }
 
     #[cfg(test)]
-    pub(crate) fn set_readiness_evaluator(
+    pub(crate) fn set_dependency_evaluator(
         &mut self,
-        evaluator: Arc<dyn crate::readiness::ReadinessEvaluator>,
+        evaluator: Arc<dyn crate::readiness::DependencyEvaluator>,
     ) {
-        self.readiness = Arc::new(crate::readiness::ReadinessCoordinator::with_evaluator(
-            evaluator,
-        ));
+        self.dependency_diagnostics = Arc::new(
+            crate::readiness::DependencyDiagnostics::with_evaluator(evaluator),
+        );
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
@@ -1367,6 +1517,51 @@ impl AuditShutdownHandle {
             ),
         }
     }
+}
+
+/// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
+///
+/// Returns `(None, None)` when the mode is `Off` or `DenyProtected` (the
+/// verifier is never consulted there; admission always returns 503). In
+/// `Enforce` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
+/// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
+/// The source starts empty; HTTP admission returns `authorization_unavailable`
+/// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
+type NipFiComponents = (
+    Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+    Option<Arc<buzz_auth::ProductionJwksSource>>,
+);
+
+fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
+    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, NipFiMode, ProductionJwksSource};
+
+    if matches!(
+        config.nip_fi.mode,
+        NipFiMode::Off | NipFiMode::DenyProtected
+    ) {
+        // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
+        return (None, None);
+    }
+
+    let source =
+        match ProductionJwksSource::new(config.nip_fi.jwks_configs.clone(), HttpJwksFetcher::new())
+        {
+            Some(s) => Arc::new(s),
+            None => {
+                tracing::error!(
+                    "nip-fi: ProductionJwksSource construction returned None despite \
+                     passing startup validation — HTTP enforcement unavailable"
+                );
+                return (None, None);
+            }
+        };
+
+    let verifier: Arc<dyn buzz_auth::VerifyAssertion> = Arc::new(FederatedAssertionVerifier::new(
+        config.nip_fi.registry.clone(),
+        Arc::clone(&source),
+    ));
+
+    (Some(verifier), Some(source))
 }
 
 /// Log a single audit entry with metrics. Extracted so the normal loop
@@ -2024,6 +2219,144 @@ pub(crate) mod tests {
         future.await;
         assert!(cancel_during.is_cancelled());
         assert!(!started_during.load(Ordering::SeqCst));
+    }
+
+    /// Reads one `buzz_community_admission_checks_total` series by exact label set.
+    fn admission_counter(
+        snapshot: &[(
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            metrics_util::debugging::DebugValue,
+        )],
+        outcome: &str,
+    ) -> Option<u64> {
+        snapshot.iter().find_map(|(key, _, _, value)| {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect::<Vec<_>>();
+            if key.key().name() != "buzz_community_admission_checks_total"
+                || labels != [("outcome", outcome)]
+            {
+                return None;
+            }
+            match value {
+                metrics_util::debugging::DebugValue::Counter(count) => Some(*count),
+                _ => panic!("community admission checks must be a counter"),
+            }
+        })
+    }
+
+    /// Admission is fail-closed on both non-affirmative outcomes. A confirmed
+    /// `Ok(false)` and a lookup `Err` are different diagnoses — the counter
+    /// keeps them apart — but neither is proof of current admission, and
+    /// `docs/multi-tenant-relay.md` I5 (`Inv_AdmissionFence`) grants read or
+    /// membership capability only to an actor *currently* admitted to that
+    /// community. Serving AUTH/REQ on an unproven tenant lifecycle is the
+    /// failure this guards.
+    #[test]
+    fn neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let (inactive_cancel, inactive_started, error_cancel, error_started, active_started) =
+            metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let registry = CommunityConnectionRegistry::new();
+                    let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+
+                    let inactive_cancel = CancellationToken::new();
+                    let inactive_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&inactive_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(inactive_cancel.clone()),
+                        || async { Ok(false) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                    )
+                    .await;
+
+                    let error_cancel = CancellationToken::new();
+                    let error_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&error_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(error_cancel.clone()),
+                        || async { Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut)) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                    )
+                    .await;
+
+                    let active_started = Arc::new(AtomicBool::new(false));
+                    let started = Arc::clone(&active_started);
+                    run_registered_community_connection(
+                        &registry,
+                        Uuid::new_v4(),
+                        community,
+                        CommunityConnectionControl::new(CancellationToken::new()),
+                        || async { Ok(true) },
+                        move |_| async move { started.store(true, Ordering::SeqCst) },
+                    )
+                    .await;
+
+                    (
+                        inactive_cancel,
+                        inactive_started,
+                        error_cancel,
+                        error_started,
+                        active_started,
+                    )
+                })
+            });
+
+        assert!(
+            inactive_cancel.is_cancelled(),
+            "a confirmed-inactive community must still cancel its socket"
+        );
+        assert!(
+            !inactive_started.load(Ordering::SeqCst),
+            "a confirmed-inactive community must never start the socket body"
+        );
+        assert!(
+            error_cancel.is_cancelled(),
+            "a failed active check must cancel its socket, not admit it"
+        );
+        assert!(
+            !error_started.load(Ordering::SeqCst),
+            "a failed active check must never start serving AUTH/REQ on an unproven tenant"
+        );
+        assert!(active_started.load(Ordering::SeqCst));
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(admission_counter(&snapshot, "inactive"), Some(1));
+        assert_eq!(admission_counter(&snapshot, "check_error"), Some(1));
+        assert_eq!(admission_counter(&snapshot, "active"), Some(1));
+
+        let label_sets = snapshot
+            .iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_community_admission_checks_total")
+            .map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .map(|label| label.key().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(label_sets.len(), 3, "outcome is the only dimension");
+        assert!(
+            label_sets.iter().all(|labels| labels == &["outcome"]),
+            "admission telemetry must never carry community, tenant, or error labels: {label_sets:?}"
+        );
     }
 
     #[tokio::test]

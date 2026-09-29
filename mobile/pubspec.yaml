@@ -59,6 +59,10 @@ dev_dependencies:
   custom_lint: ^0.8.0
   riverpod_lint: ^3.1.0
   mocktail: ^1.0.4
+  # Test-only platform interface fakes (depend_on_referenced_packages).
+  path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
+  video_player_platform_interface: ^6.6.0
 
 flutter:
   uses-material-design: true

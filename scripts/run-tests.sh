@@ -93,10 +93,18 @@ run_unit_tests() {
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
+  # buzz-sdk builder/validation unit tests: pure event-builder and input
+  # validation, no infra. Mirrors the nextest path in `just test-unit` — the
+  # two lists must stay in step. `--lib` matches the nextest invocation and
+  # avoids the full-package rustdoc dependency-resolution flake.
+  run_test_step "buzz-sdk unit tests" \
+    cargo test -p buzz-sdk --lib -- --nocapture
+
   # Keep the relay-to-agent trust-boundary regressions in the fallback path
   # when cargo-nextest is unavailable.
   run_test_step "buzz-acp tests" \
     cargo test -p buzz-acp -- --nocapture
+
 
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
   # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
@@ -120,12 +128,19 @@ run_unit_tests() {
 
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
+  run_test_step "buzz-push-gateway personal development tests" \
+    cargo test -p buzz-push-gateway --features personal-dev-app-attest -- --nocapture
 
   # Kubernetes backend provider: pure decision layers driven by a fake
   # substrate, no cluster. Mirrors the nextest path in `just test-unit` —
   # the two lists must stay in step or the fallback silently covers less.
   run_test_step "buzz-backend-kubernetes tests" \
     cargo test -p buzz-backend-kubernetes -- --nocapture
+
+  # Keep fallback parity with `just test-unit`: one LaunchDarkly-feature run
+  # exercises both default and feature-gated buzz-feature-flags tests.
+  run_test_step "buzz-feature-flags tests (launchdarkly)" \
+    cargo test -p buzz-feature-flags --features launchdarkly -- --nocapture
 
   # buzz-agent model-capabilities corpus: the Rust half of the cross-language
   # drift guard. model_capabilities.rs embeds scripts/model-capabilities.json +
@@ -140,9 +155,9 @@ run_unit_tests() {
   run_test_step "buzz-acp unit tests" \
     cargo test -p buzz-acp --lib -- --nocapture
 
-  # Mirror the three infra-free relay handler modules in `just test-unit`'s
-  # nextest expression. Keep the side-effects filter pinned to `::tests::` so
-  # it does not select the sibling Postgres-backed test module.
+  # Mirror the relay filters from `just test-unit`: the three handler modules,
+  # storage-snapshot helpers, readiness and router unit suites, and the single
+  # scoped admission regression in state::tests, plus the REQ lifecycle tests.
   run_test_step "buzz-relay channel authorization tests" \
     cargo test -p buzz-relay --lib handlers::channel_authz:: -- --nocapture
 
@@ -154,6 +169,29 @@ run_unit_tests() {
 
   run_test_step "buzz-relay storage snapshot tests" \
     cargo test -p buzz-relay --lib storage_sweep::tests:: -- --nocapture
+
+  # Infra-free REQ subscription-lifecycle tests, by exact name: the rest of
+  # handlers::req needs a database.
+  run_test_step "buzz-relay REQ subscription lifecycle tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      handlers::req::tests::timed_out_historical_read_deregisters_before_closed \
+      handlers::req::tests::superseded_timeout_leaves_replacement_intact \
+      handlers::req::tests::search_claim_retires_live_and_yields_to_replacement \
+      handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
+      handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
+      handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
+      handlers::req::tests::claims_after_connection_cleanup_are_refused \
+      handlers::req::tests::dropped_terminal_frame_cancels_connection \
+      handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection
+
+  run_test_step "buzz-relay readiness tests" \
+    cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture
+
+  run_test_step "buzz-relay router tests" \
+    cargo test -p buzz-relay --lib router::tests:: -- --nocapture
+
+  run_test_step "buzz-relay admission regression test" \
+    cargo test -p buzz-relay --lib state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

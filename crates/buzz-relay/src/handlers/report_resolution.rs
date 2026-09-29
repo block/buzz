@@ -522,7 +522,8 @@ async fn drive_enforcement(
                 target_event_id,
                 channel_id,
             };
-            let mutation_result = run_atomic_mutation(state, action_id, lease_token, &ctx).await;
+            let mutation_result =
+                run_atomic_mutation(state, tenant, action_id, lease_token, &ctx).await;
 
             // On enforcement error, record the failure while we STILL hold the
             // lease — `record_action_failure` is fenced on the live token, so it
@@ -732,6 +733,7 @@ enum MutationOutcome {
 /// - `Err` — the mutation itself failed (DB or validation error).
 async fn run_atomic_mutation(
     state: &Arc<AppState>,
+    tenant: &TenantContext,
     action_id: Uuid,
     lease_token: Uuid,
     ctx: &EnforcementCtx<'_>,
@@ -816,7 +818,7 @@ async fn run_atomic_mutation(
                 .map_err(|e| anyhow::anyhow!("thread metadata lookup failed: {e}"))?;
             let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
             let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
-            state
+            let committed = state
                 .db
                 .execute_delete_with_marker(
                     action_id,
@@ -827,7 +829,18 @@ async fn run_atomic_mutation(
                     root_id.as_deref(),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("delete failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("delete failed: {e}"))?;
+            // Same post-commit refresh as NIP-29 DELETE_EVENT: push a fresh
+            // 39005 so live badge counts also count down.
+            if let (true, Some(meta), Some(root_id)) = (committed, meta, root_id) {
+                crate::handlers::side_effects::emit_live_thread_summary(
+                    tenant,
+                    state,
+                    meta.channel_id,
+                    root_id,
+                );
+            }
+            Ok(committed)
         }
         other => Err(anyhow::anyhow!("unexpected enforcement action: {other}")),
     };
@@ -981,6 +994,7 @@ mod tests {
             reporter_pubkey: "0".repeat(64),
             target_kind: target_kind.to_string(),
             target: target.to_string(),
+            target_author_pubkey: None,
             channel_id: None,
             report_type: "spam".to_string(),
             note: None,

@@ -137,29 +137,53 @@ pub async fn sign_event(
     content: String,
     created_at: Option<u64>,
     tags: Vec<Vec<String>>,
+    allow_self_tagging: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let nostr_tags = tags
-            .into_iter()
-            .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
-        if let Some(created_at) = created_at {
-            builder = builder.custom_created_at(Timestamp::from(created_at));
-        }
-
-        let event = builder
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
+        sign_event_json(
+            &keys,
+            kind,
+            content,
+            created_at,
+            tags,
+            allow_self_tagging == Some(true),
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Build and sign the event behind [`sign_event`]. nostr strips a `p` tag that
+/// names the author unless `allow_self_tagging` is set, so only callers that
+/// need a self-tag (self-reports) opt in.
+fn sign_event_json(
+    keys: &Keys,
+    kind: u16,
+    content: String,
+    created_at: Option<u64>,
+    tags: Vec<Vec<String>>,
+    allow_self_tagging: bool,
+) -> Result<String, String> {
+    let nostr_tags = tags
+        .into_iter()
+        .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+    if let Some(created_at) = created_at {
+        builder = builder.custom_created_at(Timestamp::from(created_at));
+    }
+    if allow_self_tagging {
+        builder = builder.allow_self_tagging();
+    }
+
+    builder
+        .sign_with_keys(keys)
+        .map(|event| event.as_json())
+        .map_err(|error| format!("sign failed: {error}"))
 }
 
 #[tauri::command]
@@ -815,3 +839,72 @@ mod nostr_identity_binding_tests {
 #[cfg(test)]
 #[path = "identity_key_backup_tests.rs"]
 mod identity_key_backup_tests;
+
+#[cfg(test)]
+mod sign_event_self_tagging_tests {
+    use super::sign_event_json;
+    use nostr::{Event, JsonUtil, Keys};
+
+    fn build_event(keys: &Keys, kind: u16, p: &str, allow_self_tagging: bool) -> Event {
+        let json = sign_event_json(
+            keys,
+            kind,
+            String::new(),
+            None,
+            vec![vec!["p".to_owned(), p.to_owned()]],
+            allow_self_tagging,
+        )
+        .expect("sign must succeed");
+        Event::from_json(json).expect("valid event json")
+    }
+
+    fn p_tag_values(event: &nostr::Event) -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .filter(|t| t.kind() == nostr::TagKind::p())
+            .filter_map(|t| t.content().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn self_p_tag_is_stripped_without_flag() {
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let event = build_event(&keys, 1984, &pubkey_hex, false);
+        assert!(
+            p_tag_values(&event).is_empty(),
+            "self p-tag must be stripped when allow_self_tagging is false"
+        );
+    }
+
+    #[test]
+    fn self_p_tag_survives_with_flag() {
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let event = build_event(&keys, 1984, &pubkey_hex, true);
+        assert_eq!(
+            p_tag_values(&event),
+            vec![pubkey_hex],
+            "self p-tag must be preserved when allow_self_tagging is true"
+        );
+    }
+
+    #[test]
+    fn third_party_p_tag_always_survives() {
+        // A p-tag that does NOT match the signing key must always survive
+        // regardless of the flag — verify both branches.
+        let keys = Keys::generate();
+        let other_keys = Keys::generate();
+        let other_hex = other_keys.public_key().to_hex();
+
+        for flag in [false, true] {
+            let event = build_event(&keys, 1984, &other_hex, flag);
+            assert_eq!(
+                p_tag_values(&event),
+                vec![other_hex.clone()],
+                "third-party p-tag must survive with allow_self_tagging={flag}"
+            );
+        }
+    }
+}

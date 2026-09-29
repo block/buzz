@@ -499,6 +499,7 @@ mod png_body_tests {
             version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
             definition: crate::managed_agents::agent_snapshot::AgentSnapshotDefinition {
                 session_policy: Default::default(),
+                acp_command: None,
                 name: "Agent".to_string(),
                 source_is_builtin: false,
                 system_prompt: None,

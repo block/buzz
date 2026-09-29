@@ -372,6 +372,14 @@ export function useLiveChannelUpdates(
     });
   }, [queryClient]);
 
+  React.useEffect(
+    () =>
+      relayClient.subscribeToChannelAccessRevocations(
+        invalidateChannelsDebounced,
+      ),
+    [invalidateChannelsDebounced],
+  );
+
   const liveSubsRef = React.useRef(new Map<string, LiveChannelEntry>());
 
   React.useEffect(() => {
