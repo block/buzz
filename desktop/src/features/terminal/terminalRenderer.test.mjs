@@ -33,12 +33,15 @@ const palette = {
 function context() {
   const text = [];
   const fills = [];
+  const alphas = [];
   return {
     text,
     fills,
+    alphas,
     fillStyle: "",
     font: "",
     textBaseline: "alphabetic",
+    globalAlpha: 1,
     save() {},
     restore() {},
     fillRect(...args) {
@@ -46,6 +49,7 @@ function context() {
     },
     fillText(...args) {
       text.push(args);
+      alphas.push(this.globalAlpha);
     },
   };
 }
@@ -247,4 +251,33 @@ test("selection offsets expand to complete grapheme clusters and clamp empty row
   assert.equal(grid.normalizeSelectionOffset(0, 3, "start"), 2);
   assert.equal(grid.normalizeSelectionOffset(0, 3, "end"), 4);
   assert.equal(grid.normalizeSelectionOffset(1, 1, "end"), 0);
+});
+
+test("SGR 2 dim text paints at half opacity and the next span is opaque", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 8, screenLines: 1 });
+  grid.apply({
+    viewport: grid.viewport,
+    full: true,
+    cursor: { line: 0, column: 0, visible: true },
+    rows: [
+      {
+        line: 0,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0x01000100, bg: 0x01000101, flags: 1 << 7 },
+            clusters: [{ column: 0, text: "hint", width: 1 }],
+          },
+          {
+            style: { fg: 0x01000100, bg: 0x01000101, flags: 0 },
+            clusters: [{ column: 4, text: "ok", width: 1 }],
+          },
+        ],
+      },
+    ],
+  });
+  const ctx = context();
+  grid.paint(ctx, metrics, palette);
+  assert.deepEqual(ctx.alphas, [0.5, 1]);
+  assert.equal(ctx.globalAlpha, 1);
 });

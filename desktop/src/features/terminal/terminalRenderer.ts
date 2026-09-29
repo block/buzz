@@ -77,6 +77,7 @@ export type PaintContext = Pick<
   | "fillText"
   | "save"
   | "restore"
+  | "globalAlpha"
 >;
 
 const COLOR_KIND = 0xff00_0000;
@@ -85,6 +86,10 @@ const NAMED = 0x0100_0000;
 const INDEXED = 0x0200_0000;
 const RGB = 0x0300_0000;
 const BOLD = 1 << 0;
+// alacritty Flags::DIM (bit 7). Apps set this with SGR 2 for ghost text.
+// Ghostty paints that text at faint-opacity 0.5 (foreground alpha only).
+const DIM = 1 << 7;
+const FAINT_OPACITY = 0.5;
 
 function xtermIndexed(index: number, palette: TerminalPalette): string {
   if (index < 16) return palette.ansi[ANSI_COLOR_NAMES[index]];
@@ -309,6 +314,8 @@ export class TerminalGrid {
         );
         context.font =
           span.style.flags & BOLD ? metrics.boldFont : metrics.font;
+        const faint = (span.style.flags & DIM) !== 0;
+        if (faint) context.globalAlpha = FAINT_OPACITY;
         for (const cluster of span.clusters) {
           context.fillText(
             cluster.text,
@@ -316,6 +323,7 @@ export class TerminalGrid {
             y + metrics.baseline,
           );
         }
+        if (faint) context.globalAlpha = 1;
       }
     }
     if (this.#cursor.visible && this.#cursorPainted) {
