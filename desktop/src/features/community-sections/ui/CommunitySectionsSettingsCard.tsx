@@ -1,8 +1,31 @@
-import { LayoutList, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  GripVertical,
+  LayoutList,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { useCommunitySections } from "@/features/community-sections/hooks";
+import { channelIdsClaimedByOtherSections } from "@/features/community-sections/lib/sectionAdmin";
 import type {
   CommunitySection,
   CommunitySectionDraft,
@@ -43,6 +66,7 @@ export function CommunitySectionsSettingsCard() {
     isSaving,
     createSection,
     updateSection,
+    reorderSections,
     deleteSection,
     setSubscribed,
     isSubscribed,
@@ -53,6 +77,49 @@ export function CommunitySectionsSettingsCard() {
   const [editing, setEditing] = React.useState<CommunitySection | null>(null);
   const [deleteTarget, setDeleteTarget] =
     React.useState<CommunitySection | null>(null);
+
+  const sectionIds = React.useMemo(
+    () => sections.map((section) => section.id),
+    [sections],
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
+
+  const handleDragEnd = React.useCallback(
+    (event: DragEndEvent) => {
+      if (!canManage || isSaving) return;
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const oldIdx = sectionIds.indexOf(String(active.id));
+      const newIdx = sectionIds.indexOf(String(over.id));
+      if (oldIdx === -1 || newIdx === -1) return;
+      void reorderSections(arrayMove(sectionIds, oldIdx, newIdx)).catch(
+        (error) => {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : "Failed to reorder sections",
+          );
+        },
+      );
+    },
+    [canManage, isSaving, reorderSections, sectionIds],
+  );
+
+  const catalogRows = sections.map((section) => (
+    <SectionRow
+      canManage={canManage}
+      channels={streamChannels}
+      key={section.id}
+      onDelete={() => setDeleteTarget(section)}
+      onEdit={() => setEditing(section)}
+      onSubscribeChange={(subscribed) => setSubscribed(section.id, subscribed)}
+      section={section}
+      subscribeDisabled={!communitySectionsEnabled}
+      subscribed={isSubscribed(section.id)}
+    />
+  ));
 
   return (
     <section className="min-w-0" data-testid="settings-community-sections">
@@ -118,27 +185,29 @@ export function CommunitySectionsSettingsCard() {
         </SettingsOptionGroup>
       ) : (
         <SettingsOptionGroup title="Catalog">
-          {sections.map((section) => (
-            <SectionRow
-              canManage={canManage}
-              channels={streamChannels}
-              key={section.id}
-              onDelete={() => setDeleteTarget(section)}
-              onEdit={() => setEditing(section)}
-              onSubscribeChange={(subscribed) =>
-                setSubscribed(section.id, subscribed)
-              }
-              section={section}
-              subscribeDisabled={!communitySectionsEnabled}
-              subscribed={isSubscribed(section.id)}
-            />
-          ))}
+          {canManage ? (
+            <DndContext
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+              sensors={sensors}
+            >
+              <SortableContext
+                items={sectionIds}
+                strategy={verticalListSortingStrategy}
+              >
+                {catalogRows}
+              </SortableContext>
+            </DndContext>
+          ) : (
+            catalogRows
+          )}
         </SettingsOptionGroup>
       )}
 
       {createOpen ? (
         <SectionFormDialog
           channels={streamChannels}
+          claimedChannelIds={channelIdsClaimedByOtherSections(sections, null)}
           onOpenChange={setCreateOpen}
           onSave={async (draft) => {
             await createSection(draft);
@@ -151,6 +220,10 @@ export function CommunitySectionsSettingsCard() {
       {editing ? (
         <SectionFormDialog
           channels={streamChannels}
+          claimedChannelIds={channelIdsClaimedByOtherSections(
+            sections,
+            editing.id,
+          )}
           onOpenChange={(open) => {
             if (!open) setEditing(null);
           }}
@@ -210,22 +283,79 @@ export function CommunitySectionsSettingsCard() {
   );
 }
 
-function SectionRow({
-  canManage,
-  channels,
-  onDelete,
-  onEdit,
-  onSubscribeChange,
-  section,
-  subscribeDisabled = false,
-  subscribed,
-}: {
+function SectionRow(props: {
   canManage: boolean;
   channels: Channel[];
   onDelete: () => void;
   onEdit: () => void;
   onSubscribeChange: (subscribed: boolean) => void;
   section: CommunitySection;
+  subscribeDisabled?: boolean;
+  subscribed: boolean;
+}) {
+  if (props.canManage) {
+    return <SortableSectionRow {...props} />;
+  }
+  return <SectionRowContent {...props} />;
+}
+
+function SortableSectionRow(props: {
+  canManage: boolean;
+  channels: Channel[];
+  onDelete: () => void;
+  onEdit: () => void;
+  onSubscribeChange: (subscribed: boolean) => void;
+  section: CommunitySection;
+  subscribeDisabled?: boolean;
+  subscribed: boolean;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: props.section.id });
+
+  return (
+    <SectionRowContent
+      {...props}
+      dragHandleProps={{ ...attributes, ...listeners }}
+      isDragging={isDragging}
+      setNodeRef={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+    />
+  );
+}
+
+function SectionRowContent({
+  canManage,
+  channels,
+  dragHandleProps,
+  isDragging = false,
+  onDelete,
+  onEdit,
+  onSubscribeChange,
+  section,
+  setNodeRef,
+  style,
+  subscribeDisabled = false,
+  subscribed,
+}: {
+  canManage: boolean;
+  channels: Channel[];
+  dragHandleProps?: React.HTMLAttributes<HTMLElement>;
+  isDragging?: boolean;
+  onDelete: () => void;
+  onEdit: () => void;
+  onSubscribeChange: (subscribed: boolean) => void;
+  section: CommunitySection;
+  setNodeRef?: (node: HTMLElement | null) => void;
+  style?: React.CSSProperties;
   subscribeDisabled?: boolean;
   subscribed: boolean;
 }) {
@@ -238,10 +368,27 @@ function SectionRow({
 
   return (
     <div
-      className="group flex items-center gap-3 px-4 py-3"
+      className={cn(
+        "group flex items-center gap-3 px-4 py-3",
+        isDragging && "opacity-40",
+      )}
       data-testid={`community-section-row-${section.id}`}
+      ref={setNodeRef}
+      style={style}
     >
-      <LayoutList className="h-4 w-4 shrink-0 text-muted-foreground" />
+      {canManage && dragHandleProps ? (
+        <button
+          aria-label={`Drag to reorder ${section.name}`}
+          className="touch-none text-muted-foreground hover:text-foreground"
+          data-testid={`community-section-drag-${section.id}`}
+          type="button"
+          {...dragHandleProps}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      ) : (
+        <LayoutList className="h-4 w-4 shrink-0 text-muted-foreground" />
+      )}
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{section.name}</div>
         <p
@@ -294,11 +441,13 @@ function SectionRow({
 
 function SectionFormDialog({
   channels,
+  claimedChannelIds,
   onOpenChange,
   onSave,
   section,
 }: {
   channels: Channel[];
+  claimedChannelIds: ReadonlySet<string>;
   onOpenChange: (open: boolean) => void;
   onSave: (draft: CommunitySectionDraft) => Promise<void>;
   section: CommunitySection | null;
@@ -312,6 +461,7 @@ function SectionFormDialog({
   const formId = "community-section-form";
 
   const toggleChannel = (channelId: string) => {
+    if (claimedChannelIds.has(channelId)) return;
     setSelectedIds((current) =>
       current.includes(channelId)
         ? current.filter((id) => id !== channelId)
@@ -324,7 +474,8 @@ function SectionFormDialog({
     setSaving(true);
     setError(null);
     try {
-      await onSave({ name, channelIds: selectedIds });
+      const channelIds = selectedIds.filter((id) => !claimedChannelIds.has(id));
+      await onSave({ name, channelIds });
       onOpenChange(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Failed to save");
@@ -356,7 +507,7 @@ function SectionFormDialog({
             </Button>
           </div>
         }
-        headerSubtitle="Pick the channels that belong in this shared section. Everyone who subscribes sees the same list."
+        headerSubtitle="Pick the channels that belong in this shared section. Everyone who subscribes sees the same list. A channel can belong to only one community section."
         title={section ? "Edit community section" : "Add community section"}
       >
         <form
@@ -391,20 +542,30 @@ function SectionFormDialog({
               ) : (
                 channels.map((channel) => {
                   const checked = selectedIds.includes(channel.id);
+                  const claimed = claimedChannelIds.has(channel.id);
+                  const disabled = claimed && !checked;
                   return (
                     <button
+                      aria-disabled={disabled}
                       className={cn(
                         "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted/60",
                         checked && "bg-muted",
+                        disabled &&
+                          "cursor-not-allowed text-muted-foreground/50 hover:bg-transparent",
                       )}
                       data-testid={`community-section-channel-${channel.id}`}
+                      disabled={disabled}
                       key={channel.id}
                       onClick={() => toggleChannel(channel.id)}
                       type="button"
                     >
                       <span className="truncate">{channel.name}</span>
                       <span className="text-xs text-muted-foreground">
-                        {checked ? "Selected" : "Add"}
+                        {checked
+                          ? "Selected"
+                          : claimed
+                            ? "In another section"
+                            : "Add"}
                       </span>
                     </button>
                   );

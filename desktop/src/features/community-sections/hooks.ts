@@ -33,6 +33,12 @@ import {
   writeCommunitySectionsEnabled,
   type CommunitySectionsEnabledChange,
 } from "./lib/featurePreference";
+import {
+  channelIdsClaimedByOtherSections,
+  ensureExclusiveChannelMembership,
+  isCommunitySectionPickerChannel,
+  reorderCommunitySections,
+} from "./lib/sectionAdmin";
 import type {
   CommunitySection,
   CommunitySectionDraft,
@@ -230,7 +236,7 @@ export function useCommunitySections() {
 
   const streamChannels = React.useMemo(() => {
     const channels = channelsQuery.data ?? [];
-    return channels.filter((channel) => channel.channelType === "stream");
+    return channels.filter(isCommunitySectionPickerChannel);
   }, [channelsQuery.data]);
 
   const saveMutation = useMutation({
@@ -256,14 +262,18 @@ export function useCommunitySections() {
           `Enter a section name (max ${MAX_SECTION_NAME_LEN} characters).`,
         );
       }
+      const claimed = channelIdsClaimedByOtherSections(sections, null);
+      const channelIds = draft.channelIds.filter((id) => !claimed.has(id));
       const section: CommunitySection = {
         id: createCommunitySectionId(),
         name,
         ...(draft.icon?.trim() ? { icon: draft.icon.trim() } : {}),
         order: sections.length,
-        channelIds: [...draft.channelIds],
+        channelIds,
       };
-      await saveMutation.mutateAsync([...sections, section]);
+      await saveMutation.mutateAsync(
+        ensureExclusiveChannelMembership([...sections, section]),
+      );
       return section;
     },
     [saveMutation, sections],
@@ -277,6 +287,8 @@ export function useCommunitySections() {
           `Enter a section name (max ${MAX_SECTION_NAME_LEN} characters).`,
         );
       }
+      const claimed = channelIdsClaimedByOtherSections(sections, sectionId);
+      const channelIds = draft.channelIds.filter((id) => !claimed.has(id));
       const next = sections.map((section) =>
         section.id === sectionId
           ? {
@@ -285,10 +297,24 @@ export function useCommunitySections() {
               ...(draft.icon?.trim()
                 ? { icon: draft.icon.trim() }
                 : { icon: undefined }),
-              channelIds: [...draft.channelIds],
+              channelIds,
             }
           : section,
       );
+      await saveMutation.mutateAsync(ensureExclusiveChannelMembership(next));
+    },
+    [saveMutation, sections],
+  );
+
+  const reorderSections = React.useCallback(
+    async (orderedIds: string[]) => {
+      const next = reorderCommunitySections(sections, orderedIds);
+      const unchanged = next.every(
+        (section, index) =>
+          section.id === sections[index]?.id &&
+          section.order === sections[index]?.order,
+      );
+      if (unchanged) return;
       await saveMutation.mutateAsync(next);
     },
     [saveMutation, sections],
@@ -350,6 +376,7 @@ export function useCommunitySections() {
     isSaving: saveMutation.isPending,
     createSection,
     updateSection,
+    reorderSections,
     deleteSection,
     setSubscribed,
     isSubscribed: (sectionId: string) => subscribedIds.has(sectionId),

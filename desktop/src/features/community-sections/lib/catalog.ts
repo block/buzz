@@ -4,6 +4,7 @@ import { signRelayEvent } from "@/shared/api/tauri";
 import { getStorageItem, setStorageItem } from "@/shared/lib/safeStorage";
 import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
+import { ensureExclusiveChannelMembership } from "./sectionAdmin";
 import type { CommunitySection, CommunitySectionsPayload } from "./types";
 import {
   MAX_COMMUNITY_SECTIONS,
@@ -92,9 +93,10 @@ export async function publishCommunitySections(
   if (sections.length > MAX_COMMUNITY_SECTIONS) {
     throw new Error(`At most ${MAX_COMMUNITY_SECTIONS} community sections.`);
   }
+  const exclusive = ensureExclusiveChannelMembership(sections);
   const payload: CommunitySectionsPayload = {
     version: 1,
-    sections: sections.map((section, index) => ({
+    sections: exclusive.map((section, index) => ({
       id: section.id,
       name: section.name.trim(),
       ...(section.icon?.trim() ? { icon: section.icon.trim() } : {}),

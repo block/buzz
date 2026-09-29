@@ -7,7 +7,8 @@ personal custom sections (`kind:30078` / `d=channel-sections`).
 
 1. Members turn on **Use Community Sections** in Settings (master toggle; default on).
 2. Admins configure sections in **Settings → Community sections**.
-3. Each section lists channel ids (same list for every member).
+3. Each section lists channel ids (same list for every member). A channel
+   belongs to **at most one** community section.
 4. Every member sees the catalog and can **Subscribe** (toggle) while the master
    switch is on.
 5. Subscribed sections appear on the left nav with a distinct community-sections
@@ -68,7 +69,8 @@ membership) is a deliberate follow-up — not in this MVP.
 
 - **Settings → Communities → Community sections**: master **Use Community
   Sections** switch; catalog + subscribe switch for everyone; create/edit/delete
-  for owner/admin.
+  and drag-reorder for owner/admin. Channel pickers omit huddle backing
+  channels and gray out channels already in another section.
 - **Left nav**: subscribed community sections render via `SidebarSection` (with
   a `LayoutList` title icon) above personal custom sections. Those channel ids
   are excluded from the personal-section / Channels buckets while the master
@@ -128,6 +130,5 @@ Desktop alone cannot fix prod; the relay binary must accept 30625.
 
 1. Encrypt-and-sync subscriptions / master toggle across devices (30078 preference blob).
 2. Optional default-subscribe for newly created sections.
-3. Drag-reorder community sections in admin UI (order field already exists).
-4. Hide channels the member cannot access from the section list.
-5. E2E: admin publish → member subscribe → section appears in sidebar.
+3. Hide channels the member cannot access from the section list.
+4. E2E: admin publish → member subscribe → section appears in sidebar.
