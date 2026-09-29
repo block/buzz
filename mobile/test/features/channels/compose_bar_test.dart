@@ -5003,10 +5003,36 @@ void main() {
       },
     );
 
-    for (final lifecycleState in [
-      AppLifecycleState.paused,
-      AppLifecycleState.detached,
-    ]) {
+    testWidgets('paused keeps a running recording as the attachment', (
+      tester,
+    ) async {
+      final recorder = _FakeVoiceNoteRecorder();
+      final lifecycle = _FakeAppLifecycleNotifier();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          voiceNoteRecorderFactory: () => recorder,
+          appLifecycle: () => lifecycle,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Voice note'));
+      await tester.pumpAndSettle();
+
+      lifecycle.setLifecycle(AppLifecycleState.paused);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsNothing);
+      expect(
+        find.byKey(
+          const ValueKey('voice-note-attachment:/tmp/voice-note-test.m4a'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    for (final lifecycleState in [AppLifecycleState.detached]) {
       testWidgets(
         '${lifecycleState.name} starts cancellation without a rendered frame',
         (tester) async {
