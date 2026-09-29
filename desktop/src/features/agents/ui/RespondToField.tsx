@@ -4,6 +4,14 @@ import {
   mergeAllowlist,
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
+import {
+  bulkAllowHelperText,
+  bulkAllowPubkeys,
+  isRespondToBulkAllowOption,
+  type RespondToBulkAllowOption,
+} from "@/features/agents/lib/respondToBulkAllow";
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
 import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -30,6 +38,9 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  *   - Anyone         (`--respond-to=anyone` — fully open agent)
  *   - Selected people (`--respond-to=allowlist`, plus the selected pubkeys as
  *                     `--respond-to-allowlist`)
+ *   - Allow All Local Agents / Allow All Community Bots / Allow All Bots
+ *     (UI shortcuts that set `allowlist` and fill `--respond-to-allowlist`
+ *     with the matching pubkeys; same persistence path as Selected people)
  *
  * `nobody` is intentionally not surfaced — it pairs with a heartbeat-only
  * setup that has no meaningful GUI use case.
@@ -77,6 +88,9 @@ const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
   { label: "Only me (default)", value: "owner-only" },
   { label: "Anyone", value: "anyone" },
   { label: "Selected people", value: "allowlist" },
+  { label: "Allow All Local Agents", value: "all-local-agents" },
+  { label: "Allow All Community Bots", value: "all-community-bots" },
+  { label: "Allow All Bots", value: "all-bots" },
 ];
 
 export const OWNER_ONLY_ACCESS_DISABLED_REASON =
@@ -118,6 +132,20 @@ export function CreateAgentRespondToField({
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
   const [pasteText, setPasteText] = React.useState("");
+  // Tracks which bulk-allow shortcut is showing in the dropdown while the
+  // persisted mode stays `"allowlist"`. Cleared on a non-bulk mode change or
+  // when the user edits the allow list by hand.
+  const [bulkAllowOption, setBulkAllowOption] =
+    React.useState<RespondToBulkAllowOption | null>(null);
+
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const communityBotsQuery = useCommunityBotsQuery();
+
+  React.useEffect(() => {
+    if (mode !== "allowlist") {
+      setBulkAllowOption(null);
+    }
+  }, [mode]);
 
   const deferredQuery = React.useDeferredValue(query.trim());
   const allowlistSet = React.useMemo(
@@ -145,16 +173,19 @@ export function CreateAgentRespondToField({
   );
 
   function handleAddSearchResult(user: UserSearchResult) {
+    setBulkAllowOption(null);
     onAllowlistChange(mergeAllowlist(allowlist, [user.pubkey]));
     setQuery("");
   }
 
   function handleAddRawPubkey(pubkey: string) {
+    setBulkAllowOption(null);
     onAllowlistChange(mergeAllowlist(allowlist, [pubkey]));
     setQuery("");
   }
 
   function handleRemove(pubkey: string) {
+    setBulkAllowOption(null);
     onAllowlistChange(
       allowlist.filter((p) => p.toLowerCase() !== pubkey.toLowerCase()),
     );
@@ -162,9 +193,31 @@ export function CreateAgentRespondToField({
 
   function handleAddFromPaste() {
     if (pasteParsed.valid.length === 0) return;
+    setBulkAllowOption(null);
     onAllowlistChange(mergeAllowlist(allowlist, pasteParsed.valid));
     setPasteText("");
   }
+
+  function handleModeSelect(value: string) {
+    if (isRespondToBulkAllowOption(value)) {
+      const pubkeys = bulkAllowPubkeys(value, {
+        localAgents: managedAgentsQuery.data ?? [],
+        communityBots: communityBotsQuery.data ?? [],
+      });
+      setBulkAllowOption(value);
+      onModeChange("allowlist");
+      onAllowlistChange(pubkeys);
+      return;
+    }
+    setBulkAllowOption(null);
+    onModeChange(value as RespondToMode);
+  }
+
+  const selectValue = bulkAllowOption ?? mode;
+  const bulkHelper =
+    bulkAllowOption != null
+      ? bulkAllowHelperText(bulkAllowOption, allowlist.length)
+      : null;
 
   const isPersonaVariant = variant === "persona";
 
@@ -211,10 +264,10 @@ export function CreateAgentRespondToField({
         <PersonaDropdownField
           disabled={disabled}
           id="agent-respond-to"
-          onValueChange={(value) => onModeChange(value as RespondToMode)}
+          onValueChange={handleModeSelect}
           options={RESPOND_TO_OPTIONS}
           placeholder="Only me (default)"
-          value={mode}
+          value={selectValue}
         />
       ) : (
         <select
@@ -222,8 +275,8 @@ export function CreateAgentRespondToField({
           data-testid="agent-respond-to-select"
           disabled={disabled}
           id="agent-respond-to"
-          onChange={(e) => onModeChange(e.target.value as RespondToMode)}
-          value={mode}
+          onChange={(e) => handleModeSelect(e.target.value)}
+          value={selectValue}
         >
           {RESPOND_TO_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
@@ -238,6 +291,14 @@ export function CreateAgentRespondToField({
           data-testid="agent-respond-to-disabled-reason"
         >
           {disabledReason}
+        </p>
+      ) : null}
+      {bulkHelper ? (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="agent-respond-to-bulk-helper"
+        >
+          {bulkHelper}
         </p>
       ) : null}
       {mode === "anyone" ? accessWarning : null}

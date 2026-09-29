@@ -14,11 +14,29 @@ const respondToFieldSource = await readFile(
  */
 const collapsedSource = respondToFieldSource.replace(/\s+/g, " ");
 
-for (const label of ["Only me (default)", "Selected people", "Anyone"]) {
+for (const label of [
+  "Only me (default)",
+  "Selected people",
+  "Anyone",
+  "Allow All Local Agents",
+  "Allow All Community Bots",
+  "Allow All Bots",
+]) {
   test(`respond-to control uses the plain-language label: ${label}`, () => {
     assert.ok(respondToFieldSource.includes(`label: "${label}"`));
   });
 }
+
+test("bulk-allow shortcuts map to allowlist persistence, not new harness modes", () => {
+  // Selecting a bulk option must call onModeChange("allowlist") and fill the
+  // allowlist — same stored shape as Selected people.
+  assert.match(
+    collapsedSource,
+    /onModeChange\("allowlist"\)/,
+  );
+  assert.match(collapsedSource, /onAllowlistChange\(pubkeys\)/);
+  assert.match(collapsedSource, /bulkAllowPubkeys\(/);
+});
 
 test("native and persona controls share one option list", () => {
   assert.match(
