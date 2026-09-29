@@ -80,9 +80,16 @@ async function openMessageMenu(
   const row = page.locator(
     `[data-testid="message-row"][data-message-id="${messageId}"]`,
   );
+  await row.evaluate((element) => element.scrollIntoView({ block: "center" }));
   await row.hover();
   await row.getByTestId(`more-actions-${messageId}`).click();
   await expect(page.getByRole("menu")).toBeVisible();
+}
+
+async function scrollBackFromLatest(page: import("@playwright/test").Page) {
+  await page.locator("[data-scroll-restoration-id] .overflow-y-auto").hover();
+  await page.mouse.wheel(0, -2000);
+  await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
 }
 
 async function storedFollowIds(page: import("@playwright/test").Page) {
@@ -250,6 +257,8 @@ test("following a broadcast reply persists its thread root", async ({
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu")).toHaveCount(0);
 
+  await scrollBackFromLatest(page);
+
   const root = await emitMessage(page, { content: "Broadcast thread root" });
   const broadcastReply = await emitMessage(page, {
     content: "Broadcast reply row",
@@ -257,6 +266,14 @@ test("following a broadcast reply persists its thread root", async ({
     extraTags: [["broadcast", "1"]],
   });
 
+  await waitForMessageProcessing(page, broadcastReply.id);
+  await expect(
+    page.locator(
+      `[data-testid="message-row"][data-message-id="${broadcastReply.id}"]`,
+    ),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("message-scroll-to-latest")).toContainText("2");
+  await page.getByTestId("message-scroll-to-latest").click();
   await openMessageMenu(page, broadcastReply.id);
   const followItem = page.getByRole("menuitem", { name: "Follow thread" });
   await followItem.focus();
@@ -265,14 +282,23 @@ test("following a broadcast reply persists its thread root", async ({
   await expect.poll(() => storedFollowIds(page)).toEqual([root.id]);
   expect(await storedFollowIds(page)).not.toContain(broadcastReply.id);
 
-  await emitMessage(page, {
+  await scrollBackFromLatest(page);
+  const child = await emitMessage(page, {
     content: "Child of broadcast reply",
     parentEventId: broadcastReply.id,
   });
+  await waitForMessageProcessing(page, child.id);
+  await expect(
+    page.locator(`[data-thread-head-id="${broadcastReply.id}"]`),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("message-scroll-to-latest")).toContainText("1");
+  await page.getByTestId("message-scroll-to-latest").click();
   await expect(
     page.locator(`[data-thread-head-id="${broadcastReply.id}"]`),
   ).toBeVisible();
-  await openMessageMenu(page, broadcastReply.id);
+  await page.getByTestId(`more-actions-${broadcastReply.id}`).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("menu")).toBeVisible();
   const unfollowItem = page.getByRole("menuitem", {
     name: "Unfollow thread",
   });
