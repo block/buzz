@@ -16,6 +16,7 @@ import {
 import { renderAudioMessageAttachment } from "@/features/messages/ui/AudioMessageAttachment";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
+import { isRtlContent } from "@/shared/lib/rtl";
 import { parseEntityLink } from "@/shared/lib/entityLink";
 import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -1808,6 +1809,7 @@ function MarkdownInner({
 
   return (
     <div
+      dir={isRtlContent(content) ? "rtl" : undefined}
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
         [

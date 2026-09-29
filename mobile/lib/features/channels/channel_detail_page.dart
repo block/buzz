@@ -28,6 +28,7 @@ import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
+import '../../shared/rtl.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/skeleton.dart';
