@@ -157,6 +157,14 @@ pub struct HuddleState {
     /// until the user explicitly opens it.
     #[serde(skip)]
     pub manual_mic_unmuted: Arc<AtomicBool>,
+    /// Spoken activation keyword for STT agent wake (`hey Fable`, …).
+    /// Shared as `Arc<Mutex<_>>` so the transcription task reads the live
+    /// value at post time. Serialized as a plain string for the frontend.
+    #[serde(
+        serialize_with = "serialize_activation_keyword",
+        deserialize_with = "deserialize_activation_keyword"
+    )]
+    pub activation_keyword: Arc<Mutex<String>>,
 }
 
 fn serialize_agent_pubkeys<S>(v: &Arc<Mutex<Vec<String>>>, s: S) -> Result<S::Ok, S::Error>
@@ -178,6 +186,24 @@ where
 {
     let v: Vec<String> = serde::Deserialize::deserialize(d)?;
     Ok(Arc::new(Mutex::new(v)))
+}
+
+fn serialize_activation_keyword<S>(v: &Arc<Mutex<String>>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let guard = v.lock().unwrap_or_else(|e| e.into_inner());
+    s.serialize_str(&guard)
+}
+
+fn deserialize_activation_keyword<'de, D>(d: D) -> Result<Arc<Mutex<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: String = serde::Deserialize::deserialize(d)?;
+    let normalized = super::stt_wake::normalize_activation_keyword(&v)
+        .unwrap_or_else(|| super::stt_wake::DEFAULT_ACTIVATION_KEYWORD.to_string());
+    Ok(Arc::new(Mutex::new(normalized)))
 }
 
 impl Clone for HuddleState {
@@ -216,6 +242,7 @@ impl Clone for HuddleState {
             voice_input_mode: self.voice_input_mode.clone(),
             ptt_active: Arc::clone(&self.ptt_active),
             manual_mic_unmuted: Arc::clone(&self.manual_mic_unmuted),
+            activation_keyword: Arc::clone(&self.activation_keyword),
         }
     }
 }
@@ -253,6 +280,9 @@ impl Default for HuddleState {
             voice_input_mode: VoiceInputMode::default(),
             ptt_active: Arc::new(AtomicBool::new(false)),
             manual_mic_unmuted: Arc::new(AtomicBool::new(false)),
+            activation_keyword: Arc::new(Mutex::new(
+                super::stt_wake::DEFAULT_ACTIVATION_KEYWORD.to_string(),
+            )),
         }
     }
 }
@@ -342,6 +372,18 @@ impl HuddleState {
         false
     }
 
+    /// Open continuous mic capture for agent auto-transcription.
+    ///
+    /// Default PTT+muted starves the AudioWorklet → `push_audio_pcm` path, so
+    /// STT never sees finals. Voice-activity + unmuted feeds STT (and the
+    /// Opus relay) until the user mutes again.
+    pub(crate) fn open_mic_for_agent_transcription(&mut self) {
+        if self.voice_input_mode == VoiceInputMode::PushToTalk {
+            self.voice_input_mode = VoiceInputMode::VoiceActivity;
+        }
+        self.manual_mic_unmuted.store(true, Ordering::Release);
+    }
+
     /// Reset to default state while preserving the session generation counter.
     /// Used by start_huddle rollback, join_huddle rollback, and teardown_huddle
     /// to invalidate in-flight transcription tasks without losing the generation.
@@ -349,10 +391,14 @@ impl HuddleState {
         let gen = Arc::clone(&self.session_generation);
         let huddle_generation = self.huddle_generation;
         let tts_enabled = self.tts_enabled;
+        // Keep the user's spoken wake keyword across huddle teardowns within
+        // this app session; UI localStorage re-applies it after full restarts.
+        let activation_keyword = Arc::clone(&self.activation_keyword);
         *self = Self::default();
         self.session_generation = gen;
         self.huddle_generation = huddle_generation;
         self.tts_enabled = tts_enabled;
+        self.activation_keyword = activation_keyword;
     }
 }
 
@@ -385,6 +431,27 @@ mod tests {
         let state = HuddleState::default();
         assert_eq!(state.voice_input_mode, super::VoiceInputMode::PushToTalk);
         assert!(!state.manual_mic_unmuted.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn open_mic_for_agent_transcription_switches_ptt_muted_to_vad_open() {
+        let mut state = HuddleState::default();
+        assert_eq!(state.voice_input_mode, super::VoiceInputMode::PushToTalk);
+        assert!(!state.manual_mic_unmuted.load(Ordering::Acquire));
+
+        state.open_mic_for_agent_transcription();
+
+        assert_eq!(state.voice_input_mode, super::VoiceInputMode::VoiceActivity);
+        assert!(state.manual_mic_unmuted.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn open_mic_for_agent_transcription_keeps_existing_vad() {
+        let mut state = HuddleState::default();
+        state.voice_input_mode = super::VoiceInputMode::VoiceActivity;
+        state.open_mic_for_agent_transcription();
+        assert_eq!(state.voice_input_mode, super::VoiceInputMode::VoiceActivity);
+        assert!(state.manual_mic_unmuted.load(Ordering::Acquire));
     }
 
     #[test]

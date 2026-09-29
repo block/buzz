@@ -35,16 +35,21 @@ test("includes filled Return path with origin and selected-agent mention", () =>
     channelId: "ch-origin",
     threadId: "th-origin",
     harness: "claude",
+    mentionPubkey: "pk-fable",
   });
   assert.match(text, /## Return path \(Buzz\)/);
   assert.match(text, /origin channelId: ch-origin/);
   assert.match(text, /origin threadId:  th-origin/);
   assert.match(text, /mention to use:   @Fable/);
+  assert.match(text, /mention pubkey:   pk-fable/);
   assert.match(text, /originChannelId: ch-origin/);
   assert.match(text, /mentionToUse: @Fable/);
+  assert.match(text, /mentionPubkey: pk-fable/);
   assert.match(text, /report back/);
   assert.match(text, /hand back/);
   assert.match(text, /I'm done/);
+  assert.match(text, /mentions:/);
+  assert.match(text, /Plain @Name alone is NOT enough/);
   assert.match(text, /Append this exact Return path block/);
 });
 

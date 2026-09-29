@@ -183,10 +183,22 @@ fn sort_personas(records: &mut [AgentDefinition]) {
     });
 }
 
-fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefinition>, bool) {
+fn merge_personas(stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefinition>, bool) {
+    merge_personas_with_deleted(stored, now, &std::collections::HashSet::new())
+}
+
+pub(crate) fn merge_personas_with_deleted(
+    mut stored: Vec<AgentDefinition>,
+    now: &str,
+    deleted_seed_ids: &std::collections::HashSet<String>,
+) -> (Vec<AgentDefinition>, bool) {
     let mut changed = false;
 
     for built_in in built_in_persona_records(now) {
+        if deleted_seed_ids.contains(&built_in.id) {
+            // User permanently removed this seed — do not re-insert.
+            continue;
+        }
         if let Some(existing) = stored.iter_mut().find(|record| record.id == built_in.id) {
             if !existing.is_builtin {
                 existing.is_builtin = true;
@@ -291,9 +303,8 @@ pub fn validate_persona_deletion(
     persona: &AgentDefinition,
     referenced_by_team: bool,
 ) -> Result<(), String> {
-    if persona.is_builtin {
-        return Err("Built-in agents cannot be deleted.".to_string());
-    }
+    // Built-ins (Fizz / Honey / Pollen) are deletable. Callers must record the
+    // id in the seed opt-out store so merge_personas does not re-seed them.
 
     if persona.source_team.is_some() {
         return Err(format!(
@@ -353,7 +364,8 @@ pub fn load_personas<R: tauri::Runtime>(
         .filter_map(|record| record.to_definition_view())
         .collect();
 
-    let (records, changed) = merge_personas(records, &now);
+    let deleted = super::seed_opt_out::load_deleted_seed_ids(app);
+    let (records, changed) = merge_personas_with_deleted(records, &now, &deleted);
     if changed {
         save_personas(app, &records)?;
     }

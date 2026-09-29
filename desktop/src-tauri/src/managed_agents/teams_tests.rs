@@ -5,7 +5,7 @@
 
 use super::{
     agents_referencing_team, deactivate_catalog_member_copies_with_ref_check, load_teams_readonly,
-    merge_teams, merge_teams_impl, sort_teams, validate_team_deletion, BuiltInTeam,
+    merge_teams, merge_teams_impl, sort_teams, validate_team_deletion, BuiltInTeam, BUILT_IN_TEAMS,
 };
 use crate::managed_agents::{
     AgentDefinition, ManagedAgentRecord, TeamMemberCatalogSource, TeamRecord,
@@ -64,8 +64,13 @@ fn merge_teams_adds_missing_built_ins() {
         persona_ids: &["builtin:test-persona"],
     };
 
-    let (records, changed) =
-        merge_teams_impl(&[synthetic], &[], Vec::new(), "2026-05-07T00:00:00Z");
+    let (records, changed) = merge_teams_impl(
+        &[synthetic],
+        &[],
+        Vec::new(),
+        "2026-05-07T00:00:00Z",
+        &std::collections::HashSet::new(),
+    );
 
     assert!(changed);
     assert_eq!(records.len(), 1);
@@ -85,8 +90,13 @@ fn merge_teams_preserves_user_customizations_to_builtin() {
     customized.is_builtin = true;
     customized.persona_ids = vec!["builtin:test-persona".to_string()];
 
-    let (records, _changed) =
-        merge_teams_impl(&[synthetic], &[], vec![customized], "2026-05-07T00:00:00Z");
+    let (records, _changed) = merge_teams_impl(
+        &[synthetic],
+        &[],
+        vec![customized],
+        "2026-05-07T00:00:00Z",
+        &std::collections::HashSet::new(),
+    );
 
     let found = records
         .iter()
@@ -107,8 +117,13 @@ fn merge_teams_preserves_unrelated_user_teams() {
     };
     let user_team = team("user-uuid", "My Team");
 
-    let (records, _changed) =
-        merge_teams_impl(&[synthetic], &[], vec![user_team], "2026-05-07T00:00:00Z");
+    let (records, _changed) = merge_teams_impl(
+        &[synthetic],
+        &[],
+        vec![user_team],
+        "2026-05-07T00:00:00Z",
+        &std::collections::HashSet::new(),
+    );
 
     assert!(records.iter().any(|t| t.id == "user-uuid"));
     assert!(records.iter().any(|t| t.id == "builtin-team:test"));
@@ -143,8 +158,13 @@ fn merge_teams_repromotes_existing_builtin_marked_as_custom() {
     let mut downgraded = team("builtin-team:test", "Test Team");
     downgraded.is_builtin = false;
 
-    let (records, changed) =
-        merge_teams_impl(&[synthetic], &[], vec![downgraded], "2026-05-07T00:00:00Z");
+    let (records, changed) = merge_teams_impl(
+        &[synthetic],
+        &[],
+        vec![downgraded],
+        "2026-05-07T00:00:00Z",
+        &std::collections::HashSet::new(),
+    );
 
     assert!(changed);
     let found = records
@@ -155,12 +175,10 @@ fn merge_teams_repromotes_existing_builtin_marked_as_custom() {
 }
 
 #[test]
-fn validate_team_deletion_rejects_built_ins() {
-    let mut built_in = team("builtin-team:fizz", "Fizz");
+fn validate_team_deletion_allows_built_ins() {
+    let mut built_in = team("builtin-team:welcome", "Welcome Team");
     built_in.is_builtin = true;
-
-    let err = validate_team_deletion(&built_in).unwrap_err();
-    assert_eq!(err, "Built-in teams cannot be deleted.");
+    assert!(validate_team_deletion(&built_in).is_ok());
 }
 
 // ── agents_referencing_team ─────────────────────────────────────────────
@@ -868,5 +886,25 @@ fn test_delete_catalog_team_team_save_failure_rolls_back_both_stores() {
         std::fs::read(&teams_path).unwrap(),
         orig_teams_bytes,
         "teams must be restored to original bytes"
+    );
+}
+
+#[test]
+fn merge_teams_skips_opted_out_welcome_team() {
+    let deleted = std::collections::HashSet::from(["builtin-team:welcome".to_string()]);
+    let (records, changed) = merge_teams_impl(
+        BUILT_IN_TEAMS,
+        &[],
+        Vec::new(),
+        "2026-07-01T00:00:00Z",
+        &deleted,
+    );
+    assert!(
+        !changed || records.iter().all(|t| t.id != "builtin-team:welcome"),
+        "opted-out Welcome Team must not be re-seeded"
+    );
+    assert!(
+        records.iter().all(|t| t.id != "builtin-team:welcome"),
+        "welcome team absent after opt-out"
     );
 }

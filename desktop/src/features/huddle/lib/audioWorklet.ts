@@ -121,10 +121,28 @@ export async function setupAudioWorklet(
     // for PTT mode (user won't be able to transmit, but audio won't leak).
   }
 
+  // WebKit may suspend the AudioContext when the main window loses focus
+  // (e.g. companion stage). Resume on visibility / statechange so continuous
+  // captions keep receiving PCM without a manual mic toggle.
+  const resumeIfNeeded = () => {
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().catch(() => {});
+    }
+  };
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") resumeIfNeeded();
+  };
+  audioContext.addEventListener("statechange", resumeIfNeeded);
+  document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("focus", resumeIfNeeded);
+
   return {
     stop: () => {
       workletNode.port.onmessage = null;
       pttUnlisten?.();
+      audioContext.removeEventListener("statechange", resumeIfNeeded);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", resumeIfNeeded);
       source.disconnect();
       gainNode.disconnect();
       workletNode.disconnect();

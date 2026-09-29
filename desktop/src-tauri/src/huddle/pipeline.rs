@@ -306,6 +306,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // the worker thread (~200ms) and must not block under the mutex.
     let (
         agent_pubkeys_arc,
+        activation_keyword_arc,
         session_gen,
         expected_generation,
         stt_starting,
@@ -343,6 +344,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         };
         (
             Arc::clone(&hs.agent_pubkeys),
+            Arc::clone(&hs.activation_keyword),
             Arc::clone(&hs.session_generation),
             hs.session_generation.load(Ordering::Acquire),
             stt_starting,
@@ -400,12 +402,31 @@ pub(crate) async fn maybe_start_stt_pipeline(
         hs.set_stt_pipeline(Arc::clone(&pipeline));
     }
 
-    spawn_transcription_task(text_rx, channel_uuid, agent_pubkeys_arc, session_gen, state);
+    spawn_transcription_task(
+        text_rx,
+        channel_uuid,
+        agent_pubkeys_arc,
+        activation_keyword_arc,
+        session_gen.clone(),
+        state,
+    );
+    super::agent_barge::spawn_agent_barge_task(channel_uuid, session_gen, state);
     Ok(true)
 }
 
 /// Start STT after agent presence automatically enables transcription.
+///
+/// Default huddle voice mode is push-to-talk with a muted mic. That starves
+/// the STT worklet (and the pipeline PTT gate) so agent auto-enable would
+/// silently produce no kind:9 transcripts. Switch to voice-activity and open
+/// the mic so PCM reaches STT; the frontend mirrors `voice_input_mode` from
+/// huddle-state-changed.
 pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral_channel_id: &str) {
+    {
+        if let Ok(mut hs) = state.huddle() {
+            hs.open_mic_for_agent_transcription();
+        }
+    }
     if let Some(manager) = models::global_model_manager() {
         manager.start_stt_download(state.http_client.clone());
     }
@@ -619,18 +640,50 @@ pub(crate) fn sign_and_guard_stt_body(
     Ok(body_bytes)
 }
 
+fn resolve_stt_agent_aliases(
+    app_handle: &Option<tauri::AppHandle>,
+    agent_pubkeys: &[String],
+) -> Vec<super::stt_wake::AgentNameAlias> {
+    let Some(app) = app_handle else {
+        return Vec::new();
+    };
+    let Ok(records) = crate::managed_agents::load_managed_agents(app) else {
+        return Vec::new();
+    };
+    let mapped: Vec<(String, Vec<String>)> = records
+        .iter()
+        .map(|r| {
+            (
+                r.pubkey.clone(),
+                super::stt_wake::collect_record_aliases(&r.name, r.display_name.as_deref()),
+            )
+        })
+        .collect();
+    super::stt_wake::aliases_from_managed_records(agent_pubkeys, &mapped)
+}
+
 /// Spawn a tokio task that reads text_rx and posts kind:9 events.
 ///
 /// Fix 1: `agent_pubkeys_arc` is an `Arc<Mutex<Vec<String>>>` cloned from
-///        `HuddleState` — the task reads it at post time so p-tags are always
+///        `HuddleState` — the task reads it at post time so the roster is
 ///        current, not a stale snapshot.
 /// Fix 3: no `.unwrap()` on mutex — poisoned locks are recovered gracefully.
 /// Fix 4: `text_rx` is a `tokio::sync::mpsc::Receiver` — fully async `.recv().await`
 ///        never blocks a Tokio worker thread (unlike std `recv_timeout`).
+///
+/// Wake gate: every STT final is logged as kind:9. Agent p-tags are attached
+/// **only** when speech uses `{activation} <agent name>` (see [`super::stt_wake`]).
+/// Bare names and ordinary transcript lines do not wake agents. Explicit chat
+/// @mentions still wake via the composer send path.
+///
+/// When a wake fires, the kind:9 content includes the full prior huddle
+/// transcript (channel history + session STT buffer) so the agent receives
+/// meeting context, not only the tagged sentence.
 pub(crate) fn spawn_transcription_task(
     mut text_rx: tokio::sync::mpsc::Receiver<String>,
     channel_uuid: Uuid,
     agent_pubkeys_arc: Arc<Mutex<Vec<String>>>,
+    activation_keyword_arc: Arc<Mutex<String>>,
     session_generation: Arc<AtomicU64>,
     state: &AppState,
 ) {
@@ -643,12 +696,28 @@ pub(crate) fn spawn_transcription_task(
         Err(_) => return,
     };
     let relay_base_url = crate::relay::relay_api_base_url_with_override(state);
+    let app_handle = state
+        .app_handle
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     tauri::async_runtime::spawn(async move {
+        let mut cached_roster: Vec<String> = Vec::new();
+        let mut cached_aliases: Vec<super::stt_wake::AgentNameAlias> = Vec::new();
+        // Local STT finals for this huddle session (chronological).
+        let mut session_transcript: Vec<String> = Vec::new();
+
         // recv().await yields (not blocks) until text arrives or sender is dropped.
         // When the STT worker exits and drops its Sender, recv() returns None → loop ends.
         while let Some(t) = text_rx.recv().await {
             if t.is_empty() {
+                continue;
+            }
+            // Belt-and-suspenders: worker already drops junk, but never post
+            // punctuation-only finals (they previously barge-in-silenced TTS).
+            if !super::stt::is_substantive_transcript(&t) {
+                eprintln!("buzz-desktop: transcription skipped junk final ({t:?})");
                 continue;
             }
 
@@ -664,10 +733,78 @@ pub(crate) fn spawn_transcription_task(
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
 
-            let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
+            if agent_pubkeys != cached_roster {
+                cached_aliases = resolve_stt_agent_aliases(&app_handle, &agent_pubkeys);
+                cached_roster = agent_pubkeys;
+            }
+
+            let activation_keyword = activation_keyword_arc
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+
+            // Wake only agents addressed as "{keyword} <Name>"; still post transcript always.
+            let mut wake_pubkeys =
+                super::stt_wake::addressed_agent_pubkeys(&t, &cached_aliases, &activation_keyword);
+            // Addressable toggle (default on): OFF agents ignore spoken wakes.
+            if !wake_pubkeys.is_empty() {
+                if let Some(handle) = app_handle.as_ref() {
+                    use tauri::Manager;
+                    if let Some(app_state) = handle.try_state::<AppState>() {
+                        if let Ok(huddle) = app_state.huddle() {
+                            wake_pubkeys.retain(|pk| {
+                                huddle
+                                    .agent_voice_settings
+                                    .get(pk)
+                                    .map(|s| s.addressable)
+                                    .unwrap_or(true)
+                            });
+                        }
+                    }
+                }
+            }
+            // Addressed wake is the only STT path that stops agent TTS. Bare
+            // "stop", punctuation, and VAD barge-in must not interrupt speech;
+            // the UI Stop button still uses interrupt_huddle_speech.
+            if !wake_pubkeys.is_empty() {
+                if let Some(handle) = app_handle.as_ref() {
+                    use tauri::Manager;
+                    if let Some(app_state) = handle.try_state::<AppState>() {
+                        if let Ok(huddle) = app_state.huddle() {
+                            if let Some(pipeline) = huddle.tts_pipeline.as_ref() {
+                                for pubkey in &wake_pubkeys {
+                                    pipeline.cancel_speaker(pubkey);
+                                }
+                                eprintln!(
+                                    "buzz-desktop: addressed wake cancelled TTS for {} agent(s)",
+                                    wake_pubkeys.len()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let content = if wake_pubkeys.is_empty() {
+                t.clone()
+            } else {
+                let channel_lines = fetch_huddle_transcript_lines(
+                    &http_client,
+                    &keys,
+                    &relay_base_url,
+                    channel_uuid,
+                )
+                .await;
+                let prior = super::stt_wake::merge_transcript_context(
+                    &channel_lines,
+                    &session_transcript,
+                    &t,
+                );
+                super::stt_wake::compose_wake_content(&prior, &t)
+            };
+            let p_tags: Vec<&str> = wake_pubkeys.iter().map(|s| s.as_str()).collect();
             let builder = match events::build_message(
                 channel_uuid,
-                &t,
+                &content,
                 None,
                 &p_tags,
                 &[],
@@ -731,8 +868,110 @@ pub(crate) fn spawn_transcription_task(
                     eprintln!("buzz-desktop: STT kind:9 post failed: {e}");
                 }
             }
+
+            // Always retain the spoken line for subsequent wake context, even
+            // when this utterance did not itself wake an agent.
+            session_transcript.push(t);
         }
     });
+}
+
+/// Fetch recent kind:9 huddle / companion messages for wake context.
+///
+/// Best-effort: failures return an empty list so the local STT session buffer
+/// still supplies prior spoken context.
+pub(crate) async fn fetch_huddle_transcript_lines(
+    http_client: &reqwest::Client,
+    keys: &nostr::Keys,
+    relay_base_url: &str,
+    channel_uuid: Uuid,
+) -> Vec<String> {
+    let filter = serde_json::json!({
+        "kinds": [9],
+        "#h": [channel_uuid.to_string()],
+        "limit": 100,
+    });
+    let body_bytes = match serde_json::to_vec(&vec![filter]) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let url = format!("{relay_base_url}/query");
+    let auth_header = match crate::relay::build_nip98_auth_header_for_keys(
+        keys,
+        &reqwest::Method::POST,
+        &url,
+        &body_bytes,
+    ) {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+    let response = http_client
+        .post(&url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json")
+        .body(body_bytes)
+        .send()
+        .await;
+    let Ok(resp) = response else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(events) = resp.json::<Vec<serde_json::Value>>().await else {
+        return Vec::new();
+    };
+    // Relay returns newest-first; wake context wants chronological.
+    let mut lines: Vec<(u64, String, String)> = Vec::new();
+    for event in events {
+        let content = event
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if content.is_empty() {
+            continue;
+        }
+        // Skip wake payloads that already embedded a transcript block so we
+        // do not nest prior wake contexts inside the next wake.
+        if content.starts_with("[Huddle transcript — full meeting context so far]") {
+            if let Some(addr) = content
+                .split(
+                    "[Addressed]
+",
+                )
+                .nth(1)
+            {
+                let addressed = addr.trim();
+                if !addressed.is_empty() {
+                    let created = event
+                        .get("created_at")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let id = event
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    lines.push((created, id, addressed.to_string()));
+                }
+            }
+            continue;
+        }
+        let created = event
+            .get("created_at")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let id = event
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        lines.push((created, id, content));
+    }
+    lines.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    lines.into_iter().map(|(_, _, c)| c).collect()
 }
 
 #[cfg(test)]

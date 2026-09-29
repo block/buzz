@@ -46,3 +46,11 @@ BUZZ_TURN_EXTERNAL_IP=<public ipv4>
 - Point DNS `livekit.` at the host; confirm WSS upgrade works.
 - Validate TURN with a NATed client (share appears for remote peer).
 - Monitor LiveKit CPU when several Huddles share large screens.
+
+## Client compatibility
+
+Desktop pins `livekit-client` 2.x with `singlePeerConnection: false` so connect
+uses legacy `/rtc` against older SFUs. Server image should be **v1.9.12+** so
+`/rtc/v1` exists if a future client enables single-PC mode. Hula host was on
+v1.8.4 (no `/rtc/v1`), which logged `v1 RTC path not found` before fallback.
+

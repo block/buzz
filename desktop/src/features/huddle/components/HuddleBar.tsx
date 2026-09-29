@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Bot,
   Captions,
+  ChevronDown,
   MonitorUp,
   PhoneOff,
   PictureInPicture,
@@ -26,6 +27,13 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
@@ -57,6 +65,8 @@ type HuddleState = {
   transcription_enabled: boolean;
   is_creator: boolean;
   voice_input_mode: "push_to_talk" | "voice_activity";
+  /** Spoken wake keyword; default "hey". */
+  activation_keyword?: string;
 };
 
 type HuddleBarProps = {
@@ -64,7 +74,7 @@ type HuddleBarProps = {
   /** The companion window owns the full controls; the main app only opens it. */
   mode?: "main" | "room";
   /** Called after the companion window has been opened successfully. */
-  onOpenHuddleWindow?: () => void;
+  onOpenHuddleWindow?: () => void | Promise<void>;
   onOpenThread?: (channelId: string, messageId: string) => void;
   onVisibilityChange?: (visible: boolean) => void;
 };
@@ -74,6 +84,44 @@ const HUDDLE_STATE_FALLBACK_INTERVAL_MS = 30_000;
 const HUDDLE_MODEL_STATUS_INTERVAL_MS = 10_000;
 const HUDDLE_REACTION_NAME_MAX = 48;
 const HEADPHONES_HINT_SEEN_STORAGE_KEY = "buzz.huddle.headphones-hint-seen";
+const ACTIVATION_KEYWORD_STORAGE_KEY = "buzz.huddle.activation-keyword";
+const ACTIVATION_KEYWORD_PRESETS = [
+  "hey",
+  "at",
+  "agent",
+  "bot",
+  "robo",
+  "ok",
+  "yo",
+  "okay",
+] as const;
+type ActivationKeyword = (typeof ACTIVATION_KEYWORD_PRESETS)[number];
+const DEFAULT_ACTIVATION_KEYWORD: ActivationKeyword = "hey";
+
+function readStoredActivationKeyword(): ActivationKeyword {
+  try {
+    const raw = window.localStorage.getItem(ACTIVATION_KEYWORD_STORAGE_KEY);
+    if (
+      raw &&
+      (ACTIVATION_KEYWORD_PRESETS as readonly string[]).includes(
+        raw.toLowerCase(),
+      )
+    ) {
+      return raw.toLowerCase() as ActivationKeyword;
+    }
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_ACTIVATION_KEYWORD;
+}
+
+function persistActivationKeyword(keyword: ActivationKeyword) {
+  try {
+    window.localStorage.setItem(ACTIVATION_KEYWORD_STORAGE_KEY, keyword);
+  } catch {
+    /* ignore */
+  }
+}
 
 function hasSeenHeadphonesHint() {
   return window.localStorage.getItem(HEADPHONES_HINT_SEEN_STORAGE_KEY) === "1";
@@ -191,6 +239,8 @@ export function HuddleBar({
   const [headphonesHintDismissed, setHeadphonesHintDismissed] = React.useState(
     hasSeenHeadphonesHint,
   );
+  const [activationKeyword, setActivationKeyword] =
+    React.useState<ActivationKeyword>(readStoredActivationKeyword);
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
@@ -203,6 +253,40 @@ export function HuddleBar({
     stt: string;
     tts: string;
   } | null>(null);
+  const pushActivationKeyword = React.useCallback(
+    (keyword: ActivationKeyword) => {
+      void invoke<string>("set_huddle_activation_keyword", { keyword }).catch(
+        (error) => {
+          console.error("Failed to set huddle activation keyword:", error);
+        },
+      );
+    },
+    [],
+  );
+
+  // Push the persisted keyword into Rust whenever a huddle becomes active so
+  // the STT wake matcher uses the user's choice (not only the in-memory default).
+  React.useEffect(() => {
+    if (!isVisibleHuddleState(state)) return;
+    pushActivationKeyword(activationKeyword);
+    // Intentionally only re-push when the huddle session identity changes —
+    // dropdown changes call pushActivationKeyword directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.phase, state?.ephemeral_channel_id, pushActivationKeyword]);
+
+  const handleActivationKeywordChange = React.useCallback(
+    (next: string) => {
+      if (!(ACTIVATION_KEYWORD_PRESETS as readonly string[]).includes(next)) {
+        return;
+      }
+      const keyword = next as ActivationKeyword;
+      setActivationKeyword(keyword);
+      persistActivationKeyword(keyword);
+      pushActivationKeyword(keyword);
+    },
+    [pushActivationKeyword],
+  );
+
   const applyIncomingState = React.useCallback((nextState: HuddleState) => {
     const leavingChannelId = locallyLeavingChannelRef.current;
     if (
@@ -395,6 +479,29 @@ export function HuddleBar({
   });
   const spotlightStream =
     screenShare.localPreviewStream ?? screenShare.remoteStream;
+  const drawerRootRef = React.useRef<HTMLDivElement | null>(null);
+
+  // Keep --buzz-huddle-drawer-height in sync with real bar content so a
+  // screen-share preview is not clipped by the fixed 5rem drawer slot.
+  React.useEffect(() => {
+    const el = drawerRootRef.current;
+    if (!el) return;
+    const shell = el.closest(".buzz-huddle-shell") as HTMLElement | null;
+    if (!shell) return;
+    const apply = () => {
+      const height = Math.ceil(el.getBoundingClientRect().height);
+      if (height > 0) {
+        shell.style.setProperty("--buzz-huddle-drawer-height", `${height}px`);
+      }
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      shell.style.removeProperty("--buzz-huddle-drawer-height");
+    };
+  }, [spotlightStream, isHuddleVisible]);
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };
     if (currentPubkey) {
@@ -566,9 +673,10 @@ export function HuddleBar({
 
   async function handleOpenHuddleWindow() {
     try {
-      await invoke("open_huddle_window");
+      // Presentation owns native open so drawer ⊕ window stay exclusive and a
+      // failed open can revert the main shell without a second invoke here.
+      await onOpenHuddleWindow?.();
       dismissHeadphonesHint();
-      onOpenHuddleWindow?.();
     } catch (error) {
       console.error("Failed to open huddle window:", error);
     }
@@ -584,6 +692,7 @@ export function HuddleBar({
 
   return (
     <div
+      ref={drawerRootRef}
       aria-hidden={isDrawerClosing}
       data-state={isDrawerClosing ? "closing" : "open"}
       className={cn(
@@ -595,10 +704,8 @@ export function HuddleBar({
       {spotlightStream ? (
         <ScreenShareSpotlight
           stream={spotlightStream}
-          label={
-            screenShare.sharing ? "You are sharing" : "Screen share"
-          }
-          className="mx-auto h-40 w-full max-w-3xl"
+          label={screenShare.sharing ? "You are sharing" : "Screen share"}
+          className="mx-auto h-56 w-full max-w-3xl shrink-0"
         />
       ) : null}
       {screenShare.error ? (
@@ -610,334 +717,385 @@ export function HuddleBar({
         </div>
       ) : null}
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3">
-      <div className="flex min-w-0 items-center gap-3 overflow-hidden">
-        {/* Error banner */}
-        {huddleError && (
-          <div
-            role="alert"
-            className="flex min-w-0 items-center gap-1.5 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive"
-          >
-            <span className="max-w-[220px] truncate">{huddleError}</span>
-            <button
-              aria-label="Dismiss error"
-              className="ml-1 opacity-60 hover:opacity-100"
-              onClick={clearHuddleError}
-              type="button"
+        <div className="flex min-w-0 items-center gap-3 overflow-hidden">
+          {/* Error banner */}
+          {huddleError && (
+            <div
+              role="alert"
+              className="flex min-w-0 items-center gap-1.5 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive"
             >
-              ✕
-            </button>
-          </div>
-        )}
-
-        {/* Model download progress */}
-        {modelStatus &&
-          ((transcriptionEnabled && modelStatus.stt !== "ready") ||
-            modelStatus.tts !== "ready") && (
-            <output className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-              <span className="truncate animate-pulse">
-                {transcriptionEnabled &&
-                modelStatus.stt !== "ready" &&
-                modelStatus.tts !== "ready"
-                  ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.tts}`
-                  : transcriptionEnabled && modelStatus.stt !== "ready"
-                    ? `STT model: ${modelStatus.stt}`
-                    : `TTS model: ${modelStatus.tts}`}
-              </span>
-            </output>
+              <span className="max-w-[220px] truncate">{huddleError}</span>
+              <button
+                aria-label="Dismiss error"
+                className="ml-1 opacity-60 hover:opacity-100"
+                onClick={clearHuddleError}
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
           )}
 
-        {agentAddError && (
-          <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
-            {agentAddError}
-          </span>
-        )}
+          {/* Model download progress */}
+          {modelStatus &&
+            ((transcriptionEnabled && modelStatus.stt !== "ready") ||
+              modelStatus.tts !== "ready") && (
+              <output className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                <span className="truncate animate-pulse">
+                  {transcriptionEnabled &&
+                  modelStatus.stt !== "ready" &&
+                  modelStatus.tts !== "ready"
+                    ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.tts}`
+                    : transcriptionEnabled && modelStatus.stt !== "ready"
+                      ? `STT model: ${modelStatus.stt}`
+                      : `TTS model: ${modelStatus.tts}`}
+                </span>
+              </output>
+            )}
 
-        {reactionError && (
-          <span className="max-w-[160px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
-            {reactionError}
-          </span>
-        )}
+          {agentAddError && (
+            <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+              {agentAddError}
+            </span>
+          )}
 
-        {transcriptError && (
-          <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
-            {transcriptError}
-          </span>
-        )}
+          {reactionError && (
+            <span className="max-w-[160px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+              {reactionError}
+            </span>
+          )}
 
-        <AddAgentDialog
-          currentAgentPubkeys={barState.agent_pubkeys}
-          onClose={() => setShowAddAgent(false)}
-          onAdd={async (pubkey: string): Promise<AgentAddResult> => {
-            setAgentAddError(null);
-            try {
-              const result = await invoke<AgentAddResult>(
-                "add_agent_to_huddle",
-                { agentPubkey: pubkey },
-              );
-              // Refresh huddle state so the participant list updates immediately.
-              const s = await invoke<HuddleState>("get_huddle_state");
-              setState(s);
-              return result;
-            } catch (e: unknown) {
-              const msg = e instanceof Error ? e.message : String(e);
-              setAgentAddError(`Failed to add agent: ${msg}`);
-              throw e; // Re-throw so AddAgentDialog shows its inline error.
-            }
-          }}
-          open={showAddAgent}
-        />
+          {transcriptError && (
+            <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+              {transcriptError}
+            </span>
+          )}
 
-        <div className="flex shrink-0 items-center gap-2">
-          <MicControls
-            isMuted={isMuted}
-            onToggleMute={toggleMute}
-            isPttMode={isPttMode}
-            micConnected={hasAvailableMic}
-            micLevel={micLevel}
-            onSelectVoiceInputMode={setVoiceInputMode}
-            audioDevices={audioDevices}
-            selectedDeviceId={selectedDeviceId}
-            onSelectDevice={setSelectedDeviceId}
-            micGain={micGain}
-            onGainChange={setMicGain}
+          <AddAgentDialog
+            currentAgentPubkeys={barState.agent_pubkeys}
+            onClose={() => setShowAddAgent(false)}
+            onAdd={async (pubkey: string): Promise<AgentAddResult> => {
+              setAgentAddError(null);
+              try {
+                const result = await invoke<AgentAddResult>(
+                  "add_agent_to_huddle",
+                  { agentPubkey: pubkey },
+                );
+                // Refresh huddle state so the participant list updates immediately.
+                const s = await invoke<HuddleState>("get_huddle_state");
+                setState(s);
+                return result;
+              } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setAgentAddError(`Failed to add agent: ${msg}`);
+                throw e; // Re-throw so AddAgentDialog shows its inline error.
+              }
+            }}
+            open={showAddAgent}
           />
 
-          {screenShare.available ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <MicControls
+              isMuted={isMuted}
+              onToggleMute={toggleMute}
+              isPttMode={isPttMode}
+              micConnected={hasAvailableMic}
+              micLevel={micLevel}
+              onSelectVoiceInputMode={setVoiceInputMode}
+              audioDevices={audioDevices}
+              selectedDeviceId={selectedDeviceId}
+              onSelectDevice={setSelectedDeviceId}
+              micGain={micGain}
+              onGainChange={setMicGain}
+            />
+
+            <SpeakerControls
+              ttsEnabled={ttsEnabled}
+              showHeadphonesHint={
+                mode === "main" &&
+                aecMissing &&
+                !headphonesHintDismissed &&
+                !isDrawerClosing
+              }
+              onHeadphonesHintDismiss={dismissHeadphonesHint}
+              onToggleTts={async () => {
+                try {
+                  await invoke("set_tts_enabled", { enabled: !ttsEnabled });
+                  const s = await invoke<HuddleState>("get_huddle_state");
+                  setState(s);
+                } catch (e) {
+                  console.error("Failed to toggle TTS:", e);
+                }
+              }}
+              outputDevices={outputDevices}
+              selectedOutputDevice={selectedOutputDevice}
+              onSelectOutputDevice={setSelectedOutputDevice}
+            />
+
+            {mode === "main" ? (
+              <HuddleParticipantsControl
+                participants={lifecycleParticipants}
+                activeSpeakers={activeSpeakers}
+                speakerLevels={participantSpeakerLevels}
+                agentPubkeys={barState.agent_pubkeys}
+                agentVoiceSettings={barState.agent_voice_settings}
+                selfProfile={{
+                  avatarUrl:
+                    profileQuery.data?.avatarUrl ??
+                    selfProfileCache?.avatarDataUrl ??
+                    null,
+                  displayName:
+                    profileQuery.data?.displayName ??
+                    identityQuery.data?.displayName ??
+                    null,
+                  pubkey: currentPubkey,
+                }}
+                onRemoveAgent={async (pubkey) => {
+                  const confirmed = window.confirm(
+                    "Remove this agent from the huddle?",
+                  );
+                  if (!confirmed) return;
+                  try {
+                    await invoke("remove_agent_from_huddle", {
+                      agentPubkey: pubkey,
+                    });
+                    setState((prev) => {
+                      if (!prev) return prev;
+                      return {
+                        ...prev,
+                        participants: prev.participants.filter(
+                          (p) => p !== pubkey,
+                        ),
+                        agent_pubkeys: prev.agent_pubkeys.filter(
+                          (p) => p !== pubkey,
+                        ),
+                      };
+                    });
+                  } catch (e) {
+                    console.error("Failed to remove agent from huddle:", e);
+                  }
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2 justify-self-center">
+          <div className="flex items-center gap-2">
+            <Popover
+              onOpenChange={setIsReactionPickerOpen}
+              open={isReactionPickerOpen}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <PopoverTrigger asChild>
+                    <Button
+                      aria-label="Emoji reactions"
+                      aria-pressed={isReactionPickerOpen}
+                      className={cn(
+                        "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
+                        isReactionPickerOpen && "text-foreground",
+                      )}
+                      size="icon"
+                      type="button"
+                      variant="secondary"
+                    >
+                      <SmilePlus className="h-4 w-4" />
+                    </Button>
+                  </PopoverTrigger>
+                </TooltipTrigger>
+                <TooltipContent className="buzz-huddle-tooltip" side="top">
+                  Emoji reactions
+                </TooltipContent>
+              </Tooltip>
+              <PopoverContent
+                align="center"
+                className="w-auto overflow-hidden rounded-2xl border-0 bg-transparent p-0 shadow-none"
+                side="top"
+                sideOffset={10}
+              >
+                <EmojiPicker autoFocus onSelect={handleHuddleReactionSelect} />
+              </PopoverContent>
+            </Popover>
+
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  type="button"
-                  variant={screenShare.sharing ? "secondary" : "ghost"}
-                  size="sm"
-                  className="gap-1.5"
-                  disabled={
-                    screenShare.connecting ||
-                    (!screenShare.sharing && screenShare.shareBlocked)
-                  }
                   aria-label={
-                    screenShare.sharing ? "Stop sharing screen" : "Share screen"
+                    transcriptionEnabled
+                      ? "Stop transcript"
+                      : "Start transcript"
                   }
-                  onClick={() => {
-                    if (screenShare.sharing) void screenShare.stopShare();
-                    else void screenShare.startShare();
-                  }}
+                  aria-pressed={transcriptionEnabled}
+                  className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                  onClick={() => void handleToggleTranscript()}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
                 >
-                  <MonitorUp className="h-4 w-4" />
-                  {screenShare.sharing ? "Stop share" : "Share"}
+                  <Captions className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>
-                {screenShare.shareBlocked && !screenShare.sharing
-                  ? "Someone else is sharing"
-                  : screenShare.sharing
-                    ? "Stop screen share"
-                    : "Share your screen"}
+              <TooltipContent className="buzz-huddle-tooltip" side="top">
+                {transcriptionEnabled ? "Stop transcript" : "Start transcript"}
               </TooltipContent>
             </Tooltip>
-          ) : null}
 
-          <SpeakerControls
-            ttsEnabled={ttsEnabled}
-            showHeadphonesHint={
-              mode === "main" &&
-              aecMissing &&
-              !headphonesHintDismissed &&
-              !isDrawerClosing
-            }
-            onHeadphonesHintDismiss={dismissHeadphonesHint}
-            onToggleTts={async () => {
-              try {
-                await invoke("set_tts_enabled", { enabled: !ttsEnabled });
-                const s = await invoke<HuddleState>("get_huddle_state");
-                setState(s);
-              } catch (e) {
-                console.error("Failed to toggle TTS:", e);
-              }
-            }}
-            outputDevices={outputDevices}
-            selectedOutputDevice={selectedOutputDevice}
-            onSelectOutputDevice={setSelectedOutputDevice}
-          />
+            <DropdownMenu>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      aria-label={`Activation word: ${activationKeyword}`}
+                      className="buzz-huddle-control-button h-12 shrink-0 gap-1 rounded-md px-2.5"
+                      data-testid="huddle-activation-keyword"
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <span className="max-w-[4.5rem] truncate text-xs font-medium capitalize">
+                        {activationKeyword}
+                      </span>
+                      <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent className="buzz-huddle-tooltip" side="top">
+                  Spoken wake word — say &ldquo;{activationKeyword}{" "}
+                  AgentName&rdquo;
+                </TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent
+                align="center"
+                className="buzz-huddle-drawer buzz-huddle-popover w-40 text-foreground"
+                side="top"
+                sideOffset={10}
+              >
+                <DropdownMenuRadioGroup
+                  onValueChange={handleActivationKeywordChange}
+                  value={activationKeyword}
+                >
+                  {ACTIVATION_KEYWORD_PRESETS.map((keyword) => (
+                    <DropdownMenuRadioItem
+                      className="capitalize"
+                      key={keyword}
+                      value={keyword}
+                    >
+                      {keyword}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
-          {mode === "main" ? (
-            <HuddleParticipantsControl
-              participants={lifecycleParticipants}
-              activeSpeakers={activeSpeakers}
-              speakerLevels={participantSpeakerLevels}
-              agentPubkeys={barState.agent_pubkeys}
-              agentVoiceSettings={barState.agent_voice_settings}
-              selfProfile={{
-                avatarUrl:
-                  profileQuery.data?.avatarUrl ??
-                  selfProfileCache?.avatarDataUrl ??
-                  null,
-                displayName:
-                  profileQuery.data?.displayName ??
-                  identityQuery.data?.displayName ??
-                  null,
-                pubkey: currentPubkey,
-              }}
-              onRemoveAgent={async (pubkey) => {
-                const confirmed = window.confirm(
-                  "Remove this agent from the huddle?",
-                );
-                if (!confirmed) return;
-                try {
-                  await invoke("remove_agent_from_huddle", {
-                    agentPubkey: pubkey,
-                  });
-                  setState((prev) => {
-                    if (!prev) return prev;
-                    return {
-                      ...prev,
-                      participants: prev.participants.filter(
-                        (p) => p !== pubkey,
-                      ),
-                      agent_pubkeys: prev.agent_pubkeys.filter(
-                        (p) => p !== pubkey,
-                      ),
-                    };
-                  });
-                } catch (e) {
-                  console.error("Failed to remove agent from huddle:", e);
-                }
-              }}
-            />
-          ) : null}
-        </div>
-      </div>
-
-      <div className="flex shrink-0 items-center gap-2 justify-self-center">
-        <div className="flex items-center gap-2">
-          <Popover
-            onOpenChange={setIsReactionPickerOpen}
-            open={isReactionPickerOpen}
-          >
             <Tooltip>
               <TooltipTrigger asChild>
-                <PopoverTrigger asChild>
-                  <Button
-                    aria-label="Emoji reactions"
-                    aria-pressed={isReactionPickerOpen}
-                    className={cn(
-                      "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
-                      isReactionPickerOpen && "text-foreground",
-                    )}
-                    size="icon"
-                    type="button"
-                    variant="secondary"
-                  >
-                    <SmilePlus className="h-4 w-4" />
-                  </Button>
-                </PopoverTrigger>
+                <Button
+                  aria-label="Add agent to huddle"
+                  className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                  onClick={() => setShowAddAgent(true)}
+                  size="icon"
+                  type="button"
+                  variant="secondary"
+                >
+                  <Bot className="h-4 w-4" />
+                </Button>
               </TooltipTrigger>
               <TooltipContent className="buzz-huddle-tooltip" side="top">
-                Emoji reactions
+                Add agent
               </TooltipContent>
             </Tooltip>
-            <PopoverContent
-              align="center"
-              className="w-auto overflow-hidden rounded-2xl border-0 bg-transparent p-0 shadow-none"
-              side="top"
-              sideOffset={10}
-            >
-              <EmojiPicker autoFocus onSelect={handleHuddleReactionSelect} />
-            </PopoverContent>
-          </Popover>
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={
-                  transcriptionEnabled ? "Stop transcript" : "Start transcript"
-                }
-                aria-pressed={transcriptionEnabled}
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => void handleToggleTranscript()}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <Captions className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              {transcriptionEnabled ? "Stop transcript" : "Start transcript"}
-            </TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Add agent to huddle"
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => setShowAddAgent(true)}
-                size="icon"
-                type="button"
-                variant="secondary"
-              >
-                <Bot className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              Add agent
-            </TooltipContent>
-          </Tooltip>
+            {screenShare.available ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label={
+                      screenShare.sharing
+                        ? "Stop sharing screen"
+                        : "Share screen"
+                    }
+                    aria-pressed={screenShare.sharing}
+                    className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                    disabled={
+                      screenShare.connecting ||
+                      (!screenShare.sharing && screenShare.shareBlocked)
+                    }
+                    onClick={() => {
+                      if (screenShare.sharing) void screenShare.stopShare();
+                      else void screenShare.startShare();
+                    }}
+                    size="icon"
+                    type="button"
+                    variant={screenShare.sharing ? "secondary" : "ghost"}
+                  >
+                    <MonitorUp className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="buzz-huddle-tooltip" side="top">
+                  {screenShare.shareBlocked && !screenShare.sharing
+                    ? "Someone else is sharing"
+                    : screenShare.sharing
+                      ? "Stop screen share"
+                      : "Share your screen"}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
         </div>
-      </div>
 
-      <div className="flex shrink-0 items-center gap-2 justify-self-end">
-        {mode === "main" ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Open huddle in a new window"
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => void handleOpenHuddleWindow()}
-                size="icon"
-                type="button"
-                variant="secondary"
-              >
-                <PictureInPicture2 className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              Open huddle window
-            </TooltipContent>
-          </Tooltip>
-        ) : (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Return huddle to drawer"
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => void handleReturnToDrawer()}
-                size="icon"
-                type="button"
-                variant="secondary"
-              >
-                <PictureInPicture className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              Return huddle to drawer
-            </TooltipContent>
-          </Tooltip>
-        )}
+        <div className="flex shrink-0 items-center gap-2 justify-self-end">
+          {mode === "main" ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Open huddle in a new window"
+                  className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                  onClick={() => void handleOpenHuddleWindow()}
+                  size="icon"
+                  type="button"
+                  variant="secondary"
+                >
+                  <PictureInPicture2 className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="buzz-huddle-tooltip" side="top">
+                Open huddle window
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Return huddle to drawer"
+                  className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                  onClick={() => void handleReturnToDrawer()}
+                  size="icon"
+                  type="button"
+                  variant="secondary"
+                >
+                  <PictureInPicture className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="buzz-huddle-tooltip" side="top">
+                Return huddle to drawer
+              </TooltipContent>
+            </Tooltip>
+          )}
 
-        <Button
-          aria-label="Leave huddle"
-          className="h-12 gap-2 px-4"
-          disabled={isLeaving}
-          aria-busy={isLeaving}
-          onClick={() => void handleLeave()}
-          size="sm"
-          variant="destructive"
-        >
-          <PhoneOff className="h-4 w-4" />
-          Leave
-        </Button>
-      </div>
+          <Button
+            aria-label="Leave huddle"
+            className="h-12 gap-2 px-4"
+            disabled={isLeaving}
+            aria-busy={isLeaving}
+            onClick={() => void handleLeave()}
+            size="sm"
+            variant="destructive"
+          >
+            <PhoneOff className="h-4 w-4" />
+            Leave
+          </Button>
+        </div>
       </div>
 
       {/* Screen reader announcements for huddle state changes */}

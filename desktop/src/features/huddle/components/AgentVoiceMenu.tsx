@@ -23,6 +23,10 @@ import { Switch } from "@/shared/ui/switch";
 export type HuddleAgentVoiceSettings = {
   enabled: boolean;
   voice_key: string;
+  /** Spoken wake (`{keyword} {name}`). Default true. */
+  addressable?: boolean;
+  /** ~60s high-bar auto-chime. Default false. */
+  agent_barge?: boolean;
 };
 
 type AgentVoiceMenuProps = {
@@ -58,7 +62,11 @@ export function AgentVoiceMenu({
 
   const update = React.useCallback(
     async (
-      command: "set_huddle_agent_tts_enabled" | "set_huddle_agent_voice",
+      command:
+        | "set_huddle_agent_tts_enabled"
+        | "set_huddle_agent_voice"
+        | "set_huddle_agent_addressable"
+        | "set_huddle_agent_barge",
       payload: Record<string, unknown>,
     ) => {
       setBusy(true);
@@ -100,11 +108,61 @@ export function AgentVoiceMenu({
       </PopoverTrigger>
       <PopoverContent
         align={contentAlign}
-        className={cn("w-64 space-y-3 p-3", contentClassName)}
+        className={cn("w-72 space-y-3 p-3", contentClassName)}
         data-testid="huddle-agent-voice-menu-content"
         side={contentSide}
         sideOffset={8}
       >
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <label
+                className="text-sm font-medium"
+                htmlFor={`agent-addressable-${agentPubkey}`}
+              >
+                Addressable
+              </label>
+              <p className="text-2xs text-muted-foreground">
+                Spoken keyword + name wakes this agent
+              </p>
+            </div>
+            <Switch
+              checked={settings?.addressable ?? true}
+              data-testid="huddle-agent-addressable-toggle"
+              disabled={!settings || busy}
+              id={`agent-addressable-${agentPubkey}`}
+              onCheckedChange={(addressable) => {
+                void update("set_huddle_agent_addressable", { addressable });
+              }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <label
+                className="text-sm font-medium"
+                htmlFor={`agent-barge-${agentPubkey}`}
+              >
+                Agent barge
+              </label>
+              <p className="text-2xs text-muted-foreground">
+                Rare auto-chime on clear open questions (~60s)
+              </p>
+            </div>
+            <Switch
+              checked={settings?.agent_barge ?? false}
+              data-testid="huddle-agent-barge-toggle"
+              disabled={!settings || busy}
+              id={`agent-barge-${agentPubkey}`}
+              onCheckedChange={(agentBarge) => {
+                void update("set_huddle_agent_barge", { agentBarge });
+              }}
+            />
+          </div>
+        </div>
+
+        <Separator />
+
         <div className="flex items-center justify-between gap-3">
           <label
             className="text-sm font-medium"

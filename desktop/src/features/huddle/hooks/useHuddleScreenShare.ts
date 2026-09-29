@@ -1,7 +1,9 @@
 import * as React from "react";
 
 import {
+  acquireDisplayMedia,
   HuddleScreenShareSession,
+  stopMediaStreamTracks,
   type ScreenShareRemote,
 } from "../lib/screenShareSession";
 import { isShareBlockedByOther } from "../lib/screenSharePolicy";
@@ -104,8 +106,12 @@ export function useHuddleScreenShare(args: {
             setRemoteStream(remote?.stream ?? null);
           },
           onLocalPreviewChanged: (stream) => {
-            setLocalPreviewStream(stream);
-            setSharing(stream != null);
+            // Non-null: session owns a published local track. Null during
+            // reconnect must not clear an early pre-connect preview.
+            if (stream) {
+              setLocalPreviewStream(stream);
+              setSharing(true);
+            }
           },
           onCurrentSharerChanged: (pubkey) => {
             setCurrentSharer(pubkey);
@@ -133,13 +139,24 @@ export function useHuddleScreenShare(args: {
   const startShare = React.useCallback(async () => {
     if (!channelId) return;
     setError(null);
+    // First await MUST be getDisplayMedia — WebKit/WKWebView needs a user gesture.
+    let acquired: MediaStream | null = null;
     try {
+      acquired = await acquireDisplayMedia();
+      // Local preview is independent of LiveKit publish — show it immediately
+      // even if mint/connect later fails.
+      setLocalPreviewStream(acquired);
+      setSharing(true);
       const minted = await mintScreenShareToken({
         channelId,
         parentChannelId,
         intent: "publish",
       });
       if ("unavailable" in minted && minted.unavailable) {
+        stopMediaStreamTracks(acquired);
+        acquired = null;
+        setLocalPreviewStream(null);
+        setSharing(false);
         setAvailable(false);
         setError(minted.reason);
         return;
@@ -152,17 +169,29 @@ export function useHuddleScreenShare(args: {
         session = new HuddleScreenShareSession({
           onRemoteChanged: (remote) => setRemoteStream(remote?.stream ?? null),
           onLocalPreviewChanged: (stream) => {
-            setLocalPreviewStream(stream);
-            setSharing(stream != null);
+            // Only clear preview when the session stops a track it owns.
+            // A null callback during reconnect must not wipe the early preview.
+            if (stream) {
+              setLocalPreviewStream(stream);
+              setSharing(true);
+            }
           },
           onCurrentSharerChanged: setCurrentSharer,
         });
         sessionRef.current = session;
       }
       await session.connect(token.url, token.token);
-      await session.startShare();
+      await session.startShare(acquired);
+      acquired = null; // ownership transferred to session
       setSharing(true);
     } catch (e) {
+      try {
+        await sessionRef.current?.stopShare();
+      } catch {
+        /* best-effort */
+      }
+      stopMediaStreamTracks(acquired);
+      setLocalPreviewStream(null);
       setError(e instanceof Error ? e.message : String(e));
       setSharing(false);
     }
@@ -179,6 +208,7 @@ export function useHuddleScreenShare(args: {
         });
       }
       setCurrentSharer(null);
+      setLocalPreviewStream(null);
       setSharing(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

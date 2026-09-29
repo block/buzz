@@ -3819,7 +3819,15 @@ type MockHuddleState = {
   huddle_thread_event_id: string | null;
   participants: string[];
   agent_pubkeys: string[];
-  agent_voice_settings: Record<string, { enabled: boolean; voice_key: string }>;
+  agent_voice_settings: Record<
+    string,
+    {
+      enabled: boolean;
+      voice_key: string;
+      addressable?: boolean;
+      agent_barge?: boolean;
+    }
+  >;
   tts_enabled: boolean;
   transcription_enabled: boolean;
   is_creator: boolean;
@@ -3900,6 +3908,8 @@ function refreshMockHuddleMembership(config?: E2eConfig | null) {
       mockHuddle.state.agent_voice_settings[pubkey] = {
         enabled: true,
         voice_key: voiceKey,
+        addressable: true,
+        agent_barge: false,
       };
     }
   });
@@ -9063,9 +9073,7 @@ async function handleDeletePersona(args: { id: string }): Promise<void> {
   if (!persona) {
     throw new Error(`agent ${args.id} not found`);
   }
-  if (persona.is_builtin) {
-    throw new Error("Built-in agents cannot be deleted.");
-  }
+  // Built-in agents are deletable; production records the id in deleted-seed-ids.json.
   if (mockTeams.some((team) => team.persona_ids.includes(args.id))) {
     throw new Error(
       `${persona.display_name} is still referenced by a team. Remove it from those teams first.`,
@@ -9319,10 +9327,7 @@ async function handleUpdateTeam(args: {
 }
 
 async function handleDeleteTeam(args: { id: string }): Promise<void> {
-  const team = mockTeams.find((candidate) => candidate.id === args.id);
-  if (team?.is_builtin) {
-    throw new Error("Built-in teams cannot be deleted.");
-  }
+  // Built-in teams are deletable; production records the id in deleted-seed-ids.json.
   mockTeams = mockTeams.filter((candidate) => candidate.id !== args.id);
 }
 
@@ -12272,6 +12277,42 @@ export function maybeInstallE2eTauriMocks() {
           mockHuddle.state.agent_voice_settings[request.agentPubkey];
         if (!settings) throw new Error("Agent is not in the active huddle.");
         settings.voice_key = request.voiceKey;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return structuredClone(settings);
+      }
+      case "set_huddle_agent_addressable": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const request = payload as {
+          agentPubkey?: string;
+          addressable?: boolean;
+        };
+        if (!request.agentPubkey || typeof request.addressable !== "boolean") {
+          throw new Error("Missing agent addressable setting.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        const settings =
+          mockHuddle.state.agent_voice_settings[request.agentPubkey];
+        if (!settings) throw new Error("Agent is not in the active huddle.");
+        settings.addressable = request.addressable;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return structuredClone(settings);
+      }
+      case "set_huddle_agent_barge": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const request = payload as {
+          agentPubkey?: string;
+          agentBarge?: boolean;
+        };
+        if (!request.agentPubkey || typeof request.agentBarge !== "boolean") {
+          throw new Error("Missing agent barge setting.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        const settings =
+          mockHuddle.state.agent_voice_settings[request.agentPubkey];
+        if (!settings) throw new Error("Agent is not in the active huddle.");
+        settings.agent_barge = request.agentBarge;
         persistMockHuddle();
         await emitMockHuddleState();
         return structuredClone(settings);

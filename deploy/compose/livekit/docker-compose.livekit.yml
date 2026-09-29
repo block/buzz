@@ -10,7 +10,7 @@
 
 services:
   livekit:
-    image: livekit/livekit-server:v1.8.4
+    image: livekit/livekit-server:v1.9.12
     restart: unless-stopped
     command: --config /etc/livekit.yaml
     volumes:

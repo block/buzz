@@ -189,7 +189,43 @@ test("global search results join only while global search is enabled", () => {
   assert.equal(searched[0].isGlobalSearchResult, true);
 });
 
-test("policy-only discovery stays selectable without claiming active presence", () => {
+test("offline and unknown-presence directory agents stay out of autocomplete", () => {
+  for (const status of ["offline", "unknown"]) {
+    const candidates = buildMentionCandidates(
+      input({
+        mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+        relayAgents: [
+          {
+            pubkey: AGENT_PUBKEY,
+            name: "Scout",
+            ownerPubkey: MEMBER_PUBKEY,
+            status,
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(candidates, [], `expected ${status} agent to be hidden`);
+  }
+});
+
+test("stopped managed agents stay out of autocomplete", () => {
+  const candidates = buildMentionCandidates(
+    input({
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: "Scout",
+          status: "stopped",
+        },
+      ],
+      managedAgentNamesByPubkey: new Map([[AGENT_PUBKEY, "Scout"]]),
+    }),
+  );
+  assert.deepEqual(candidates, []);
+});
+
+test("online relay agents remain selectable", () => {
   const [candidate] = buildMentionCandidates(
     input({
       mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
@@ -198,14 +234,35 @@ test("policy-only discovery stays selectable without claiming active presence", 
           pubkey: AGENT_PUBKEY,
           name: "Scout",
           ownerPubkey: MEMBER_PUBKEY,
-          status: "unknown",
+          status: "online",
         },
       ],
     }),
   );
   assert.equal(candidate.pubkey, AGENT_PUBKEY);
-  assert.equal(candidate.isActiveAgent, false);
+  assert.equal(candidate.isActiveAgent, true);
   assert.equal(candidate.ownerPubkey, MEMBER_PUBKEY);
+});
+
+test("presence-exempt community bots stay mentionable without live presence", () => {
+  const [candidate] = buildMentionCandidates(
+    input({
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+      presenceExemptAgentPubkeys: new Set([AGENT_PUBKEY]),
+      members: [
+        {
+          pubkey: AGENT_PUBKEY,
+          displayName: "Mo",
+          isAgent: true,
+          role: "bot",
+        },
+      ],
+      memberPubkeys: new Set([AGENT_PUBKEY]),
+    }),
+  );
+  assert.equal(candidate.pubkey, AGENT_PUBKEY);
+  assert.equal(candidate.isActiveAgent, false);
+  assert.equal(candidate.isMember, true);
 });
 
 for (const locallyManaged of [true, false]) {
@@ -220,6 +277,10 @@ for (const locallyManaged of [true, false]) {
           ? [{ pubkey: AGENT_PUBKEY, name: "Scout", status: "deployed" }]
           : [],
         mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+        // Non-managed channel bots lack directory presence — exempt them.
+        presenceExemptAgentPubkeys: locallyManaged
+          ? undefined
+          : new Set([AGENT_PUBKEY]),
       }),
     );
     assert.equal(candidate.isMember, true);
@@ -242,6 +303,7 @@ test("in-channel reserved community bot stays isMember after catalog route", () 
         },
       ],
       mentionableAgentPubkeys: new Set([channelMo, catalogMo]),
+      presenceExemptAgentPubkeys: new Set([channelMo]),
       relayAgents: [
         {
           pubkey: catalogMo,

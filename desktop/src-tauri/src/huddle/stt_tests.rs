@@ -1,9 +1,10 @@
 use std::sync::{atomic::AtomicBool, mpsc, Arc, Barrier};
 
 use super::{
-    has_enough_voiced_audio, run_stt_receive_loop, vad_flush_allowed, HumanFloor, SttAudioInput,
-    SttAudioOrigin, SttLoopInput, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
-    SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
+    has_enough_voiced_audio, is_substantive_transcript, run_stt_receive_loop, vad_flush_allowed,
+    HumanFloor, SttAudioInput, SttAudioOrigin, SttLoopInput, VadEndpoint, VadFrameAction,
+    MAX_UTTERANCE_SAMPLES, MIN_VOICED_FRAMES, SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES,
+    VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
 };
 
 #[derive(Clone, Copy)]
@@ -257,4 +258,49 @@ fn held_push_to_talk_never_silence_flushes() {
     assert!(!vad_flush_allowed(true, true, true));
     // Manually open mic with the shortcut up: normal VAD behavior.
     assert!(vad_flush_allowed(true, true, false));
+}
+
+#[test]
+fn continuous_speech_flushes_at_max_utterance_without_silence() {
+    let mut endpoint = VadEndpoint::new();
+    // Confirm onset.
+    for _ in 0..VAD_ONSET_FRAMES {
+        endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+    }
+    let mut saw_max = false;
+    // Keep feeding voiced frames (no silence) until the soft cap fires.
+    let max_frames = (MAX_UTTERANCE_SAMPLES / VAD_FRAME_SAMPLES) + VAD_ONSET_FRAMES + 8;
+    for _ in 0..max_frames {
+        let action = endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
+        if action == VadFrameAction::MaxUtterance {
+            saw_max = true;
+            break;
+        }
+        assert!(
+            matches!(
+                action,
+                VadFrameAction::Speech | VadFrameAction::ConfirmedOnset | VadFrameAction::None
+            ),
+            "unexpected action before max utterance: {action:?}"
+        );
+    }
+    assert!(
+        saw_max,
+        "continuous speech must emit MaxUtterance before silence"
+    );
+    assert!(
+        endpoint.speech_buf.len() >= MAX_UTTERANCE_SAMPLES,
+        "flush should retain at least the soft-cap samples"
+    );
+    assert!(has_enough_voiced_audio(endpoint.voiced_frames));
+}
+
+#[test]
+fn junk_punctuation_is_not_substantive() {
+    assert!(!is_substantive_transcript("."));
+    assert!(!is_substantive_transcript(" ... "));
+    assert!(!is_substantive_transcript("?!"));
+    assert!(!is_substantive_transcript(""));
+    assert!(is_substantive_transcript("stop"));
+    assert!(is_substantive_transcript("hey Fable"));
 }

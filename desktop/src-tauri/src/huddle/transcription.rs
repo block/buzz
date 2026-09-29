@@ -72,3 +72,52 @@ pub async fn set_huddle_transcription_enabled(
     state.emit_huddle_state_changed();
     Ok(())
 }
+
+/// Preset activation keywords for the huddle STT wake dropdown.
+#[tauri::command]
+pub fn list_huddle_activation_keywords() -> Vec<String> {
+    super::stt_wake::ACTIVATION_KEYWORD_PRESETS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Current spoken activation keyword for the active huddle (defaults to "hey").
+#[tauri::command]
+pub fn get_huddle_activation_keyword(state: State<'_, AppState>) -> Result<String, String> {
+    let hs = state.huddle()?;
+    let keyword = hs
+        .activation_keyword
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Ok(keyword)
+}
+
+/// Set the spoken activation keyword used by STT wake matching.
+///
+/// Accepts only the short preset allow-list (hey / at / agent / bot / robo /
+/// ok / yo / okay). Updates the live Arc so an in-flight transcription task
+/// picks up the new keyword on the next STT final.
+#[tauri::command]
+pub fn set_huddle_activation_keyword(
+    keyword: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let normalized = super::stt_wake::normalize_activation_keyword(&keyword).ok_or_else(|| {
+        format!(
+            "unsupported activation keyword {keyword:?}; choose one of: {}",
+            super::stt_wake::ACTIVATION_KEYWORD_PRESETS.join(", ")
+        )
+    })?;
+    {
+        let hs = state.huddle()?;
+        let mut guard = hs
+            .activation_keyword
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = normalized.clone();
+    }
+    state.emit_huddle_state_changed();
+    Ok(normalized)
+}

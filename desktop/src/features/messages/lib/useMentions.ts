@@ -324,11 +324,13 @@ export function useMentions(
         relayAgents: relayAgentsQuery.data,
         userSearchResults,
         reservedCommunityBotRoutes,
+        presenceExemptAgentPubkeys: communityBotMentionPubkeys,
       }),
     [
       activePersonaById,
       activeAgentPubkeys,
       activePersonas,
+      communityBotMentionPubkeys,
       userSearchResults,
       canSearchGlobalUsers,
       currentPubkey,

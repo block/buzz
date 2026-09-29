@@ -1,7 +1,8 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    merge_personas, merge_personas_with_deleted, migrate_retired_personas,
+    validate_persona_activation_change, validate_persona_deletion, BUILT_IN_PERSONAS,
+    RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
@@ -242,13 +243,10 @@ fn validate_persona_activation_change_allows_safe_builtin_updates() {
 }
 
 #[test]
-fn validate_persona_deletion_rejects_builtins() {
+fn validate_persona_deletion_allows_builtins() {
     let mut persona = custom_persona("builtin:fizz", "Fizz");
     persona.is_builtin = true;
-
-    let err = validate_persona_deletion(&persona, false).unwrap_err();
-
-    assert_eq!(err, "Built-in agents cannot be deleted.");
+    assert!(validate_persona_deletion(&persona, false).is_ok());
 }
 
 #[test]
@@ -416,5 +414,21 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         effective_agent_command(Some("builtin:fizz"), &records, None),
         "buzz-agent",
         "Fizz must resolve to buzz-agent specifically"
+    );
+}
+
+#[test]
+fn merge_personas_skips_opted_out_builtins() {
+    let deleted = std::collections::HashSet::from(["builtin:fizz".to_string()]);
+    let (records, changed) =
+        merge_personas_with_deleted(Vec::new(), "2026-03-19T00:00:00Z", &deleted);
+    assert!(changed, "other built-ins should still seed");
+    assert!(
+        records.iter().all(|p| p.id != "builtin:fizz"),
+        "opted-out Fizz must not be re-seeded"
+    );
+    assert!(
+        records.iter().any(|p| p.id == "builtin:honey"),
+        "non-opted-out Honey should still seed"
     );
 }

@@ -9,12 +9,20 @@ import {
   type DraftState,
 } from "@/features/messages/lib/useDrafts";
 
+export type UserSignerDraftMentionRef = {
+  displayName: string;
+  pubkey: string;
+  isAgent: boolean;
+};
+
 export type UserSignerDraftPayload = {
   channelId: string;
   draftKey: string;
   content: string;
   threadId?: string | null;
   requestId: string;
+  /** Mentions from buzz_draft_message — required for composer chips. */
+  mentionRefs?: UserSignerDraftMentionRef[] | null;
 };
 
 /**
@@ -40,11 +48,32 @@ export function useUserSignerDraftListener(enabled = true): void {
         existing?.content && existing.content.trim().length > 0
           ? `${existing.content.trimEnd()}\n\n${payload.content}`
           : payload.content;
+      const incomingRefs = (payload.mentionRefs ?? [])
+        .filter(
+          (ref) =>
+            typeof ref?.displayName === "string" &&
+            ref.displayName.trim() &&
+            typeof ref?.pubkey === "string" &&
+            ref.pubkey.trim(),
+        )
+        .map((ref) => ({
+          displayName: ref.displayName.trim(),
+          pubkey: ref.pubkey.trim(),
+          isAgent: ref.isAgent !== false,
+        }));
+      const existingRefs = existing?.mentionRefs ?? [];
+      const byPubkey = new Map(
+        existingRefs.map((ref) => [ref.pubkey.toLowerCase(), ref]),
+      );
+      for (const ref of incomingRefs) {
+        byPubkey.set(ref.pubkey.toLowerCase(), ref);
+      }
+      const mentionRefs = [...byPubkey.values()];
       const draft: DraftState = {
         channelId: payload.channelId,
         content,
         createdAt: existing?.createdAt ?? now,
-        mentionRefs: existing?.mentionRefs ?? [],
+        mentionRefs,
         pendingImeta: existing?.pendingImeta ?? [],
         selectionEnd: content.length,
         selectionStart: content.length,

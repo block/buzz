@@ -19,6 +19,8 @@ export type BuildTermSessionHandoffInstructionInput = {
   originDeepLink?: string | null;
   /** Explicit mention override (with or without `@`). Defaults to agentDisplayName. */
   mentionToUse?: string | null;
+  /** Hex pubkey for mentionToUse — required for buzz_draft_message mentionRefs. */
+  mentionPubkey?: string | null;
   /**
    * When the card will summarize a different thread than origin, pass both so
    * the instruction labels origin vs summarized/source.
@@ -58,10 +60,13 @@ export function buildTermSessionHandoffInstruction(
     agentDisplayName: name,
   });
 
+  const mentionPubkey = (input.mentionPubkey ?? "").trim();
+
   const returnPath = buildTermSessionReturnPathSection({
     originChannelId: origin.channelId,
     originThreadId: origin.threadId,
     mention,
+    mentionPubkey: mentionPubkey || null,
     summarizedChannelId: input.summarizedChannelId,
     summarizedThreadId: input.summarizedThreadId,
   });
@@ -84,6 +89,9 @@ export function buildTermSessionHandoffInstruction(
     `-   originChannelId: ${origin.channelId}`,
     `-   originThreadId: ${origin.threadId}`,
     `-   mentionToUse: ${mention}`,
+    mentionPubkey
+      ? `-   mentionPubkey: ${mentionPubkey}`
+      : "-   mentionPubkey: <selected agent hex pubkey>",
     "- optional cwd, summary, sid",
     openclawLine,
     "",
@@ -91,6 +99,7 @@ export function buildTermSessionHandoffInstruction(
     `- origin channelId: ${origin.channelId}`,
     `- origin threadId: ${origin.threadId}`,
     `- mention to use: ${mention}`,
+    ...(mentionPubkey ? [`- mention pubkey: ${mentionPubkey}`] : []),
     "",
     "Context for your summary (may match origin; if you summarize a different",
     "thread, label it summarized/source in the prompt and keep Return path on origin):",

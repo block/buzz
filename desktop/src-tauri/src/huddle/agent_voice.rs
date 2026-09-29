@@ -15,10 +15,33 @@ use super::{
     HuddlePhase, HuddleState,
 };
 
+fn default_addressable() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentVoiceSettings {
     pub enabled: bool,
     pub voice_key: String,
+    /// When true (default), spoken `{activation} {name}` wakes this agent.
+    /// When false, only text @mention / thread add can address them.
+    #[serde(default = "default_addressable")]
+    pub addressable: bool,
+    /// When true, ~every 60s the agent may auto-chime on a very high bar.
+    /// Default false — never auto-chime.
+    #[serde(default)]
+    pub agent_barge: bool,
+}
+
+impl AgentVoiceSettings {
+    pub fn new(voice_key: String) -> Self {
+        Self {
+            enabled: true,
+            voice_key,
+            addressable: true,
+            agent_barge: false,
+        }
+    }
 }
 
 struct AgentVoiceCatalog {
@@ -114,13 +137,9 @@ pub(crate) fn sync_agent_voice_assignments(
         };
         if let Some(voice_key) = preferred {
             used.insert(voice_key.clone());
-            huddle.agent_voice_settings.insert(
-                pubkey.clone(),
-                AgentVoiceSettings {
-                    enabled: true,
-                    voice_key,
-                },
-            );
+            huddle
+                .agent_voice_settings
+                .insert(pubkey.clone(), AgentVoiceSettings::new(voice_key));
         }
     }
     huddle.agent_voice_settings != previous
@@ -219,6 +238,52 @@ pub fn set_huddle_agent_voice(
     Ok(settings)
 }
 
+#[tauri::command]
+pub fn set_huddle_agent_addressable(
+    agent_pubkey: String,
+    addressable: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentVoiceSettings, String> {
+    let catalog = catalog(&app, &state)?;
+    let settings = {
+        let mut huddle = state.huddle()?;
+        require_active_huddle(&huddle)?;
+        ensure_with_catalog(&mut huddle, &catalog, Some(&agent_pubkey));
+        let settings = huddle
+            .agent_voice_settings
+            .get_mut(&agent_pubkey)
+            .ok_or("Agent is not in the active huddle")?;
+        settings.addressable = addressable;
+        settings.clone()
+    };
+    state.emit_huddle_state_changed();
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn set_huddle_agent_barge(
+    agent_pubkey: String,
+    agent_barge: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentVoiceSettings, String> {
+    let catalog = catalog(&app, &state)?;
+    let settings = {
+        let mut huddle = state.huddle()?;
+        require_active_huddle(&huddle)?;
+        ensure_with_catalog(&mut huddle, &catalog, Some(&agent_pubkey));
+        let settings = huddle
+            .agent_voice_settings
+            .get_mut(&agent_pubkey)
+            .ok_or("Agent is not in the active huddle")?;
+        settings.agent_barge = agent_barge;
+        settings.clone()
+    };
+    state.emit_huddle_state_changed();
+    Ok(settings)
+}
+
 pub(crate) fn voice_reference_for_agent(
     app: &AppHandle,
     state: &AppState,
@@ -304,6 +369,8 @@ mod tests {
             AgentVoiceSettings {
                 enabled: false,
                 voice_key: "pocket:jane".into(),
+                addressable: true,
+                agent_barge: false,
             }
         );
     }

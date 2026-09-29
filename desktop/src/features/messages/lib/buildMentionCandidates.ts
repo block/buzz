@@ -47,6 +47,11 @@ export type BuildMentionCandidatesInput = {
   userSearchResults: readonly UserSearchResult[];
   /** Reserved community-bot name → pubkey (Captain/Mo/Stitch/Quasar/Korg). */
   reservedCommunityBotRoutes?: ReadonlyMap<string, string>;
+  /**
+   * Agent pubkeys that stay mentionable without live presence (in-channel
+   * community/catalog bots). Offline managed/relay agents are still excluded.
+   */
+  presenceExemptAgentPubkeys?: ReadonlySet<string>;
 };
 
 /**
@@ -56,7 +61,9 @@ export type BuildMentionCandidatesInput = {
  * relay `kind:13535` snapshot) are dropped at add time even when they still
  * appear in a roster or directory cache. Agents the viewer may not mention
  * are also dropped; identities appearing in several sources are coalesced
- * into a single entry that keeps the richest field from each.
+ * into a single entry that keeps the richest field from each. Offline /
+ * stopped agent identities are excluded so autocomplete only lists
+ * active/online eligible agents (community bots may be presence-exempt).
  */
 export function buildMentionCandidates({
   activeAgentPubkeys,
@@ -81,6 +88,7 @@ export function buildMentionCandidates({
   relayAgents,
   userSearchResults,
   reservedCommunityBotRoutes,
+  presenceExemptAgentPubkeys,
 }: BuildMentionCandidatesInput): MentionCandidate[] {
   const candidatesByPubkey = new Map<string, MentionCandidate>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
@@ -264,11 +272,25 @@ export function buildMentionCandidates({
   // roster under a richer non-member source. Re-assert membership from the
   // merged channel set so in-channel community bots never show
   // "not in channel".
-  return routed.map((candidate) => {
+  const withMembership = routed.map((candidate) => {
     if (!candidate.pubkey || candidate.isMember) return candidate;
     if (!memberPubkeys.has(normalizePubkey(candidate.pubkey))) {
       return candidate;
     }
     return { ...candidate, isMember: true };
+  });
+  return withMembership.filter((candidate) => {
+    if (candidate.isAgent !== true || candidate.kind === "persona") {
+      return true;
+    }
+    if (candidate.isActiveAgent === true) {
+      return true;
+    }
+    const pubkey = candidate.pubkey ? normalizePubkey(candidate.pubkey) : null;
+    if (pubkey && presenceExemptAgentPubkeys?.has(pubkey)) {
+      return true;
+    }
+    // Offline / stopped / unknown-presence directory agents stay out.
+    return false;
   });
 }

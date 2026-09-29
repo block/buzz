@@ -122,6 +122,7 @@ export function TermSessionHandoffPopover({
         threadId,
         harness,
         openclawWorkspace: selectedAgent.useOpenClawWorkspace === true,
+        mentionPubkey: selectedAgent.pubkey,
       });
 
       await onSend(

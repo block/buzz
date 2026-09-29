@@ -81,7 +81,13 @@ fn built_in_team_order(built_ins: &[BuiltInTeam], id: &str) -> Option<usize> {
 /// (name, description, persona membership). Returns the merged list and whether
 /// the store changed.
 fn merge_teams(stored: Vec<TeamRecord>, now: &str) -> (Vec<TeamRecord>, bool) {
-    merge_teams_impl(BUILT_IN_TEAMS, RETIRED_BUILT_IN_TEAMS, stored, now)
+    merge_teams_impl(
+        BUILT_IN_TEAMS,
+        RETIRED_BUILT_IN_TEAMS,
+        stored,
+        now,
+        &std::collections::HashSet::new(),
+    )
 }
 
 fn merge_teams_impl(
@@ -89,11 +95,15 @@ fn merge_teams_impl(
     retired: &[BuiltInTeam],
     mut stored: Vec<TeamRecord>,
     now: &str,
+    deleted_seed_ids: &std::collections::HashSet<String>,
 ) -> (Vec<TeamRecord>, bool) {
     let mut changed = false;
 
     // Seed missing built-ins / re-promote existing ones that were downgraded.
     for built_in in built_in_team_records(built_ins, now) {
+        if deleted_seed_ids.contains(&built_in.id) {
+            continue;
+        }
         if let Some(existing) = stored.iter_mut().find(|record| record.id == built_in.id) {
             if !existing.is_builtin {
                 existing.is_builtin = true;
@@ -143,14 +153,9 @@ fn merge_teams_impl(
     (stored, changed)
 }
 
-/// Reject deletion of built-in teams. Mirrors `validate_persona_deletion`
-/// for personas — built-ins always come back via `merge_teams` on the
-/// next load, so blocking the delete avoids a confusing "keeps coming
-/// back" UX.
-pub fn validate_team_deletion(team: &TeamRecord) -> Result<(), String> {
-    if team.is_builtin {
-        return Err("Built-in teams cannot be deleted.".to_string());
-    }
+/// Built-in teams (Welcome Team) are deletable. Callers must record the id in
+/// the seed opt-out store so `merge_teams` does not re-seed them on the next load.
+pub fn validate_team_deletion(_team: &TeamRecord) -> Result<(), String> {
     Ok(())
 }
 
@@ -171,7 +176,21 @@ pub(crate) fn load_teams_readonly(path: &std::path::Path) -> Result<Vec<TeamReco
         Vec::new()
     };
 
-    let (mut records, _changed) = merge_teams(records, &now);
+    let deleted = path
+        .parent()
+        .map(|parent| {
+            super::seed_opt_out::load_deleted_seed_ids_from_path(
+                &parent.join("deleted-seed-ids.json"),
+            )
+        })
+        .unwrap_or_default();
+    let (mut records, _changed) = merge_teams_impl(
+        BUILT_IN_TEAMS,
+        RETIRED_BUILT_IN_TEAMS,
+        records,
+        &now,
+        &deleted,
+    );
     sort_teams(&mut records);
     Ok(records)
 }
@@ -189,7 +208,14 @@ pub fn load_teams<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Vec<TeamRecor
         Vec::new()
     };
 
-    let (mut records, changed) = merge_teams(records, &now);
+    let deleted = super::seed_opt_out::load_deleted_seed_ids(app);
+    let (mut records, changed) = merge_teams_impl(
+        BUILT_IN_TEAMS,
+        RETIRED_BUILT_IN_TEAMS,
+        records,
+        &now,
+        &deleted,
+    );
     sort_teams(&mut records);
 
     if changed || !path.exists() {
@@ -252,6 +278,8 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<St
         .ok_or_else(|| format!("team {team_id} not found"))?;
 
     validate_team_deletion(team)?;
+    let was_builtin = team.is_builtin;
+    let deleted_team_id = team.id.clone();
 
     let agents = crate::managed_agents::load_managed_agents(app)?;
     let referencing = agents_referencing_team(&agents, team);
@@ -346,12 +374,18 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<St
             || save_teams(app, &teams_to_write),
         )?;
 
+        if was_builtin {
+            super::seed_opt_out::remember_deleted_seed_id(app, &deleted_team_id)?;
+        }
         return Ok(cascaded_persona_d_tags);
     }
 
     // Remove TeamRecord
     teams.retain(|record| record.id != team_id);
     save_teams(app, &teams)?;
+    if was_builtin {
+        super::seed_opt_out::remember_deleted_seed_id(app, &deleted_team_id)?;
+    }
     Ok(cascaded_persona_d_tags)
 }
 

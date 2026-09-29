@@ -37,12 +37,20 @@ use super::{human_floor::HumanFloor, local_barge_in};
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
 /// Bounded audio queue capacity.
-/// 100 ms batches at 48 kHz ≈ 19 KB each → 50 slots ≈ 5 s / ~1 MB max backlog.
-const AUDIO_QUEUE_DEPTH: usize = 50;
+/// 100 ms batches at 48 kHz ≈ 19 KB each → 150 slots ≈ 15 s / ~3 MB max backlog.
+/// Sized to absorb a mid-utterance Parakeet decode without dropping continuous speech.
+const AUDIO_QUEUE_DEPTH: usize = 150;
 
 /// Maximum speech buffer size: 30 seconds at 16 kHz.
 /// Prevents OOM if VAD stays in speech mode (noisy environment).
 const MAX_SPEECH_SAMPLES: usize = 16_000 * 30;
+
+/// Soft cap for a single continuous utterance before we emit a final.
+/// Long monologues never hit the silence flush, so without this the UI shows
+/// nothing until `MAX_SPEECH_SAMPLES` (30 s). Twelve seconds keeps finals
+/// flowing while leaving room for natural mid-sentence pauses to end a turn
+/// via the silence path first.
+const MAX_UTTERANCE_SAMPLES: usize = 16_000 * 12;
 
 /// Handle to the running STT pipeline.
 ///
@@ -169,7 +177,16 @@ impl SttPipeline {
             ));
         }
         // Drop audio if the pipeline can't keep up — better than blocking the UI.
-        let _ = self.audio_tx.try_send(SttAudioInput { pcm_bytes, origin });
+        // Log drops so long blocking decodes (or a stalled worker) are visible.
+        if self
+            .audio_tx
+            .try_send(SttAudioInput { pcm_bytes, origin })
+            .is_err()
+        {
+            eprintln!(
+                "buzz-desktop: STT audio queue full — dropping frame (origin={origin:?}); continuous speech may gap until the worker drains"
+            );
+        }
         Ok(())
     }
 }
@@ -239,6 +256,8 @@ enum VadFrameAction {
     Speech,
     FirstSilence,
     Flush,
+    /// Continuous speech hit the soft utterance cap — emit a final mid-turn.
+    MaxUtterance,
 }
 
 struct VadEndpoint {
@@ -306,6 +325,9 @@ impl VadEndpoint {
             self.silence_frames = 0;
             self.voiced_frames += 1;
             self.speech_buf.extend_from_slice(&frame);
+            if self.speech_buf.len() >= MAX_UTTERANCE_SAMPLES {
+                return VadFrameAction::MaxUtterance;
+            }
             return VadFrameAction::Speech;
         }
 
@@ -547,12 +569,14 @@ fn stt_worker(
             }
             SttLoopInput::Batch(batch) => {
                 for input in batch {
+                    // Local VAD must not hard-cancel agent TTS. Only an addressed
+                    // wake (`{keyword} {agent}`) or the UI Stop button stops speech.
                     let (stream, ptt_gate, manual_gate, track_local_floor) = match input.origin {
                         SttAudioOrigin::Local => (
                             &mut local_stream,
                             ptt_active.as_ref(),
                             manual_mic_unmuted.as_ref(),
-                            true,
+                            false,
                         ),
                         SttAudioOrigin::RemoteHuman => (&mut remote_stream, None, None, false),
                     };
@@ -696,9 +720,20 @@ fn process_16k_samples(
             && local_barge_in::enabled(ptt_active.is_some(), manually_open, ptt_held);
         if track_local_floor {
             if local_barge_in {
+                // Defer hard barge-in until we have enough voiced audio that a
+                // junk Parakeet final (".") is unlikely. ConfirmedOnset alone
+                // is only ~48 ms and was silencing TTS on punctuation finals.
                 local_barge_in_state.observe(
                     prob,
-                    action == VadFrameAction::ConfirmedOnset,
+                    action == VadFrameAction::ConfirmedOnset
+                        || matches!(
+                            action,
+                            VadFrameAction::Speech
+                                | VadFrameAction::FirstSilence
+                                | VadFrameAction::Flush
+                                | VadFrameAction::MaxUtterance
+                        ),
+                    endpoint.voiced_frames,
                     human_floor,
                     output_device,
                     VAD_ONSET_THRESHOLD,
@@ -708,6 +743,7 @@ fn process_16k_samples(
             }
         }
 
+        let is_max_utterance = matches!(action, VadFrameAction::MaxUtterance);
         match action {
             VadFrameAction::ConfirmedOnset => {
                 speculative.take();
@@ -730,7 +766,14 @@ fn process_16k_samples(
                     ));
                 }
             }
-            VadFrameAction::Flush => {
+            VadFrameAction::Flush | VadFrameAction::MaxUtterance => {
+                if is_max_utterance {
+                    eprintln!(
+                        "buzz-desktop: STT mid-utterance flush (max_utterance, {} voiced frames, {} samples)",
+                        endpoint.voiced_frames,
+                        endpoint.speech_buf.len()
+                    );
+                }
                 match speculative.take() {
                     Some((text, decoded_at)) if decoded_at == endpoint.voiced_frames => {
                         send_transcript(text, text_tx);
@@ -801,11 +844,34 @@ fn decode_speech(recognizer: &sherpa_onnx::OfflineRecognizer, speech_buf: &[f32]
         .unwrap_or_default()
 }
 
-fn send_transcript(text: String, text_tx: &tokio_mpsc::Sender<String>) {
-    if !text.is_empty() {
-        if let Err(e) = text_tx.blocking_send(text) {
-            eprintln!("buzz-desktop: STT text channel closed: {e}");
+/// True when a decoded final should cancel agent speech and post to chat.
+///
+/// Punctuation-only / empty / whitespace junk (e.g. Parakeet ".") must not
+/// barge in on TTS — the agent keeps speaking until Stop or a spoken stop.
+pub(crate) fn is_substantive_transcript(text: &str) -> bool {
+    let mut has_alnum = false;
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            has_alnum = true;
+            break;
         }
+    }
+    has_alnum
+}
+
+fn send_transcript(text: String, text_tx: &tokio_mpsc::Sender<String>) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !is_substantive_transcript(trimmed) {
+        eprintln!(
+            "buzz-desktop: STT dropped junk final ({trimmed:?}) — no barge-in / no transcript post"
+        );
+        return;
+    }
+    if let Err(e) = text_tx.blocking_send(trimmed.to_string()) {
+        eprintln!("buzz-desktop: STT text channel closed: {e}");
     }
 }
 

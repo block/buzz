@@ -57,13 +57,24 @@
     z-index: 60;
   }
 
+  /* Straight bottom edge where the lifted surface meets the drawer bar.
+   * A bottom radius here overhangs the controls and clips huddle buttons.
+   * Main-window lift includes the drawer-slot inset (same as left/right) so the
+   * separator sits above the bar with matching top gap, not on the buttons. */
   .buzz-huddle-app-surface-open {
-    border-bottom-left-radius: var(--buzz-huddle-drawer-radius);
-    border-bottom-right-radius: var(--buzz-huddle-drawer-radius);
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
     bottom: var(--buzz-huddle-drawer-height);
     box-shadow:
       0 10px 24px -12px rgb(0 0 0 / 62%),
       0 2px 7px -4px rgb(0 0 0 / 42%);
+  }
+
+  .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-app-surface-open {
+    bottom: calc(
+      var(--buzz-huddle-drawer-height) +
+      2 * var(--buzz-huddle-drawer-inset)
+    );
   }
 
   .buzz-huddle-app-surface-open::after {
@@ -73,10 +84,7 @@
   .buzz-huddle-drawer-backdrop {
     background: hsl(var(--buzz-huddle-drawer-surface));
     bottom: 0;
-    height: calc(
-      var(--buzz-huddle-drawer-height) +
-      var(--buzz-huddle-drawer-radius)
-    );
+    height: var(--buzz-huddle-drawer-height);
     left: 0;
     opacity: 0;
     pointer-events: none;
@@ -84,6 +92,13 @@
     right: 0;
     transition: opacity 260ms var(--buzz-huddle-drawer-ease);
     z-index: 1;
+  }
+
+  .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-drawer-backdrop {
+    height: calc(
+      var(--buzz-huddle-drawer-height) +
+      2 * var(--buzz-huddle-drawer-inset)
+    );
   }
 
   .buzz-huddle-drawer-backdrop-open {
@@ -127,6 +142,28 @@
 
   .buzz-huddle-drawer::-webkit-scrollbar {
     display: none;
+  }
+
+  /* Main-window drawer: inset so controls clear the window edge (and match the
+   * top gap under the straight separator). The surface above meets the bar with
+   * a straight edge; only the drawer bar is rounded. The dedicated companion
+   * room keeps a full-bleed control dock. */
+  .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-drawer-slot {
+    min-height: calc(
+      var(--buzz-huddle-drawer-height) +
+      2 * var(--buzz-huddle-drawer-inset)
+    );
+    padding: var(--buzz-huddle-drawer-inset);
+  }
+
+  .buzz-huddle-shell[data-huddle-window="false"]
+    .buzz-huddle-drawer-slot
+    > .buzz-huddle-drawer {
+    border-radius: calc(
+      var(--buzz-huddle-drawer-radius) -
+      var(--buzz-huddle-drawer-inset)
+    );
+    height: 100%;
   }
 
   .buzz-huddle-popover {

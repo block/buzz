@@ -77,6 +77,18 @@ Gap between liveness (`48104`) and guidelines (`48106`).
 - macOS Screen Recording permission is OS-gated; first Share triggers the
   system prompt.
 
+## Local preview vs LiveKit publish
+
+Desktop sets `localPreviewStream` **immediately** after `getDisplayMedia`
+succeeds, before mint/connect/publish. The huddle drawer grows with a
+ResizeObserver so the spotlight is not clipped by the default 5rem height.
+Publish failures clear the preview and stop tracks; flaky LiveKit must not
+block seeing what you selected.
+
+`livekit-client` is configured with `singlePeerConnection: false` so connect
+uses legacy `/rtc` against older SFUs. Prefer LiveKit server **v1.9.12+**
+(serves `/rtc/v1`) on the host.
+
 ## Deploy (LiveKit + TURN + Caddy)
 
 See `deploy/compose/livekit/` stubs and `.env.example` notes:

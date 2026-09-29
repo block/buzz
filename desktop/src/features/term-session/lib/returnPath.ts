@@ -27,6 +27,11 @@ export type BuildTermSessionReturnPathSectionInput = {
    */
   mention: string;
   /**
+   * Hex pubkey for the mention agent. Required for real composer chips —
+   * plain `@Name` in content alone is not enough.
+   */
+  mentionPubkey?: string | null;
+  /**
    * When the card summarizes a different thread than origin, label both.
    * Omit when summarized === origin (or unknown).
    */
@@ -56,7 +61,9 @@ export type ResolveReturnPathMentionInput = {
  * Normalize a display name into `@Name`. Does not invent a default agent.
  * Returns empty string when no usable name is available.
  */
-export function formatReturnPathMention(raw: string | null | undefined): string {
+export function formatReturnPathMention(
+  raw: string | null | undefined,
+): string {
   const trimmed = (raw ?? "").trim();
   if (!trimmed) return "";
   return trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
@@ -136,8 +143,9 @@ export function buildTermSessionReturnPathSection(
 ): string {
   const originChannelId = input.originChannelId.trim();
   const originThreadId = input.originThreadId.trim();
-  const mention =
-    formatReturnPathMention(input.mention) || "@agent";
+  const mention = formatReturnPathMention(input.mention) || "@agent";
+  const displayName = mention.startsWith("@") ? mention.slice(1) : mention;
+  const mentionPubkey = (input.mentionPubkey ?? "").trim();
 
   const lines = [
     "## Return path (Buzz)",
@@ -145,6 +153,10 @@ export function buildTermSessionReturnPathSection(
     `- origin threadId:  ${originThreadId}`,
     `- mention to use:   ${mention}`,
   ];
+
+  if (mentionPubkey) {
+    lines.push(`- mention pubkey:   ${mentionPubkey}`);
+  }
 
   if (
     !sameThread(
@@ -160,10 +172,17 @@ export function buildTermSessionReturnPathSection(
     );
   }
 
+  const mentionsJson = mentionPubkey
+    ? `[{ displayName: "${displayName}", pubkey: "${mentionPubkey}", isAgent: true }]`
+    : `[{ displayName: "${displayName}", pubkey: "<agent-pubkey>", isAgent: true }]`;
+
   lines.push(
     '- On "report back" / "hand back" / "I\'m done":',
-    "  call buzz_draft_message with the origin channelId + threadId.",
-    `  Content = "${mention} <text JM asked for>". Draft only. JM clicks Send.`,
+    "  call buzz_draft_message with the origin channelId + threadId,",
+    `  content starting with "${mention} <text JM asked for>",`,
+    `  AND mentions: ${mentionsJson}`,
+    "  for that agent. Plain @Name alone is NOT enough — drafts need mentionRefs.",
+    "  Draft only. JM clicks Send.",
     "- Never draft to any other channel or thread unless JM gives new IDs.",
     "- Never auto-draft progress; keep status in the Term TUI.",
   );

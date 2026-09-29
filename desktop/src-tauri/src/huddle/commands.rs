@@ -26,6 +26,9 @@ pub fn set_huddle_manual_mic_unmuted(
 }
 
 /// Immediately interrupt the agent utterance that is currently speaking.
+///
+/// Shared stop: cancelling also epoch-bumps the agent TTS publisher so every
+/// other huddle participant stops hearing that utterance (not local-only).
 #[tauri::command]
 pub fn interrupt_huddle_speech(
     agent_pubkey: String,

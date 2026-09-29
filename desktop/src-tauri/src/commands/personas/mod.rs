@@ -4,7 +4,7 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
+        save_managed_agents, save_personas, save_teams, stop_managed_agent_process,
         sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
         validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
     },
@@ -165,15 +165,25 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 .iter()
                 .find(|record| record.id == id)
                 .ok_or_else(|| format!("persona {id} not found"))?;
-            let referenced_by_team = load_teams(&app)?.iter().any(|team| {
-                team.persona_ids
-                    .iter()
-                    .any(|persona_id| persona_id == id.as_str())
-            });
-            validate_persona_deletion(persona, referenced_by_team)?;
-            // Capture the coordinate before the record might leave the list. Only
-            // reached for non-builtin, non-team personas (both rejected above),
-            // so every deleted persona here is one this owner published.
+            let was_builtin = persona.is_builtin;
+            // Drop membership from any teams first so a seed agent (Fizz/Honey/
+            // Pollen) can be deleted even while Welcome Team still lists it.
+            {
+                let mut teams = load_teams(&app)?;
+                let mut teams_changed = false;
+                for team in teams.iter_mut() {
+                    let before = team.persona_ids.len();
+                    team.persona_ids.retain(|persona_id| persona_id != &id);
+                    if team.persona_ids.len() != before {
+                        teams_changed = true;
+                    }
+                }
+                if teams_changed {
+                    save_teams(&app, &teams)?;
+                }
+            }
+            validate_persona_deletion(persona, false)?;
+            // Capture the coordinate before the record leaves the list.
             let d_tag = crate::managed_agents::persona_events::persona_d_tag(persona);
 
             // ── Phase 1: Stage ─────────────────────────────────────────────
@@ -266,6 +276,9 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 return Err(format!("persona {id} not found"));
             }
             save_personas(&app, &personas)?;
+            if was_builtin {
+                crate::managed_agents::seed_opt_out::remember_deleted_seed_id(&app, &id)?;
+            }
 
             // Side effects — strictly after records leave disk.
             for pk in &cascade {

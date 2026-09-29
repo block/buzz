@@ -6,6 +6,9 @@ import {
   type RemoteTrack,
   type RoomOptions,
 } from "livekit-client";
+import { acquireDisplayMedia, stopMediaStreamTracks } from "./screenShareMedia";
+
+export { acquireDisplayMedia, stopMediaStreamTracks } from "./screenShareMedia";
 
 export type ScreenShareRemote = {
   participantIdentity: string;
@@ -24,6 +27,7 @@ export type ScreenShareSessionCallbacks = {
  * Thin LiveKit session for one huddle screen track.
  * Audio stays on the Opus WebSocket path — this only handles video.
  */
+
 export class HuddleScreenShareSession {
   private room: Room | null = null;
   private localPublication: LocalTrackPublication | null = null;
@@ -46,9 +50,13 @@ export class HuddleScreenShareSession {
     if (this.room) {
       await this.disconnect();
     }
+    // livekit-client ≥2.17 defaults singlePeerConnection=true (/rtc/v1).
+    // Hula LiveKit was on v1.8.4 which only serves legacy /rtc — force dual-PC
+    // so connect does not burn a failed v1 attempt before fallback.
     const options: RoomOptions = {
       adaptiveStream: true,
       dynacast: true,
+      singlePeerConnection: false,
     };
     const room = new Room(options);
     this.room = room;
@@ -84,10 +92,7 @@ export class HuddleScreenShareSession {
           publication.source === Track.Source.ScreenShare
         ) {
           this.attachRemote(participant.identity, publication.track);
-        } else if (
-          publication.kind === Track.Kind.Video &&
-          publication.track
-        ) {
+        } else if (publication.kind === Track.Kind.Video && publication.track) {
           // Accept any remote video (room is screen-only by grant).
           this.attachRemote(participant.identity, publication.track);
         }
@@ -95,19 +100,23 @@ export class HuddleScreenShareSession {
     }
   }
 
-  async startShare(): Promise<void> {
+  /**
+   * Publish a pre-acquired display MediaStream.
+   * Call {@link acquireDisplayMedia} first (inside the user-gesture handler)
+   * so WebKit/WKWebView keeps the gesture chain intact.
+   */
+  async startShare(stream: MediaStream): Promise<void> {
     if (!this.room || this.disposed) {
       throw new Error("screen share room is not connected");
     }
-    if (this.localPublication) return;
+    if (this.localPublication) {
+      stopMediaStreamTracks(stream);
+      return;
+    }
 
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: false,
-    });
     const [videoTrack] = stream.getVideoTracks();
     if (!videoTrack) {
-      stream.getTracks().forEach((t) => t.stop());
+      stopMediaStreamTracks(stream);
       throw new Error("no screen video track from getDisplayMedia");
     }
     videoTrack.addEventListener("ended", () => {
@@ -185,11 +194,9 @@ export class HuddleScreenShareSession {
   }
 
   private stopLocalTracks() {
-    if (this.localStream) {
-      this.localStream.getTracks().forEach((t) => t.stop());
-      this.localStream = null;
-    }
+    if (!this.localStream) return;
+    this.localStream.getTracks().forEach((t) => t.stop());
+    this.localStream = null;
     this.callbacks.onLocalPreviewChanged(null);
   }
 }
-

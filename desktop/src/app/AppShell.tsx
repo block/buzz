@@ -129,6 +129,7 @@ export function AppShell() {
     isHuddleDrawerOpen,
     isHuddleRoom,
     isHuddleRoomStarting,
+    presentation: huddlePresentation,
     showHuddleInMainApp,
     viewHuddleChannel,
   } = useHuddlePresentation();
@@ -468,26 +469,25 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  const { homeBadgeCountExcludingHighPriority } =
-    useHomeFeedNotificationState(
-      homeFeedQuery.data,
-      identityQuery.data?.pubkey,
-      notificationSettings.settings,
-      notificationSettings.setDesktopEnabled,
-      !isHuddleRoom,
-      selectedView === "home" && !settingsOpen,
-      getChannelReadAt,
-      readStateVersion,
-      highPriorityUnreadChannelIds,
-      feedProfilesQuery.data?.profiles,
-      mutedChannelIds,
-      feedItemState.unreadSet,
-      threadActivityFeedItems,
-      getThreadReadAt,
-      getMessageReadAt,
-      channels,
-      huddleBackingChannelIds,
-    );
+  const { homeBadgeCountExcludingHighPriority } = useHomeFeedNotificationState(
+    homeFeedQuery.data,
+    identityQuery.data?.pubkey,
+    notificationSettings.settings,
+    notificationSettings.setDesktopEnabled,
+    !isHuddleRoom,
+    selectedView === "home" && !settingsOpen,
+    getChannelReadAt,
+    readStateVersion,
+    highPriorityUnreadChannelIds,
+    feedProfilesQuery.data?.profiles,
+    mutedChannelIds,
+    feedItemState.unreadSet,
+    threadActivityFeedItems,
+    getThreadReadAt,
+    getMessageReadAt,
+    channels,
+    huddleBackingChannelIds,
+  );
   const isNotifiedForThread = React.useCallback(
     (rootId: string) =>
       !mutedRootIds.has(rootId) &&
@@ -768,6 +768,7 @@ export function AppShell() {
             isCompanionOpen={isHuddleCompanionOpen}
             isDrawerOpen={isHuddleDrawerOpen}
             isRoom={isHuddleRoom}
+            presentation={huddlePresentation}
             onCompanionOpen={handleHuddleCompanionOpen}
             onHuddleStartPendingChange={handleHuddleStartPendingChange}
             onHuddleStarted={handleHuddleStarted}

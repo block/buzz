@@ -779,6 +779,53 @@ export function HuddleProvider({
 
   usePipelineHotstart(ephemeralChannelId);
 
+  // When Rust auto-enables transcription for agents it may flip voice mode to
+  // VAD and open the mic. Mirror that into the worklet so PCM actually reaches
+  // push_audio_pcm / STT (default PTT+muted would starve the pipeline).
+  React.useEffect(() => {
+    if (!ownsAudioSession) return;
+    type SyncState = {
+      transcription_enabled?: boolean;
+      voice_input_mode?: VoiceInputMode;
+      phase?: string;
+    };
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    const apply = (state: SyncState) => {
+      if (cancelled) return;
+      if (state.phase === "idle") return;
+      const mode = state.voice_input_mode;
+      if (!mode) return;
+      if (mode === getVoiceInputMode()) return;
+      setVoiceInputModeState(mode);
+      workletRef.current?.setMode(mode);
+      // Backend flipped us (agent auto-enable → VAD): open the mic so STT
+      // receives PCM. Do not fight a later manual mute.
+      if (state.transcription_enabled && mode === "voice_activity") {
+        setIsMuted(false);
+        workletRef.current?.setTransmitting(true);
+        void invoke("set_huddle_manual_mic_unmuted", { enabled: true }).catch(
+          () => {},
+        );
+      }
+    };
+    void invoke<SyncState>("get_huddle_state")
+      .then((s) => {
+        if (s) apply(s);
+      })
+      .catch(() => {});
+    void listen<SyncState>("huddle-state-changed", (event) => {
+      apply(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [getVoiceInputMode, ownsAudioSession, setVoiceInputModeState]);
+
   // Mic level analyser — drives the voice activity indicator
   const micLevel = useMicLevelAnalyser(localAudioTrack, micConnected);
 

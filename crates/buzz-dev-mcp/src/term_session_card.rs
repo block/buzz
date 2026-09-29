@@ -50,6 +50,9 @@ pub struct TermSessionCardParams {
     /// Term agent mentioning itself — use the Buzz agent that should continue.
     #[serde(default)]
     pub mention_to_use: Option<String>,
+    /// Hex pubkey for `mention_to_use` — required for buzz_draft_message mention chips.
+    #[serde(default)]
+    pub mention_pubkey: Option<String>,
     /// When summarizing a different thread than origin, label it in Return path.
     #[serde(default)]
     pub summarized_channel_id: Option<String>,
@@ -92,19 +95,29 @@ pub fn build_return_path_section(
     origin_channel_id: &str,
     origin_thread_id: &str,
     mention_to_use: &str,
+    mention_pubkey: Option<&str>,
     summarized_channel_id: Option<&str>,
     summarized_thread_id: Option<&str>,
 ) -> String {
     let mention = format_mention(mention_to_use);
+    let display_name = mention.trim_start_matches('@');
+    let pubkey = mention_pubkey.map(str::trim).filter(|s| !s.is_empty());
     let mut lines = vec![
         RETURN_PATH_HEADING.to_string(),
         format!("- origin channelId: {origin_channel_id}"),
         format!("- origin threadId:  {origin_thread_id}"),
         format!("- mention to use:   {mention}"),
     ];
+    if let Some(pk) = pubkey {
+        lines.push(format!("- mention pubkey:   {pk}"));
+    }
 
-    let sc = summarized_channel_id.map(str::trim).filter(|s| !s.is_empty());
-    let st = summarized_thread_id.map(str::trim).filter(|s| !s.is_empty());
+    let sc = summarized_channel_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let st = summarized_thread_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if let (Some(sc), Some(st)) = (sc, st) {
         if sc != origin_channel_id || st != origin_thread_id {
             lines.push(format!("- summarized/source channelId: {sc}"));
@@ -112,14 +125,26 @@ pub fn build_return_path_section(
         }
     }
 
+    let mentions_json = match pubkey {
+        Some(pk) => {
+            format!("[{{ displayName: \"{display_name}\", pubkey: \"{pk}\", isAgent: true }}]")
+        }
+        None => format!(
+            "[{{ displayName: \"{display_name}\", pubkey: \"<agent-pubkey>\", isAgent: true }}]"
+        ),
+    };
+
     lines.push("- On \"report back\" / \"hand back\" / \"I'm done\":".to_string());
-    lines.push("  call buzz_draft_message with the origin channelId + threadId.".to_string());
+    lines.push("  call buzz_draft_message with the origin channelId + threadId,".to_string());
     lines.push(format!(
-        "  Content = \"{mention} <text JM asked for>\". Draft only. JM clicks Send."
+        "  content starting with \"{mention} <text JM asked for>\","
     ));
+    lines.push(format!("  AND mentions: {mentions_json}"));
     lines.push(
-        "- Never draft to any other channel or thread unless JM gives new IDs.".to_string(),
+        "  for that agent. Plain @Name alone is NOT enough — drafts need mentionRefs.".to_string(),
     );
+    lines.push("  Draft only. JM clicks Send.".to_string());
+    lines.push("- Never draft to any other channel or thread unless JM gives new IDs.".to_string());
     lines.push("- Never auto-draft progress; keep status in the Term TUI.".to_string());
 
     lines.join("\n")
@@ -132,6 +157,7 @@ pub fn ensure_return_path_in_prompt(
     origin_channel_id: Option<&str>,
     origin_thread_id: Option<&str>,
     mention_to_use: Option<&str>,
+    mention_pubkey: Option<&str>,
     summarized_channel_id: Option<&str>,
     summarized_thread_id: Option<&str>,
 ) -> String {
@@ -148,6 +174,7 @@ pub fn ensure_return_path_in_prompt(
         ch,
         th,
         mention,
+        mention_pubkey,
         summarized_channel_id,
         summarized_thread_id,
     );
@@ -175,10 +202,7 @@ pub fn run(p: TermSessionCardParams) -> Result<String, ErrorData> {
     }
 
     if p.prompt.is_empty() {
-        return Err(ErrorData::invalid_params(
-            "prompt must be non-empty",
-            None,
-        ));
+        return Err(ErrorData::invalid_params("prompt must be non-empty", None));
     }
 
     let sid = match p.sid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -208,6 +232,7 @@ pub fn run(p: TermSessionCardParams) -> Result<String, ErrorData> {
         p.origin_channel_id.as_deref(),
         p.origin_thread_id.as_deref(),
         p.mention_to_use.as_deref(),
+        p.mention_pubkey.as_deref(),
         p.summarized_channel_id.as_deref(),
         p.summarized_thread_id.as_deref(),
     );
@@ -248,6 +273,7 @@ mod tests {
             origin_channel_id: None,
             origin_thread_id: None,
             mention_to_use: None,
+            mention_pubkey: None,
             summarized_channel_id: None,
             summarized_thread_id: None,
         }
@@ -355,9 +381,8 @@ mod tests {
 
     #[test]
     fn params_reject_unknown_fields() {
-        let res: Result<TermSessionCardParams, _> = serde_json::from_str(
-            r#"{"name":"n","tool":"claude","prompt":"p","token":"nope"}"#,
-        );
+        let res: Result<TermSessionCardParams, _> =
+            serde_json::from_str(r#"{"name":"n","tool":"claude","prompt":"p","token":"nope"}"#);
         assert!(res.is_err());
     }
 
@@ -368,6 +393,7 @@ mod tests {
         p.origin_channel_id = Some("ch-origin".into());
         p.origin_thread_id = Some("th-origin".into());
         p.mention_to_use = Some("Fable".into());
+        p.mention_pubkey = Some("pk-fable".into());
         let v = parse_fence(&run(p).unwrap());
         let prompt = v["prompt"].as_str().unwrap();
         assert!(prompt.starts_with("Ship the ClaimMiner fix."));
@@ -375,8 +401,12 @@ mod tests {
         assert!(prompt.contains("origin channelId: ch-origin"));
         assert!(prompt.contains("origin threadId:  th-origin"));
         assert!(prompt.contains("mention to use:   @Fable"));
+        assert!(prompt.contains("mention pubkey:   pk-fable"));
         assert!(prompt.contains("report back"));
         assert!(prompt.contains("buzz_draft_message"));
+        assert!(prompt.contains("mentions:"));
+        assert!(prompt.contains("isAgent: true"));
+        assert!(prompt.contains("Plain @Name alone is NOT enough"));
         assert!(!prompt.contains("summarized/source"));
     }
 
@@ -386,12 +416,15 @@ mod tests {
             "ch-o",
             "th-o",
             "@ClaimMiner",
+            Some("pk-claim"),
             Some("ch-o"),
             Some("th-summarized"),
         );
         assert!(section.contains("origin threadId:  th-o"));
         assert!(section.contains("summarized/source threadId:  th-summarized"));
         assert!(section.contains("mention to use:   @ClaimMiner"));
+        assert!(section.contains("mention pubkey:   pk-claim"));
+        assert!(section.contains("mentions:"));
     }
 
     #[test]
@@ -399,7 +432,7 @@ mod tests {
         let mut p = base();
         p.prompt = format!(
             "Work.\n\n{}",
-            build_return_path_section("ch", "th", "@Bot", None, None)
+            build_return_path_section("ch", "th", "@Bot", Some("pk-bot"), None, None)
         );
         p.origin_channel_id = Some("ch".into());
         p.origin_thread_id = Some("th".into());
@@ -419,6 +452,7 @@ mod tests {
               "originChannelId": "ch",
               "originThreadId": "th",
               "mentionToUse": "@Fable",
+              "mentionPubkey": "pk-fable",
               "summarizedChannelId": "ch2",
               "summarizedThreadId": "th2"
             }"#,
@@ -427,6 +461,7 @@ mod tests {
         assert_eq!(p.origin_channel_id.as_deref(), Some("ch"));
         assert_eq!(p.origin_thread_id.as_deref(), Some("th"));
         assert_eq!(p.mention_to_use.as_deref(), Some("@Fable"));
+        assert_eq!(p.mention_pubkey.as_deref(), Some("pk-fable"));
         assert_eq!(p.summarized_channel_id.as_deref(), Some("ch2"));
         assert_eq!(p.summarized_thread_id.as_deref(), Some("th2"));
     }

@@ -40,6 +40,7 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod seed_opt_out;
 mod session_policy;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;

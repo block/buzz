@@ -18,7 +18,7 @@ export function AppHuddleBar({
   return (
     <AppProfilePanelProvider>
       <HuddleBar
-        className="h-full"
+        className="min-h-(--buzz-huddle-drawer-height)"
         mode={mode}
         onOpenHuddleWindow={onOpenHuddleWindow}
         onOpenThread={onOpenThread}

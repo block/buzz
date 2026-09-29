@@ -310,7 +310,7 @@ export function HuddleParticipantsControl({
       {visibleIdentities.map((participant) =>
         appearance === "room" ? (
           <div
-            className="buzz-huddle-participant-tile relative flex w-28 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl border border-border/70 bg-muted/45 px-3 py-3"
+            className="buzz-huddle-participant-tile relative flex w-28 shrink-0 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-xl border border-border/70 bg-muted/45 px-3 py-3"
             data-testid="huddle-participant-tile"
             key={participant.pubkey}
           >
@@ -452,7 +452,10 @@ function ParticipantAvatar({
   return (
     <span
       className={cn(
-        "buzz-huddle-speaking-avatar relative z-0 inline-flex shrink-0",
+        // Fixed square box + overflow clip: after the taller share spotlight
+        // drawer, unconstrained h-full/w-full avatars were stretching into a
+        // wide pill across neighboring tiles.
+        "buzz-huddle-speaking-avatar relative z-0 inline-flex aspect-square shrink-0 overflow-hidden",
         participant.isAgent
           ? "buzz-huddle-speaking-avatar-agent"
           : "rounded-full",
@@ -482,7 +485,7 @@ function ParticipantAvatar({
         avatarUrl={participant.avatarUrl}
         label={participant.displayName}
         initialsLabel={participant.initialsLabel}
-        className="h-full w-full border-2 border-black text-2xs"
+        className={cn(sizeClass, "border-2 border-black text-2xs")}
         shape={participant.isAgent ? "squircle" : "circle"}
       />
     </span>
