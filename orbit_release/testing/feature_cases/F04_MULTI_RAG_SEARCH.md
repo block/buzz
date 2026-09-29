@@ -10,6 +10,6 @@
 | TC-F04-004 | Context pack | Run retrieval with small token budget. | Output is deduplicated, provenance-bearing and within budget. |
 
 ## Status
-- [ ] Automated coverage implemented where appropriate
-- [ ] Manual local validation completed
-- [ ] Evidence recorded
+- [x] Automated coverage implemented where appropriate
+- [x] Manual local validation completed
+- [x] Evidence recorded

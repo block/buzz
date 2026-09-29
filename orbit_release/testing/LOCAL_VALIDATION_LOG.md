@@ -83,4 +83,34 @@ Notes:
 Follow-up: Advance to Feature 04 (SuperRAG Retrieval Layer).
 ```
 
+```text
+Date: 2026-09-30
+Feature: 04 - SuperRAG Retrieval Layer (Pre-Retrieval Routing, RRF, Re-Trial, Reranker, Context Packer)
+Build/commit: local-build-f04
+Automated tests:
+  - buzz-search::router::tests (4 tests: symbolic, temporal, conceptual/multihop, query expansion) -> PASS
+  - buzz-search::cache::tests (2 tests: hit/eviction, TTL expiration) -> PASS
+  - buzz-search::fusion::tests (2 tests: RRF multi-modal boost, temporal decay) -> PASS
+  - buzz-search::retrial::tests (4 tests: empty pool, sparse pool, confident pool, query reformulation) -> PASS
+  - buzz-search::packer::tests (2 tests: knapsack budget constraint, XML provenance stamping) -> PASS
+  - buzz-search::query::tests (3 tests: normalized search text tests) -> PASS
+  - buzz-search::f04_superrag_tests (6 tests: TC-F04-001 exact lookup, TC-F04-002 semantic recall, TC-F04-003 temporal conflict & ADR preference, TC-F04-004 context pack within budget, TC-F04-005 sub-5ms cache hit, TC-F04-006 data retrial with knowledge graph) -> PASS
+  - buzz-db regression (6 tests) -> PASS (zero regressions)
+  - buzz-ai regression (4 tests) -> PASS (zero regressions)
+  - buzz-ingest regression (1 test) -> PASS (zero regressions)
+Manual tests: Verified that symbolic queries route to exact code symbols and return line numbers in <orbit_context>. Verified that natural language paraphrases trigger conceptual routing and rank semantic vector hits. Verified that temporal decay (e^(-lambda*delta_t)) and authority weighting ensure current ADRs outrank 120-day-old chat logs. Verified that low-confidence/sparse queries trigger the adaptive data re-trial loop with reformulated keywords and expanded graph hops. Verified sub-millisecond cache hits for repeated queries.
+Environment: Windows 11, Rust 1.88, tokio 1.52, chrono 0.4, uuid 1.23
+Result: PASS
+Notes:
+  - Pre-retrieval routing arbiter identifies Symbolic, Conceptual, TemporalDecision, and MultiHopRelationship intents.
+  - Multi-modal retrieval executes across Dense Vectors (embedded vector store), Lexical BM25 (SQLite FTS5), and Knowledge Graph (2-hop neighborhood).
+  - Reciprocal Rank Fusion combines rankings with k=60.0, temporal decay, authority weights, and active workspace boost (1.5x).
+  - Confidence verification loop evaluates theta_conf >= 0.65 and adapts with query reformulation and 3-hop graph walk.
+  - Cross-encoder reranks top 50 candidates down to top 15 precision chunks.
+  - Greedy knapsack token budget packer produces bounded <orbit_context> XML.
+  - Architecture Reviewer subagent sign-off: PASS.
+Follow-up: Advance to Feature 05 (Graph Engine & Dynamic Pruning).
+```
+
+
 

@@ -9,13 +9,18 @@ description = "Postgres full-text search for Buzz, scoped by community"
 
 [dependencies]
 buzz-core   = { workspace = true }
+buzz-db     = { workspace = true }
+buzz-ai     = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
 sqlx        = { workspace = true }
 uuid        = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
 metrics     = { workspace = true }
+chrono      = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
 
 [dev-dependencies]
-buzz-db     = { workspace = true }
-tokio       = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

@@ -118,6 +118,20 @@ impl EmbeddedGraphStore {
 
         Ok(())
     }
+
+    /// Finds entities by name matching a query string within a workspace.
+    pub fn find_entities_by_name(&self, workspace_path: &str, query: &str) -> Vec<Entity> {
+        let lock = self.state.read().unwrap();
+        let q = query.to_ascii_lowercase();
+        lock.entities
+            .values()
+            .filter(|e| {
+                (workspace_path.is_empty() || e.workspace_path == workspace_path)
+                    && (e.name.to_ascii_lowercase().contains(&q) || q.contains(&e.name.to_ascii_lowercase()))
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl GraphStore for EmbeddedGraphStore {

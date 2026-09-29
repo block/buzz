@@ -1558,10 +1558,14 @@ dependencies = [
 name = "buzz-search"
 version = "0.1.0"
 dependencies = [
+ "buzz-ai",
  "buzz-core",
  "buzz-datastore-tracing",
  "buzz-db",
+ "chrono",
  "metrics",
+ "serde",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

@@ -282,6 +282,51 @@ impl SqliteMetadataStore {
         Ok(res)
     }
 
+    /// Lexical keyword search across chunks in a workspace.
+    pub fn search_chunks_keyword(&self, workspace_path: &str, query: &str, limit: usize) -> Result<Vec<Chunk>> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%{}%", query.trim());
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, document_id, workspace_path, chunk_index, content,
+                        token_count, scope, agent_name, line_start, line_end, created_at
+                 FROM orbit_chunks
+                 WHERE workspace_path = ?1 AND content LIKE ?2
+                 LIMIT ?3;",
+            )
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![workspace_path, pattern, limit as i64], |row| {
+                let id_str: String = row.get(0)?;
+                let doc_id_str: String = row.get(1)?;
+                let created_str: String = row.get(10)?;
+
+                Ok(Chunk {
+                    id: Uuid::parse_str(&id_str).unwrap_or_default(),
+                    document_id: Uuid::parse_str(&doc_id_str).unwrap_or_default(),
+                    workspace_path: row.get(2)?,
+                    chunk_index: row.get(3)?,
+                    content: row.get(4)?,
+                    token_count: row.get(5)?,
+                    scope: row.get(6)?,
+                    agent_name: row.get(7)?,
+                    line_start: row.get(8)?,
+                    line_end: row.get(9)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })
+            .map_err(|e| DbError::Internal(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| DbError::Internal(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     /// Stores or updates an entity record.
     pub fn upsert_entity(&self, entity: &Entity) -> Result<()> {
         let conn = self.conn.lock().unwrap();

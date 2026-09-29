@@ -26,9 +26,29 @@ pub mod error;
 /// Search query execution.
 pub mod query;
 
+/// Pre-retrieval query routing arbiter and intent classification.
+pub mod router;
+/// In-memory semantic query cache.
+pub mod cache;
+/// Reciprocal rank fusion and heuristic decay modulation.
+pub mod fusion;
+/// Data re-trial and confidence verification loop.
+pub mod retrial;
+/// Working context compiler and greedy knapsack token budget packer.
+pub mod packer;
+/// End-to-end SuperRAG multi-modal retrieval engine.
+pub mod superrag;
+
 pub use buzz_core::CommunityId;
 pub use error::SearchError;
 pub use query::{search, ChannelScope, SearchHit, SearchMode, SearchQuery, SearchResult};
+
+pub use cache::{CachedRetrieval, SemanticQueryCache};
+pub use fusion::{CandidateChunk, RrfCombiner};
+pub use packer::{PackedContext, TokenBudgetPacker};
+pub use retrial::{ConfidenceEvaluator, ReTrialDecision};
+pub use router::{QueryIntent, QueryRouter};
+pub use superrag::{SuperRagEngine, SuperRagRequest, SuperRagResponse};
 
 use sqlx::PgPool;
 

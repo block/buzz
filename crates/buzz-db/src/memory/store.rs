@@ -180,6 +180,11 @@ impl EmbeddedMemoryStore {
         self.graph.neighborhood(seeds, hops).await
     }
 
+    /// Finds entities matching a query in the graph store.
+    pub fn find_entities_by_name(&self, workspace_path: &str, query: &str) -> Vec<Entity> {
+        self.graph.find_entities_by_name(workspace_path, query)
+    }
+
     /// Gathers cross-store health and count statistics.
     pub async fn stats(&self) -> Result<MemoryStats> {
         let total_documents = self.metadata.count_documents().await?;
