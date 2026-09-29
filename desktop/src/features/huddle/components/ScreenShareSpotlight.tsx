@@ -1,10 +1,21 @@
 import * as React from "react";
+import type { RemoteTrack } from "livekit-client";
 
 import { cn } from "@/shared/lib/cn";
 import { Spinner } from "@/shared/ui/spinner";
 
 type ScreenShareSpotlightProps = {
-  stream: MediaStream | null;
+  /**
+   * Local getDisplayMedia preview. Used when we are the publisher — not a
+   * LiveKit RemoteTrack, so srcObject is correct here.
+   */
+  stream?: MediaStream | null;
+  /**
+   * Remote LiveKit video. Must use track.attach() so adaptiveStream sees the
+   * element; raw srcObject freezes after the first frame then goes black on
+   * expand remount.
+   */
+  videoTrack?: RemoteTrack | null;
   label?: string;
   className?: string;
   muted?: boolean;
@@ -17,17 +28,31 @@ type ScreenShareSpotlightProps = {
 
 /** Spotlight <video> for a remote (or local preview) screen share track. */
 export function ScreenShareSpotlight({
-  stream,
+  stream = null,
+  videoTrack = null,
   label,
   className,
   muted = true,
   republishing = false,
 }: ScreenShareSpotlightProps) {
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
+  const hasMedia = Boolean(videoTrack || stream);
 
   React.useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
+
+    if (videoTrack) {
+      videoTrack.attach(el);
+      el.muted = muted;
+      void el.play().catch(() => {
+        /* autoplay may be blocked until gesture; muted helps */
+      });
+      return () => {
+        videoTrack.detach(el);
+      };
+    }
+
     el.srcObject = stream;
     if (stream) {
       void el.play().catch(() => {
@@ -35,11 +60,15 @@ export function ScreenShareSpotlight({
       });
     }
     return () => {
-      el.srcObject = null;
+      // Only clear when this effect owned the srcObject — do not blank a
+      // LiveKit-attached element if props flipped mid-cycle.
+      if (el.srcObject === stream) {
+        el.srcObject = null;
+      }
     };
-  }, [stream]);
+  }, [videoTrack, stream, muted]);
 
-  if (!stream) return null;
+  if (!hasMedia) return null;
 
   return (
     <div

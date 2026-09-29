@@ -13,7 +13,9 @@ export { acquireDisplayMedia, stopMediaStreamTracks } from "./screenShareMedia";
 
 export type ScreenShareRemote = {
   participantIdentity: string;
-  track: MediaStreamTrack;
+  /** LiveKit remote video — UI must attach() this for adaptiveStream. */
+  videoTrack: RemoteTrack;
+  mediaStreamTrack: MediaStreamTrack;
   stream: MediaStream;
 };
 
@@ -45,6 +47,8 @@ export class HuddleScreenShareSession {
   private disposed = false;
   /** True while LiveKit is mid-reconnect — do not clear remote UI. */
   private reconnecting = false;
+  /** Delay clearing remote UI after unsubscribe (publisher republish blip). */
+  private remoteClearTimer: ReturnType<typeof setTimeout> | null = null;
   /** Serialize connect/reconnect so subscribe and publish never interleave. */
   private connectTail: Promise<void> = Promise.resolve();
 
@@ -82,9 +86,13 @@ export class HuddleScreenShareSession {
     // livekit-client ≥2.17 defaults singlePeerConnection=true (/rtc/v1).
     // Hula LiveKit was on v1.8.4 which only serves legacy /rtc — force dual-PC
     // so connect does not burn a failed v1 attempt before fallback.
+    // Screen-only room: full-quality share. adaptiveStream without
+    // RemoteTrack.attach() freezes after the first frame then goes black on
+    // expand remount; even with attach(), dock↔expand unmount briefly marks
+    // the track invisible and pauses. Keep adaptive/dynacast off here.
     const options: RoomOptions = {
-      adaptiveStream: true,
-      dynacast: true,
+      adaptiveStream: false,
+      dynacast: false,
       singlePeerConnection: false,
     };
     const room = new Room(options);
@@ -99,8 +107,13 @@ export class HuddleScreenShareSession {
       // During LiveKit reconnect, tracks briefly unsubscribe then return —
       // clearing here causes a false drop/reconnect flicker in the UI.
       if (this.reconnecting) return;
-      if (this.remote?.track === track.mediaStreamTrack) {
-        this.clearRemote();
+      if (
+        this.remote?.videoTrack === track ||
+        this.remote?.mediaStreamTrack === track.mediaStreamTrack
+      ) {
+        // Publisher sticky-republish unsubscribes then resubscribes — keep the
+        // last frame briefly instead of blanking the viewer mid-blip.
+        this.scheduleSoftClearRemote();
       }
     });
     room.on(RoomEvent.ParticipantDisconnected, (participant) => {
@@ -156,16 +169,14 @@ export class HuddleScreenShareSession {
   private attachExistingRemoteTracks(room: Room) {
     for (const participant of room.remoteParticipants.values()) {
       for (const publication of participant.trackPublications.values()) {
-        if (
-          publication.kind === Track.Kind.Video &&
-          publication.track &&
-          publication.source === Track.Source.ScreenShare
-        ) {
-          this.attachRemote(participant.identity, publication.track);
-        } else if (publication.kind === Track.Kind.Video && publication.track) {
-          // Accept any remote video (room is screen-only by grant).
-          this.attachRemote(participant.identity, publication.track);
+        if (publication.kind !== Track.Kind.Video || !publication.track) {
+          continue;
         }
+        // RemoteParticipant publications yield RemoteTrack.
+        this.attachRemote(
+          participant.identity,
+          publication.track as RemoteTrack,
+        );
       }
     }
   }
@@ -271,25 +282,36 @@ export class HuddleScreenShareSession {
     this.callbacks.onReconnectingChanged?.(active);
   }
 
-  private attachRemote(
-    identity: string,
-    track: RemoteTrack | { mediaStreamTrack: MediaStreamTrack },
-  ) {
-    const media =
-      "mediaStreamTrack" in track
-        ? track.mediaStreamTrack
-        : (track as RemoteTrack).mediaStreamTrack;
+  private attachRemote(identity: string, track: RemoteTrack) {
+    this.cancelSoftClearRemote();
+    const media = track.mediaStreamTrack;
     const stream = new MediaStream([media]);
     this.remote = {
       participantIdentity: identity,
-      track: media,
+      videoTrack: track,
+      mediaStreamTrack: media,
       stream,
     };
     this.callbacks.onRemoteChanged(this.remote);
     this.callbacks.onCurrentSharerChanged(identity);
   }
 
+  private scheduleSoftClearRemote() {
+    if (this.remoteClearTimer) return;
+    this.remoteClearTimer = setTimeout(() => {
+      this.remoteClearTimer = null;
+      this.clearRemote();
+    }, 2500);
+  }
+
+  private cancelSoftClearRemote() {
+    if (!this.remoteClearTimer) return;
+    clearTimeout(this.remoteClearTimer);
+    this.remoteClearTimer = null;
+  }
+
   private clearRemote() {
+    this.cancelSoftClearRemote();
     if (!this.remote) return;
     this.remote = null;
     this.callbacks.onRemoteChanged(null);

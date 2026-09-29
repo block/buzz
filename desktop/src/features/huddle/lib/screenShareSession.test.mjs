@@ -180,3 +180,26 @@ test("screenShareSession startShare can republish held stream", async () => {
   assert.match(src, /heldLocalStream/);
   assert.match(src, /isSharing/);
 });
+
+test("screenShareSession disables adaptiveStream for screen-only room", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("./screenShareSession.ts", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(src, /adaptiveStream:\s*false/);
+  assert.match(src, /dynacast:\s*false/);
+});
+
+test("screenShareSession soft-clears remote on unsubscribe", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("./screenShareSession.ts", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(src, /scheduleSoftClearRemote/);
+  assert.match(src, /cancelSoftClearRemote/);
+  assert.match(src, /videoTrack/);
+});

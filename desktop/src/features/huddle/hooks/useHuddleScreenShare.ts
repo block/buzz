@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import type { RemoteTrack } from "livekit-client";
+
 import {
   acquireDisplayMedia,
   HuddleScreenShareSession,
@@ -24,6 +26,8 @@ export type HuddleScreenShareState = {
    */
   republishing: boolean;
   remoteStream: MediaStream | null;
+  /** LiveKit remote video for track.attach() in the spotlight. */
+  remoteVideoTrack: RemoteTrack | null;
   localPreviewStream: MediaStream | null;
   currentSharer: string | null;
   error: string | null;
@@ -110,6 +114,8 @@ export function useHuddleScreenShare(args: {
   const [remoteStream, setRemoteStream] = React.useState<MediaStream | null>(
     null,
   );
+  const [remoteVideoTrack, setRemoteVideoTrack] =
+    React.useState<RemoteTrack | null>(null);
   const [localPreviewStream, setLocalPreviewStream] =
     React.useState<MediaStream | null>(null);
   const [currentSharer, setCurrentSharer] = React.useState<string | null>(null);
@@ -141,6 +147,7 @@ export function useHuddleScreenShare(args: {
     () => ({
       onRemoteChanged: (remote: ScreenShareRemote | null) => {
         setRemoteStream(remote?.stream ?? null);
+        setRemoteVideoTrack(remote?.videoTrack ?? null);
       },
       onLocalPreviewChanged: (stream: MediaStream | null) => {
         // Non-null: session owns a published/held local track. Null during
@@ -266,6 +273,7 @@ export function useHuddleScreenShare(args: {
     }
     setSharing(false);
     setRemoteStream(null);
+    setRemoteVideoTrack(null);
     setLocalPreviewStream(null);
     setCurrentSharer(null);
     setConnecting(false);
@@ -518,6 +526,7 @@ export function useHuddleScreenShare(args: {
     sharing,
     republishing,
     remoteStream,
+    remoteVideoTrack,
     localPreviewStream,
     currentSharer,
     error,

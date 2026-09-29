@@ -401,15 +401,20 @@ export function HuddleBar({
   });
   const spotlightStream =
     screenShare.localPreviewStream ?? screenShare.remoteStream;
+  // Local preview is a getDisplayMedia MediaStream; remote must use LiveKit
+  // RemoteTrack.attach() (adaptiveStream pauses raw srcObject after frame 1).
+  const spotlightVideoTrack = screenShare.localPreviewStream
+    ? null
+    : screenShare.remoteVideoTrack;
   const drawerRootRef = React.useRef<HTMLDivElement | null>(null);
   const [shareExpanded, setShareExpanded] = React.useState(false);
   const [shareStageHost, setShareStageHost] =
     React.useState<HTMLElement | null>(null);
 
-  // Collapse expanded share when the stream ends.
+  // Collapse expanded share when remote/local media ends.
   React.useEffect(() => {
-    if (!spotlightStream) setShareExpanded(false);
-  }, [spotlightStream]);
+    if (!spotlightStream && !spotlightVideoTrack) setShareExpanded(false);
+  }, [spotlightStream, spotlightVideoTrack]);
 
   // Resolve the huddle shell once the bar mounts so expand can portal the
   // share stage into the content area above the dock.
@@ -678,10 +683,11 @@ export function HuddleBar({
         className,
       )}
     >
-      {spotlightStream && !shareExpanded ? (
+      {(spotlightStream || spotlightVideoTrack) && !shareExpanded ? (
         <div className="relative mx-auto h-56 w-full max-w-3xl shrink-0">
           <ScreenShareSpotlight
             stream={spotlightStream}
+            videoTrack={spotlightVideoTrack}
             label={screenShare.sharing ? "You are sharing" : "Screen share"}
             className="h-full w-full"
             republishing={screenShare.sharing && screenShare.republishing}
@@ -705,7 +711,7 @@ export function HuddleBar({
           </Tooltip>
         </div>
       ) : null}
-      {shareExpanded && spotlightStream && shareStageHost
+      {shareExpanded && (spotlightStream || spotlightVideoTrack) && shareStageHost
         ? createPortal(
             <div
               className="buzz-huddle-share-stage"
@@ -713,6 +719,7 @@ export function HuddleBar({
             >
               <ScreenShareSpotlight
                 stream={spotlightStream}
+                videoTrack={spotlightVideoTrack}
                 label={screenShare.sharing ? "You are sharing" : "Screen share"}
                 className="h-full w-full rounded-none border-0"
                 republishing={screenShare.sharing && screenShare.republishing}

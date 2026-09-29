@@ -91,3 +91,9 @@ test("bar avatar strip avoids overflow-x-auto scrollbars", () => {
     /appearance === "room"[\s\S]*?overflow-x-auto[\s\S]*?: "h-12 gap-1 overflow-visible"/,
   );
 });
+
+test("HuddleBar passes remote LiveKit track into spotlight for attach", () => {
+  assert.match(src, /spotlightVideoTrack/);
+  assert.match(src, /videoTrack=\{spotlightVideoTrack\}/);
+  assert.match(src, /remoteVideoTrack/);
+});
