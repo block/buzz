@@ -93,6 +93,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goAiBrain = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/ai-brain",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -459,6 +470,7 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goAiBrain,
     goChannel,
     goDuplicateWorkflow,
     goEditWorkflow,

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use buzz_core::memory::{
     Chunk, Document, EmbeddingRecord, Entity, GraphHit, Relation, VectorFilter, VectorHit,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::error::Result;
@@ -137,9 +138,15 @@ impl EmbeddedMemoryStore {
     pub async fn remember_graph(&self, entities: &[Entity], relations: &[Relation]) -> Result<()> {
         if !entities.is_empty() {
             self.graph.upsert_entities(entities).await?;
+            for ent in entities {
+                let _ = self.metadata.upsert_entity(ent);
+            }
         }
         if !relations.is_empty() {
             self.graph.upsert_relations(relations).await?;
+            for rel in relations {
+                let _ = self.metadata.upsert_relation(rel);
+            }
         }
         Ok(())
     }
@@ -178,6 +185,65 @@ impl EmbeddedMemoryStore {
     /// Traverses graph neighborhood starting from seed entities.
     pub async fn graph_neighborhood(&self, seeds: &[Uuid], hops: u8) -> Result<Vec<GraphHit>> {
         self.graph.neighborhood(seeds, hops).await
+    }
+
+    /// Traverses graph neighborhood as of a specific timestamp with optional max nodes cap.
+    pub async fn graph_neighborhood_as_of(
+        &self,
+        seeds: &[Uuid],
+        hops: u8,
+        as_of: Option<DateTime<Utc>>,
+        max_nodes: Option<usize>,
+    ) -> Result<Vec<GraphHit>> {
+        self.graph.neighborhood_as_of(seeds, hops, as_of, max_nodes).await
+    }
+
+    /// Invalidates a relation by ID across both embedded graph and SQLite metadata.
+    pub async fn invalidate_graph_relation(&self, id: &Uuid, invalid_at: Option<DateTime<Utc>>) -> Result<bool> {
+        let found = self.graph.invalidate_relation(id, invalid_at).await?;
+        let _ = self.metadata.invalidate_relation(id, invalid_at);
+        Ok(found)
+    }
+
+    /// Resolves contradictions between entities of relation_type, marking obsolete edges invalid in both stores.
+    pub async fn resolve_graph_contradiction(
+        &self,
+        workspace_path: &str,
+        source_id: &Uuid,
+        target_id: &Uuid,
+        relation_type: &str,
+        replacement: &Relation,
+    ) -> Result<usize> {
+        let count = self.graph.resolve_contradiction(workspace_path, source_id, target_id, relation_type, replacement).await?;
+        let _ = self.metadata.invalidate_relations_by_edge(
+            workspace_path,
+            source_id,
+            target_id,
+            relation_type,
+            Some(replacement.valid_at),
+        );
+        let _ = self.metadata.upsert_relation(replacement);
+        Ok(count)
+    }
+
+    /// Fetches an entity by ID from the graph.
+    pub async fn get_entity(&self, id: &Uuid) -> Result<Option<Entity>> {
+        self.graph.get_entity(id).await
+    }
+
+    /// Fetches a relation by ID from the graph.
+    pub async fn get_relation(&self, id: &Uuid) -> Result<Option<Relation>> {
+        self.graph.get_relation(id).await
+    }
+
+    /// Lists entities in the graph for a workspace.
+    pub async fn list_entities(&self, workspace_path: &str) -> Result<Vec<Entity>> {
+        self.graph.list_entities(workspace_path).await
+    }
+
+    /// Lists relations in the graph for a workspace, optionally filtering to active only.
+    pub async fn list_relations(&self, workspace_path: &str, active_only: bool) -> Result<Vec<Relation>> {
+        self.graph.list_relations(workspace_path, active_only).await
     }
 
     /// Finds entities matching a query in the graph store.

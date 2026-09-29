@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::chunker::AstChunker;
 use crate::error::Result;
 use crate::git::GitMetadataExtractor;
+use crate::graph_extractor::KnowledgeGraphExtractor;
 use crate::watcher::WorkspaceWatcher;
 
 /// Summary report returned after a batch workspace ingestion run.
@@ -30,14 +31,19 @@ pub struct IngestSummary {
     pub total_chunks_created: usize,
     /// Total dense vector embeddings saved.
     pub total_vectors_saved: usize,
+    /// Total knowledge graph entities created or updated.
+    pub total_entities_created: usize,
+    /// Total knowledge graph relations created.
+    pub total_relations_created: usize,
 }
 
-/// Orchestrates file ingestion across Redactor, Chunker, Embedder, and Storage.
+/// Orchestrates file ingestion across Redactor, Chunker, Embedder, Knowledge Graph, and Storage.
 #[derive(Clone)]
 pub struct IngestionPipeline {
     store: Arc<EmbeddedMemoryStore>,
     embedder: Arc<dyn EmbedProvider>,
     chunker: AstChunker,
+    graph_extractor: KnowledgeGraphExtractor,
 }
 
 impl IngestionPipeline {
@@ -47,6 +53,7 @@ impl IngestionPipeline {
             store,
             embedder,
             chunker: AstChunker::default(),
+            graph_extractor: KnowledgeGraphExtractor::new(),
         }
     }
 
@@ -60,6 +67,7 @@ impl IngestionPipeline {
             store,
             embedder,
             chunker,
+            graph_extractor: KnowledgeGraphExtractor::new(),
         }
     }
 
@@ -160,6 +168,16 @@ impl IngestionPipeline {
 
         self.store.vectors().upsert_embeddings(&embedding_records).await?;
 
+        // 8. Knowledge Graph Extraction & Ingestion
+        let extracted_graph = self.graph_extractor.extract_from_file_chunks(
+            workspace_path,
+            &source_uri,
+            &chunks,
+        );
+        if !extracted_graph.entities.is_empty() || !extracted_graph.relations.is_empty() {
+            self.store.remember_graph(&extracted_graph.entities, &extracted_graph.relations).await?;
+        }
+
         Ok(Some(doc))
     }
 
@@ -200,6 +218,11 @@ impl IngestionPipeline {
                 }
             }
         }
+
+        // Tally total graph entities and relations
+        let stats = self.store.stats().await?;
+        summary.total_entities_created = stats.total_entities;
+        summary.total_relations_created = stats.total_relations;
 
         Ok(summary)
     }

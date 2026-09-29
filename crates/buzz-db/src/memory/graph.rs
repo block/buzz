@@ -10,6 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use buzz_core::memory::{Entity, GraphHit, Relation};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::error::{DbError, Result};
@@ -143,7 +144,24 @@ impl GraphStore for EmbeddedGraphStore {
         {
             let mut lock = self.state.write().unwrap();
             for entity in entities {
-                lock.entities.insert(entity.id, entity.clone());
+                // Duplicate entity merging: check by ID first, then by (workspace, type, name)
+                let existing_id = if lock.entities.contains_key(&entity.id) {
+                    Some(entity.id)
+                } else {
+                    lock.entities.values().find(|e| {
+                        e.workspace_path == entity.workspace_path
+                            && e.entity_type.eq_ignore_ascii_case(&entity.entity_type)
+                            && e.name.eq_ignore_ascii_case(&entity.name)
+                    }).map(|e| e.id)
+                };
+
+                if let Some(target_id) = existing_id {
+                    if let Some(existing) = lock.entities.get_mut(&target_id) {
+                        existing.merge_with(entity);
+                    }
+                } else {
+                    lock.entities.insert(entity.id, entity.clone());
+                }
             }
         }
 
@@ -172,15 +190,25 @@ impl GraphStore for EmbeddedGraphStore {
     }
 
     async fn neighborhood(&self, seed_ids: &[Uuid], hops: u8) -> Result<Vec<GraphHit>> {
+        self.neighborhood_as_of(seed_ids, hops, None, None).await
+    }
+
+    async fn neighborhood_as_of(
+        &self,
+        seed_ids: &[Uuid],
+        hops: u8,
+        as_of: Option<DateTime<Utc>>,
+        max_nodes: Option<usize>,
+    ) -> Result<Vec<GraphHit>> {
         let lock = self.state.read().unwrap();
+        let max_nodes = max_nodes.unwrap_or(100);
         let mut results = Vec::new();
         let mut visited = HashSet::new();
         let mut queue: VecDeque<(Uuid, u8, Option<Relation>)> = VecDeque::new();
 
         for seed in seed_ids {
-            if lock.entities.contains_key(seed) {
+            if lock.entities.contains_key(seed) && visited.insert(*seed) {
                 queue.push_back((*seed, 0, None));
-                visited.insert(*seed);
             }
         }
 
@@ -191,12 +219,19 @@ impl GraphStore for EmbeddedGraphStore {
                     relation: incoming_rel,
                     depth,
                 });
+                if results.len() >= max_nodes {
+                    break;
+                }
             }
 
             if depth < hops {
-                // Find all outgoing and incoming active relations
+                // Find all outgoing and incoming relations that are valid at `as_of`
                 for rel in &lock.relations {
-                    if !rel.is_active() {
+                    let is_valid = match as_of {
+                        Some(t) => rel.is_valid_at(t),
+                        None => rel.is_active(),
+                    };
+                    if !is_valid {
                         continue;
                     }
 
@@ -212,6 +247,87 @@ impl GraphStore for EmbeddedGraphStore {
         }
 
         Ok(results)
+    }
+
+    async fn invalidate_relation(&self, id: &Uuid, invalid_at: Option<DateTime<Utc>>) -> Result<bool> {
+        let mut found = false;
+        {
+            let mut lock = self.state.write().unwrap();
+            if let Some(rel) = lock.relations.iter_mut().find(|r| r.id == *id) {
+                rel.invalidate(invalid_at);
+                found = true;
+            }
+        }
+
+        if found {
+            self.save_to_disk()?;
+        }
+        Ok(found)
+    }
+
+    async fn resolve_contradiction(
+        &self,
+        workspace_path: &str,
+        source_id: &Uuid,
+        target_id: &Uuid,
+        relation_type: &str,
+        replacement: &Relation,
+    ) -> Result<usize> {
+        let mut count = 0;
+        {
+            let mut lock = self.state.write().unwrap();
+            for rel in lock.relations.iter_mut() {
+                if (workspace_path.is_empty() || rel.workspace_path == workspace_path)
+                    && rel.source_entity_id == *source_id
+                    && rel.target_entity_id == *target_id
+                    && rel.relation_type.eq_ignore_ascii_case(relation_type)
+                    && rel.is_active()
+                {
+                    rel.invalidate(Some(replacement.valid_at));
+                    count += 1;
+                }
+            }
+            // Add replacement relation
+            if let Some(pos) = lock.relations.iter().position(|r| r.id == replacement.id) {
+                lock.relations[pos] = replacement.clone();
+            } else {
+                lock.relations.push(replacement.clone());
+            }
+        }
+
+        self.save_to_disk()?;
+        Ok(count)
+    }
+
+    async fn get_entity(&self, id: &Uuid) -> Result<Option<Entity>> {
+        let lock = self.state.read().unwrap();
+        Ok(lock.entities.get(id).cloned())
+    }
+
+    async fn get_relation(&self, id: &Uuid) -> Result<Option<Relation>> {
+        let lock = self.state.read().unwrap();
+        Ok(lock.relations.iter().find(|r| r.id == *id).cloned())
+    }
+
+    async fn list_entities(&self, workspace_path: &str) -> Result<Vec<Entity>> {
+        let lock = self.state.read().unwrap();
+        let entities = lock.entities.values()
+            .filter(|e| workspace_path.is_empty() || e.workspace_path == workspace_path)
+            .cloned()
+            .collect();
+        Ok(entities)
+    }
+
+    async fn list_relations(&self, workspace_path: &str, active_only: bool) -> Result<Vec<Relation>> {
+        let lock = self.state.read().unwrap();
+        let relations = lock.relations.iter()
+            .filter(|r| {
+                (workspace_path.is_empty() || r.workspace_path == workspace_path)
+                    && (!active_only || r.is_active())
+            })
+            .cloned()
+            .collect();
+        Ok(relations)
     }
 
     async fn delete_entity(&self, id: &Uuid) -> Result<bool> {
@@ -313,6 +429,78 @@ mod tests {
             // Relations referencing ent2 should be cascade-deleted
             assert_eq!(store.count_relations().await.unwrap(), 0);
         }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_entity_merge_and_contradiction_resolution() {
+        let temp_dir = std::env::temp_dir().join(format!("orbit_graph_merge_test_{}", Uuid::new_v4()));
+        let store = EmbeddedGraphStore::open(&temp_dir).expect("open graph store");
+
+        // 1. Entity upsert with duplicate merge
+        let id = Entity::deterministic_id("/workspace", "Technology", "Postgres");
+        let mut ent1 = Entity::new_deterministic("/workspace", "Postgres", "Technology", "Relational database");
+        ent1.metadata = serde_json::json!({"version": "15"});
+
+        store.upsert_entities(&[ent1]).await.expect("upsert ent1");
+        assert_eq!(store.count_entities().await.unwrap(), 1);
+
+        // Upsert duplicate with additional description and metadata
+        let mut ent2 = Entity::new_deterministic("/workspace", "Postgres", "Technology", "High reliability ACID engine");
+        ent2.metadata = serde_json::json!({"port": 5432});
+
+        store.upsert_entities(&[ent2]).await.expect("upsert ent2 duplicate");
+        // Count should still be 1 (merged)
+        assert_eq!(store.count_entities().await.unwrap(), 1);
+
+        let fetched = store.get_entity(&id).await.unwrap().expect("entity exists");
+        assert!(fetched.description.contains("Relational database"));
+        assert!(fetched.description.contains("High reliability ACID engine"));
+        assert_eq!(fetched.metadata["version"], "15");
+        assert_eq!(fetched.metadata["port"], 5432);
+
+        // 2. Contradiction resolution and bi-temporal query
+        let arch_node = Entity::new_deterministic("/workspace", "Architecture", "Concept", "Primary data store");
+        store.upsert_entities(&[arch_node.clone()]).await.unwrap();
+
+        let t0 = Utc::now() - chrono::Duration::hours(2);
+        let mut old_rel = Relation::new("/workspace", arch_node.id, id, "USES_DATABASE", 1.0);
+        old_rel.valid_at = t0;
+        store.upsert_relations(&[old_rel.clone()]).await.unwrap();
+
+        // Active relations at t0
+        let hits_t0 = store.neighborhood_as_of(&[arch_node.id], 1, Some(t0 + chrono::Duration::minutes(10)), None).await.unwrap();
+        assert_eq!(hits_t0.len(), 2); // arch_node + postgres
+
+        // New decision replaces old database with Sqlite
+        let sqlite_node = Entity::new_deterministic("/workspace", "Sqlite", "Technology", "Embedded SQL database");
+        store.upsert_entities(&[sqlite_node.clone()]).await.unwrap();
+
+        let t1 = Utc::now();
+        let mut replacement = Relation::new("/workspace", arch_node.id, sqlite_node.id, "USES_DATABASE", 1.0);
+        replacement.valid_at = t1;
+
+        let invalidated_count = store
+            .resolve_contradiction("/workspace", &arch_node.id, &id, "USES_DATABASE", &replacement)
+            .await
+            .unwrap();
+        assert_eq!(invalidated_count, 1);
+
+        // Current active relations should have Sqlite, not Postgres
+        let active_rels = store.list_relations("/workspace", true).await.unwrap();
+        assert_eq!(active_rels.len(), 1);
+        assert_eq!(active_rels[0].target_entity_id, sqlite_node.id);
+
+        // Historical query as of t0 + 10min should still see Postgres!
+        let hist_hits = store.neighborhood_as_of(&[arch_node.id], 1, Some(t0 + chrono::Duration::minutes(10)), None).await.unwrap();
+        assert!(hist_hits.iter().any(|h| h.entity.id == id));
+        assert!(!hist_hits.iter().any(|h| h.entity.id == sqlite_node.id));
+
+        // Present query (as_of None) sees Sqlite!
+        let now_hits = store.neighborhood_as_of(&[arch_node.id], 1, None, None).await.unwrap();
+        assert!(now_hits.iter().any(|h| h.entity.id == sqlite_node.id));
+        assert!(!now_hits.iter().any(|h| h.entity.id == id));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

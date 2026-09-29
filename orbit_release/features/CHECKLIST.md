@@ -14,7 +14,7 @@
 | **02** | Embedding & Reranker Engine | `02_embedding_engine/` | P0 | Sprint 1 | F01 | `[x] Completed` |
 | **03** | Ingestion Pipeline (L1 $\rightarrow$ L2) | `03_ingestion_pipeline/` | P0 | Sprint 2 | F01, F02 | `[x] Completed` |
 | **04** | SuperRAG Retrieval Layer (Data Re-Trial & Reranking)| `04_multi_rag_search/` | P0 | Sprint 2 | F01, F02 | `[x] Completed` |
-| **05** | Knowledge Graph (L3 Bi-temporal Memory) | `05_knowledge_graph/` | P1 | Sprint 3 | F01, F03 | `[ ] Not Started` |
+| **05** | Knowledge Graph (L3 Bi-temporal Memory) | `05_knowledge_graph/` | P1 | Sprint 3 | F01, F03 | `[x] Completed` |
 | **06** | Recall Agent (9 IDE Parsers) | `06_recall_agent/` | P1 | Sprint 3 | F01, F02, F03 | `[ ] Not Started` |
 | **07** | MCP Server Tools (`orbit.*`) | `07_mcp_server_tools/` | P0 | Sprint 4 | F01, F02, F04, F05, F06 | `[ ] Not Started` |
 | **08** | Desktop 1-Click Harness Hub | `08_agent_auto_wiring/` | P1 | Sprint 4 | F07 | `[ ] Not Started` |
@@ -49,9 +49,9 @@
 - [x] **F04**: Token budget knapsack packing formats Layer 5 context into `<orbit_context>` semantic XML tags
 
 ### Phase 3: Knowledge Graph & Historical Recall (Sprint 3)
-- [ ] **F05**: Bi-temporal entity and relation extraction operational (Graphiti model)
-- [ ] **F05**: Contradiction resolver invalidates obsolete facts (`invalid_at = NOW()`)
-- [ ] **F05**: 2-hop neighborhood traversal integrated into SuperRAG retrieval
+- [x] **F05**: Bi-temporal entity and relation extraction operational (Graphiti model)
+- [x] **F05**: Contradiction resolver invalidates obsolete facts (`invalid_at = replacement.valid_at`)
+- [x] **F05**: 2-hop neighborhood traversal integrated into SuperRAG retrieval
 - [ ] **F06**: 9 IDE transcript parsers implemented:
   - [ ] Antigravity (`~/.gemini/...`)
   - [ ] Claude Code (`~/.claude/...`)

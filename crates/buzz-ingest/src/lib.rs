@@ -15,9 +15,12 @@ pub mod git;
 pub mod pipeline;
 /// Filesystem watcher and change detection.
 pub mod watcher;
+/// Knowledge graph entity and relation extraction from chunks and documentation.
+pub mod graph_extractor;
 
 pub use chunker::{AstChunker, SupportedLanguage};
 pub use error::{IngestError, Result};
 pub use git::{GitMetadata, GitMetadataExtractor};
+pub use graph_extractor::{ExtractedGraph, KnowledgeGraphExtractor};
 pub use pipeline::{IngestSummary, IngestionPipeline};
 pub use watcher::{FileChangeEvent, WorkspaceWatcher};

@@ -1,4 +1,4 @@
-import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, Brain, Folders, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
@@ -19,6 +19,7 @@ type SidebarSelectedView =
   | "channel"
   | "messages"
   | "agents"
+  | "ai-brain"
   | "workflows"
   | "pulse"
   | "projects";
@@ -42,6 +43,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectAiBrain?: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -92,6 +94,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectAiBrain,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -166,6 +169,19 @@ export function AppSidebarPrimaryMenu({
             >
               <Bot className="h-4 w-4" />
               <SidebarMenuLabel>Agents</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="data-[active=true]:font-normal"
+              data-testid="open-ai-brain-view"
+              isActive={selectedView === "ai-brain"}
+              onClick={onSelectAiBrain}
+              tooltip="AI Brain"
+              type="button"
+            >
+              <Brain className="h-4 w-4 text-purple-400" />
+              <SidebarMenuLabel>AI Brain</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <ProtectedBestieSidebarEntry />

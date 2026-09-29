@@ -9,6 +9,6 @@
 | TC-F05-003 | Graph-assisted recall | Ask a multi-hop dependency question. | Relevant neighborhood contributes evidence. |
 
 ## Status
-- [ ] Automated coverage implemented where appropriate
-- [ ] Manual local validation completed
-- [ ] Evidence recorded
+- [x] Automated coverage implemented (`crates/buzz-db/tests/f05_knowledge_graph_tests.rs`)
+- [x] Manual local validation completed
+- [x] Evidence recorded (`testing/LOCAL_VALIDATION_LOG.md`)

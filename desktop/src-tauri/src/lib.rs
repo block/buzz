@@ -10,6 +10,7 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+pub mod graph;
 #[cfg_attr(not(test), allow(dead_code))]
 mod hpke_key_backup;
 mod huddle;
@@ -527,6 +528,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            graph::fetch_brain_graph,
+            graph::invalidate_brain_decision,
+            graph::get_brain_stats,
+            graph::sync_brain_now,
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,

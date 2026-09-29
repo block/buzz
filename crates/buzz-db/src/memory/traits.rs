@@ -54,6 +54,8 @@ pub trait VectorStore: Send + Sync + Debug {
     fn count_vectors(&self) -> impl std::future::Future<Output = Result<usize>> + Send;
 }
 
+use chrono::{DateTime, Utc};
+
 /// Knowledge graph entity and relation traversal trait.
 pub trait GraphStore: Send + Sync + Debug {
     /// Inserts or updates semantic entities.
@@ -62,6 +64,33 @@ pub trait GraphStore: Send + Sync + Debug {
     fn upsert_relations(&self, relations: &[Relation]) -> impl std::future::Future<Output = Result<()>> + Send;
     /// Traverses the graph up to `hops` distance from seed entity IDs.
     fn neighborhood(&self, seed_ids: &[Uuid], hops: u8) -> impl std::future::Future<Output = Result<Vec<GraphHit>>> + Send;
+    /// Traverses the graph as of a specific point in time with optional node cap.
+    fn neighborhood_as_of(
+        &self,
+        seed_ids: &[Uuid],
+        hops: u8,
+        as_of: Option<DateTime<Utc>>,
+        max_nodes: Option<usize>,
+    ) -> impl std::future::Future<Output = Result<Vec<GraphHit>>> + Send;
+    /// Invalidates a relation by ID.
+    fn invalidate_relation(&self, id: &Uuid, invalid_at: Option<DateTime<Utc>>) -> impl std::future::Future<Output = Result<bool>> + Send;
+    /// Resolves contradictions by marking prior active relations invalid and adding replacement.
+    fn resolve_contradiction(
+        &self,
+        workspace_path: &str,
+        source_id: &Uuid,
+        target_id: &Uuid,
+        relation_type: &str,
+        replacement: &Relation,
+    ) -> impl std::future::Future<Output = Result<usize>> + Send;
+    /// Fetches an entity by ID.
+    fn get_entity(&self, id: &Uuid) -> impl std::future::Future<Output = Result<Option<Entity>>> + Send;
+    /// Fetches a relation by ID.
+    fn get_relation(&self, id: &Uuid) -> impl std::future::Future<Output = Result<Option<Relation>>> + Send;
+    /// Lists entities in a workspace.
+    fn list_entities(&self, workspace_path: &str) -> impl std::future::Future<Output = Result<Vec<Entity>>> + Send;
+    /// Lists relations in a workspace, optionally filtering to active only.
+    fn list_relations(&self, workspace_path: &str, active_only: bool) -> impl std::future::Future<Output = Result<Vec<Relation>>> + Send;
     /// Deletes an entity by ID.
     fn delete_entity(&self, id: &Uuid) -> impl std::future::Future<Output = Result<bool>> + Send;
     /// Deletes relations associated with a provenance chunk.

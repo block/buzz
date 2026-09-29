@@ -112,5 +112,28 @@ Notes:
 Follow-up: Advance to Feature 05 (Graph Engine & Dynamic Pruning).
 ```
 
+```text
+Date: 2026-09-30
+Feature: 05 - Knowledge Graph (Entities + Bi-Temporal Relations)
+Build/commit: local-build-f05
+Automated tests:
+  - buzz-db::f05_knowledge_graph_tests (3 tests: TC-F05-001 entity relation creation, TC-F05-002 temporal invalidation & contradiction resolution, TC-F05-003 graph-assisted recall) -> PASS
+  - buzz-db::f01_storage_foundation_tests (6 tests) -> PASS (zero regressions)
+  - buzz-ingest::tests (8 unit + 4 integration + 1 e2e) -> PASS (zero regressions)
+  - buzz-search::f04_superrag_tests (6 tests) -> PASS (zero regressions)
+  - buzz-core (267 unit + 2 doc tests) -> PASS (zero regressions)
+Manual tests: Verified that deterministic UUIDs are generated for File, Symbol, Decision, and Technology nodes using SHA-256. Verified that duplicate entities merge descriptions and metadata attributes without losing information. Verified that contradiction resolution marks obsolete relations with invalid_at = replacement.valid_at while preserving full historical audit records. Verified that time-travel queries (as_of) retrieve the accurate historical state while current queries see active state. Verified multi-hop traversal (1-hop seed, 2-hop reasoning, 3-hop retry) with hard node cap. Verified dual-store synchronization between EmbeddedGraphStore and SQLite metadata.
+Environment: Windows 11, Rust 1.88, rusqlite 0.40, serde_json 1.0, chrono 0.4, uuid 1.23
+Result: PASS
+Notes:
+  - 4-Tier Layer Architecture fully implemented:
+    - Tier 1 Frontend: React 19 interactive D3 canvas graph (BrainGraph.tsx), HUD status header (BrainHUD.tsx), filter controls (BrainFilterControls.tsx), and bi-temporal inspector drawer with Invalidate action (NodeDetailsDrawer.tsx).
+    - Tier 2 Backend: desktop/src-tauri/src/graph.rs IPC commands (fetch_brain_graph & invalidate_brain_decision) registered in tauri handler.
+    - Tier 3 Core: buzz-core domain types, buzz-db EmbeddedGraphStore with crash-safe atomic journal and bi-temporal BFS traversal, buzz-ingest KnowledgeGraphExtractor for AST and ADR extraction.
+    - Tier 4 Packaging: Pure Rust in-process runtime at ~/.orbit/brain/graph/, zero external graph server dependency, documented remote enterprise boundaries in adapters.md.
+  - Architecture Reviewer subagent sign-off: PASS.
+Follow-up: Advance to Feature 06 (Recall Agent / 9 IDE Parsers).
+```
+
 
 

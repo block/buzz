@@ -262,6 +262,112 @@ impl Entity {
             updated_at: now,
         }
     }
+
+    /// Generates a deterministic UUID from workspace, entity_type, and name using SHA-256.
+    pub fn deterministic_id(workspace_path: &str, entity_type: &str, name: &str) -> Uuid {
+        let normalized = format!("{}:{}:{}", workspace_path.trim(), entity_type.trim(), name.trim().to_ascii_lowercase());
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(normalized.as_bytes());
+        let hash = hasher.finalize();
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        // Set RFC 4122 version 5 and variant bits
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    /// Creates a new entity with a deterministic ID.
+    pub fn new_deterministic(
+        workspace_path: impl Into<String>,
+        name: impl Into<String>,
+        entity_type: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let ws = workspace_path.into();
+        let nm = name.into();
+        let et = entity_type.into();
+        let id = Self::deterministic_id(&ws, &et, &nm);
+        let now = Utc::now();
+        Self {
+            id,
+            workspace_path: ws,
+            name: nm,
+            entity_type: et,
+            description: description.into(),
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Merges another entity into this one (combining descriptions, metadata, updating timestamp).
+    pub fn merge_with(&mut self, other: &Entity) {
+        if self.description.is_empty() {
+            self.description = other.description.clone();
+        } else if !other.description.is_empty() && !self.description.contains(&other.description) {
+            self.description = format!("{}; {}", self.description, other.description);
+        }
+
+        // Merge JSON metadata objects if both are objects
+        if let (Some(self_obj), Some(other_obj)) = (self.metadata.as_object_mut(), other.metadata.as_object()) {
+            for (k, v) in other_obj {
+                if !self_obj.contains_key(k) {
+                    self_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        self.updated_at = Utc::now();
+    }
+}
+
+/// Standardized knowledge graph node types.
+pub struct EntityType;
+impl EntityType {
+    /// Workspace root container.
+    pub const WORKSPACE: &'static str = "Workspace";
+    /// Project / crate / module boundary.
+    pub const PROJECT: &'static str = "Project";
+    /// Source code or documentation file.
+    pub const FILE: &'static str = "File";
+    /// Code symbol (fn, struct, enum, trait, interface).
+    pub const SYMBOL: &'static str = "Symbol";
+    /// Interactive session or conversation turn.
+    pub const SESSION: &'static str = "Session";
+    /// AI agent persona or subagent.
+    pub const AGENT: &'static str = "Agent";
+    /// Architectural or domain entity.
+    pub const ENTITY: &'static str = "Entity";
+    /// Architecture Decision Record (ADR).
+    pub const DECISION: &'static str = "Decision";
+    /// Technology, library, or dependency.
+    pub const TECHNOLOGY: &'static str = "Technology";
+    /// Conceptual topic or pattern.
+    pub const CONCEPT: &'static str = "Concept";
+}
+
+/// Standardized knowledge graph edge relation types.
+pub struct RelationType;
+impl RelationType {
+    /// Structural containment (e.g. Workspace -> Project -> File).
+    pub const CONTAINS: &'static str = "CONTAINS";
+    /// Definition of a symbol within a file (File -> Symbol).
+    pub const DEFINES: &'static str = "DEFINES";
+    /// Import / usage dependency (File -> File/Technology).
+    pub const IMPORTS: &'static str = "IMPORTS";
+    /// Functional or structural dependency (Symbol -> Symbol, Project -> Technology).
+    pub const DEPENDS_ON: &'static str = "DEPENDS_ON";
+    /// Discussion or mention within a session (Session -> Entity/Symbol).
+    pub const DISCUSSED_IN: &'static str = "DISCUSSED_IN";
+    /// Architectural decision authorship (Decision -> File/Symbol).
+    pub const DECIDED_BY: &'static str = "DECIDED_BY";
+    /// Temporal replacement or invalidation (Decision -> Decision, Technology -> Technology).
+    pub const SUPERSEDES: &'static str = "SUPERSEDES";
+    /// Conceptual association (Concept -> Concept, Entity -> Entity).
+    pub const RELATES_TO: &'static str = "RELATES_TO";
+    /// Origin or provenance derivation (Entity -> Source/Chunk).
+    pub const DERIVED_FROM: &'static str = "DERIVED_FROM";
 }
 
 /// Layer 3: Bi-temporal relationship edge between entities.
@@ -319,6 +425,16 @@ impl Relation {
     /// Check if this relation is currently active (not superseded/invalidated).
     pub fn is_active(&self) -> bool {
         self.invalid_at.is_none()
+    }
+
+    /// Checks if this relation is valid at a specific timestamp.
+    pub fn is_valid_at(&self, as_of: DateTime<Utc>) -> bool {
+        self.valid_at <= as_of && self.invalid_at.map(|inv| inv > as_of).unwrap_or(true)
+    }
+
+    /// Invalidates this relation as of a specific timestamp (default: now).
+    pub fn invalidate(&mut self, invalid_at: Option<DateTime<Utc>>) {
+        self.invalid_at = Some(invalid_at.unwrap_or_else(Utc::now));
     }
 }
 
@@ -552,5 +668,39 @@ mod tests {
 
         rel.invalid_at = Some(Utc::now());
         assert!(!rel.is_active());
+    }
+
+    #[test]
+    fn test_deterministic_entity_id_and_merge() {
+        let ws = "/projects/orbit";
+        let id1 = Entity::deterministic_id(ws, EntityType::TECHNOLOGY, "SQLite");
+        let id2 = Entity::deterministic_id(ws, EntityType::TECHNOLOGY, "sqlite");
+        assert_eq!(id1, id2, "Deterministic ID must be case-insensitive for entity name");
+
+        let mut ent1 = Entity::new_deterministic(ws, "SQLite", EntityType::TECHNOLOGY, "Embedded database");
+        assert_eq!(ent1.id, id1);
+
+        let ent2 = Entity::new_deterministic(ws, "SQLite", EntityType::TECHNOLOGY, "Fast local storage");
+        ent1.merge_with(&ent2);
+        assert!(ent1.description.contains("Embedded database"));
+        assert!(ent1.description.contains("Fast local storage"));
+    }
+
+    #[test]
+    fn test_bi_temporal_relation_invalidation() {
+        let now = Utc::now();
+        let src = Uuid::new_v4();
+        let dst = Uuid::new_v4();
+        let mut rel = Relation::new("/ws", src, dst, RelationType::DEPENDS_ON, 0.9);
+        rel.valid_at = now - chrono::Duration::days(10);
+
+        assert!(rel.is_valid_at(now - chrono::Duration::days(5)));
+        assert!(rel.is_valid_at(now));
+
+        // Invalidate 2 days ago
+        rel.invalidate(Some(now - chrono::Duration::days(2)));
+        assert!(!rel.is_active());
+        assert!(rel.is_valid_at(now - chrono::Duration::days(5))); // historical query was valid
+        assert!(!rel.is_valid_at(now)); // current query is invalid
     }
 }

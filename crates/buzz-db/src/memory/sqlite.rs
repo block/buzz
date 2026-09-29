@@ -407,6 +407,40 @@ impl SqliteMetadataStore {
         Ok(())
     }
 
+    /// Invalidates an active relation by ID.
+    pub fn invalidate_relation(&self, id: &Uuid, invalid_at: Option<DateTime<Utc>>) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let inv_str = invalid_at.unwrap_or_else(Utc::now).to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE orbit_relations SET invalid_at = ?1 WHERE id = ?2 AND invalid_at IS NULL;",
+            params![inv_str, id.to_string()],
+        ).map_err(|e| DbError::Internal(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    /// Invalidates active relations matching edge tuple (workspace, source, target, type).
+    pub fn invalidate_relations_by_edge(
+        &self,
+        workspace_path: &str,
+        source_id: &Uuid,
+        target_id: &Uuid,
+        relation_type: &str,
+        invalid_at: Option<DateTime<Utc>>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let inv_str = invalid_at.unwrap_or_else(Utc::now).to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE orbit_relations SET invalid_at = ?1 
+             WHERE (?2 = '' OR workspace_path = ?2)
+               AND source_entity_id = ?3 
+               AND target_entity_id = ?4 
+               AND LOWER(relation_type) = LOWER(?5) 
+               AND invalid_at IS NULL;",
+            params![inv_str, workspace_path, source_id.to_string(), target_id.to_string(), relation_type],
+        ).map_err(|e| DbError::Internal(e.to_string()))?;
+        Ok(rows)
+    }
+
     /// Stores or updates an ingested source record.
     pub fn upsert_source(&self, source: &SourceRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
