@@ -23,6 +23,8 @@ type MicControlsProps = {
   isMuted: boolean;
   onToggleMute: () => void;
   isPttMode: boolean;
+  /** True while the PTT shortcut is held (audio owner / mirrored effective open). */
+  pttActive?: boolean;
   micConnected: boolean;
   micLevel: number;
   onSelectVoiceInputMode: (mode: VoiceInputMode) => void | Promise<void>;
@@ -40,6 +42,21 @@ const mutedHuddleControlClass =
   "bg-destructive/35 text-destructive shadow-none hover:bg-destructive/45 hover:text-destructive";
 const compactMutedHuddleControlClass =
   "bg-destructive/15 text-destructive shadow-none hover:bg-destructive/20 hover:text-destructive";
+/** PTT gated (key not held): orange, distinct from red hard-mute. */
+const pttGatedHuddleControlClass =
+  "bg-warning/35 text-warning shadow-none hover:bg-warning/45 hover:text-warning";
+const compactPttGatedHuddleControlClass =
+  "bg-warning/15 text-warning shadow-none hover:bg-warning/20 hover:text-warning";
+
+/** Mic with a bottom underscore — gated PTT look (vs MicOff slash = hard mute). */
+function MicPttGatedIcon({ className }: { className?: string }) {
+  return (
+    <span aria-hidden="true" className={cn("relative inline-flex", className)}>
+      <Mic className="h-4 w-4" />
+      <span className="absolute bottom-0 left-1/2 h-0.5 w-2.5 -translate-x-1/2 rounded-full bg-current" />
+    </span>
+  );
+}
 const MIC_PERMISSION_SETTINGS_URL =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
 
@@ -96,6 +113,7 @@ export function MicControls({
   isMuted,
   onToggleMute,
   isPttMode,
+  pttActive = false,
   micConnected,
   micLevel,
   onSelectVoiceInputMode,
@@ -110,6 +128,10 @@ export function MicControls({
   const prefersReducedMotion = usePrefersReducedMotion();
   const pushToTalkShortcut = isMac ? "⌃Space" : "Ctrl+Space";
   const isEffectivelyMuted = isMuted;
+  // PTT gated = mode on and not transmitting (key not held / manually muted).
+  // Distinct from hard mute (red MicOff) so the control shows PTT without settings.
+  const isPttGated = isPttMode && !micUnavailable && isEffectivelyMuted;
+  const isPttLive = isPttMode && !micUnavailable && !isEffectivelyMuted;
   const showMicMeter = micConnected && !isEffectivelyMuted;
   const barHeights: [number, number, number] = prefersReducedMotion
     ? MIC_METER_IDLE_HEIGHTS
@@ -123,19 +145,32 @@ export function MicControls({
       : "Mute microphone";
   const micTooltip = micUnavailable
     ? "Microphone unavailable. Check app permissions or input device."
-    : micButtonLabel;
+    : isPttGated
+      ? undefined
+      : isPttLive
+        ? pttActive
+          ? `Push to Talk live — release ${pushToTalkShortcut} or click to mute`
+          : "Push to Talk live — click to mute"
+        : micButtonLabel;
   const iconButtonClass = compact
     ? "h-8 w-8 shrink-0 rounded-l-md rounded-r-none px-0 py-0 text-sidebar-foreground/70 !shadow-none hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground/70"
     : splitIconButtonClass;
   const chevronButtonClass = compact
     ? "buzz-huddle-split-chevron group h-8 w-5 shrink-0 rounded-l-none rounded-r-md border-l border-sidebar-border/80 px-0.5 py-0 text-sidebar-foreground/70 !shadow-none hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground/70"
     : splitChevronButtonClass;
-  const mutedMicClass =
-    isEffectivelyMuted || micUnavailable
+  const micStateClass = micUnavailable
+    ? compact
+      ? compactMutedHuddleControlClass
+      : mutedHuddleControlClass
+    : isPttGated
       ? compact
-        ? compactMutedHuddleControlClass
-        : mutedHuddleControlClass
-      : null;
+        ? compactPttGatedHuddleControlClass
+        : pttGatedHuddleControlClass
+      : isEffectivelyMuted
+        ? compact
+          ? compactMutedHuddleControlClass
+          : mutedHuddleControlClass
+        : null;
 
   return (
     <Popover>
@@ -154,11 +189,16 @@ export function MicControls({
               aria-pressed={micConnected ? isEffectivelyMuted : true}
               className={cn(
                 iconButtonClass,
-                mutedMicClass,
+                micStateClass,
                 !isEffectivelyMuted &&
                   !micUnavailable &&
                   "buzz-huddle-split-main",
+                isPttGated && "gap-1",
+                isPttGated && !compact && "min-w-12 px-2",
               )}
+              data-ptt-state={
+                isPttGated ? "gated" : isPttLive ? "live" : undefined
+              }
               onClick={() => {
                 if (!micConnected) return;
                 onToggleMute();
@@ -170,17 +210,35 @@ export function MicControls({
                   : "secondary"
               }
             >
-              {isEffectivelyMuted || micUnavailable ? (
+              {micUnavailable ? (
+                <MicOff className="h-4 w-4" />
+              ) : isPttGated ? (
+                <>
+                  <MicPttGatedIcon />
+                  {!compact ? (
+                    <span className="text-2xs font-semibold tracking-wide">
+                      PTT
+                    </span>
+                  ) : null}
+                </>
+              ) : isEffectivelyMuted ? (
                 <MicOff className="h-4 w-4" />
               ) : (
-                <Mic className="h-4 w-4" />
+                <>
+                  <Mic className="h-4 w-4" />
+                  {isPttLive && !compact ? (
+                    <span className="text-2xs font-semibold tracking-wide text-warning">
+                      PTT
+                    </span>
+                  ) : null}
+                </>
               )}
             </Button>
           </TooltipTrigger>
           <TooltipContent className="buzz-huddle-tooltip" side="top">
-            {isPttMode && !micUnavailable && isEffectivelyMuted ? (
+            {isPttGated ? (
               <span className="flex items-center gap-1.5">
-                <span>Click to unmute or hold</span>
+                <span>PTT gated — click to unmute or hold</span>
                 <kbd className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
                   {pushToTalkShortcut}
                 </kbd>

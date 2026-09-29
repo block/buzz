@@ -390,6 +390,7 @@ export function SidebarSection({
   presenceByChannelId,
   selectedChannelId,
   title,
+  titleIcon,
   testId,
   unreadChannelCounts,
   unreadChannelIds,
@@ -414,6 +415,8 @@ export function SidebarSection({
   presenceByChannelId?: Record<string, PresenceStatus>;
   selectedChannelId: string | null;
   title: string;
+  /** Optional leading icon (e.g. community sections vs personal sections). */
+  titleIcon?: React.ReactNode;
   testId: string;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
@@ -453,6 +456,15 @@ export function SidebarSection({
               onClick={onToggleCollapsed}
               type="button"
             >
+              {titleIcon ? (
+                <span
+                  aria-hidden="true"
+                  className="flex shrink-0 items-center"
+                  data-sidebar-section-title-icon
+                >
+                  {titleIcon}
+                </span>
+              ) : null}
               <span data-sidebar-section-title>{title}</span>
               <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
                 <ChevronDown

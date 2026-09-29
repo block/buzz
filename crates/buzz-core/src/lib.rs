@@ -11,6 +11,8 @@ pub mod agent_turn_metric;
 pub mod channel;
 /// Community-installed OpenClaw bots (kind:30624) payload validation.
 pub mod community_bots;
+/// Community channel sections catalog (kind:30625) payload validation.
+pub mod community_sections;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;

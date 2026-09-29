@@ -146,6 +146,7 @@ export function ChannelContextMenuItems({
   isStarred,
   sections,
   assignments,
+  sectionMoveLocked = false,
   onMarkChannelRead,
   onMarkChannelUnread,
   onMuteChannel,
@@ -164,6 +165,8 @@ export function ChannelContextMenuItems({
   isStarred?: boolean;
   sections?: ChannelSection[];
   assignments?: Record<string, string>;
+  /** When true, hide Move to section (community-section lock). */
+  sectionMoveLocked?: boolean;
   onMarkChannelRead?: (
     channelId: string,
     lastMessageAt: string | null | undefined,
@@ -226,7 +229,8 @@ export function ChannelContextMenuItems({
     : Boolean(onMarkChannelUnread);
   const showMuteToggle = Boolean(onMuteChannel && onUnmuteChannel);
   const showMove = Boolean(
-    sections &&
+    !sectionMoveLocked &&
+      sections &&
       assignments &&
       onAssignChannel &&
       onUnassignChannel &&

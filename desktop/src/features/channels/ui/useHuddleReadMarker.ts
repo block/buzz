@@ -1,5 +1,10 @@
 import * as React from "react";
+import { useSyncExternalStore } from "react";
 
+import {
+  getHuddleShareBlocksAutoRead,
+  subscribeHuddleShareUiState,
+} from "@/features/huddle/lib/huddleShareExpandStore";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import type { RelayEvent } from "@/shared/api/types";
 
@@ -63,9 +68,17 @@ export function useHuddleReadMarker({
     ? new Date(latestHuddleTranscriptMessage.created_at * 1_000).toISOString()
     : activeReadAt;
   const lastHuddleReadKeyRef = React.useRef<string | null>(null);
+  const shareBlocksAutoRead = useSyncExternalStore(
+    subscribeHuddleShareUiState,
+    getHuddleShareBlocksAutoRead,
+    () => false,
+  );
 
   React.useEffect(() => {
     if (!activeChannelId || activeChannelIsMember === false) return;
+    // Expanded share covers the transcript; skip auto-read unless dock chat
+    // is open (store clears the block while the popover is reading).
+    if (shareBlocksAutoRead) return;
     const huddleReadKey = hasFlattenedHuddleReplies
       ? `${activeChannelId}:${huddleReadAt}`
       : null;
@@ -85,5 +98,6 @@ export function useHuddleReadMarker({
     hasFlattenedHuddleReplies,
     huddleReadAt,
     markChannelRead,
+    shareBlocksAutoRead,
   ]);
 }

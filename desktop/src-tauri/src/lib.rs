@@ -889,6 +889,7 @@ pub fn run() {
             huddle::agent_voice::set_huddle_agent_voice,
             huddle::agent_voice::set_huddle_agent_addressable,
             huddle::agent_voice::set_huddle_agent_barge,
+            huddle::agent_voice::set_huddle_agent_activation_keyword,
             speak_agent_message,
             interrupt_huddle_speech,
             add_agent_to_huddle,
@@ -988,6 +989,9 @@ pub fn run() {
             event: WindowEvent::CloseRequested { .. },
             ..
         } if label.starts_with("huddle-") => {
+            // User red-X must restore the drawer even if a leftover suppress
+            // note from zombie-recreate would otherwise swallow Destroyed.
+            huddle::window::note_user_initiated_companion_close();
             // Hide immediately so the OS frame is gone before Destroyed fires and
             // the main window restores the drawer (drawer ⊕ window exclusivity).
             if let Some(window) = app_handle.get_webview_window(&label) {
@@ -1003,7 +1007,11 @@ pub fn run() {
         } if label.starts_with("huddle-") => {
             // Dock / zombie-recreate destroy paths set suppress so they can emit
             // (or skip) deliberately. Only a real companion teardown restores drawer.
-            if huddle::window::take_suppress_companion_return() {
+            let user_closed = huddle::window::take_user_initiated_companion_close();
+            let suppressed = huddle::window::take_suppress_companion_return();
+            // User red-X wins over a stale suppress note (zombie-recreate).
+            // Intentional dock/recreate suppress still skips when not user-closed.
+            if suppressed && !user_closed {
                 // consumed
             } else {
                 let is_active_huddle_window = app_handle

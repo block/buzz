@@ -306,7 +306,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // the worker thread (~200ms) and must not block under the mutex.
     let (
         agent_pubkeys_arc,
-        activation_keyword_arc,
         session_gen,
         expected_generation,
         stt_starting,
@@ -344,7 +343,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
         };
         (
             Arc::clone(&hs.agent_pubkeys),
-            Arc::clone(&hs.activation_keyword),
             Arc::clone(&hs.session_generation),
             hs.session_generation.load(Ordering::Acquire),
             stt_starting,
@@ -406,7 +404,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
         text_rx,
         channel_uuid,
         agent_pubkeys_arc,
-        activation_keyword_arc,
         session_gen.clone(),
         state,
     );
@@ -683,7 +680,6 @@ pub(crate) fn spawn_transcription_task(
     mut text_rx: tokio::sync::mpsc::Receiver<String>,
     channel_uuid: Uuid,
     agent_pubkeys_arc: Arc<Mutex<Vec<String>>>,
-    activation_keyword_arc: Arc<Mutex<String>>,
     session_generation: Arc<AtomicU64>,
     state: &AppState,
 ) {
@@ -738,30 +734,30 @@ pub(crate) fn spawn_transcription_task(
                 cached_roster = agent_pubkeys;
             }
 
-            let activation_keyword = activation_keyword_arc
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-
-            // Wake only agents addressed as "{keyword} <Name>"; still post transcript always.
-            let mut wake_pubkeys =
-                super::stt_wake::addressed_agent_pubkeys(&t, &cached_aliases, &activation_keyword);
-            // Addressable toggle (default on): OFF agents ignore spoken wakes.
-            if !wake_pubkeys.is_empty() {
-                if let Some(handle) = app_handle.as_ref() {
-                    use tauri::Manager;
-                    if let Some(app_state) = handle.try_state::<AppState>() {
-                        if let Ok(huddle) = app_state.huddle() {
-                            wake_pubkeys.retain(|pk| {
-                                huddle
-                                    .agent_voice_settings
-                                    .get(pk)
-                                    .map(|s| s.addressable)
-                                    .unwrap_or(true)
-                            });
+            // Overlay each agent's activation keyword + addressable gate from
+            // live voice settings (per-avatar menu), then fuzzy-match wakes.
+            let mut wake_aliases = cached_aliases.clone();
+            let mut addressable_by_pk = std::collections::HashMap::<String, bool>::new();
+            if let Some(handle) = app_handle.as_ref() {
+                use tauri::Manager;
+                if let Some(app_state) = handle.try_state::<AppState>() {
+                    if let Ok(huddle) = app_state.huddle() {
+                        for alias in &mut wake_aliases {
+                            if let Some(settings) = huddle.agent_voice_settings.get(&alias.pubkey) {
+                                alias.activation_keyword = settings.activation_keyword.clone();
+                                addressable_by_pk
+                                    .insert(alias.pubkey.clone(), settings.addressable);
+                            }
                         }
                     }
                 }
+            }
+
+            // Wake only agents addressed as "{keyword} <Name>"; still post transcript always.
+            let mut wake_pubkeys = super::stt_wake::addressed_agent_pubkeys(&t, &wake_aliases);
+            // Addressable toggle (default on): OFF agents ignore spoken wakes.
+            if !wake_pubkeys.is_empty() {
+                wake_pubkeys.retain(|pk| addressable_by_pk.get(pk).copied().unwrap_or(true));
             }
             // Addressed wake is the only STT path that stops agent TTS. Bare
             // "stop", punctuation, and VAD barge-in must not interrupt speech;

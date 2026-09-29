@@ -29,7 +29,11 @@ import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import { useHuddlePresentation } from "@/app/useHuddlePresentation";
 import { useUserSignerDraftListener } from "@/features/term-session/lib/useUserSignerDraftListener";
-import { shouldShowSidebarChannel } from "@/app/huddleChannelVisibility";
+import {
+  isArchivedHuddleSidebarChannel,
+  shouldShowSidebarChannel,
+  sortArchivedHuddleChannels,
+} from "@/app/huddleChannelVisibility";
 import {
   channelsQueryKey,
   useChannelsQuery,
@@ -117,6 +121,7 @@ export function AppShell() {
   useWebviewScrollBoundaryLock();
   const communitiesHook = useCommunities();
   const {
+    activeHuddleChannelId,
     handleHuddleCompanionOpen,
     handleHuddleEnded,
     handleHuddleStartPendingChange,
@@ -298,6 +303,32 @@ export function AppShell() {
       ),
     [huddleBackingChannelIds, memberChannels, revealedHuddleChannelIds],
   );
+  const archivedHuddleChannels = React.useMemo(
+    () =>
+      sortArchivedHuddleChannels(
+        memberChannels.filter((channel) =>
+          isArchivedHuddleSidebarChannel(
+            channel,
+            huddleBackingChannelIds,
+            revealedHuddleChannelIds,
+            activeHuddleChannelId,
+          ),
+        ),
+      ),
+    [
+      activeHuddleChannelId,
+      huddleBackingChannelIds,
+      memberChannels,
+      revealedHuddleChannelIds,
+    ],
+  );
+  const unreadTrackingChannels = React.useMemo(
+    () =>
+      archivedHuddleChannels.length === 0
+        ? sidebarChannels
+        : [...sidebarChannels, ...archivedHuddleChannels],
+    [archivedHuddleChannels, sidebarChannels],
+  );
   const hasRestoredCommunityDestinationRef = React.useRef(false);
   React.useEffect(() => {
     const activeCommunityId = communitiesHook.activeCommunity?.id;
@@ -412,7 +443,7 @@ export function AppShell() {
     muteThread,
     unmuteThread,
   } = useUnreadChannels(
-    isHuddleRoom ? EMPTY_CHANNELS : sidebarChannels,
+    isHuddleRoom ? EMPTY_CHANNELS : unreadTrackingChannels,
     isHuddleRoom ? null : activeChannel,
     {
       pubkey: identityQuery.data?.pubkey,
@@ -846,6 +877,7 @@ export function AppShell() {
                       {!hideAppChrome ? (
                         <AppSidebar
                           activeCommunity={communitiesHook.activeCommunity}
+                          archivedHuddleChannels={archivedHuddleChannels}
                           channels={sidebarChannels}
                           currentPubkey={identityQuery.data?.pubkey}
                           errorMessage={channelsErrorMessage}

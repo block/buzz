@@ -3,7 +3,7 @@ import { AppHuddleBar } from "@/app/AppHuddleBar";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
 import {
   type HuddlePresentation,
-  shouldMountMainHuddleDrawerBar,
+  shouldShowHuddleDockChrome,
 } from "@/app/huddlePresentation";
 import { HuddleProvider, useHuddle } from "@/features/huddle";
 import { HUDDLE_SHORTCUT_EVENT } from "@/shared/lib/keyboard-shortcuts";
@@ -16,7 +16,7 @@ type AppHuddleShellProps = {
   isCompanionOpen: boolean;
   isDrawerOpen: boolean;
   isRoom: boolean;
-  /** Main-app presentation enum; gate mounts on `presentation === "drawer"`. */
+  /** Main-app presentation enum; dock chrome uses isRoom XOR main mount gate. */
   presentation: HuddlePresentation;
   onCompanionOpen: () => void | Promise<void>;
   onHuddleStartPendingChange: (pending: boolean) => void;
@@ -62,9 +62,15 @@ export function AppHuddleShell({
   onViewHuddleChannel,
   onVisibilityChange,
 }: AppHuddleShellProps) {
+  // Companion (`isRoom` from huddle-* window label) always mounts + reveals the
+  // dock. Main never does — do not gate companion chrome on presentation/drawer.
+  const showDockChrome = shouldShowHuddleDockChrome({ isRoom, presentation });
+
+  // Companion-only: room webview owns mic/AudioWorklet. Main-owned capture goes
+  // deaf when WKWebView suspends the background AudioContext under companion focus.
   return (
     <HuddleProvider
-      ownsAudioSession={!isRoom}
+      ownsAudioSession={isRoom}
       onHuddleStartPendingChange={
         isRoom ? undefined : onHuddleStartPendingChange
       }
@@ -76,7 +82,7 @@ export function AppHuddleShell({
         <RemindMeLaterProvider pubkey={currentPubkey}>
           <div
             className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
-            data-huddle-open={isDrawerOpen}
+            data-huddle-open={showDockChrome || isDrawerOpen}
             data-huddle-companion={isCompanionOpen || presentation === "window"}
             data-huddle-window={isRoom}
           >
@@ -84,13 +90,13 @@ export function AppHuddleShell({
               aria-hidden="true"
               className={cn(
                 "buzz-huddle-drawer-backdrop",
-                isDrawerOpen && "buzz-huddle-drawer-backdrop-open",
+                showDockChrome && "buzz-huddle-drawer-backdrop-open",
               )}
             />
             <div
               className={cn(
                 "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
-                isDrawerOpen &&
+                showDockChrome &&
                   (isRoom
                     ? "buzz-huddle-app-surface-room-open"
                     : "buzz-huddle-app-surface-open"),
@@ -99,9 +105,8 @@ export function AppHuddleShell({
               <BuzzTheme.GradientLayer />
               {children}
             </div>
-            {/* Strict XOR: main mounts HuddleBar/drawer only when
-                presentation === "drawer". Companion room always keeps its bar. */}
-            {isRoom || shouldMountMainHuddleDrawerBar(presentation) ? (
+            {/* Companion room label → dock. Main presentation never mounts. */}
+            {showDockChrome ? (
               <div className="buzz-huddle-drawer-slot absolute inset-x-0 bottom-0 z-[2] min-h-(--buzz-huddle-drawer-height)">
                 <AppHuddleBar
                   mode={isRoom ? "room" : "main"}

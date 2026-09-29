@@ -9,6 +9,7 @@ import {
   Download,
   FlaskConical,
   Keyboard,
+  LayoutList,
   LayoutTemplate,
   MessagesSquare,
   MonitorCog,
@@ -86,6 +87,7 @@ import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { VoiceSettingsCard } from "./VoiceSettingsCard";
 import { PinnedSitesSettingsCard } from "@/features/pinned-sites/ui/PinnedSitesSettingsCard";
+import { CommunitySectionsSettingsCard } from "@/features/community-sections/ui/CommunitySectionsSettingsCard";
 
 export type SettingsSection =
   | "profile"
@@ -99,6 +101,7 @@ export type SettingsSection =
   | "shortcuts"
   | "hosted-communities"
   | "community-members"
+  | "community-sections"
   | "bots"
   | "moderation"
   | "custom-emoji"
@@ -122,6 +125,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "shortcuts",
   "hosted-communities",
   "community-members",
+  "community-sections",
   "bots",
   "moderation",
   "custom-emoji",
@@ -229,6 +233,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "community-members",
     label: "Invites",
     icon: Ticket,
+  },
+  {
+    value: "community-sections",
+    label: "Community sections",
+    icon: LayoutList,
   },
   {
     value: "bots",
@@ -879,6 +888,8 @@ export function renderSettingsSection(
       return (
         <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
       );
+    case "community-sections":
+      return <CommunitySectionsSettingsCard />;
     case "bots":
       return (
         <>

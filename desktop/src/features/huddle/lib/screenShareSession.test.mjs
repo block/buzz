@@ -127,3 +127,56 @@ test("screenShareSession source forces dual peer connection", async () => {
   assert.match(src, /singlePeerConnection:\s*false/);
   assert.match(src, /acquireDisplayMedia/);
 });
+
+test("screenShareSession serializes reconnects", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("./screenShareSession.ts", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(src, /connectExclusive/);
+  assert.match(src, /connectTail/);
+});
+
+
+test("screenShareSession suppresses remote clear while reconnecting", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("./screenShareSession.ts", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(src, /reconnecting/);
+  assert.match(src, /RoomEvent\.Reconnecting/);
+  assert.match(src, /RoomEvent\.Reconnected/);
+  assert.match(src, /if \(this\.reconnecting\) return/);
+  assert.match(src, /attachExistingRemoteTracks/);
+});
+
+test("screenShareSession detaches room without stopping local capture", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("./screenShareSession.ts", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(src, /detachRoomKeepLocal/);
+  assert.match(src, /onPublishInterrupted/);
+  assert.match(src, /onReconnectingChanged/);
+  // Permanent disconnect with held local stream must not stop tracks.
+  assert.match(src, /if \(this\.localStream\)/);
+  assert.match(src, /onPublishInterrupted\?\.\(\)/);
+});
+
+test("screenShareSession startShare can republish held stream", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("./screenShareSession.ts", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(src, /readyState === "ended"/);
+  assert.match(src, /heldLocalStream/);
+  assert.match(src, /isSharing/);
+});

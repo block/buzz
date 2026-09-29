@@ -189,6 +189,7 @@ export function SidebarDndContext({
   onAssignChannel,
   onUnassignChannel,
   onReorderSections,
+  lockedChannelIds,
 }: {
   sectionIds: string[];
   channels: { id: string; name: string }[];
@@ -197,6 +198,8 @@ export function SidebarDndContext({
   onAssignChannel: (channelId: string, sectionId: string) => void;
   onUnassignChannel: (channelId: string) => void;
   onReorderSections: (orderedIds: string[]) => void;
+  /** Channels that belong to a subscribed community section while Use Community Sections is on. */
+  lockedChannelIds?: ReadonlySet<string>;
 }) {
   const [activeDragItem, setActiveDragItem] =
     React.useState<SidebarDragItem | null>(null);
@@ -209,6 +212,7 @@ export function SidebarDndContext({
       const data = event.active.data.current;
       if (!data) return;
       if (data.type === "channel") {
+        if (lockedChannelIds?.has(data.channelId as string)) return;
         const ch = channels.find((c) => c.id === data.channelId);
         if (ch)
           setActiveDragItem({
@@ -226,7 +230,7 @@ export function SidebarDndContext({
           });
       }
     },
-    [channels, sections],
+    [channels, lockedChannelIds, sections],
   );
 
   const handleDragEnd = React.useCallback(
@@ -239,6 +243,7 @@ export function SidebarDndContext({
       if (!activeData) return;
       if (activeData.type === "channel") {
         const channelId = activeData.channelId as string;
+        if (lockedChannelIds?.has(channelId)) return;
         if (overData?.type === "section-drop") {
           onAssignChannel(channelId, overData.sectionId as string);
         } else if (overData?.type === "ungrouped") {
@@ -254,7 +259,13 @@ export function SidebarDndContext({
         }
       }
     },
-    [sectionIds, onAssignChannel, onUnassignChannel, onReorderSections],
+    [
+      sectionIds,
+      lockedChannelIds,
+      onAssignChannel,
+      onUnassignChannel,
+      onReorderSections,
+    ],
   );
 
   return (

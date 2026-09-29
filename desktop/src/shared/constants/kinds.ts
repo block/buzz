@@ -86,6 +86,7 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 export const KIND_DM_VISIBILITY = 30622;
 export const KIND_COMMUNITY_PINNED_SITES = 30623;
 export const KIND_COMMUNITY_BOTS = 30624;
+export const KIND_COMMUNITY_SECTIONS = 30625;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.

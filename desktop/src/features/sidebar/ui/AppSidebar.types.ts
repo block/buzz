@@ -18,13 +18,15 @@ export type CollapsibleSidebarGroup =
   | "starredThreads"
   | "channels"
   | "forums"
-  | "directMessages";
+  | "directMessages"
+  | "archivedHuddles";
 
 export type CreateChannelKind = "stream" | "forum";
 
 export type AppSidebarProps = {
   addCommunityPrefill?: AddCommunityPrefillRequest | null;
   activeCommunity: Community | null;
+  archivedHuddleChannels?: Channel[];
   channels: Channel[];
   currentPubkey?: string;
   fallbackDisplayName?: string;

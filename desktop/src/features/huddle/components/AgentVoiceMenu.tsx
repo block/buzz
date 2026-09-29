@@ -20,6 +20,22 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Separator } from "@/shared/ui/separator";
 import { Switch } from "@/shared/ui/switch";
 
+export const HUDDLE_ACTIVATION_KEYWORD_PRESETS = [
+  "hey",
+  "at",
+  "agent",
+  "bot",
+  "robo",
+  "ok",
+  "yo",
+  "okay",
+] as const;
+
+export type HuddleActivationKeyword =
+  (typeof HUDDLE_ACTIVATION_KEYWORD_PRESETS)[number];
+
+export const DEFAULT_HUDDLE_ACTIVATION_KEYWORD: HuddleActivationKeyword = "hey";
+
 export type HuddleAgentVoiceSettings = {
   enabled: boolean;
   voice_key: string;
@@ -27,6 +43,8 @@ export type HuddleAgentVoiceSettings = {
   addressable?: boolean;
   /** ~60s high-bar auto-chime. Default false. */
   agent_barge?: boolean;
+  /** Per-agent spoken activation keyword. Default "hey". */
+  activation_keyword?: string;
 };
 
 type AgentVoiceMenuProps = {
@@ -66,7 +84,8 @@ export function AgentVoiceMenu({
         | "set_huddle_agent_tts_enabled"
         | "set_huddle_agent_voice"
         | "set_huddle_agent_addressable"
-        | "set_huddle_agent_barge",
+        | "set_huddle_agent_barge"
+        | "set_huddle_agent_activation_keyword",
       payload: Record<string, unknown>,
     ) => {
       setBusy(true);
@@ -123,7 +142,7 @@ export function AgentVoiceMenu({
                 Addressable
               </label>
               <p className="text-2xs text-muted-foreground">
-                Spoken keyword + name wakes this agent
+                Spoken activation + name wakes this agent
               </p>
             </div>
             <Switch
@@ -135,6 +154,63 @@ export function AgentVoiceMenu({
                 void update("set_huddle_agent_addressable", { addressable });
               }}
             />
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <span className="text-sm font-medium">Activation word</span>
+              <p className="text-2xs text-muted-foreground">
+                Say &ldquo;
+                {settings?.activation_keyword ??
+                  DEFAULT_HUDDLE_ACTIVATION_KEYWORD}{" "}
+                {displayName}&rdquo; (fuzzy STT OK)
+              </p>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={`Activation word for ${displayName}`}
+                  className="h-8 shrink-0 gap-1.5 px-2 text-sm capitalize text-muted-foreground"
+                  data-testid="huddle-agent-activation-keyword"
+                  disabled={
+                    !settings || busy || !(settings?.addressable ?? true)
+                  }
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  {settings?.activation_keyword ??
+                    DEFAULT_HUDDLE_ACTIVATION_KEYWORD}
+                  <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                className="max-h-72 min-w-28 overflow-y-auto"
+              >
+                <DropdownMenuRadioGroup
+                  onValueChange={(keyword) => {
+                    void update("set_huddle_agent_activation_keyword", {
+                      activationKeyword: keyword,
+                    });
+                  }}
+                  value={
+                    settings?.activation_keyword ??
+                    DEFAULT_HUDDLE_ACTIVATION_KEYWORD
+                  }
+                >
+                  {HUDDLE_ACTIVATION_KEYWORD_PRESETS.map((keyword) => (
+                    <DropdownMenuRadioItem
+                      className="capitalize"
+                      key={keyword}
+                      value={keyword}
+                    >
+                      {keyword}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
           <div className="flex items-center justify-between gap-3">

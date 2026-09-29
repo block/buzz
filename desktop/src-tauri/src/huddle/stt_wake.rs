@@ -1,20 +1,21 @@
 //! STT wake gate: only p-tag / wake huddle agents when speech uses
-//! the explicit phrase **"{activation} {agent name}"** (case-insensitive).
+//! the explicit phrase **"{activation} {agent name}"** (case-insensitive),
+//! with light fuzzy tolerance for STT mis-hears (e.g. "Ok Faybell" ≈ "Okay Fable").
 //!
 //! Ordinary STT lines still post as kind:9 transcript messages, but with
 //! **no** agent p-tags. Bare name address (`Fable, what do you think?`) does
 //! **not** wake. Explicit chat @mentions continue to wake via the normal
 //! composer send path (unchanged here).
 //!
-//! Default activation keyword is **"hey"** (friendlier than the legacy
-//! hard-coded "at"). The live keyword is user-selectable in the huddle UI.
+//! Each huddle agent has its own activation keyword (default **"hey"**).
+//! Addressable (per-agent) still gates whether a spoken wake applies.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Default spoken activation keyword when the user has not chosen one.
 pub const DEFAULT_ACTIVATION_KEYWORD: &str = "hey";
 
-/// Short preset list shown in the huddle activation dropdown.
+/// Short preset list shown in the per-agent activation dropdown.
 pub const ACTIVATION_KEYWORD_PRESETS: &[&str] =
     &["hey", "at", "agent", "bot", "robo", "ok", "yo", "okay"];
 
@@ -25,6 +26,8 @@ pub struct AgentNameAlias {
     pub pubkey: String,
     /// Non-empty display names / aliases (trimmed). Matched longest-first.
     pub aliases: Vec<String>,
+    /// Per-agent spoken activation keyword (preset allow-list).
+    pub activation_keyword: String,
 }
 
 /// Normalize a user-facing activation keyword for matching / persistence.
@@ -43,102 +46,318 @@ pub fn normalize_activation_keyword(raw: &str) -> Option<String> {
         .map(|p| (*p).to_string())
 }
 
-/// Return pubkeys of huddle agents addressed by spoken
-/// `{keyword} <Name>` in `text`.
-///
-/// Matching rules:
-/// - Case-insensitive activation keyword at start-of-string or after whitespace.
-/// - Immediately followed by whitespace, then an agent alias (longest first).
-/// - Alias must end at a word boundary (end of string, whitespace, or
-///   comma / punctuation like `,.;:!?)]}`).
-/// - Bare agent name without leading keyword does **not** match.
-/// - Keyword with no following huddle agent name does **not** match.
-pub fn addressed_agent_pubkeys(
-    text: &str,
-    agents: &[AgentNameAlias],
-    activation_keyword: &str,
-) -> Vec<String> {
-    if text.is_empty() || agents.is_empty() {
-        return Vec::new();
+/// Keyword synonym groups for common STT confusions (ok ↔ okay).
+fn keyword_synonym_group(normalized: &str) -> Option<&'static [&'static str]> {
+    match normalized {
+        "ok" | "okay" => Some(&["ok", "okay"]),
+        _ => None,
     }
-    let keyword = normalize_activation_keyword(activation_keyword)
-        .unwrap_or_else(|| DEFAULT_ACTIVATION_KEYWORD.to_string());
-    let keyword_lower = keyword.to_ascii_lowercase();
-    if keyword_lower.is_empty() {
-        return Vec::new();
-    }
-
-    let mut aliases: Vec<(&str, &str)> = Vec::new(); // (alias, pubkey)
-    for agent in agents {
-        let pk = agent.pubkey.trim();
-        if pk.is_empty() {
-            continue;
-        }
-        for alias in &agent.aliases {
-            let a = alias.trim();
-            if !a.is_empty() {
-                aliases.push((a, pk));
-            }
-        }
-    }
-    if aliases.is_empty() {
-        return Vec::new();
-    }
-    // Longest alias first so "hey Claim Miner" wins over "hey Claim".
-    aliases.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
-
-    let lower = text.to_ascii_lowercase();
-    let mut hit_pubkeys = Vec::new();
-    let mut seen = HashSet::new();
-
-    for (idx, _) in lower.match_indices(&keyword_lower) {
-        if !is_keyword_token_start(&lower, idx, keyword_lower.len()) {
-            continue;
-        }
-        let after_kw = idx + keyword_lower.len();
-        let rest = &lower[after_kw..];
-        let Some(name_start_rel) = rest.find(|c: char| !c.is_ascii_whitespace()) else {
-            continue;
-        };
-        // Require at least one whitespace between keyword and the name.
-        if name_start_rel == 0 {
-            continue;
-        }
-        let name_region = &rest[name_start_rel..];
-        if let Some((_, pubkey)) = aliases.iter().find(|(alias, _)| {
-            let al = alias.to_ascii_lowercase();
-            name_region
-                .get(..al.len())
-                .is_some_and(|s| s == al && is_name_boundary(&name_region[al.len()..]))
-        }) {
-            let pk = (*pubkey).to_string();
-            if seen.insert(pk.to_ascii_lowercase()) {
-                hit_pubkeys.push(pk);
-            }
-        }
-    }
-
-    hit_pubkeys
 }
 
-/// True when `keyword` at `idx` is a standalone token (start or after
-/// whitespace, and not part of a longer word like "heythere" / "that").
-fn is_keyword_token_start(lower: &str, idx: usize, keyword_len: usize) -> bool {
-    let bytes = lower.as_bytes();
-    if idx + keyword_len > bytes.len() {
+fn collapse_duplicate_letters(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev: Option<char> = None;
+    for c in s.chars() {
+        if prev == Some(c) {
+            continue;
+        }
+        out.push(c);
+        prev = Some(c);
+    }
+    out
+}
+
+/// Damerau–Levenshtein (optimal string alignment): insert/delete/substitute
+/// plus adjacent transposition, so STT swaps like "Faybel"≈"Fable" stay close.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            let mut best = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(dp[i - 2][j - 2] + 1);
+            }
+            dp[i][j] = best;
+        }
+    }
+    dp[m][n]
+}
+
+/// Whether a spoken token matches the agent's configured activation keyword.
+///
+/// Exact and synonym matches (ok/okay) always pass. Longer keywords also
+/// allow a single edit so STT noise like "agents" ≈ "agent" still wakes.
+pub fn keywords_fuzzy_match(spoken: &str, expected: &str) -> bool {
+    let expected_n = normalize_activation_keyword(expected)
+        .unwrap_or_else(|| expected.trim().to_ascii_lowercase());
+    if expected_n.is_empty() {
         return false;
     }
-    // Preceded by start or whitespace.
-    if idx > 0 && !bytes[idx - 1].is_ascii_whitespace() {
+    let spoken_raw = spoken.trim().to_ascii_lowercase();
+    if spoken_raw.is_empty() {
         return false;
     }
-    true
+    if let Some(spoken_n) = normalize_activation_keyword(&spoken_raw) {
+        if spoken_n == expected_n {
+            return true;
+        }
+        if let (Some(g1), Some(g2)) = (
+            keyword_synonym_group(&spoken_n),
+            keyword_synonym_group(&expected_n),
+        ) {
+            if g1.iter().any(|k| g2.contains(k)) {
+                return true;
+            }
+        }
+    }
+    if let Some(group) = keyword_synonym_group(&expected_n) {
+        if group.iter().any(|k| *k == spoken_raw) {
+            return true;
+        }
+        let collapsed = collapse_duplicate_letters(&spoken_raw);
+        if group.iter().any(|k| *k == collapsed.as_str()) {
+            return true;
+        }
+    }
+    // Single-edit tolerance for keywords of length >= 3 (not "at"/"ok"/"yo").
+    if expected_n.len() >= 3 && spoken_raw.len() >= 3 {
+        let a = collapse_duplicate_letters(&spoken_raw);
+        let b = collapse_duplicate_letters(&expected_n);
+        if levenshtein(&a, &b) <= 1 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Max edit distance allowed for a fuzzy agent-name match.
+fn name_fuzzy_allowed_distance(alias_len: usize, heard_len: usize) -> usize {
+    let max_len = alias_len.max(heard_len);
+    let min_len = alias_len.min(heard_len);
+    if min_len < 3 {
+        return 0; // very short names: exact only
+    }
+    // After duplicate-letter collapse + Damerau, allow up to 2 edits for
+    // typical STT mangling ("Fable"↔"Faybell") while keeping short typos tight.
+    if max_len >= 5 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Fuzzy compare heard name token(s) to an alias. Returns edit distance when
+/// it matches (0 = exact), or None.
+pub fn names_fuzzy_match(heard: &str, alias: &str) -> Option<usize> {
+    let heard_raw = heard.trim().to_ascii_lowercase();
+    let alias_raw = alias.trim().to_ascii_lowercase();
+    if heard_raw.is_empty() || alias_raw.is_empty() {
+        return None;
+    }
+    if heard_raw == alias_raw {
+        return Some(0);
+    }
+    let heard_n = collapse_duplicate_letters(&heard_raw);
+    let alias_n = collapse_duplicate_letters(&alias_raw);
+    if heard_n == alias_n {
+        return Some(0);
+    }
+    // First letter must agree — blocks cross-agent false wakes (Fable vs Maple).
+    if heard_n.chars().next() != alias_n.chars().next() {
+        return None;
+    }
+    let dist = levenshtein(&heard_n, &alias_n);
+    let allowed = name_fuzzy_allowed_distance(alias_n.len(), heard_n.len());
+    if dist <= allowed {
+        Some(dist)
+    } else {
+        None
+    }
 }
 
 fn is_name_boundary(s: &str) -> bool {
     s.chars().next().is_none_or(|c| {
         c.is_ascii_whitespace() || matches!(c, ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}')
     })
+}
+
+/// Split `text` into whitespace-separated tokens with byte offsets.
+fn tokenize(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (idx, ch) in text.char_indices() {
+        if ch.is_ascii_whitespace() {
+            if let Some(s) = start.take() {
+                out.push((s, text[s..idx].to_string()));
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, text[s..].to_string()));
+    }
+    out
+}
+
+/// Strip trailing punctuation from a spoken name token for matching.
+fn strip_trailing_punct(token: &str) -> &str {
+    token.trim_end_matches(|c: char| {
+        matches!(c, ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}')
+    })
+}
+
+/// Return pubkeys of huddle agents addressed by spoken
+/// `{keyword} <Name>` in `text`, using each agent's own activation keyword
+/// and fuzzy tolerance for STT mistakes.
+///
+/// Matching rules:
+/// - Keyword is a standalone token matching the agent's keyword (exact,
+///   synonym, or light fuzzy).
+/// - Immediately followed by an agent alias (longest first; fuzzy OK).
+/// - Alias must end at a word boundary (end of string, whitespace, or
+///   comma / punctuation like `,.;:!?)]}`).
+/// - Bare agent name without leading keyword does **not** match.
+/// - Keyword with no following huddle agent name does **not** match.
+/// - When two agents fuzzy-compete for the same span, the closer (then
+///   longer alias) wins; an exact tie across different agents wakes none
+///   for that span (avoids easy false wakes).
+pub fn addressed_agent_pubkeys(text: &str, agents: &[AgentNameAlias]) -> Vec<String> {
+    if text.is_empty() || agents.is_empty() {
+        return Vec::new();
+    }
+
+    let tokens = tokenize(text);
+    if tokens.len() < 2 {
+        return Vec::new();
+    }
+
+    // Candidates: (token_index_of_keyword, pubkey, name_dist, alias_len)
+    let mut candidates: Vec<(usize, String, usize, usize)> = Vec::new();
+
+    for (ti, (_off, raw_kw)) in tokens.iter().enumerate() {
+        if ti + 1 >= tokens.len() {
+            break;
+        }
+        let kw_token = strip_trailing_punct(raw_kw);
+        if kw_token.is_empty() {
+            continue;
+        }
+
+        for agent in agents {
+            let pk = agent.pubkey.trim();
+            if pk.is_empty() {
+                continue;
+            }
+            let expected = normalize_activation_keyword(&agent.activation_keyword)
+                .unwrap_or_else(|| DEFAULT_ACTIVATION_KEYWORD.to_string());
+            if !keywords_fuzzy_match(kw_token, &expected) {
+                continue;
+            }
+
+            let mut aliases: Vec<&str> = agent
+                .aliases
+                .iter()
+                .map(|a| a.trim())
+                .filter(|a| !a.is_empty())
+                .collect();
+            aliases.sort_by_key(|a| std::cmp::Reverse(a.len()));
+
+            for alias in aliases {
+                let alias_words: Vec<&str> = alias.split_whitespace().collect();
+                if alias_words.is_empty() {
+                    continue;
+                }
+                let follow = &tokens[ti + 1..];
+                if follow.len() < alias_words.len() {
+                    continue;
+                }
+
+                let mut heard_parts: Vec<String> = Vec::with_capacity(alias_words.len());
+                let mut ok = true;
+                for (wi, _) in alias_words.iter().enumerate() {
+                    let part = strip_trailing_punct(&follow[wi].1);
+                    if part.is_empty() {
+                        ok = false;
+                        break;
+                    }
+                    heard_parts.push(part.to_ascii_lowercase());
+                }
+                if !ok {
+                    continue;
+                }
+
+                let heard_joined = heard_parts.join(" ");
+                let alias_joined = alias_words.join(" ").to_ascii_lowercase();
+
+                if let Some(dist) = names_fuzzy_match(&heard_joined, &alias_joined) {
+                    candidates.push((ti, pk.to_string(), dist, alias.len()));
+                    break; // best (longest) alias for this agent at this keyword
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Per keyword token index: keep the best candidate. Prefer lower name
+    // distance, then longer alias. If two different pubkeys tie, drop the span.
+    let mut best_by_span: HashMap<usize, (String, usize, usize)> = HashMap::new();
+    let mut tied_spans: HashSet<usize> = HashSet::new();
+
+    for (ti, pk, dist, alias_len) in candidates {
+        if tied_spans.contains(&ti) {
+            continue;
+        }
+        match best_by_span.get(&ti) {
+            None => {
+                best_by_span.insert(ti, (pk, dist, alias_len));
+            }
+            Some((best_pk, best_dist, best_len)) => {
+                if pk.eq_ignore_ascii_case(best_pk) {
+                    if dist < *best_dist || (dist == *best_dist && alias_len > *best_len) {
+                        best_by_span.insert(ti, (pk, dist, alias_len));
+                    }
+                } else if dist < *best_dist || (dist == *best_dist && alias_len > *best_len) {
+                    best_by_span.insert(ti, (pk, dist, alias_len));
+                } else if dist == *best_dist && alias_len == *best_len {
+                    best_by_span.remove(&ti);
+                    tied_spans.insert(ti);
+                }
+            }
+        }
+    }
+
+    let mut hit_pubkeys = Vec::new();
+    let mut seen = HashSet::new();
+    let mut spans: Vec<_> = best_by_span.into_iter().collect();
+    spans.sort_by_key(|(ti, _)| *ti);
+    for (_ti, (pk, _, _)) in spans {
+        if seen.insert(pk.to_ascii_lowercase()) {
+            hit_pubkeys.push(pk);
+        }
+    }
+    hit_pubkeys
 }
 
 /// Build the kind:9 content posted when STT wakes an agent.
@@ -236,6 +455,7 @@ pub fn aliases_from_managed_records(
             out.push(AgentNameAlias {
                 pubkey: pk_norm.to_string(),
                 aliases,
+                activation_keyword: DEFAULT_ACTIVATION_KEYWORD.to_string(),
             });
         }
     }
@@ -263,51 +483,58 @@ pub fn collect_record_aliases(name: &str, display_name: Option<&str>) -> Vec<Str
 mod tests {
     use super::*;
 
-    fn fable() -> AgentNameAlias {
+    fn agent(pubkey: &str, aliases: &[&str], keyword: &str) -> AgentNameAlias {
         AgentNameAlias {
-            pubkey: "pk-fable".into(),
-            aliases: vec!["Fable".into()],
+            pubkey: pubkey.into(),
+            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
+            activation_keyword: keyword.into(),
         }
     }
 
+    fn fable() -> AgentNameAlias {
+        agent("pk-fable", &["Fable"], "hey")
+    }
+
     fn claim_miner() -> AgentNameAlias {
-        AgentNameAlias {
-            pubkey: "pk-cm".into(),
-            aliases: vec!["Claim Miner".into(), "ClaimMiner".into()],
-        }
+        agent("pk-cm", &["Claim Miner", "ClaimMiner"], "hey")
     }
 
     #[test]
     fn hey_fable_tags_fable_default() {
-        let hits = addressed_agent_pubkeys("Hey Fable, what do you think?", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("Hey Fable, what do you think?", &[fable()]);
         assert_eq!(hits, vec!["pk-fable"]);
     }
 
     #[test]
     fn at_fable_tags_when_keyword_is_at() {
-        let hits = addressed_agent_pubkeys("At Fable, what do you think?", &[fable()], "at");
+        let hits = addressed_agent_pubkeys(
+            "At Fable, what do you think?",
+            &[agent("pk-fable", &["Fable"], "at")],
+        );
         assert_eq!(hits, vec!["pk-fable"]);
     }
 
     #[test]
     fn bare_fable_does_not_tag() {
-        let hits = addressed_agent_pubkeys("Fable, what do you think?", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("Fable, what do you think?", &[fable()]);
         assert!(hits.is_empty());
     }
 
     #[test]
     fn wrong_keyword_does_not_tag() {
-        let hits = addressed_agent_pubkeys("At Fable please", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("At Fable please", &[fable()]);
         assert!(hits.is_empty());
-        let hits = addressed_agent_pubkeys("Hey Fable please", &[fable()], "at");
+        let hits =
+            addressed_agent_pubkeys("Hey Fable please", &[agent("pk-fable", &["Fable"], "at")]);
         assert!(hits.is_empty());
     }
 
     #[test]
     fn keyword_case_insensitive() {
-        let hits = addressed_agent_pubkeys("HEY fable can you help", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("HEY fable can you help", &[fable()]);
         assert_eq!(hits, vec!["pk-fable"]);
-        let hits = addressed_agent_pubkeys("yo FABLE please", &[fable()], "yo");
+        let hits =
+            addressed_agent_pubkeys("yo FABLE please", &[agent("pk-fable", &["Fable"], "yo")]);
         assert_eq!(hits, vec!["pk-fable"]);
     }
 
@@ -315,34 +542,34 @@ mod tests {
     fn multi_char_presets_match() {
         for kw in ["agent", "bot", "robo", "ok", "okay"] {
             let text = format!("{kw} Fable summarize");
-            let hits = addressed_agent_pubkeys(&text, &[fable()], kw);
+            let hits = addressed_agent_pubkeys(&text, &[agent("pk-fable", &["Fable"], kw)]);
             assert_eq!(hits, vec!["pk-fable"], "kw={kw}");
         }
     }
 
     #[test]
     fn keyword_without_agent_name_does_not_tag() {
-        let hits = addressed_agent_pubkeys("Hey the store later", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("Hey the store later", &[fable()]);
         assert!(hits.is_empty());
-        let hits = addressed_agent_pubkeys("we meet at noon", &[fable()], "at");
+        let hits =
+            addressed_agent_pubkeys("we meet at noon", &[agent("pk-fable", &["Fable"], "at")]);
         assert!(hits.is_empty());
-        let hits = addressed_agent_pubkeys("Hey", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("Hey", &[fable()]);
         assert!(hits.is_empty());
-        let hits = addressed_agent_pubkeys("heythere rising", &[fable()], "hey");
+        let hits = addressed_agent_pubkeys("heythere rising", &[fable()]);
         assert!(hits.is_empty());
     }
 
     #[test]
     fn stt_without_keyword_name_logs_no_tags() {
         let agents = vec![fable(), claim_miner()];
-        assert!(addressed_agent_pubkeys("sounds good everyone", &agents, "hey").is_empty());
-        assert!(addressed_agent_pubkeys("Fable and ClaimMiner agree", &agents, "hey").is_empty());
+        assert!(addressed_agent_pubkeys("sounds good everyone", &agents).is_empty());
+        assert!(addressed_agent_pubkeys("Fable and ClaimMiner agree", &agents).is_empty());
     }
 
     #[test]
     fn multiword_alias() {
-        let hits =
-            addressed_agent_pubkeys("Hey Claim Miner, summarize please", &[claim_miner()], "hey");
+        let hits = addressed_agent_pubkeys("Hey Claim Miner, summarize please", &[claim_miner()]);
         assert_eq!(hits, vec!["pk-cm"]);
     }
 
@@ -355,7 +582,7 @@ mod tests {
             "Hey Fable:",
             "Hey Fable)",
         ] {
-            let hits = addressed_agent_pubkeys(text, &[fable()], "hey");
+            let hits = addressed_agent_pubkeys(text, &[fable()]);
             assert_eq!(hits, vec!["pk-fable"], "text={text}");
         }
     }
@@ -363,8 +590,67 @@ mod tests {
     #[test]
     fn only_addressed_agent_tagged() {
         let agents = vec![fable(), claim_miner()];
-        let hits = addressed_agent_pubkeys("Hey Fable take the lead", &agents, "hey");
+        let hits = addressed_agent_pubkeys("Hey Fable take the lead", &agents);
         assert_eq!(hits, vec!["pk-fable"]);
+    }
+
+    #[test]
+    fn per_agent_keywords_independent() {
+        let agents = vec![
+            agent("pk-fable", &["Fable"], "hey"),
+            agent("pk-cm", &["Claim Miner", "ClaimMiner"], "yo"),
+        ];
+        assert_eq!(
+            addressed_agent_pubkeys("Hey Fable go", &agents),
+            vec!["pk-fable"]
+        );
+        assert_eq!(
+            addressed_agent_pubkeys("Yo ClaimMiner go", &agents),
+            vec!["pk-cm"]
+        );
+        assert!(addressed_agent_pubkeys("Hey ClaimMiner go", &agents).is_empty());
+        assert!(addressed_agent_pubkeys("Yo Fable go", &agents).is_empty());
+    }
+
+    #[test]
+    fn okay_fable_matches_ok_faybell_fuzzy() {
+        // Agent configured as "okay" + "Fable"; STT heard "Ok Faybell".
+        let agents = vec![agent("pk-fable", &["Fable"], "okay")];
+        let hits = addressed_agent_pubkeys("Ok Faybell, what do you think?", &agents);
+        assert_eq!(hits, vec!["pk-fable"]);
+        // Reverse direction: agent "ok", STT "Okay Fable".
+        let agents = vec![agent("pk-fable", &["Fable"], "ok")];
+        let hits = addressed_agent_pubkeys("Okay Fable summarize", &agents);
+        assert_eq!(hits, vec!["pk-fable"]);
+    }
+
+    #[test]
+    fn fuzzy_name_requires_first_letter() {
+        let agents = vec![agent("pk-fable", &["Fable"], "hey")];
+        assert!(addressed_agent_pubkeys("Hey Maple please", &agents).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_does_not_easily_cross_wake_other_agent() {
+        let agents = vec![
+            agent("pk-fable", &["Fable"], "hey"),
+            agent("pk-maple", &["Maple"], "hey"),
+        ];
+        assert_eq!(
+            addressed_agent_pubkeys("Hey Fayble go", &agents),
+            vec!["pk-fable"]
+        );
+        assert_eq!(
+            addressed_agent_pubkeys("Hey Mayple go", &agents),
+            vec!["pk-maple"]
+        );
+    }
+
+    #[test]
+    fn short_names_stay_exact() {
+        let agents = vec![agent("pk-ab", &["Ab"], "hey")];
+        assert_eq!(addressed_agent_pubkeys("Hey Ab go", &agents), vec!["pk-ab"]);
+        assert!(addressed_agent_pubkeys("Hey Ac go", &agents).is_empty());
     }
 
     #[test]
@@ -385,6 +671,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].pubkey, "pk-fable");
         assert_eq!(out[0].aliases, vec!["Fable"]);
+        assert_eq!(out[0].activation_keyword, "hey");
     }
 
     #[test]
@@ -433,5 +720,12 @@ mod tests {
             "Hey Fable go",
         );
         assert_eq!(with_wake_dup, vec!["earlier".to_string()]);
+    }
+
+    #[test]
+    fn unused_is_name_boundary_helper_still_covers_punct() {
+        assert!(is_name_boundary(""));
+        assert!(is_name_boundary(", more"));
+        assert!(!is_name_boundary("more"));
     }
 }

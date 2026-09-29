@@ -3826,6 +3826,7 @@ type MockHuddleState = {
       voice_key: string;
       addressable?: boolean;
       agent_barge?: boolean;
+      activation_keyword?: string;
     }
   >;
   tts_enabled: boolean;
@@ -3910,6 +3911,7 @@ function refreshMockHuddleMembership(config?: E2eConfig | null) {
         voice_key: voiceKey,
         addressable: true,
         agent_barge: false,
+        activation_keyword: "hey",
       };
     }
   });
@@ -12313,6 +12315,40 @@ export function maybeInstallE2eTauriMocks() {
           mockHuddle.state.agent_voice_settings[request.agentPubkey];
         if (!settings) throw new Error("Agent is not in the active huddle.");
         settings.agent_barge = request.agentBarge;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return structuredClone(settings);
+      }
+      case "set_huddle_agent_activation_keyword": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const request = payload as {
+          agentPubkey?: string;
+          activationKeyword?: string;
+        };
+        const presets = [
+          "hey",
+          "at",
+          "agent",
+          "bot",
+          "robo",
+          "ok",
+          "yo",
+          "okay",
+        ] as const;
+        if (
+          !request.agentPubkey ||
+          typeof request.activationKeyword !== "string" ||
+          !(presets as readonly string[]).includes(
+            request.activationKeyword.toLowerCase(),
+          )
+        ) {
+          throw new Error("Missing or unsupported agent activation keyword.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        const settings =
+          mockHuddle.state.agent_voice_settings[request.agentPubkey];
+        if (!settings) throw new Error("Agent is not in the active huddle.");
+        settings.activation_keyword = request.activationKeyword.toLowerCase();
         persistMockHuddle();
         await emitMockHuddleState();
         return structuredClone(settings);

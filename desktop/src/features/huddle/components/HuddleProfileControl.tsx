@@ -41,6 +41,7 @@ export function HuddleProfileControl({
     isMuted,
     leaveHuddle,
     micConnected,
+    pttActive,
     micGain,
     selectedDeviceId,
     setMicGain,
@@ -148,6 +149,7 @@ export function HuddleProfileControl({
           compact
           isMuted={isMuted}
           isPttMode={voiceInputMode === "push_to_talk"}
+          pttActive={pttActive}
           micConnected={micConnected}
           micGain={micGain}
           micLevel={micLevel}

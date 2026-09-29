@@ -70,7 +70,7 @@ const settingsNavGroups: Array<{
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "community-members", "bots"],
+    sections: ["hosted-communities", "community-members", "community-sections", "bots"],
   },
   {
     label: "App",

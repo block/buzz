@@ -73,7 +73,8 @@
   .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-app-surface-open {
     bottom: calc(
       var(--buzz-huddle-drawer-height) +
-      2 * var(--buzz-huddle-drawer-inset)
+      2 *
+      var(--buzz-huddle-drawer-inset)
     );
   }
 
@@ -97,7 +98,8 @@
   .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-drawer-backdrop {
     height: calc(
       var(--buzz-huddle-drawer-height) +
-      2 * var(--buzz-huddle-drawer-inset)
+      2 *
+      var(--buzz-huddle-drawer-inset)
     );
   }
 
@@ -109,6 +111,28 @@
    * transcript look like a raised card. */
   .buzz-huddle-app-surface-room-open {
     bottom: var(--buzz-huddle-drawer-height);
+  }
+
+  /* Expanded screen share: fill the shell content above the bottom dock bar.
+   * Not OS fullscreen — the huddle window stays; transcript is covered.
+   * z-index must sit above .buzz-huddle-app-surface (z-10); z-3 hid the
+   * stage behind the transcript so expand looked like the share vanished. */
+  .buzz-huddle-share-stage {
+    background: #000;
+    bottom: var(--buzz-huddle-drawer-height);
+    left: 0;
+    position: absolute;
+    right: 0;
+    top: 0;
+    z-index: 15;
+  }
+
+  .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-share-stage {
+    bottom: calc(
+      var(--buzz-huddle-drawer-height) +
+      2 *
+      var(--buzz-huddle-drawer-inset)
+    );
   }
 
   .buzz-huddle-drawer {
@@ -151,7 +175,8 @@
   .buzz-huddle-shell[data-huddle-window="false"] .buzz-huddle-drawer-slot {
     min-height: calc(
       var(--buzz-huddle-drawer-height) +
-      2 * var(--buzz-huddle-drawer-inset)
+      2 *
+      var(--buzz-huddle-drawer-inset)
     );
     padding: var(--buzz-huddle-drawer-inset);
   }
@@ -216,36 +241,61 @@
     width: 0.25rem;
   }
 
+  @keyframes buzz-huddle-speaking-pulse {
+    0%,
+    100% {
+      filter: drop-shadow(0 0 0 hsl(142 71% 45% / 0));
+      opacity: var(--buzz-huddle-speaker-opacity, 0);
+      transform: scale(var(--buzz-huddle-speaker-scale, 1.02));
+    }
+
+    50% {
+      filter: drop-shadow(0 0 6px hsl(142 71% 45% / 0.55));
+      opacity: var(--buzz-huddle-speaker-opacity, 0);
+      transform: scale(calc(var(--buzz-huddle-speaker-scale, 1.02) + 0.05));
+    }
+  }
+
   .buzz-huddle-speaking-avatar {
     isolation: isolate;
   }
 
-  .buzz-huddle-speaking-avatar::after {
+  /* Level-driven ring for human members (agents use the squircle SVG). */
+  .buzz-huddle-speaking-ring {
     border: 2px solid hsl(142 71% 45%);
-    border-radius: inherit;
-    content: "";
+    box-shadow: 0 0 0 0 hsl(142 71% 45% / 0);
     inset: -2px;
     opacity: var(--buzz-huddle-speaker-opacity, 0);
-    pointer-events: none;
     position: absolute;
     transform: scale(var(--buzz-huddle-speaker-scale, 1.02));
     transition:
+      box-shadow 90ms linear,
       opacity 80ms linear,
       transform 90ms cubic-bezier(0.2, 0, 0, 1);
-    will-change: opacity, transform;
+    will-change: box-shadow, opacity, transform;
     z-index: 1;
   }
 
-  .buzz-huddle-speaking-avatar-agent::after {
-    content: none;
+  .buzz-huddle-speaking-avatar-active .buzz-huddle-speaking-ring {
+    animation: buzz-huddle-speaking-pulse 1.05s ease-in-out infinite;
+    box-shadow: 0 0 8px 1px hsl(142 71% 45% / 0.4);
   }
 
   .buzz-huddle-speaking-squircle {
+    filter: drop-shadow(0 0 0 hsl(142 71% 45% / 0));
     opacity: var(--buzz-huddle-speaker-opacity, 0);
-    transform: scale(1.04);
-    transition: opacity 80ms linear;
-    will-change: opacity;
+    transform: scale(var(--buzz-huddle-speaker-scale, 1.04));
+    transition:
+      filter 90ms linear,
+      opacity 80ms linear,
+      transform 90ms cubic-bezier(0.2, 0, 0, 1);
+    will-change: filter, opacity, transform;
     z-index: 1;
+  }
+
+  .buzz-huddle-speaking-avatar-active .buzz-huddle-speaking-squircle {
+    animation: buzz-huddle-speaking-pulse 1.05s ease-in-out infinite;
+    filter: drop-shadow(0 0 6px hsl(142 71% 45% / 0.5));
   }
 
   @keyframes buzz-huddle-participant-tile-enter {
@@ -289,6 +339,12 @@
       isolation: auto;
     }
 
+    .buzz-huddle-speaking-avatar-active .buzz-huddle-speaking-ring,
+    .buzz-huddle-speaking-avatar-active .buzz-huddle-speaking-squircle {
+      animation: none;
+    }
+
+    .buzz-huddle-speaking-ring,
     .buzz-huddle-speaking-squircle {
       transition: none;
       will-change: auto;

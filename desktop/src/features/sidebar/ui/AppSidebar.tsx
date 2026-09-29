@@ -1,5 +1,6 @@
 // biome-ignore format: keep compact to stay within file size limit
 import * as React from "react";
+import { LayoutList } from "lucide-react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -10,6 +11,11 @@ import {
   useChannelSections,
   type ChannelSection,
 } from "@/features/sidebar/lib/useChannelSections";
+import { useCommunitySections } from "@/features/community-sections/hooks";
+import {
+  channelsForCommunitySection,
+  communitySectionChannelIds,
+} from "@/features/community-sections/lib/sidebarBuckets";
 import { useActiveWorkingChannelsById } from "@/features/sidebar/lib/useActiveWorkingChannelsById";
 import { useThreadStars } from "@/features/sidebar/lib/useThreadStars";
 import { SidebarStarredThreadsSection } from "@/features/sidebar/ui/SidebarStarredThreadsSection";
@@ -44,6 +50,7 @@ import {
   preferredUnreadTarget,
 } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
+import { ArchivedHuddlesSection } from "@/features/sidebar/ui/ArchivedHuddlesSection";
 import {
   ChannelGroupSection,
   CustomChannelSection,
@@ -82,6 +89,7 @@ import { useProtectedVisibleDirectMessages } from "@protected-feature-components
 export function AppSidebar({
   addCommunityPrefill,
   activeCommunity,
+  archivedHuddleChannels = [],
   channels,
   currentPubkey,
   fallbackDisplayName,
@@ -250,6 +258,7 @@ export function AppSidebar({
     channels: false,
     forums: false,
     directMessages: false,
+    archivedHuddles: true,
   });
 
   const toggleCollapsedGroup = React.useCallback(
@@ -284,6 +293,44 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey, activeCommunity?.relayUrl);
+
+  const {
+    navSubscribedSections: communitySubscribedSections,
+    lockedChannelIds: communityLockedChannelIds,
+    communitySectionsEnabled,
+  } = useCommunitySections();
+  // Only occupy / lock channels while the master toggle is on. When off,
+  // channels return to personal sections / Channels; personal section rows
+  // (including empty ones) are never deleted.
+  const communityOccupiedChannelIds = React.useMemo(
+    () =>
+      communitySectionsEnabled
+        ? communitySectionChannelIds(communitySubscribedSections)
+        : new Set<string>(),
+    [communitySectionsEnabled, communitySubscribedSections],
+  );
+  const communityChannelsById = React.useMemo(() => {
+    const map = new Map<string, Channel>();
+    for (const channel of channels) {
+      if (channel.channelType === "stream") map.set(channel.id, channel);
+    }
+    return map;
+  }, [channels]);
+
+  const assignChannelGuarded = React.useCallback(
+    (channelId: string, sectionId: string) => {
+      if (communityLockedChannelIds.has(channelId)) return;
+      assignChannel(channelId, sectionId);
+    },
+    [assignChannel, communityLockedChannelIds],
+  );
+  const unassignChannelGuarded = React.useCallback(
+    (channelId: string) => {
+      if (communityLockedChannelIds.has(channelId)) return;
+      unassignChannel(channelId);
+    },
+    [unassignChannel, communityLockedChannelIds],
+  );
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
@@ -323,6 +370,7 @@ export function AppSidebar({
 
     for (const channel of streamChannels) {
       if (starredChannelIds?.has(channel.id)) continue;
+      if (communityOccupiedChannelIds.has(channel.id)) continue;
       const sectionId = channelAssignments[channel.id];
       if (sectionId && sectionIds.has(sectionId)) {
         if (!bySection[sectionId]) {
@@ -349,6 +397,7 @@ export function AppSidebar({
     streamChannels,
     channelSections,
     channelAssignments,
+    communityOccupiedChannelIds,
     starredChannelIds,
     sortModeFor,
   ]);
@@ -375,11 +424,11 @@ export function AppSidebar({
         return;
       }
       if (createSectionState.pendingChannelId) {
-        assignChannel(createSectionState.pendingChannelId, section.id);
+        assignChannelGuarded(createSectionState.pendingChannelId, section.id);
       }
       setCreateSectionState({ open: false, pendingChannelId: null });
     },
-    [createSection, assignChannel, createSectionState.pendingChannelId],
+    [createSection, assignChannelGuarded, createSectionState.pendingChannelId],
   );
 
   const forumChannels = React.useMemo(
@@ -505,9 +554,12 @@ export function AppSidebar({
 
   const handleCreateChannelInSection = React.useCallback(
     (sectionId: string) => {
-      onBrowseChannels?.((channelId) => assignChannel(channelId, sectionId));
+      onBrowseChannels?.((channelId) => {
+        if (communityLockedChannelIds.has(channelId)) return;
+        assignChannelGuarded(channelId, sectionId);
+      });
     },
-    [assignChannel, onBrowseChannels],
+    [assignChannelGuarded, communityLockedChannelIds, onBrowseChannels],
   );
 
   return (
@@ -640,13 +692,58 @@ export function AppSidebar({
                     }
                     onUnstarThread={unstarThread}
                   />
+                  {communitySubscribedSections.map((section) => {
+                    const sectionChannels = sortChannelsForSidebar(
+                      channelsForCommunitySection(
+                        section,
+                        communityChannelsById,
+                        starredChannelIds,
+                      ),
+                      sortModeFor(
+                        sectionSortGroupKey(`community:${section.id}`),
+                      ),
+                    );
+                    return (
+                      <SidebarSection
+                        activeWorkingByChannelId={activeWorkingByChannelId}
+                        isActiveChannel={selectedView === "channel"}
+                        isCollapsed={
+                          collapsedSections[`community:${section.id}`] ?? false
+                        }
+                        items={sectionChannels}
+                        key={`community-section-${section.id}`}
+                        mutedChannelIds={mutedChannelIds}
+                        onMarkChannelRead={onMarkChannelRead}
+                        onMarkChannelUnread={onMarkChannelUnread}
+                        onMuteChannel={onMuteChannel}
+                        onSelectChannel={onSelectChannel}
+                        onToggleCollapsed={() =>
+                          toggleCollapsedSection(`community:${section.id}`)
+                        }
+                        onUnmuteChannel={onUnmuteChannel}
+                        selectedChannelId={selectedChannelId}
+                        testId={`community-section-${section.id}`}
+                        title={section.name}
+                        titleIcon={
+                          <LayoutList
+                            aria-hidden="true"
+                            className="size-3.5 shrink-0 text-sidebar-foreground/70"
+                            data-testid="community-section-nav-icon"
+                          />
+                        }
+                        unreadChannelCounts={unreadChannelCounts}
+                        unreadChannelIds={unreadChannelIds}
+                      />
+                    );
+                  })}
                   <SidebarDndContext
                     channels={channels}
                     sections={channelSections}
                     sectionIds={sectionIds}
-                    onAssignChannel={assignChannel}
-                    onUnassignChannel={unassignChannel}
+                    onAssignChannel={assignChannelGuarded}
+                    onUnassignChannel={unassignChannelGuarded}
                     onReorderSections={reorderSections}
+                    lockedChannelIds={communityLockedChannelIds}
                   >
                     {channelSections.map((section, idx) => (
                       <CustomChannelSection
@@ -688,8 +785,9 @@ export function AppSidebar({
                             );
                           }
                         }}
-                        onAssignChannel={assignChannel}
-                        onUnassignChannel={unassignChannel}
+                        onAssignChannel={assignChannelGuarded}
+                        onUnassignChannel={unassignChannelGuarded}
+                        lockedChannelIds={communityLockedChannelIds}
                         onCreateSectionForChannel={
                           handleCreateSectionForChannel
                         }
@@ -737,8 +835,9 @@ export function AppSidebar({
                       unreadChannelCounts={unreadChannelCounts}
                       sections={channelSections}
                       assignments={channelAssignments}
-                      onAssignChannel={assignChannel}
-                      onUnassignChannel={unassignChannel}
+                      onAssignChannel={assignChannelGuarded}
+                      onUnassignChannel={unassignChannelGuarded}
+                      lockedChannelIds={communityLockedChannelIds}
                       onCreateSectionForChannel={handleCreateSectionForChannel}
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
@@ -823,6 +922,24 @@ export function AppSidebar({
                     mutedChannelIds={mutedChannelIds}
                     onMuteChannel={onMuteChannel}
                     onUnmuteChannel={onUnmuteChannel}
+                  />
+                  <ArchivedHuddlesSection
+                    isActiveChannel={selectedView === "channel"}
+                    isCollapsed={collapsedGroups.archivedHuddles}
+                    items={archivedHuddleChannels}
+                    mutedChannelIds={mutedChannelIds}
+                    onMarkChannelRead={onMarkChannelRead}
+                    onMarkChannelUnread={onMarkChannelUnread}
+                    onMuteChannel={onMuteChannel}
+                    onSelectChannel={onSelectChannel}
+                    onToggleCollapsed={() =>
+                      toggleCollapsedGroup("archivedHuddles")
+                    }
+                    onUnmuteChannel={onUnmuteChannel}
+                    parentChannels={channels}
+                    selectedChannelId={selectedChannelId}
+                    unreadChannelCounts={unreadChannelCounts}
+                    unreadChannelIds={unreadChannelIds}
                   />
                 </>
               ) : null}

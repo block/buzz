@@ -8,6 +8,7 @@ use tauri::{AppHandle, State};
 use crate::app_state::AppState;
 
 use super::{
+    stt_wake::{normalize_activation_keyword, DEFAULT_ACTIVATION_KEYWORD},
     tts_settings::{
         pocket_voice_reference, resolve_voice_for_backend_in_registry, voice_registry,
         VoiceRegistryEntry, POCKET_BACKEND_ID,
@@ -17,6 +18,10 @@ use super::{
 
 fn default_addressable() -> bool {
     true
+}
+
+fn default_activation_keyword() -> String {
+    DEFAULT_ACTIVATION_KEYWORD.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +36,9 @@ pub struct AgentVoiceSettings {
     /// Default false — never auto-chime.
     #[serde(default)]
     pub agent_barge: bool,
+    /// Per-agent spoken activation keyword (hey/at/agent/…). Default "hey".
+    #[serde(default = "default_activation_keyword")]
+    pub activation_keyword: String,
 }
 
 impl AgentVoiceSettings {
@@ -40,6 +48,7 @@ impl AgentVoiceSettings {
             voice_key,
             addressable: true,
             agent_barge: false,
+            activation_keyword: default_activation_keyword(),
         }
     }
 }
@@ -284,6 +293,35 @@ pub fn set_huddle_agent_barge(
     Ok(settings)
 }
 
+#[tauri::command]
+pub fn set_huddle_agent_activation_keyword(
+    agent_pubkey: String,
+    activation_keyword: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentVoiceSettings, String> {
+    let normalized = normalize_activation_keyword(&activation_keyword).ok_or_else(|| {
+        format!(
+            "unsupported activation keyword {activation_keyword:?}; choose one of: {}",
+            super::stt_wake::ACTIVATION_KEYWORD_PRESETS.join(", ")
+        )
+    })?;
+    let catalog = catalog(&app, &state)?;
+    let settings = {
+        let mut huddle = state.huddle()?;
+        require_active_huddle(&huddle)?;
+        ensure_with_catalog(&mut huddle, &catalog, Some(&agent_pubkey));
+        let settings = huddle
+            .agent_voice_settings
+            .get_mut(&agent_pubkey)
+            .ok_or("Agent is not in the active huddle")?;
+        settings.activation_keyword = normalized;
+        settings.clone()
+    };
+    state.emit_huddle_state_changed();
+    Ok(settings)
+}
+
 pub(crate) fn voice_reference_for_agent(
     app: &AppHandle,
     state: &AppState,
@@ -371,6 +409,7 @@ mod tests {
                 voice_key: "pocket:jane".into(),
                 addressable: true,
                 agent_barge: false,
+                activation_keyword: DEFAULT_ACTIVATION_KEYWORD.to_string(),
             }
         );
     }

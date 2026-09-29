@@ -1370,8 +1370,9 @@ test("starts muted with Push to Talk while preserving manual microphone control"
     name: "Unmute microphone",
   });
   await expect(unmuteButton).toBeVisible();
-  await expect(unmuteButton).toHaveClass(/bg-destructive\/15/);
-  await expect(unmuteButton).toHaveClass(/text-destructive/);
+  await expect(unmuteButton).toHaveAttribute("data-ptt-state", "gated");
+  await expect(unmuteButton).toHaveClass(/bg-warning\/15/);
+  await expect(unmuteButton).toHaveClass(/text-warning/);
 
   // Manually unmuting hands the mic back to the user.
   await unmuteButton.click();
@@ -1393,8 +1394,9 @@ test("starts muted with Push to Talk while preserving manual microphone control"
 
   await muteButton.click();
   await expect(unmuteButton).toBeVisible();
-  await expect(unmuteButton).toHaveClass(/bg-destructive\/15/);
-  await expect(unmuteButton).toHaveClass(/text-destructive/);
+  await expect(unmuteButton).toHaveAttribute("data-ptt-state", "gated");
+  await expect(unmuteButton).toHaveClass(/bg-warning\/15/);
+  await expect(unmuteButton).toHaveClass(/text-warning/);
   await expect
     .poll(() =>
       page.evaluate(
@@ -1408,7 +1410,7 @@ test("starts muted with Push to Talk while preserving manual microphone control"
   await page.mouse.move(0, 0);
   await unmuteButton.hover();
   await expect(page.getByRole("tooltip")).toHaveAccessibleName(
-    /Click to unmute or hold .*Space/,
+    /PTT gated — click to unmute or hold .*Space/,
   );
 
   await page.evaluate(async () => {

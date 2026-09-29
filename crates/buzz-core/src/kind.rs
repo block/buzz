@@ -462,6 +462,13 @@ pub const KIND_COMMUNITY_PINNED_SITES: u32 = 30623;
 /// tokens stay on the admin device — never in this event.
 pub const KIND_COMMUNITY_BOTS: u32 = 30624;
 
+/// Community channel sections catalog (NIP-33, parameterized replaceable,
+/// `d=buzz:community-sections`). Content is a JSON list of
+/// `{id,name,icon?,order,channelIds}` rows curated by a community owner or
+/// admin. Member opt-in/subscribe state is client-local (and optional personal
+/// preference sync), not this event.
+pub const KIND_COMMUNITY_SECTIONS: u32 = 30625;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -733,6 +740,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_DM_VISIBILITY,
     KIND_COMMUNITY_PINNED_SITES,
     KIND_COMMUNITY_BOTS,
+    KIND_COMMUNITY_SECTIONS,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,
@@ -887,6 +895,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 303
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_COMMUNITY_PINNED_SITES)); // 30623 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_COMMUNITY_BOTS)); // 30624 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_COMMUNITY_SECTIONS)); // 30625 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999

@@ -1,6 +1,6 @@
 //! Native companion-window lifecycle for an active Huddle.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -15,9 +15,32 @@ use crate::app_state::AppState;
 /// (drawer ⊕ window both visible).
 static PENDING_SUPPRESSED_DESTROYS: AtomicU32 = AtomicU32::new(0);
 
+/// Set when the user closes the companion via the OS chrome (red X).
+/// Destroyed prefers this over a leftover suppress count from zombie-recreate,
+/// so the drawer is always restored after a real user close.
+static USER_INITIATED_COMPANION_CLOSE: AtomicBool = AtomicBool::new(false);
+
 /// Note that the next matching `Destroyed` must not restore the drawer.
 fn note_suppress_companion_return() {
+    // Intentional teardown — clear any stale user-close flag so dock/recreate
+    // Destroyed stays suppressed.
+    USER_INITIATED_COMPANION_CLOSE.store(false, Ordering::SeqCst);
     PENDING_SUPPRESSED_DESTROYS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Note that the in-flight companion CloseRequested came from the user.
+/// Skip when an intentional dock/recreate suppress is already pending so a
+/// destroy()-triggered CloseRequested cannot override that suppress.
+pub(crate) fn note_user_initiated_companion_close() {
+    if PENDING_SUPPRESSED_DESTROYS.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    USER_INITIATED_COMPANION_CLOSE.store(true, Ordering::SeqCst);
+}
+
+/// Returns true once when Destroyed should restore the drawer despite suppress.
+pub(crate) fn take_user_initiated_companion_close() -> bool {
+    USER_INITIATED_COMPANION_CLOSE.swap(false, Ordering::SeqCst)
 }
 
 /// Returns true once when a destroy intentionally should not dock the huddle.
@@ -127,6 +150,14 @@ pub fn close_huddle_companion(
     Ok(())
 }
 
+/// Serialize companion open so overlapping creating-phase + onHuddleStarted
+/// invokes cannot Builder-race into two OS windows for one label.
+static OPEN_HUDDLE_WINDOW_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn companion_is_usable(window: &tauri::WebviewWindow) -> bool {
+    window.show().and_then(|_| window.set_focus()).is_ok() && window.is_visible().unwrap_or(false)
+}
+
 /// Open the active huddle's ephemeral channel in a focused companion window.
 /// The main window remains the owner of microphone capture; closing this room
 /// must never leave the shared huddle session.
@@ -135,6 +166,8 @@ pub async fn open_huddle_window(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let _open_guard = OPEN_HUDDLE_WINDOW_LOCK.lock().await;
+
     let ephemeral_channel_id = state
         .huddle()?
         .ephemeral_channel_id
@@ -147,13 +180,11 @@ pub async fn open_huddle_window(
     // race that restored the drawer while this companion stayed open.
 
     if let Some(window) = app.get_webview_window(&label) {
-        match window.show().and_then(|_| window.set_focus()) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                eprintln!("buzz-desktop: existing huddle companion unusable ({error}); recreating");
-                destroy_huddle_window(&app, &label, true);
-            }
+        if companion_is_usable(&window) {
+            return Ok(());
         }
+        eprintln!("buzz-desktop: existing huddle companion not visible/focusable; recreating");
+        destroy_huddle_window(&app, &label, true);
     }
 
     // destroy() removes the OS window asynchronously. Brief poll so Builder
@@ -169,9 +200,16 @@ pub async fn open_huddle_window(
     // with "already exists" while the companion is still on stage (that path
     // demoted React to drawer and left drawer ⊕ window both visible).
     if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.show();
-        let _ = window.set_focus();
-        return Ok(());
+        if companion_is_usable(&window) {
+            return Ok(());
+        }
+        destroy_huddle_window(&app, &label, true);
+        for _ in 0..20 {
+            if app.get_webview_window(&label).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 
     match WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::App("index.html".into()))
@@ -185,16 +223,19 @@ pub async fn open_huddle_window(
             let message = error.to_string();
             if message.to_ascii_lowercase().contains("already exists") {
                 if let Some(window) = app.get_webview_window(&label) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    return Ok(());
+                    if companion_is_usable(&window) {
+                        return Ok(());
+                    }
                 }
-                // Label reserved but get_webview_window missed it — still treat
-                // as open success so the frontend keeps presentation "window".
+                // Label reserved but no usable window — error so React demotes
+                // to the drawer instead of staying on presentation "window"
+                // with nothing on stage (prior "treat as success" path).
                 eprintln!(
-                    "buzz-desktop: huddle companion label {label} already exists; treating open as success"
+                    "buzz-desktop: huddle companion label {label} already exists without a usable window"
                 );
-                return Ok(());
+                return Err(format!(
+                    "huddle companion label {label} already exists without a usable window"
+                ));
             }
             Err(message)
         }

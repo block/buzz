@@ -365,6 +365,7 @@ export function ChannelGroupSection({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  lockedChannelIds,
   mutedChannelIds,
   onMuteChannel,
   onUnmuteChannel,
@@ -415,6 +416,7 @@ export function ChannelGroupSection({
   onAssignChannel?: (channelId: string, sectionId: string) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
+  lockedChannelIds?: ReadonlySet<string>;
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
@@ -434,7 +436,7 @@ export function ChannelGroupSection({
           <ContextMenu key={channel.id}>
             <ContextMenuTrigger asChild>
               <SidebarMenuItem className="content-visibility-auto-row">
-                {draggable ? (
+                {draggable && !(lockedChannelIds?.has(channel.id) ?? false) ? (
                   <DraggableChannelRow channelId={channel.id}>
                     <ChannelMenuButton
                       channel={channel}
@@ -471,6 +473,7 @@ export function ChannelGroupSection({
                 isStarred={starredChannelIds?.has(channel.id)}
                 sections={sections}
                 assignments={assignments}
+                sectionMoveLocked={lockedChannelIds?.has(channel.id) ?? false}
                 onMarkChannelRead={onMarkChannelRead}
                 onMarkChannelUnread={onMarkChannelUnread}
                 onMuteChannel={onMuteChannel}
@@ -564,6 +567,7 @@ export function CustomChannelSection({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  lockedChannelIds,
   onCreateChannel,
   onRenameSection,
   onDeleteSection,
@@ -604,6 +608,7 @@ export function CustomChannelSection({
   onAssignChannel: (channelId: string, sectionId: string) => void;
   onUnassignChannel: (channelId: string) => void;
   onCreateSectionForChannel: (channelId: string) => void;
+  lockedChannelIds?: ReadonlySet<string>;
   onCreateChannel: () => void;
   onRenameSection: () => void;
   onDeleteSection: () => void;
@@ -737,7 +742,26 @@ export function CustomChannelSection({
                       <ContextMenu key={channel.id}>
                         <ContextMenuTrigger asChild>
                           <SidebarMenuItem>
-                            <DraggableChannelRow channelId={channel.id}>
+                            {!(lockedChannelIds?.has(channel.id) ?? false) ? (
+                              <DraggableChannelRow channelId={channel.id}>
+                                <ChannelMenuButton
+                                  channel={channel}
+                                  activeWorking={activeWorkingByChannelId?.get(
+                                    channel.id,
+                                  )}
+                                  hasUnread={unreadChannelIds.has(channel.id)}
+                                  unreadCount={
+                                    unreadChannelCounts?.get(channel.id) ?? 0
+                                  }
+                                  isMuted={mutedChannelIds?.has(channel.id)}
+                                  isActive={
+                                    isActiveChannel &&
+                                    selectedChannelId === channel.id
+                                  }
+                                  onSelectChannel={onSelectChannel}
+                                />
+                              </DraggableChannelRow>
+                            ) : (
                               <ChannelMenuButton
                                 channel={channel}
                                 activeWorking={activeWorkingByChannelId?.get(
@@ -754,7 +778,7 @@ export function CustomChannelSection({
                                 }
                                 onSelectChannel={onSelectChannel}
                               />
-                            </DraggableChannelRow>
+                            )}
                           </SidebarMenuItem>
                         </ContextMenuTrigger>
                         <ContextMenuContent>
@@ -765,6 +789,9 @@ export function CustomChannelSection({
                             isStarred={starredChannelIds?.has(channel.id)}
                             sections={sections}
                             assignments={assignments}
+                            sectionMoveLocked={
+                              lockedChannelIds?.has(channel.id) ?? false
+                            }
                             onMarkChannelRead={onMarkChannelRead}
                             onMarkChannelUnread={onMarkChannelUnread}
                             onMuteChannel={onMuteChannel}
