@@ -11,7 +11,7 @@
 ### 1. `buzz-plugins` & `buzz-recall` Setup
 - [ ] Create `crates/buzz-plugins` with `RecallPlugin` trait
 - [ ] Create `crates/buzz-recall` implementing the 9 agent parsers
-- [ ] Connect with `buzz-db` and `orbit-ai`
+- [ ] Connect with `buzz-db` and `buzz-ai`
 
 ### 2. 9 IDE & Agent Parsers
 - [ ] Implement `AntigravityRecallPlugin` (`~/.gemini/antigravity-ide/brain/*/transcript.jsonl`)

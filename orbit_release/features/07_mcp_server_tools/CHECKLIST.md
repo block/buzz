@@ -8,9 +8,9 @@
 
 ## Deliverables & Tasks
 
-### 1. `orbit-mcp` Crate Setup
-- [ ] Add `rmcp` (Rust MCP protocol library) to `crates/orbit-mcp/Cargo.toml`
-- [ ] Wire dependencies to `buzz-db`, `buzz-search`, `orbit-core`, `orbit-ai`
+### 1. `buzz-mcp` Crate Setup
+- [ ] Add `rmcp` (Rust MCP protocol library) to `crates/buzz-mcp/Cargo.toml`
+- [ ] Wire dependencies to `buzz-db`, `buzz-search`, `buzz-core`, `buzz-ai`
 - [ ] Register tools in `crates/buzz-dev-mcp/src/lib.rs`
 
 ### 2. 8 Orbit MCP Tools
@@ -36,7 +36,7 @@
 
 ## Verification & Sign-off
 
-- [ ] `cargo test -p orbit-mcp` passes
+- [ ] `cargo test -p buzz-mcp` passes
 - [ ] JSON-RPC stdio handshake and tool invocation verified with mock client
 - [ ] All 8 tools return valid JSON conforming to MCP schema
 - [ ] `just ci` passes cleanly

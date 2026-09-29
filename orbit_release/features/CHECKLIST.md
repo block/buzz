@@ -38,7 +38,7 @@
 - [ ] **F02**: API keys securely stored via `buzz-auth` OS keyring (DPAPI, Keychain, Secret Service)
 
 ### Phase 2: Ingestion & SuperRAG Retrieval (Sprint 2)
-- [ ] **F03**: `orbit-ingest` file watcher monitors workspace changes using `notify`
+- [ ] **F03**: `buzz-ingest` file watcher monitors workspace changes using `notify`
 - [ ] **F03**: Tree-sitter AST chunker chunks Rust, TS, Python, Go, and Markdown with provenance
 - [ ] **F03**: Git history ingested (commits, authors, diffs) with SHA hashes
 - [ ] **F04**: Pre-Retrieval Data Re-Trial & Query Routing Arbiter classifies intents and checks semantic cache

@@ -3,14 +3,14 @@
 > **Priority**: P0 — Ingestion engine. Populates the storage foundation.  
 > **Sprint**: Sprint 2 (Weeks 3–4)  
 > **Dependencies**: Feature 01 (Storage), Feature 02 (Embeddings)  
-> **Crates**: `orbit-ingest` (implementation), `buzz-db` (storage), `orbit-ai` (vectorization)  
+> **Crates**: `buzz-ingest` (implementation), `buzz-db` (storage), `buzz-ai` (vectorization)  
 > **Environment Variables**: `BUZZ_DATA_DIR`, `BUZZ_WATCH_INTERVAL_MS`
 
 ---
 
 ## Overview
 
-Feature 03 converts files, code, and documentation from developer workspaces into chunked, embedded records in the `buzz_documents` and `buzz_chunks` tables. It includes:
+Feature 03 converts files, code, and documentation from developer workspaces into chunked, embedded records in the `orbit_documents` and `orbit_chunks` tables. It includes:
 1. Continuous background workspace watching with `notify`.
 2. AST-aware semantic chunking via Tree-sitter.
 3. Git commit, author, and branch metadata enrichment.
@@ -38,10 +38,10 @@ Tree-sitter AST Chunker (~512 token chunks with semantic boundaries)
 Batch Embedding Generation (Feature 02)
             │
             ▼
-Persist to `buzz_documents` & `buzz_chunks` (Feature 01)
+Persist to `orbit_documents` & `orbit_chunks` (Feature 01)
 ```
 
-### 2. Tree-sitter AST Chunker (`crates/orbit-ingest/src/chunker.rs`)
+### 2. Tree-sitter AST Chunker (`crates/buzz-ingest/src/chunker.rs`)
 
 Language-specific AST boundary recognition:
 - **Rust**: `function_item`, `struct_item`, `impl_item`, `mod_item`
@@ -61,10 +61,10 @@ Extracts context from the local `.git` repository:
 
 ## Verification & Quality Gates
 
-- Ingest sample project files; verify records created in `buzz_documents` and `buzz_chunks`.
+- Ingest sample project files; verify records created in `orbit_documents` and `orbit_chunks`.
 - Verify modified files update `mtime_ns` and regenerate embeddings without duplicating documents.
 - Verify secrets are redacted before embedding.
-- Run `cargo test -p orbit-ingest`.
+- Run `cargo test -p buzz-ingest`.
 
 ## Local-first processing and cloud outbox
 

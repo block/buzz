@@ -9,12 +9,12 @@
 
 ## Deliverables & Tasks
 
-### 1. `orbit-ai` Crate Setup
-- [ ] Add `ort = "2.0"` (ONNX Runtime) to `crates/orbit-ai/Cargo.toml`
+### 1. `buzz-ai` Crate Setup
+- [ ] Add `ort = "2.0"` (ONNX Runtime) to `crates/buzz-ai/Cargo.toml`
 - [ ] Add `tokenizers = "0.20"` for HuggingFace fast tokenizers
 - [ ] Add `reqwest` with JSON support for cloud embedding & reranking APIs
-- [ ] Define `EmbedProvider` trait in `crates/orbit-ai/src/provider.rs`
-- [ ] Define `RerankProvider` trait in `crates/orbit-ai/src/rerank.rs`
+- [ ] Define `EmbedProvider` trait in `crates/buzz-ai/src/provider.rs`
+- [ ] Define `RerankProvider` trait in `crates/buzz-ai/src/rerank.rs`
 
 ### 2. Local ONNX Providers (Embeddings + Reranking)
 - [ ] Download and verify `bge-small-en-v1.5` INT8 ONNX model (~32MB)
@@ -43,7 +43,7 @@
 
 ## Verification & Sign-off
 
-- [ ] `cargo test -p orbit-ai` passes
+- [ ] `cargo test -p buzz-ai` passes
 - [ ] Local ONNX generates 384-dimensional normalized vector in <5ms
 - [ ] Local ONNX reranker re-scores 50 query-candidate pairs in <10ms
 - [ ] Zero network requests emitted when running in local ONNX mode

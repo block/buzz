@@ -8,11 +8,11 @@
 
 ## Deliverables & Tasks
 
-### 1. `orbit-ingest` Crate Setup
+### 1. `buzz-ingest` Crate Setup
 - [ ] Add `notify = "6.1"` for filesystem watching
 - [ ] Add `tree-sitter` and grammars (`tree-sitter-rust`, `tree-sitter-typescript`, `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-md`)
 - [ ] Add `git2` for Git repository introspection
-- [ ] Wire dependencies to `buzz-db` and `orbit-ai`
+- [ ] Wire dependencies to `buzz-db` and `buzz-ai`
 
 ### 2. AST Chunker
 - [ ] Implement language detection via file extension
@@ -31,7 +31,7 @@
 
 ### 4. Git Metadata Integration
 - [ ] Extract current commit SHA, branch, and author for ingested files
-- [ ] Attach Git metadata into `buzz_documents.metadata` JSONB
+- [ ] Attach Git metadata into `orbit_documents.metadata` JSONB
 
 ### 5. Orchestration Pipeline
 - [ ] Connect Secret Redactor → Chunker → Embedder → Database transaction
@@ -41,7 +41,7 @@
 
 ## Verification & Sign-off
 
-- [ ] `cargo test -p orbit-ingest` passes
+- [ ] `cargo test -p buzz-ingest` passes
 - [ ] Real-time modification of a test file triggers chunking and embedding
 - [ ] AST chunking preserves function and struct integrity
 - [ ] `just ci` passes cleanly

@@ -2,9 +2,9 @@
 
 > **Status**: Active Engineering Blueprint  
 > **Brand & Architecture Alignment**:  
-> • **Buzz**: The active engineering architecture, crate ecosystem, and codebase naming standard.  
-> • **Orbit**: The user-facing brand identity and long-term memory product vision.  
-> • **Execution Rule**: All implementation plans, crate modifications, and configurations use the **current Buzz codebase architecture** to prevent variable collisions and architectural drift. Brand metadata updates occur post-release.  
+> • **Buzz**: The active engineering architecture, crate ecosystem (`crates/buzz-*`), and code variable naming standard (`buzz_*`).  
+> • **Orbit**: The user-facing brand identity, user interface, database tables (`orbit_*`), and local storage folder (`~/.orbit/`).  
+> • **Execution Rule**: All code implementation plans, crate modifications, and in-code variables use the **current Buzz codebase architecture** to prevent variable collisions and architectural drift. Everything that remains on the local machine and that the user sees (UI screens, local folders, database tables) must be Orbit with no user-visible Buzz. Brand metadata updates occur post-release.  
 > **Design Principle**: Pure implementation plan, specifications, and execution steps. No raw code snippets.
 
 ---
@@ -177,7 +177,7 @@ Authentication itself stays outside the memory store. The desktop receives an ac
 
 The database migration maps directly onto the 5 layers:
 
-#### 1. `buzz_documents` (Layer 1: Source Layer — Raw Sources)
+#### 1. `orbit_documents` (Layer 1: Source Layer — Raw Sources)
 * `id` (UUID, Primary Key): Unique document identifier.
 * `source_type` (VARCHAR(64)): Source classification (`file`, `session`, `git`, `slack`, `github`, `gitlab`, `jira`).
 * `source_uri` (TEXT): Absolute local path or remote URL.
@@ -190,9 +190,9 @@ The database migration maps directly onto the 5 layers:
 * `created_at` / `updated_at` (TIMESTAMPTZ).
 * *Constraints & Indexes*: Unique on `(workspace_path, content_hash)`. B-tree indexes on `workspace_path` and `source_uri`.
 
-#### 2. `buzz_chunks` (Layer 2: Processed Context Layer — Normalized Chunks & Vectors)
+#### 2. `orbit_chunks` (Layer 2: Processed Context Layer — Normalized Chunks & Vectors)
 * `id` (UUID, Primary Key): Unique chunk identifier.
-* `document_id` (UUID, Foreign Key $\rightarrow$ `buzz_documents.id` ON DELETE CASCADE).
+* `document_id` (UUID, Foreign Key $\rightarrow$ `orbit_documents.id` ON DELETE CASCADE).
 * `workspace_path` (TEXT): Workspace boundary.
 * `chunk_index` (INT): Sequence index within the source document.
 * `content` (TEXT): Normalized chunk text.
@@ -205,7 +205,7 @@ The database migration maps directly onto the 5 layers:
 * `created_at` (TIMESTAMPTZ).
 * *Indexes*: Vector index managed by LanceDB. Lexical index managed by SQLite FTS5. B-tree indexes on `workspace_path` and `agent_name`.
 
-#### 3. `buzz_entities` (Layer 3: Memory Layer — Semantic Nodes)
+#### 3. `orbit_entities` (Layer 3: Memory Layer — Semantic Nodes)
 * `id` (UUID, Primary Key): Unique entity identifier.
 * `workspace_path` (TEXT): Workspace boundary.
 * `name` (VARCHAR(255)): Entity name (`DatabasePool`, `Alice`, `NIP-42`, `SuperRAG`).
@@ -216,21 +216,21 @@ The database migration maps directly onto the 5 layers:
 * `created_at` / `updated_at` (TIMESTAMPTZ).
 * *Constraints & Indexes*: Unique on `(workspace_path, name, entity_type)`. B-tree index on `workspace_path`.
 
-#### 4. `buzz_relations` (Layer 3: Memory Layer — Bi-Temporal Edges)
+#### 4. `orbit_relations` (Layer 3: Memory Layer — Bi-Temporal Edges)
 * `id` (UUID, Primary Key): Unique relation identifier.
 * `workspace_path` (TEXT): Workspace boundary.
-* `source_entity_id` (UUID, Foreign Key $\rightarrow$ `buzz_entities.id` ON DELETE CASCADE).
-* `target_entity_id` (UUID, Foreign Key $\rightarrow$ `buzz_entities.id` ON DELETE CASCADE).
+* `source_entity_id` (UUID, Foreign Key $\rightarrow$ `orbit_entities.id` ON DELETE CASCADE).
+* `target_entity_id` (UUID, Foreign Key $\rightarrow$ `orbit_entities.id` ON DELETE CASCADE).
 * `relation_type` (VARCHAR(64)): Typed relationship (`implements`, `depends_on`, `decided_by`, `authored_by`, `supersedes`).
 * `confidence` (REAL): Confidence score (0.0 to 1.0).
 * `valid_at` (TIMESTAMPTZ): When this fact became true in the real world.
 * `invalid_at` (TIMESTAMPTZ, Nullable): When this fact was contradicted or superseded (`NULL` = active fact).
 * `recorded_at` (TIMESTAMPTZ): When the system learned this fact.
-* `provenance_chunk_id` (UUID, Foreign Key $\rightarrow$ `buzz_chunks.id` ON DELETE SET NULL).
+* `provenance_chunk_id` (UUID, Foreign Key $\rightarrow$ `orbit_chunks.id` ON DELETE SET NULL).
 * `metadata` (JSONB): Extraction confidence, model version, notes.
 * *Indexes*: B-tree indexes on `source_entity_id`, `target_entity_id`, and partial index on `(workspace_path, relation_type) WHERE invalid_at IS NULL`.
 
-#### 5. `buzz_query_cache` (Layer 4: Retrieval Layer — Pre-Retrieval Routing Cache)
+#### 5. `orbit_query_cache` (Layer 4: Retrieval Layer — Pre-Retrieval Routing Cache)
 * `query_hash` (CHAR(64), Primary Key): SHA-256 of normalized query string + workspace path.
 * `workspace_path` (TEXT): Workspace boundary.
 * `intent_type` (VARCHAR(64)): Classified intent (`symbolic`, `conceptual`, `temporal`, `multihop`).
@@ -241,7 +241,7 @@ The database migration maps directly onto the 5 layers:
 * `expires_at` / `created_at` (TIMESTAMPTZ).
 * *Indexes*: B-tree index on `workspace_path`.
 
-#### 6. `buzz_working_contexts` (Layer 5: Working Context Layer — Active Task Context)
+#### 6. `orbit_working_contexts` (Layer 5: Working Context Layer — Active Task Context)
 * `id` (UUID, Primary Key): Unique working context identifier.
 * `workspace_path` (TEXT): Workspace boundary.
 * `task_id` (VARCHAR(128)): Active agent conversation ID or ticket ID.
@@ -259,15 +259,15 @@ The database migration maps directly onto the 5 layers:
 
 ## 3. Configurable Embedding & Reranker Engine — Local ONNX & Cloud Models
 
-### 3.1 Local ONNX Default Runtimes (`crates/orbit-ai`)
+### 3.1 Local ONNX Default Runtimes (`crates/buzz-ai`)
 * **Embedding Engine**: `BAAI/bge-small-en-v1.5` (quantized INT8 ONNX, 384 dimensions, ~32MB weights file). Latency: `<5 ms` per chunk on CPU.
 * **Cross-Encoder Reranker Engine**: `BAAI/bge-reranker-small` (quantized INT8 ONNX, ~25MB weights file). Latency: `<10 ms` for 50 candidate pairs on CPU.
 * **Runtime**: In-process via the Rust `ort` crate. 100% offline, zero API fees.
-* **Storage Location**: `~/.buzz/orbit_brain/models/`.
+* **Storage Location**: `~/.orbit/brain/models/`.
 
 ### 3.2 Provider Abstraction Contracts
-* **`EmbedProvider` Contract**: Async trait in `crates/orbit-ai/src/provider.rs` defining batch embedding generation (`embed_batch`), output dimension resolution (`dimensions`), and provider identifier (`provider_name`).
-* **`RerankProvider` Contract**: Async trait in `crates/orbit-ai/src/rerank.rs` defining query-document cross-attention scoring (`rerank(query, candidates, top_n) -> Vec<RerankResult>`) and provider identifier (`provider_name`).
+* **`EmbedProvider` Contract**: Async trait in `crates/buzz-ai/src/provider.rs` defining batch embedding generation (`embed_batch`), output dimension resolution (`dimensions`), and provider identifier (`provider_name`).
+* **`RerankProvider` Contract**: Async trait in `crates/buzz-ai/src/rerank.rs` defining query-document cross-attention scoring (`rerank(query, candidates, top_n) -> Vec<RerankResult>`) and provider identifier (`provider_name`).
 
 ### 3.3 Supported Provider Matrix
 
@@ -334,7 +334,7 @@ The database migration maps directly onto the 5 layers:
 #### Layer 4: Retrieval Layer (SuperRAG & Data Re-Trial Engine)
 - **Role**: Dynamically discovers, verifies, and ranks relevant information across all layers.
 - **The Data Re-Trial Front Door**: When an agent issues a query, it **hits this layer first** before any raw database query executes:
-  1. **Pre-Retrieval Routing**: Checks the in-memory semantic cache (`buzz_query_cache`). If cached context is valid, returns in `<1ms`. If missed, classifies query intent into `Symbolic`, `Conceptual`, `TemporalDecision`, or `MultiHopRelationship`.
+  1. **Pre-Retrieval Routing**: Checks the in-memory semantic cache (`orbit_query_cache`). If cached context is valid, returns in `<1ms`. If missed, classifies query intent into `Symbolic`, `Conceptual`, `TemporalDecision`, or `MultiHopRelationship`.
   2. **Multi-Modal Candidate Retrieval**: Dispatches targeted queries in parallel to LanceDB vector index (dense), PostgreSQL GIN (BM25), and 2-hop recursive graph walks.
   3. **Reciprocal Rank Fusion (RRF)**: Merges candidates using smoothed reciprocal ranking ($k=60$) modulated by temporal decay ($e^{-\lambda \Delta t}$) and source authoritativeness ($A_{\text{source}}$).
   4. **Data Re-Trial & Confidence Verification Loop**: Evaluates candidate score distribution. If top-ranked confidence $< \theta_{\text{conf}}$ (0.65) or candidate count $< 3$, triggers an automated adaptive re-trial pass (query expansion, keyword relaxation, and graph walk widening) before proceeding.
@@ -399,11 +399,11 @@ Exposes 8 standardized memory and context tools to external coding agents over `
 | `orbit.delete_memory` | Write | `(id) → ()` | Hard delete / cryptographic erasure (GDPR compliance). |
 
 ### 5.2 Mode 2: Buzz as MCP Client (Centralized Data Ingestion)
-Buzz acts as an **MCP Client** connecting outward to external MCP servers to aggregate dispersed enterprise and developer data into the centralized `buzz_documents` and `buzz_chunks` repository:
+Buzz acts as an **MCP Client** connecting outward to external MCP servers to aggregate dispersed enterprise and developer data into the centralized `orbit_documents` and `orbit_chunks` repository:
 
 | External MCP Target | Integration Protocol | Ingestion Workflow | Central Repository Mapping |
 | :--- | :--- | :--- | :--- |
-| **GitHub MCP Server** | Stdio / SSE subprocess | Fetches repo issues, PR bodies, review discussions, and commit diffs. | Normalized into `buzz_documents` with commit SHAs and author metadata. |
+| **GitHub MCP Server** | Stdio / SSE subprocess | Fetches repo issues, PR bodies, review discussions, and commit diffs. | Normalized into `orbit_documents` with commit SHAs and author metadata. |
 | **GitLab MCP Server** | Stdio / SSE subprocess | Queries merge requests, issue boards, and CI job error logs. | Ingested with branch tags and project boundaries. |
 | **Slack MCP Server** | Stdio / SSE subprocess | Reads channel history and threaded architectural debates. | Filtered by public channels; redacted and stored with thread timestamps. |
 | **Jira MCP Server** | Stdio / SSE subprocess | Pulls ticket descriptions, acceptance criteria, and sprint goals. | Mapped to Cognitive Concepts (Cognee Tier 4) for project context. |
@@ -526,23 +526,23 @@ Storage & Embed  SuperRAG & Plg   Tri-Modal MCP    Installer & UI   Desktop Poli
 ```
 
 ### Sprint 1 — Storage Foundation & Embed/Rerank Engines (Weeks 1–2)
-- [ ] Create the local storage schema for SQLite metadata, events, provenance and memory lifecycle state
+- [ ] Create the local storage schema for SQLite metadata, events, provenance and memory lifecycle state (`~/.orbit/brain/db/orbit.db` with `orbit_*` tables)
 - [ ] Implement `MetadataStore`, `VectorStore`, `GraphStore` and `MemoryStore` traits
 - [ ] Implement SQLite metadata/event adapter, LanceDB vector adapter and embedded graph adapter
 - [ ] Implement atomic logical mutation handling so derived stores can be updated idempotently
 - [ ] Implement Secret Redactor with regex patterns in `crates/buzz-db/src/redactor.rs`
-- [ ] Implement Local ONNX embedder (`bge-small-en-v1.5`) via `ort` crate in `crates/orbit-ai`
-- [ ] Implement Local ONNX cross-encoder reranker (`bge-reranker-small`) in `crates/orbit-ai`
+- [ ] Implement Local ONNX embedder (`bge-small-en-v1.5`) via `ort` crate in `crates/buzz-ai`
+- [ ] Implement Local ONNX cross-encoder reranker (`bge-reranker-small`) in `crates/buzz-ai`
 - [ ] Implement Configurable API clients for OpenAI, Cohere, Voyage, Gemini, Ollama
 - [ ] Bundle ONNX models (~32MB embed, ~25MB rerank) into `desktop/src-tauri/resources/`
 - [ ] Validate `just ci` passes
 
 ### Sprint 2 — Ingestion Pipeline & SuperRAG Retrieval Layer (Weeks 3–4)
 - [ ] Implement `SourcePlugin` and `RecallPlugin` traits in `crates/buzz-plugins`
-- [ ] Implement Tree-sitter AST chunker (Rust, TypeScript, Python, Go, Markdown) in `crates/orbit-ingest`
+- [ ] Implement Tree-sitter AST chunker (Rust, TypeScript, Python, Go, Markdown) in `crates/buzz-ingest`
 - [ ] Implement Local file watcher using `notify` crate
 - [ ] Implement Pre-Retrieval Data Re-Trial & Query Routing Arbiter in `crates/buzz-search/src/router.rs`
-- [ ] Implement in-memory Semantic Query Cache with sub-millisecond return
+- [ ] Implement in-memory Semantic Query Cache (`orbit_query_cache`) with sub-millisecond return
 - [ ] Implement Layer 1 (Dense Vector) over LanceDB and Layer 2 (Lexical BM25-style retrieval) over SQLite FTS5 in `buzz-search`
 - [ ] Implement Reciprocal Rank Fusion (RRF) combiner with temporal decay and source authority weighting
 - [ ] Implement Data Re-Trial & Confidence Verification loop with adaptive query reformulation
@@ -555,14 +555,14 @@ Storage & Embed  SuperRAG & Plg   Tri-Modal MCP    Installer & UI   Desktop Poli
 - [ ] Implement Layer 3 Bi-temporal Entity and Relation Extraction in `buzz-db`
 - [ ] Implement Contradiction Resolver setting `invalid_at = NOW()` for superseded assertions
 - [ ] Implement 2-hop neighborhood traversal through the embedded graph adapter in `buzz-search`
-- [ ] Implement 9 IDE Recall Plugins (Antigravity, Claude Code, Codex, Cursor, Goose, OpenCode, ZCode, AGY CLI, Kimi)
-- [ ] Ingest past session histories idempotently using `content_hash` deduplication
+- [ ] Implement 9 IDE Recall Plugins (Antigravity, Claude Code, Codex, Cursor, Goose, OpenCode, ZCode, AGY CLI, Kimi) in `crates/buzz-recall`
+- [ ] Ingest past session histories idempotently using `content_hash` deduplication into `orbit_documents` and `orbit_chunks`
 - [ ] Validate `just ci` passes
 
 ### Sprint 4 — Tri-Modal MCP Fabric & Centralized Ingestion (Week 7)
-- [ ] Extend `crates/buzz-dev-mcp` to expose the 8 standardized `orbit.*` tools
+- [ ] Extend `crates/buzz-dev-mcp` (or `crates/buzz-mcp`) to expose the 8 standardized `orbit.*` tools
 - [ ] Implement MCP Client manager connecting to external MCP servers (GitHub, GitLab, Slack, Jira, PostgreSQL)
-- [ ] Implement Centralized Ingestion pipeline pulling external MCP data into `buzz_documents`
+- [ ] Implement Centralized Ingestion pipeline pulling external MCP data into `orbit_documents`
 - [ ] Implement Context Arbiter security layer (delimiter fencing, input sanitization)
 - [ ] Implement agent auto-discovery logic in `crates/buzz-cli` (`buzz memory install --auto`)
 - [ ] Create shared skill definition in `.agents/skills/orbit-memory/SKILL.md`

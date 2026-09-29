@@ -74,9 +74,9 @@ pub async fn detect_agent_harnesses() -> Result<Vec<HarnessInfo>, String> {
 
 #[tauri::command]
 pub async fn connect_harness(harness_id: String) -> Result<bool, String> {
-    // 1. Injects orbit-mcp into the harness's config file
+    // 1. Injects buzz-mcp (Orbit MCP server) into the harness's config file
     // 2. Copies the canonical Orbit Skill definition
-    // 3. Connects harness to ~/.buzz/orbit_brain/
+    // 3. Connects harness to ~/.orbit/brain/
 }
 
 #[tauri::command]

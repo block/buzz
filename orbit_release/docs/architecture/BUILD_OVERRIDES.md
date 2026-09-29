@@ -68,6 +68,18 @@ PostgreSQL/pgvector are valid here because F11 is the hosted data plane. Keep te
 
 Identity, device metadata, subscription state, sync events, and enterprise policies are control-plane/workspace data. They are not long-term memory content unless explicitly imported by a user/workspace policy.
 
+## Code Structure vs User Surface & Storage Overrides
+
+### Code Architecture & Variables
+- All internal crates follow the existing Buzz workspace naming scheme (`crates/buzz-*`): `buzz-core`, `buzz-db`, `buzz-search`, `buzz-ai`, `buzz-ingest`, `buzz-mcp`, `buzz-plugins`, `buzz-recall`, `buzz-dev-mcp`, `buzz-cli`, etc.
+- In-code variables, struct fields, traits, and modules must use the `buzz` / `buzz_*` naming standard to prevent variable collisions or architectural divergence.
+
+### User Interface, Database & Local Storage
+- All database tables must be named `orbit_*` (`orbit_documents`, `orbit_chunks`, `orbit_entities`, `orbit_relations`, `orbit_query_cache`, `orbit_working_contexts`).
+- Local database file is `orbit.db` under `~/.orbit/brain/db/`.
+- Local storage root for data, models, and indexes must be `~/.orbit/` or `~/.orbit/brain/` (never `~/.buzz/`).
+- The user interface and local files visible to the user must carry the Orbit identity exclusively with no user-visible Buzz naming.
+
 ## External-reference rule
 
 The architecture package can contain research citations for historical context, but an implementation agent must not browse or adopt an external design merely because a preserved document contains a citation. Use the repository specification as the build source of truth.

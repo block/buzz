@@ -10,7 +10,7 @@
 
 ## Overview
 
-Feature 06 retroactively parses, normalizes, and ingests past session transcripts from AI coding agents so Orbit starts with a rich memory from day one. Ingested raw transcripts are cached under `orbit_brain/transcripts/` and vectorized into `buzz_chunks`.
+Feature 06 retroactively parses, normalizes, and ingests past session transcripts from AI coding agents so Orbit starts with a rich memory from day one. Ingested raw transcripts are cached under `orbit_brain/transcripts/` and vectorized into `orbit_chunks`.
 
 ---
 
@@ -58,8 +58,8 @@ For each detected session:
 1. Extract user queries, agent explanations, tool invocations, and code diffs.
 2. Run through `SecretRedactor` to strip credentials.
 3. Compute `content_hash` to guarantee idempotency (prevent re-ingesting identical sessions).
-4. Chunk and embed using `orbit-ingest` and `orbit-ai`.
-5. Store in `buzz_documents` (`source_type = 'session'`) and `buzz_chunks` (`agent_name = plugin.name()`).
+4. Chunk and embed using `buzz-ingest` and `buzz-ai`.
+5. Store in `orbit_documents` (`source_type = 'session'`) and `orbit_chunks` (`agent_name = plugin.name()`).
 
 ---
 

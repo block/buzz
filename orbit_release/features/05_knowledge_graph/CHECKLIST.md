@@ -28,6 +28,6 @@
 
 ## Verification & Sign-off
 
-- [ ] `cargo test -p orbit-core`
+- [ ] `cargo test -p buzz-core`
 - [ ] Graph persistence/reopen test passes
 - [ ] Contradiction-resolution test passes

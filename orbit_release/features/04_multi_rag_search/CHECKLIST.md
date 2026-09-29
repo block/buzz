@@ -33,8 +33,8 @@
 - [ ] Implement automatic adaptive re-trial pass on low confidence or sparse result pools (<3 results)
 - [ ] Add query reformulation, keyword stem relaxation, and graph walk expansion to 3 hops in re-trial loop
 
-### 5. MVP Cross-Encoder Reranking Engine (`crates/orbit-ai`)
-- [ ] Define `RerankProvider` trait in `crates/orbit-ai/src/rerank.rs`
+### 5. MVP Cross-Encoder Reranking Engine (`crates/buzz-ai`)
+- [ ] Define `RerankProvider` trait in `crates/buzz-ai/src/rerank.rs`
 - [ ] Implement local ONNX cross-encoder provider using `BAAI/bge-reranker-small` (INT8 quantized, ~25MB) via `ort` crate
 - [ ] Implement candidate scoring pipeline: re-evaluates top 50 candidates down to top 15 precision chunks in `<10ms`
 - [ ] Implement cloud API fallback for Cohere Rerank (`rerank-v3.5`) and Voyage Rerank (`rerank-2`)
@@ -51,7 +51,7 @@
 ## Verification & Sign-off
 
 - [ ] `cargo test -p buzz-search` passes
-- [ ] `cargo test -p orbit-ai` passes (embeddings + reranking)
+- [ ] `cargo test -p buzz-ai` passes (embeddings + reranking)
 - [ ] Multi-RAG query returns high-relevance chunks for both conceptual and exact symbol queries
 - [ ] Data Re-Trial loop successfully triggers and recovers relevant candidates on ambiguous queries
 - [ ] Cross-encoder reranker runs on CPU in `<10ms` for 50 candidates

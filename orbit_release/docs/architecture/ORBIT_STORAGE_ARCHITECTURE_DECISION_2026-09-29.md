@@ -183,17 +183,17 @@ That is unnecessary runtime complexity for ORBIT V1.
 ```text
 Tauri / Rust
 │
-├── orbit-core
+├── buzz-core
 │   ├── Memory API
 │   ├── lifecycle
 │   └── policy
 │
-├── orbit-ingest
+├── buzz-ingest
 │   ├── filesystem
 │   ├── Git
 │   └── IDE transcripts
 │
-├── orbit-recall
+├── buzz-search / buzz-recall
 │   ├── lexical
 │   ├── vector
 │   ├── graph
@@ -201,17 +201,17 @@ Tauri / Rust
 │   ├── rerank
 │   └── context compiler
 │
-├── orbit-store
-│   ├── MetadataStore → SQLite
-│   ├── VectorStore   → LanceDB
-│   └── GraphStore    → Ladybug/Kuzu
+├── buzz-db
+│   ├── MetadataStore → SQLite (~/.orbit/brain/db/orbit.db)
+│   ├── VectorStore   → LanceDB (~/.orbit/brain/vectors/)
+│   └── GraphStore    → Ladybug/Kuzu (~/.orbit/brain/graph/)
 │
-├── orbit-ai
+├── buzz-ai
 │   ├── embeddings
 │   ├── reranker
 │   └── optional local LLM
 │
-└── orbit-mcp
+└── buzz-mcp / buzz-dev-mcp
     ├── search_context
     ├── store_memory
     ├── recall_session

@@ -27,7 +27,7 @@ auth server and policy gates across storage/processing/retrieval.
 - Work in small, reviewable tasks.
 - After each task, run the narrowest relevant local test.
 - Do not mark checklist items complete based on code presence alone.
-- Keep the public contracts in `orbit-core` / storage / retrieval interfaces stable unless the implementation document explicitly requires a contract change.
+- Keep the public contracts in `buzz-core` / storage / retrieval interfaces stable unless the implementation document explicitly requires a contract change.
 - Preserve local-first behavior for desktop features.
 - Do not introduce a server, cloud dependency, or CI-only workaround into a local feature.
 

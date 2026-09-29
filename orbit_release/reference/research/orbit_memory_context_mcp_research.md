@@ -906,28 +906,28 @@ Core Memory     Connectors      MCP Fabric      Context Graph   Enterprise Relay
 
 ### Phase 1 — Core Local Memory Substrate (Months 1–2)
 - **Deliverables**: Embedded Rust storage engine inside Tauri v2; SQLite + `sqlite-vec` + FTS5 integration; local ONNX embedding pipeline (`bge-small`); basic memory CRUD API; desktop memory inspector UI.
-- **Technical Components**: `crates/orbit-core`, `crates/orbit-storage`, `desktop/src/components/memory`.
+- **Technical Components**: `crates/buzz-core`, `crates/buzz-db`, `desktop/src/components/memory`.
 - **Dependencies**: Tauri v2, `sqlite-vec` C-extension, `ort` (ONNX Runtime Rust bindings).
 - **Risks**: Cross-platform compilation of `sqlite-vec` on Windows MSVC.
 - **Definition of Done**: A standalone Tauri desktop app that runs locally, embeds text chunks into SQLite-vec in `<10ms`, executes hybrid BM25+vector searches in `<30ms`, and consumes `<60MB` RAM.
 
 ### Phase 2 — Multi-Platform Source Connectors (Months 3–4)
 - **Deliverables**: Ingestion pipeline supporting GitHub (Issues, PRs, Commits), Slack (Socket Mode threads), Local Filesystem (file watcher), and Markdown/PDF document importers.
-- **Technical Components**: `crates/orbit-connectors`, `crates/orbit-ingest`, OAuth PKCE manager.
+- **Technical Components**: `crates/buzz-connectors`, `crates/buzz-ingest`, OAuth PKCE manager.
 - **Dependencies**: `octocrab` (GitHub), `slack-mpsc`, `notify` (file system).
 - **Risks**: Slack and GitHub API rate limits during initial historical backfills.
 - **Definition of Done**: Successful automated ingestion of a 10,000-message Slack workspace and a 500-issue GitHub repository into canonical context chunks with full provenance metadata.
 
 ### Phase 3 — Model Context Protocol (MCP) Fabric (Months 5–6)
 - **Deliverables**: Production-grade ORBIT MCP Server (stdio and SSE transports); ORBIT MCP Client manager; tool permission security gate; prompt injection sanitization filter.
-- **Technical Components**: `crates/orbit-mcp`, `crates/orbit-security`.
+- **Technical Components**: `crates/buzz-mcp`, `crates/buzz-auth`.
 - **Dependencies**: `rmcp` Rust crate, MCP Protocol specification 2024-11-05.
 - **Risks**: Divergent MCP client behavior between Claude Code, Google Antigravity, and Cursor.
 - **Definition of Done**: Claude Code and Google Antigravity can connect to ORBIT via `orbit.search_context`, query multi-platform context with accurate citations, and store memories using `orbit.store_memory`.
 
 ### Phase 4 — Advanced Context & Knowledge Graph (Months 7–9)
 - **Deliverables**: Embedded Kùzu graph engine integration; dynamic entity-relation extraction pipeline; temporal contradiction and superseding resolver; cross-encoder reranking.
-- **Technical Components**: `crates/orbit-graph`, `crates/orbit-rerank`.
+- **Technical Components**: `crates/buzz-core`, `crates/buzz-ai`.
 - **Dependencies**: `kuzu` Rust bindings, local Cross-Encoder models.
 - **Risks**: Memory footprint inflation during large graph neighbor expansions.
 - **Definition of Done**: Multi-hop queries (*"Find all PRs reviewed by Alice that changed the authentication layer mentioned in Slack"*) return accurate results by joining graph edges with vector similarities.
@@ -1086,11 +1086,11 @@ To achieve a rapid, battle-tested first release that delivers immediate value to
 
 | Deliverable | Technical Component | Functionality & Target Metrics |
 | :--- | :--- | :--- |
-| **1. Embedded Vector Engine** | `crates/orbit-storage` | Link `sqlite-vec` as a statically compiled C extension inside SQLite. Enable dense cosine distance search with P99 latency `<10ms`. |
-| **2. Local Lexical Search** | `crates/orbit-storage` | Enable SQLite `FTS5` virtual tables for BM25 exact-token matching over code symbols and identifiers. |
-| **3. In-Process Embedder** | `crates/orbit-ai` | Embed ONNX Runtime (`ort` crate) running quantized `bge-small-en-v1.5` (384 dimensions, ~30MB model weight file). Zero network traffic. |
-| **4. Essential MCP Server** | `crates/orbit-mcp` | Implement stdio MCP server exposing 3 critical tools:<br>• `orbit.search_context(query, limit)`<br>• `orbit.store_memory(content, tags)`<br>• `orbit.get_project_context(path)` |
-| **5. Local File Ingester** | `crates/orbit-ingest` | Native OS file watcher (`notify` crate) monitoring active project directories. Ingests `.md`, `.txt`, and code files using Tree-sitter AST chunking. |
+| **1. Embedded Vector Engine** | `crates/buzz-db` | Link `sqlite-vec` as a statically compiled C extension inside SQLite. Enable dense cosine distance search with P99 latency `<10ms`. |
+| **2. Local Lexical Search** | `crates/buzz-db` | Enable SQLite `FTS5` virtual tables for BM25 exact-token matching over code symbols and identifiers. |
+| **3. In-Process Embedder** | `crates/buzz-ai` | Embed ONNX Runtime (`ort` crate) running quantized `bge-small-en-v1.5` (384 dimensions, ~30MB model weight file). Zero network traffic. |
+| **4. Essential MCP Server** | `crates/buzz-mcp` | Implement stdio MCP server exposing 3 critical tools:<br>• `orbit.search_context(query, limit)`<br>• `orbit.store_memory(content, tags)`<br>• `orbit.get_project_context(path)` |
+| **5. Local File Ingester** | `crates/buzz-ingest` | Native OS file watcher (`notify` crate) monitoring active project directories. Ingests `.md`, `.txt`, and code files using Tree-sitter AST chunking. |
 | **6. Desktop Memory UI** | `desktop/src/views/Memory` | Clean React 19 interface allowing users to view indexed files, search memories, view provenance citations, and hard-delete entries. |
 | **7. Zero-Docker Packaging** | `desktop/src-tauri` | Package as a self-contained Windows `.exe` / macOS `.dmg` consuming `<60MB` RAM at idle. Zero requirement for Docker, PostgreSQL, or Redis. |
 

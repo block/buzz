@@ -52,7 +52,7 @@ The panel consumes the active Catppuccin theme variables:
                [Chat: Fix Auth] 🔵 ───────► (File: auth.rs) 🟠
                       │                            ▲
                       ▼                            │
-             (Entity: NIP-42) 🟡 ─────────► [Project: Buzz Relay] 🟢
+             (Entity: NIP-42) 🟡 ─────────► [Project: Orbit Workspace] 🟢
                       ▲
                       │
            (Decision: Use HNSW) ⚪ ───────► [Chat: Pgvector RFC] 🔵
@@ -122,7 +122,7 @@ pub async fn fetch_brain_graph(
     start_time: Option<DateTime<Utc>>,
     end_time: Option<DateTime<Utc>>,
 ) -> Result<BrainGraphPayload, String> {
-    // Queries buzz_documents, buzz_chunks, buzz_entities, buzz_relations
+    // Queries orbit_documents, orbit_chunks, orbit_entities, orbit_relations
     // Returns nodes & links ready for D3 simulation
 }
 ```

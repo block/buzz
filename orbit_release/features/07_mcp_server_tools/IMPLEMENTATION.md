@@ -3,7 +3,7 @@
 > **Priority**: P0 — Integration point. Exposes Orbit intelligence to AI agents.  
 > **Sprint**: Sprint 4 (Week 7)  
 > **Dependencies**: Feature 01, 02, 04, 05, 06  
-> **Crates**: `orbit-mcp` (implementation), `buzz-dev-mcp` (registration)  
+> **Crates**: `buzz-mcp` (implementation), `buzz-dev-mcp` (registration)  
 > **Environment Variables**: `BUZZ_DATABASE_URL`, `BUZZ_DATA_DIR`
 
 ---
@@ -42,7 +42,7 @@ To protect AI agents from prompt injections and hallucinated data:
 
 - Integration test: invoke `orbit.store_memory` over JSON-RPC stdio → verify chunk stored.
 - Integration test: invoke `orbit.search_context` over JSON-RPC stdio → verify ranked results.
-- Run `cargo test -p orbit-mcp`.
+- Run `cargo test -p buzz-mcp`.
 - Run `just ci`.
 
 ## Local versus hosted MCP policy

@@ -3,14 +3,14 @@
 > **Priority**: P0 — Required for all vector similarity and cross-encoder reranking operations.  
 > **Sprint**: Sprint 1 (Weeks 1–2)  
 > **Dependencies**: Feature 01 (Storage Foundation)  
-> **Crates**: `orbit-ai` (implementation), `buzz-auth` (keyring credentials)  
+> **Crates**: `buzz-ai` (implementation), `buzz-auth` (keyring credentials)  
 > **Environment Variables**: `BUZZ_EMBED_PROVIDER`, `BUZZ_EMBED_MODEL`, `BUZZ_RERANK_PROVIDER`, `BUZZ_RERANK_MODEL`, `BUZZ_DATA_DIR`
 
 ---
 
 ## Overview
 
-Feature 02 provides both an **Embedding Generation Engine** and a high-performance **Cross-Encoder Reranker Engine** for Orbit within the `orbit-ai` crate. It features zero-cost, zero-network **local ONNX runtimes** (`bge-small-en-v1.5` for embeddings and `bge-reranker-small` for reranking), while providing pluggable cloud providers (OpenAI, Voyage, Cohere, Gemini, Ollama) behind unified async traits.
+Feature 02 provides both an **Embedding Generation Engine** and a high-performance **Cross-Encoder Reranker Engine** for Orbit within the `buzz-ai` crate. It features zero-cost, zero-network **local ONNX runtimes** (`bge-small-en-v1.5` for embeddings and `bge-reranker-small` for reranking), while providing pluggable cloud providers (OpenAI, Voyage, Cohere, Gemini, Ollama) behind unified async traits.
 
 Model weights files are stored locally under `orbit_brain/models/`.
 
@@ -18,7 +18,7 @@ Model weights files are stored locally under `orbit_brain/models/`.
 
 ## Architecture & Traits
 
-### 1. `EmbedProvider` Trait (`crates/orbit-ai/src/provider.rs`)
+### 1. `EmbedProvider` Trait (`crates/buzz-ai/src/provider.rs`)
 
 ```rust
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ pub trait EmbedProvider: Send + Sync {
 }
 ```
 
-### 2. `RerankProvider` Trait (`crates/orbit-ai/src/rerank.rs`)
+### 2. `RerankProvider` Trait (`crates/buzz-ai/src/rerank.rs`)
 
 ```rust
 use async_trait::async_trait;
@@ -69,7 +69,7 @@ pub trait RerankProvider: Send + Sync {
 - **Size**: ~32MB weights file
 - **Runtime**: `ort` crate (ONNX Runtime bindings for Rust)
 - **Performance**: `<5 ms` per chunk on CPU
-- **Location**: `~/.buzz/orbit_brain/models/bge-small-en-v1.5.onnx`
+- **Location**: `~/.orbit/brain/models/bge-small-en-v1.5.onnx`
 
 ### 2. Local Cross-Encoder Reranker Engine: `LocalOnnxReranker`
 - **Model**: `BAAI/bge-reranker-small` quantized to INT8
@@ -77,7 +77,7 @@ pub trait RerankProvider: Send + Sync {
 - **Size**: ~25MB weights file
 - **Runtime**: `ort` crate running on CPU (SIMD/AVX-512 optimized)
 - **Performance**: `<10 ms` for 50 candidate pairs
-- **Location**: `~/.buzz/orbit_brain/models/bge-reranker-small.onnx`
+- **Location**: `~/.orbit/brain/models/bge-reranker-small.onnx`
 
 ---
 
@@ -111,6 +111,6 @@ Keys are never stored in plaintext configuration files or database tables.
 - Unit tests: verify 384-dimensional vector output for sample sentences.
 - Unit tests: verify cross-encoder score ranking matches semantic relevance on test pairs.
 - Mock tests for cloud providers to verify JSON payload contracts.
-- Run `cargo test -p orbit-ai`.
+- Run `cargo test -p buzz-ai`.
 - Benchmark: CPU latency `<5ms` for embed, `<10ms` for 50-candidate rerank.
 - Run `just ci`.

@@ -27,9 +27,14 @@ This repository is the implementation plan and local build source of truth for O
 11. Enterprise policies must be evaluated through ingestion, storage, sync, processing, retrieval, and export.
 12. Local processing remains the default even when cloud sync is enabled; hosted processing is explicit and policy-controlled.
 
-## Naming rule
+## Naming & Architecture Rule
 
-The documents may refer to both the Buzz codebase substrate and ORBIT product naming. Preserve existing repository names where the actual codebase requires them. Do not rename crates or modules solely for branding unless a task explicitly calls for it.
+Buzz is the foundational engineering architecture and codebase substrate used to create Orbit:
+- **In the Code (Architecture, Crates, Variables)**: All crates (`crates/buzz-*`), modules, traits, and variable names in code must use the Buzz naming convention (`buzz-*`, `buzz_*` variables, `buzz-ai`, `buzz-ingest`, `buzz-mcp`, `buzz-core`, `buzz-db`, `buzz-search`, etc.) to prevent variable or crate mismatch with the existing codebase structure.
+- **On the User Interface, Database, and Local Storage**: Everything that remains on the local machine and that the user sees must be named Orbit (no Buzz visible to the user):
+  - **Database**: All database tables must be prefixed with `orbit_` (`orbit_documents`, `orbit_chunks`, `orbit_entities`, `orbit_relations`, `orbit_query_cache`, `orbit_working_contexts`), and database file is `orbit.db`.
+  - **Local data folder**: The local directory where data is stored must be `~/.orbit/` or `~/.orbit/brain/` (never `~/.buzz/`).
+  - **User Interface**: All UI components, views, titles, labels, and screens are Orbit. No Buzz should be displayed to the user.
 
 ## Required reading order
 

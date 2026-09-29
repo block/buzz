@@ -3,7 +3,7 @@
 > **Priority**: P0 — Core retrieval and context assembly engine for AI agents and developer queries (Layer 4 of Orbit's 5-Layer Context Architecture).  
 > **Sprint**: Sprint 2 (Weeks 3–4)  
 > **Dependencies**: Feature 01 (Storage Foundation), Feature 02 (Embedding & Reranker Engine)  
-> **Crates**: `buzz-search` (extend query & fusion), `orbit-storage` (orchestrator), `orbit-ai` (reranker runtime)  
+> **Crates**: `buzz-search` (extend query & fusion), `buzz-db` (orchestrator), `buzz-ai` (reranker runtime)  
 > **Environment Variables**: `BUZZ_DATABASE_URL`, `BUZZ_SEARCH_LIMIT`, `BUZZ_TOKEN_BUDGET`, `BUZZ_RERANK_PROVIDER`, `BUZZ_RERANK_MODEL`
 
 ---
@@ -20,9 +20,9 @@ In conventional architectures, every agent query executes brute-force database s
    - **Intent Classification & Query Decomposition**: Routes intelligently based on query type (symbol lookup, architectural decision, multi-hop relation, or general concept).
    - **Multi-Query Expansion**: Generates keyword-dense and semantic variations to maximize recall.
 2. **Parallel Multi-Modal Candidate Retrieval**:
-   - **Dense Vector Search**: embedded vector store index (`<=>` cosine distance) over `buzz_chunks`.
+   - **Dense Vector Search**: embedded vector store index (`<=>` cosine distance) over `orbit_chunks`.
    - **Lexical BM25 Search**: PostgreSQL GIN index (`search_tsv` with `ts_rank_cd`).
-   - **Knowledge Graph Traversal**: Bi-temporal 2-hop recursive graph walk over `buzz_entities` and `buzz_relations`.
+   - **Knowledge Graph Traversal**: Bi-temporal 2-hop recursive graph walk over `orbit_entities` and `orbit_relations`.
    - **Metadata & Scope Filters**: Workspace isolation, permissions/ACLs, and agent boundary filtering.
 3. **Reciprocal Rank Fusion (RRF) & Temporal Modulation**:
    - Merges candidate rankings using RRF ($k = 60$).
@@ -241,7 +241,7 @@ Unlike bi-encoders (which compute vector similarity independently), the **Cross-
 
 $$\text{Rerank\_Score}(q, d) = \text{Softmax}(\mathbf{W} \cdot \text{Transformer}([CLS] \circ q \circ [SEP] \circ d \circ [SEP]))$$
 
-#### Runtime Implementation (`crates/orbit-ai/src/rerank.rs`):
+#### Runtime Implementation (`crates/buzz-ai/src/rerank.rs`):
 - **Local Default Engine**: `BAAI/bge-reranker-small` (INT8 quantized ONNX, ~25MB weights file) executed via the Rust `ort` crate.
 - **Latency**: `<10 ms` for 50 candidate chunks on a standard multi-core CPU.
 - **Pluggable Cloud Fallback**: Cohere Rerank API (`rerank-v3.5`) or Voyage Rerank API (`rerank-2`) when configured in desktop settings.
@@ -291,7 +291,7 @@ The winning top 10–15 reranked chunks are transformed into a clean, bounded wo
   - Idle RAM overhead of the retrieval engine remains **$< 40$ MB**.
 - **Quality Gates**:
   - `cargo test -p buzz-search`
-  - `cargo test -p orbit-ai`
+  - `cargo test -p buzz-ai`
   - `just ci`
 
 ## Local-first retrieval rule
