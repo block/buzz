@@ -2,6 +2,9 @@
 
 set dotenv-load := true
 
+export PATH := justfile_directory() + "/bin;C:\\Program Files\\Git\\usr\\bin;" + env_var_or_default("PATH", "")
+
+
 desktop_dir := "desktop"
 desktop_tauri_manifest := "desktop/src-tauri/Cargo.toml"
 web_dir := "web"
@@ -59,12 +62,13 @@ hooks:
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.
     HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
     git config --local core.hooksPath "$HOOKS_DIR"
-    if command -v lefthook &>/dev/null; then
-        lefthook install --force
-    elif command -v pnpm &>/dev/null; then
+    export HERMIT_STATE_DIR_RAW="${HERMIT_STATE_DIR_RAW:-}"
+    if command -v pnpm &>/dev/null; then
         pnpm dlx lefthook install --force
     elif command -v npx &>/dev/null; then
         npx -y lefthook install --force
+    elif command -v lefthook &>/dev/null; then
+        lefthook install --force
     else
         export PATH="{{justfile_directory()}}/bin:$PATH"
         lefthook install --force
