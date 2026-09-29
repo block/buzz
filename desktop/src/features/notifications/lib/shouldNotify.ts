@@ -20,6 +20,8 @@ export type NotifyOptions = {
   participatedRootIds: ReadonlySet<string>;
   followedRootIds: ReadonlySet<string>;
   authoredRootIds: ReadonlySet<string>;
+  /** Sidebar-starred thread roots — same notify interest as followed. */
+  starredRootIds?: ReadonlySet<string>;
   mutedRootIds?: ReadonlySet<string>;
   mutedChannelIds?: ReadonlySet<string>;
   channelId?: string | null;
@@ -34,6 +36,7 @@ export function shouldNotifyForEvent(
     participatedRootIds,
     followedRootIds,
     authoredRootIds,
+    starredRootIds = new Set(),
     mutedRootIds = new Set(),
     mutedChannelIds = new Set(),
     channelId = null,
@@ -65,6 +68,10 @@ export function shouldNotifyForEvent(
   }
 
   if (rootId !== null && followedRootIds.has(rootId)) {
+    return true;
+  }
+
+  if (rootId !== null && starredRootIds.has(rootId)) {
     return true;
   }
 

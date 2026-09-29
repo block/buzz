@@ -69,6 +69,7 @@ export type UseLiveChannelUpdatesOptions = {
   participatedRootIds?: ReadonlySet<string>;
   followedRootIds?: ReadonlySet<string>;
   authoredRootIds?: ReadonlySet<string>;
+  starredRootIds?: ReadonlySet<string>;
   mutedRootIds?: ReadonlySet<string>;
   mutedChannelIds?: ReadonlySet<string>;
 };
@@ -319,6 +320,7 @@ export function useLiveChannelUpdates(
           participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
           followedRootIds: options.followedRootIds ?? EMPTY_SET,
           authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
+          starredRootIds: options.starredRootIds ?? EMPTY_SET,
           mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
           mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
           channelId,

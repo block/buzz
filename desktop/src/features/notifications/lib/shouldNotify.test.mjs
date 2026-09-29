@@ -123,6 +123,33 @@ test("thread reply to followed thread notifies", () => {
   );
 });
 
+test("thread reply to starred thread notifies", () => {
+  const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
+  assert.equal(
+    shouldNotifyForEvent(
+      event,
+      PUBKEY,
+      opts({ starredRootIds: new Set([ROOT_ID]) }),
+    ),
+    true,
+  );
+});
+
+test("muted thread reply suppresses starred", () => {
+  const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
+  assert.equal(
+    shouldNotifyForEvent(
+      event,
+      PUBKEY,
+      opts({
+        starredRootIds: new Set([ROOT_ID]),
+        mutedRootIds: new Set([ROOT_ID]),
+      }),
+    ),
+    false,
+  );
+});
+
 test("thread reply to authored thread notifies", () => {
   const event = makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]);
   assert.equal(

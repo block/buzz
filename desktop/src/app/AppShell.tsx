@@ -46,6 +46,7 @@ import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
+import { useThreadStars } from "@/features/sidebar/lib/useThreadStars";
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
@@ -420,6 +421,7 @@ export function AppShell() {
     followThread,
     unfollowThread,
   } = useThreadFollows(identityQuery.data?.pubkey);
+  const { starredThreadIds } = useThreadStars(identityQuery.data?.pubkey);
   const {
     markAllChannelsRead: markAllChannelReadMarkers,
     markChannelRead,
@@ -457,6 +459,7 @@ export function AppShell() {
       onLiveMention: refetchHomeFeedFromLiveSignal,
       onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
       followedRootIds,
+      starredRootIds: starredThreadIds,
     },
   );
 
@@ -523,11 +526,13 @@ export function AppShell() {
     (rootId: string) =>
       !mutedRootIds.has(rootId) &&
       (followedRootIds.has(rootId) ||
+        starredThreadIds.has(rootId) ||
         participatedRootIds.has(rootId) ||
         authoredRootIds.has(rootId) ||
         mentionedRootIds.has(rootId)),
     [
       followedRootIds,
+      starredThreadIds,
       mutedRootIds,
       participatedRootIds,
       authoredRootIds,
