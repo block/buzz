@@ -362,65 +362,35 @@ pub fn addressed_agent_pubkeys(text: &str, agents: &[AgentNameAlias]) -> Vec<Str
 
 /// Build the kind:9 content posted when STT wakes an agent.
 ///
-/// Includes the full prior huddle transcript (all earlier lines) so the agent
-/// receives meeting context, not only the tagged wake sentence. When there is
-/// no prior context, returns `wake_text` unchanged.
-pub fn compose_wake_content(prior_transcript_lines: &[String], wake_text: &str) -> String {
+/// Keeps the wake short: the addressed utterance plus a clear instruction to
+/// read the huddle channel (and thread, when set) with existing Buzz tools.
+/// Does not inline the meeting transcript.
+pub fn compose_wake_content(
+    wake_text: &str,
+    huddle_channel_id: &str,
+    thread_id: Option<&str>,
+) -> String {
     let wake = wake_text.trim();
-    if prior_transcript_lines.is_empty() {
-        return wake.to_string();
-    }
-    let mut body = String::from("[Huddle transcript — full meeting context so far]\n");
-    for line in prior_transcript_lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        body.push_str(trimmed);
+    let channel = huddle_channel_id.trim();
+    let mut body = String::new();
+    body.push_str(wake);
+    body.push_str("\n\n");
+    body.push_str("[Huddle wake — read channel context]\n");
+    body.push_str(
+        "This wake does not include the meeting transcript. Read the huddle channel with Buzz tools before you answer.\n",
+    );
+    body.push_str("Channel: ");
+    body.push_str(channel);
+    body.push('\n');
+    if let Some(thread) = thread_id.map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str("Thread: ");
+        body.push_str(thread);
         body.push('\n');
     }
-    body.push_str("\n[Addressed]\n");
-    body.push_str(wake);
+    body.push_str("Example: buzz messages get --channel ");
+    body.push_str(channel);
+    body.push('\n');
     body
-}
-
-/// Chronologically merge channel history lines with the local STT session
-/// buffer, dropping exact duplicate consecutive lines and omitting the wake
-/// text itself when it already appears as the last history line.
-pub fn merge_transcript_context(
-    channel_lines: &[String],
-    session_lines: &[String],
-    wake_text: &str,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let push_unique = |out: &mut Vec<String>, line: &str| {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        if out
-            .last()
-            .is_some_and(|prev| prev.eq_ignore_ascii_case(trimmed))
-        {
-            return;
-        }
-        out.push(trimmed.to_string());
-    };
-    for line in channel_lines {
-        push_unique(&mut out, line);
-    }
-    for line in session_lines {
-        push_unique(&mut out, line);
-    }
-    let wake = wake_text.trim();
-    if !wake.is_empty()
-        && out
-            .last()
-            .is_some_and(|prev| prev.eq_ignore_ascii_case(wake))
-    {
-        out.pop();
-    }
-    out
 }
 
 /// Build alias lists for huddle agent pubkeys from managed-agent records.
@@ -683,43 +653,35 @@ mod tests {
     }
 
     #[test]
-    fn compose_wake_content_includes_prior_lines() {
-        let prior = vec![
-            "we discussed the roadmap".into(),
-            "then covered PRs from yesterday".into(),
-        ];
-        let out = compose_wake_content(&prior, "Hey Fable, summarize that");
-        assert!(out.contains("[Huddle transcript — full meeting context so far]"));
-        assert!(out.contains("we discussed the roadmap"));
-        assert!(out.contains("then covered PRs from yesterday"));
-        assert!(out.contains("[Addressed]"));
-        assert!(out.contains("Hey Fable, summarize that"));
+    fn compose_wake_content_instructs_channel_read() {
+        let out = compose_wake_content(
+            "Hey Fable, summarize that",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            None,
+        );
+        assert!(out.starts_with("Hey Fable, summarize that"));
+        assert!(out.contains("[Huddle wake — read channel context]"));
+        assert!(out.contains("Channel: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        assert!(out.contains(
+            "buzz messages get --channel aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ));
+        assert!(!out.contains("[Huddle transcript — full meeting context so far]"));
+        assert!(!out.contains("we discussed the roadmap"));
     }
 
     #[test]
-    fn compose_wake_content_without_prior_is_plain() {
-        assert_eq!(compose_wake_content(&[], "Hey Fable hi"), "Hey Fable hi");
-    }
-
-    #[test]
-    fn merge_transcript_context_dedups_and_strips_wake() {
-        let channel = vec!["hello everyone".into(), "roadmap next".into()];
-        let session = vec!["roadmap next".into(), "one more thing".into()];
-        let merged = merge_transcript_context(&channel, &session, "Hey Fable go");
-        assert_eq!(
-            merged,
-            vec![
-                "hello everyone".to_string(),
-                "roadmap next".to_string(),
-                "one more thing".to_string(),
-            ]
+    fn compose_wake_content_includes_thread_when_set() {
+        let out = compose_wake_content(
+            "Hey Fable hi",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
         );
-        let with_wake_dup = merge_transcript_context(
-            &["earlier".into(), "Hey Fable go".into()],
-            &[],
-            "Hey Fable go",
-        );
-        assert_eq!(with_wake_dup, vec!["earlier".to_string()]);
+        assert!(out.contains(
+            "Thread: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        ));
+        assert!(out.contains(
+            "buzz messages get --channel aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ));
     }
 
     #[test]

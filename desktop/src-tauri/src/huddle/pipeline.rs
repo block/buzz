@@ -673,9 +673,10 @@ fn resolve_stt_agent_aliases(
 /// Bare names and ordinary transcript lines do not wake agents. Explicit chat
 /// @mentions still wake via the composer send path.
 ///
-/// When a wake fires, the kind:9 content includes the full prior huddle
-/// transcript (channel history + session STT buffer) so the agent receives
-/// meeting context, not only the tagged sentence.
+/// When a wake fires, the kind:9 content stays short: the addressed utterance
+/// plus the huddle channel (and thread, when set) id and an instruction to
+/// read that huddle context with existing Buzz tools. Agent p-tags still route
+/// the wake. The full meeting transcript is not inlined.
 pub(crate) fn spawn_transcription_task(
     mut text_rx: tokio::sync::mpsc::Receiver<String>,
     channel_uuid: Uuid,
@@ -701,8 +702,6 @@ pub(crate) fn spawn_transcription_task(
     tauri::async_runtime::spawn(async move {
         let mut cached_roster: Vec<String> = Vec::new();
         let mut cached_aliases: Vec<super::stt_wake::AgentNameAlias> = Vec::new();
-        // Local STT finals for this huddle session (chronological).
-        let mut session_transcript: Vec<String> = Vec::new();
 
         // recv().await yields (not blocks) until text arrives or sender is dropped.
         // When the STT worker exits and drops its Sender, recv() returns None → loop ends.
@@ -783,19 +782,17 @@ pub(crate) fn spawn_transcription_task(
             let content = if wake_pubkeys.is_empty() {
                 t.clone()
             } else {
-                let channel_lines = fetch_huddle_transcript_lines(
-                    &http_client,
-                    &keys,
-                    &relay_base_url,
-                    channel_uuid,
-                )
-                .await;
-                let prior = super::stt_wake::merge_transcript_context(
-                    &channel_lines,
-                    &session_transcript,
+                let thread_id = app_handle.as_ref().and_then(|handle| {
+                    use tauri::Manager;
+                    let app_state = handle.try_state::<AppState>()?;
+                    let huddle = app_state.huddle().ok()?;
+                    huddle.huddle_thread_event_id.clone()
+                });
+                super::stt_wake::compose_wake_content(
                     &t,
-                );
-                super::stt_wake::compose_wake_content(&prior, &t)
+                    &channel_uuid.to_string(),
+                    thread_id.as_deref(),
+                )
             };
             let p_tags: Vec<&str> = wake_pubkeys.iter().map(|s| s.as_str()).collect();
             let builder = match events::build_message(
@@ -865,17 +862,15 @@ pub(crate) fn spawn_transcription_task(
                 }
             }
 
-            // Always retain the spoken line for subsequent wake context, even
-            // when this utterance did not itself wake an agent.
-            session_transcript.push(t);
         }
     });
 }
 
-/// Fetch recent kind:9 huddle / companion messages for wake context.
+/// Fetch recent kind:9 huddle / companion messages (used by agent barge).
 ///
-/// Best-effort: failures return an empty list so the local STT session buffer
-/// still supplies prior spoken context.
+/// Best-effort: failures return an empty list. Legacy wake payloads that
+/// inlined a full transcript dump are reduced to their addressed line so
+/// barge context does not nest old wake blocks.
 pub(crate) async fn fetch_huddle_transcript_lines(
     http_client: &reqwest::Client,
     keys: &nostr::Keys,
