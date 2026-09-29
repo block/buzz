@@ -85,6 +85,43 @@ surfaces a toast. Treat as a known Claude-first gap.
 
 
 
+## Return path (Buzz)
+
+Every term-session card `prompt` must end with a **Return path (Buzz)** block so
+the Term agent knows how to hand back to Buzz:
+
+```
+## Return path (Buzz)
+- origin channelId: <...>
+- origin threadId:  <...>
+- mention to use:   @<AgentName>
+- On "report back" / "hand back" / "I'm done":
+  call buzz_draft_message with the origin channelId + threadId.
+  Content = "<mention> <text JM asked for>". Draft only. JM clicks Send.
+- Never draft to any other channel or thread unless JM gives new IDs.
+```
+
+Rules:
+
+1. **Origin, not source.** IDs are the thread JM launched Term from (Term Go /
+   deep link), **not** a different thread that was summarized into the prompt.
+   If summarized ≠ origin, label both (`origin` vs `summarized/source`).
+2. **Mention** is the Buzz agent that should pick the thread up next (usually
+   the agent selected in the Term handoff popover). Do not hardcode a name; do
+   not default to Term mentioning itself.
+3. Trigger phrases only: `report back` / `hand back` / `I'm done`. Never
+   auto-draft progress.
+4. Prefer filling origin from a `hulabuzz://message?channel=&id=&thread=` (or
+   `buzz://message`) deep link when the card was invoked from one.
+
+Desktop: `buildTermSessionReturnPathSection` /
+`resolveTermSessionReturnPathOrigin` in
+`desktop/src/features/term-session/lib/returnPath.ts`. The Go instruction
+(`buildTermSessionHandoffInstruction`) embeds a filled block and asks the
+card-maker to pass `originChannelId` / `originThreadId` / `mentionToUse` to
+`term_session_card`. The MCP tool appends the section when those fields are
+set and the prompt lacks the heading.
+
 ## User-signer MCP (reads as JM; writes = draft)
 
 Buzz Term Claude sessions wire **buzz-dev-mcp** into a per-sid `CLAUDE_CONFIG_DIR`
@@ -125,7 +162,7 @@ IPC layout:
 ## Files
 
 - `desktop/src/features/term-session/` — parse, roster, harnesses, card UI,
-  handoff popover, launch/open
+  handoff popover, launch/open, `returnPath.ts` (Return path section)
 - `crates/buzz-dev-mcp/src/term_session_card.rs` — MCP `term_session_card`
 - `desktop/src-tauri/src/commands/term_session.rs` — `prepare_term_session_launch`
 - Markdown fence registration mirrors playground cards

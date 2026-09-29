@@ -246,7 +246,7 @@ impl DevMcp {
 
     #[tool(
         name = "term_session_card",
-        description = "Standing instructions: summarize the thread into a Buzz Term handoff. Reply in chat with ONLY a short one-line ack plus this tool’s returned fenced card. Put the full handoff prompt ONLY in JSON `prompt` (UI hides it). Never dump the prompt as plain markdown. Never put tokens/JWTs in the card. Set `openclawWorkspace` true (boolean only) when the agent uses OpenClaw; otherwise omit or false."
+        description = "Standing instructions: summarize the thread into a Buzz Term handoff. Reply in chat with ONLY a short one-line ack plus this tool’s returned fenced card. Put the full handoff prompt ONLY in JSON `prompt` (UI hides it). Never dump the prompt as plain markdown. Never put tokens/JWTs in the card. Set `openclawWorkspace` true (boolean only) when the agent uses OpenClaw; otherwise omit or false. Pass originChannelId + originThreadId + mentionToUse (the Buzz agent to @ on hand-back, e.g. the agent that built this card) so the tool appends a Return path (Buzz) section: Term must buzz_draft_message only to that origin on report back / hand back / I'm done — never to a summarized/source thread."
     )]
     async fn term_session_card(
         &self,
