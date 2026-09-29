@@ -69,3 +69,18 @@ For each detected session:
 - Verify deduplication: re-running ingestion does not create duplicate chunks.
 - Run `cargo test -p buzz-recall`.
 - Run `just ci`.
+
+## Multi-device transcript policy
+
+Raw agent transcripts are not automatically cloud-synced. Feature 06 should distinguish:
+
+- raw local transcript data,
+- durable extracted memories/decisions,
+- compact session summaries selected for sync.
+
+Cloud sync can default to durable memories and summaries so a second device receives useful long-term context without uploading every raw transcript. The user may explicitly choose broader transcript synchronization.
+
+
+## Policy-aware recall
+
+Recall returns only policy-eligible context. Workspace scope, ownership, local-only flags, retention state and hosted-processing permissions are checked before context compilation. If a relevant memory is not eligible for the current agent/task, the recall system must omit it rather than expose it as a restricted result.

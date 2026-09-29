@@ -103,3 +103,16 @@ When a harness connects, Orbit injects an identical universal skill instructing 
 - 1-Click test: click "Connect" on Claude / Cursor / Antigravity, verify config file correctly updated.
 - Zero-CLI verification: user connects harnesses without ever opening a terminal.
 - Run `just ci`.
+
+## Cloud account connection is separate from agent wiring
+
+Agent harness configuration and ORBIT account authentication must remain separate concerns. Connecting Claude Code/Cursor/Codex/etc. grants the harness access to the local ORBIT MCP endpoint; it does not implicitly upload memory to the cloud. Cloud synchronization is an explicit user action in ORBIT settings.
+
+The onboarding surface should expose:
+
+1. `Use Local Brain` — no account required.
+2. `Sign In` — opens the ORBIT website in the browser.
+3. `Enable Cloud Sync` — shown only after successful account authentication and entitlement checks.
+4. `Connected Devices` — shows registered devices and last sync state.
+
+The MCP server always enforces the currently active local workspace and permission scope. A cloud-authenticated user is not automatically granted access to another local workspace.

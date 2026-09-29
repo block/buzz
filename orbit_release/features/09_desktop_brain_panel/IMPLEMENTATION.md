@@ -2,20 +2,42 @@
 
 > **Priority**: P1 — Visual, interactive knowledge universe for developers.  
 > **Sprint**: Sprint 5 (Weeks 8–9)  
-> **Dependencies**: Feature 04 (Search), Feature 05 (Knowledge Graph), Feature 07 (MCP)  
+> **Dependencies**: Feature 04 (SuperRAG Search), Feature 05 (Knowledge Graph), Feature 07 (MCP)  
 > **Components**: `desktop/src/features/memory/` (React 19), `desktop/src-tauri/src/graph.rs` (Tauri IPC)  
-> **Aesthetic Reference**: Obsidian Graph View (dark universe, glowing nodes, fluid physics)
+> **Aesthetic Reference**: Obsidian Graph View (dark universe, glowing nodes, fluid physics)  
+> **Codebase Design System**: Catppuccin Theme & Buzz Typography contract (`desktop/src/shared/styles/globals/`)
 
 ---
 
 ## Overview
 
-Feature 09 implements a **dynamic, interactive Obsidian-style Brain Graph** within the Orbit React 19 desktop application. Rather than a static list of memories, developers explore their entire ecosystem as a living, interconnected universe of:
-- **Projects & Workspaces**
-- **Chats & Conversation Threads**
-- **AI Agents** working across tasks
-- **Files & Source Code**
-- **Entities, Concepts & Architectural Decisions**
+Feature 09 implements a **dynamic, interactive Obsidian-style Brain Graph** within the Orbit React 19 desktop application. Rather than navigating a static table of memories, developers explore their entire ecosystem as a living, interconnected universe of:
+- **Projects & Workspaces** (Layer 1)
+- **Chats & Conversation Threads** (Layer 1 & 3)
+- **AI Agents** working across tasks (Layer 3 & 5)
+- **Files & Source Code** (Layer 1 & 2)
+- **Entities, Concepts & Architectural Decisions** (Layer 3)
+
+---
+
+## UI Typography & Design System Contract
+
+The Brain Graph and Memory Explorer components strictly consume the design tokens and typography contract defined in the codebase (`desktop/src/shared/styles/globals/typography.css` and `theme.css`):
+
+### 1. Typography Hierarchy
+All typography scales with `--buzz-type-scale` and `--buzz-type-rem` (1rem-relative) to support keyboard zoom and user density settings without breaking layout geometry:
+- **Graph Header / Title**: `var(--text-xl)` (calc(`var(--buzz-type-rem) * 1.25`)), font-weight 600.
+- **Node Labels**: `var(--text-xs)` (calc(`var(--buzz-type-rem) * 0.75`)), `font-variant-ligatures: no-contextual`, with background pill contrast.
+- **Drawer Body Text**: `var(--conversation-message-font-size)` (calc(`var(--buzz-type-rem) * 0.875`)), line-height `var(--conversation-message-line-height)`.
+- **Drawer Timestamps / Metadata**: `var(--conversation-timestamp-font-size)` (calc(`var(--buzz-type-rem) * 0.75`)), color `hsl(var(--muted-foreground))`.
+- **Code Diffs / Monospace Excerpts**: Monospace font family (`ui-monospace`, `SFMono-Regular`, `Menlo`), font-size `var(--text-xs)`.
+
+### 2. Catppuccin Theme Palette & Surface Tokens
+The panel consumes the active Catppuccin theme variables:
+- **Background Surface**: `hsl(var(--background))` with deep canvas gradient.
+- **Card & Drawer Surface**: `hsl(var(--card))` with border `hsl(var(--border))` and `--radius: 0.625rem`.
+- **Primary Accent**: `hsl(var(--primary))` (mauve accent, 266 85.05% 58.04%).
+- **Interactive State**: Hover states utilize `hsl(var(--accent))` and text `hsl(var(--accent-foreground))`.
 
 ---
 
@@ -39,10 +61,10 @@ Feature 09 implements a **dynamic, interactive Obsidian-style Brain Graph** with
              (Agent: Antigravity) 🟣
 ```
 
-### 2. Node Classification & Color Coding
+### 2. Node Classification & Visual Semantics
 
-| Node Type | Color | Icon / Visual | Represents |
-|-----------|-------|---------------|------------|
+| Node Type | Color Token | Icon / Visual | Represents |
+|-----------|-------------|---------------|------------|
 | 🟢 **Project** | Emerald Green (`#10B981`) | Large pulsating orb | Workspaces, git repos, crates (`buzz-relay`, `buzz-db`) |
 | 🔵 **Chat / Thread** | Cyan Blue (`#06B6D4`) | Medium orb with glow | Relay message threads, agent conversation sessions |
 | 🟣 **Agent** | Violet Purple (`#8B5CF6`) | Hexagonal orb | Active/past agents (`Antigravity`, `Claude`, `Cursor`, `Kimi`) |
@@ -111,7 +133,29 @@ pub async fn fetch_brain_graph(
 
 - Open `/memory/graph` in Desktop preview.
 - Verify D3 force graph initializes at 60 FPS.
+- Verify typography inherits `--buzz-type-scale` and `--buzz-type-rem` when user adjusts zoom or font preferences.
 - Click a Project node → verify connected chats and agents highlight correctly.
 - Verify clicking a chat opens the drawer with complete history.
 - Run `just desktop-screenshot --name memory-graph` to capture screenshot.
 - Run `just ci`.
+
+## Local / cloud state surface
+
+The Brain panel should show the storage mode without making cloud mode feel like a different brain:
+
+```text
+Brain: Local
+Processing: On device
+Cloud Sync: Off
+
+Brain: Synced
+Processing: On device
+Cloud Sync: Last synced 2 min ago
+Devices: 3
+
+Brain: Enterprise
+Processing: On device (default)
+Cloud policy: Workspace managed
+```
+
+The UI should expose `Sync now`, sync health, pending changes and connected devices. It must not display access tokens, secret material or raw remote payloads. A signed-in account alone is not evidence that memory is currently stored in the cloud; the user/workspace sync state must be shown explicitly.

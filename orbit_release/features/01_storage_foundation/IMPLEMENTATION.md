@@ -1,208 +1,212 @@
-# Feature 01 — Storage Foundation (pgvector + buzz-db Extension)
+# Feature 01 — Storage Foundation (Local-First Embedded Memory Store)
 
-> **Priority**: P0 — Foundation layer. All other Orbit features depend on this.  
-> **Sprint**: Sprint 1 (Weeks 1–2)  
+> **Priority**: P0 — foundational storage for ORBIT's local-first context engine.  
+> **Sprint**: Sprint 1  
 > **Dependencies**: None  
-> **Crates**: `buzz-db` (modify), `migrations/` (new SQL migration)  
-> **Environment Variables**: `BUZZ_DATABASE_URL`, `BUZZ_DATA_DIR`
-
----
+> **Primary principle**: Keep the desktop memory substrate embedded, file-backed, Rust-native, and replaceable.
 
 ## Overview
 
-Feature 01 establishes the foundational storage layer for the Orbit memory system inside the existing `buzz-db` crate. It activates the PostgreSQL `pgvector` extension and introduces four core tables following Cognee and Graphiti data models.
+The original plan used a bundled PostgreSQL 16 + pgvector runtime as the universal local and remote database. That is now superseded for the desktop product.
 
-All data is housed under the structured `orbit_brain/` directory:
-- `orbit_brain/storage/` — PostgreSQL data directory and pgvector indexes
-- `orbit_brain/sync/` — Staging changelog for future cloud synchronization
+ORBIT's primary workload is a **single-user, local-first AI memory engine inside a Tauri/Rust application**. The desktop database must therefore minimize external processes, installation size, startup cost, operational complexity, and failure surfaces.
 
----
+The recommended V1 storage architecture is:
 
-## Architecture & Schemas
+- **Relational/state metadata:** SQLite (file-backed) for documents, chunks, provenance, sync state, settings, and job metadata.
+- **Vector retrieval:** LanceDB as the embedded persistent vector store.
+- **Knowledge graph:** embedded Ladybug/Kuzu-compatible graph backend for entity/relation traversal.
+- **Context engine:** ORBIT-owned Rust retrieval/orchestration layer over these stores.
+- **Remote/team evolution:** adapters for PostgreSQL/pgvector and graph services are deferred to the sync/enterprise layer.
 
-### 1. Database Migration: `migrations/0047_buzz_memory_pgvector.sql`
+This direction aligns with the current Rust implementation of Cognee, which uses SQLite + embedded Ladybug + embedded LanceDB as its default no-external-service stack. Cognee-RS exposes the same high-level memory lifecycle (`remember`, `recall`, `improve`, `forget`) and supports pluggable vector/graph providers. citeturn115698search0turn115698search1turn474137search5
 
-```sql
--- 1. Enable pgvector extension
-CREATE EXTENSION IF NOT EXISTS vector;
+## Why the architecture changes
 
--- 2. Raw Source Documents Table (Cognee Tier 1)
-CREATE TABLE IF NOT EXISTS buzz_documents (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_type VARCHAR(64) NOT NULL,            -- 'file', 'git', 'session', 'slack', 'manual'
-    source_uri TEXT NOT NULL,                     -- Absolute path or URL
-    workspace_path TEXT NOT NULL,                 -- Canonical root path of the workspace
-    content_hash CHAR(64) NOT NULL,               -- SHA-256 for change detection & deduplication
-    mtime_ns BIGINT NOT NULL,                     -- Filesystem modification timestamp in nanoseconds
-    size_bytes BIGINT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,  -- Author, commit SHA, PR number, branch, etc.
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_buzz_doc_workspace_hash UNIQUE (workspace_path, content_hash)
-);
+### 1. PostgreSQL is an infrastructure service; ORBIT needs an embedded product component
 
-CREATE INDEX IF NOT EXISTS idx_buzz_documents_workspace ON buzz_documents(workspace_path);
-CREATE INDEX IF NOT EXISTS idx_buzz_documents_source_uri ON buzz_documents(source_uri);
+Bundling PostgreSQL means shipping, initializing, supervising, upgrading, and recovering a complete DBMS. This conflicts with ORBIT's core product requirement: a desktop app that behaves like a native local utility rather than a local server stack.
 
--- 3. Semantic Chunks Table (Cognee Tier 2 + Hybrid Search)
-CREATE TABLE IF NOT EXISTS buzz_chunks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    document_id UUID NOT NULL REFERENCES buzz_documents(id) ON DELETE CASCADE,
-    workspace_path TEXT NOT NULL,
-    chunk_index INT NOT NULL,
-    content TEXT NOT NULL,
-    token_count INT NOT NULL,
-    -- Default 384 dimensions for local BGE-small-en-v1.5
-    embedding VECTOR(384),
-    -- Full-Text Search column for BM25 lexical ranking
-    search_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-    scope VARCHAR(64) NOT NULL DEFAULT 'project', -- 'project', 'global', 'agent_private'
-    agent_name VARCHAR(64),                       -- 'antigravity', 'claude', 'cursor', etc.
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+The old `<150MB RAM` target should not be treated as proof that PostgreSQL is lightweight; it was an architectural estimate, not a measured release benchmark. The new target is measured process RSS for **Tauri + ORBIT storage + retrieval + model runtime**, with no Docker and no user-managed DB server.
 
--- HNSW Vector Index (Cosine Distance) for sub-millisecond similarity search
-CREATE INDEX IF NOT EXISTS idx_buzz_chunks_embedding_hnsw 
-ON buzz_chunks USING hnsw (embedding vector_cosine_ops)
-WITH (m = 16, ef_construction = 64);
+### 2. Do not force one database to perform three different jobs
 
--- GIN Full-Text Index for BM25 lexical search
-CREATE INDEX IF NOT EXISTS idx_buzz_chunks_search_tsv 
-ON buzz_chunks USING gin (search_tsv);
+The memory model has three different access patterns:
 
-CREATE INDEX IF NOT EXISTS idx_buzz_chunks_workspace ON buzz_chunks(workspace_path);
-CREATE INDEX IF NOT EXISTS idx_buzz_chunks_agent ON buzz_chunks(agent_name);
+| Workload | Required operation | V1 store |
+|---|---|---|
+| Source metadata / provenance / jobs | transactional rows, constraints, updates | SQLite |
+| Semantic retrieval | approximate nearest-neighbor search | LanceDB |
+| Entity/relation reasoning | graph traversal, neighborhood expansion | Ladybug/Kuzu |
 
--- 4. Knowledge Graph Entities Table (Graphiti Tier 3)
-CREATE TABLE IF NOT EXISTS buzz_entities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    workspace_path TEXT NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    entity_type VARCHAR(64) NOT NULL,             -- 'Technology', 'Person', 'File', 'Concept', 'Architecture'
-    description TEXT,
-    summary_embedding VECTOR(384),
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_buzz_entity_workspace_name_type UNIQUE (workspace_path, name, entity_type)
-);
+The abstraction belongs above the databases, not inside a single universal DB.
 
-CREATE INDEX IF NOT EXISTS idx_buzz_entities_workspace ON buzz_entities(workspace_path);
+### 3. Keep the Rust/Tauri hot path native
 
--- 5. Bi-Temporal Relations Table (Graphiti Edge Model)
-CREATE TABLE IF NOT EXISTS buzz_relations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    workspace_path TEXT NOT NULL,
-    source_entity_id UUID NOT NULL REFERENCES buzz_entities(id) ON DELETE CASCADE,
-    target_entity_id UUID NOT NULL REFERENCES buzz_entities(id) ON DELETE CASCADE,
-    relation_type VARCHAR(64) NOT NULL,           -- 'implements', 'depends_on', 'decided_by', 'authored_by'
-    confidence REAL NOT NULL DEFAULT 1.0,         -- 0.0 to 1.0 confidence score
-    -- Bi-temporal validity timestamps
-    valid_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- When this became true in real world
-    invalid_at TIMESTAMPTZ,                       -- NULL = actively true, timestamp = superseded
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),-- When system learned this fact
-    provenance_chunk_id UUID REFERENCES buzz_chunks(id) ON DELETE SET NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
-);
+Cognee-RS now provides a directly relevant Rust reference: its default build is an embedded, no-external-service stack using SQLite, Ladybug, and LanceDB; its vector and graph providers are behind interfaces, which is the pattern ORBIT should mirror rather than importing the Python Cognee runtime. citeturn115698search1turn115698search0
 
-CREATE INDEX IF NOT EXISTS idx_buzz_relations_source ON buzz_relations(source_entity_id);
-CREATE INDEX IF NOT EXISTS idx_buzz_relations_target ON buzz_relations(target_entity_id);
-CREATE INDEX IF NOT EXISTS idx_buzz_relations_active ON buzz_relations(workspace_path, relation_type) 
-WHERE invalid_at IS NULL;
-```
+## Storage model
 
----
+### SQLite: authoritative metadata and provenance
 
-## Crate Implementation: `crates/buzz-db`
+Tables:
 
-### 1. New Data Models in `crates/buzz-db/src/memory_models.rs`
+- `documents`
+- `chunks`
+- `memory_items`
+- `sources`
+- `sessions`
+- `decisions`
+- `sync_log`
+- `ingestion_jobs`
+- `memory_feedback`
+- `working_contexts`
+
+SQLite remains the source of truth for IDs, relationships that do not require graph traversal, timestamps, hashes, scopes, permissions, and lifecycle state.
+
+### LanceDB: vector index
+
+Store:
+
+- `chunk_id`
+- `document_id`
+- `workspace_id`
+- `embedding`
+- normalized text or compact retrieval payload
+- metadata needed for filtering
+
+LanceDB is embedded, file-backed, supports vector + metadata search, has Rust support, and is designed specifically for local/AI retrieval workloads. citeturn474137search2
+
+### Ladybug/Kuzu-compatible graph store
+
+Store:
+
+- entities
+- concepts
+- files
+- sessions
+- agents
+- decisions
+- typed relations
+- `valid_at`
+- `invalid_at`
+- provenance IDs
+
+Graph traversal must return IDs and evidence references; full text remains in SQLite/LanceDB rather than being duplicated in the graph.
+
+Cognee currently documents Ladybug/Kuzu as its embedded graph backend and explicitly recommends graph-native storage rather than PostgreSQL-as-graph for production graph workloads. citeturn115698search5
+
+## ORBIT storage abstraction
+
+Create a `MemoryStore` facade in Rust:
 
 ```rust
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use uuid::Uuid;
-use pgvector::Vector;
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct BuzzDocument {
-    pub id: Uuid,
-    pub source_type: String,
-    pub source_uri: String,
-    pub workspace_path: String,
-    pub content_hash: String,
-    pub mtime_ns: i64,
-    pub size_bytes: i64,
-    pub metadata: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+pub trait MetadataStore: Send + Sync {
+    async fn upsert_document(&self, doc: Document) -> Result<()>;
+    async fn get_document(&self, id: DocumentId) -> Result<Option<Document>>;
+    async fn record_feedback(&self, feedback: MemoryFeedback) -> Result<()>;
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct BuzzChunk {
-    pub id: Uuid,
-    pub document_id: Uuid,
-    pub workspace_path: String,
-    pub chunk_index: i32,
-    pub content: String,
-    pub token_count: i32,
-    pub embedding: Option<Vector>,
-    pub scope: String,
-    pub agent_name: Option<String>,
-    pub created_at: DateTime<Utc>,
+pub trait VectorStore: Send + Sync {
+    async fn upsert_embeddings(&self, items: &[EmbeddingRecord]) -> Result<()>;
+    async fn search(&self, query: &[f32], filter: VectorFilter, k: usize)
+        -> Result<Vec<VectorHit>>;
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct BuzzEntity {
-    pub id: Uuid,
-    pub workspace_path: String,
-    pub name: String,
-    pub entity_type: String,
-    pub description: Option<String>,
-    pub summary_embedding: Option<Vector>,
-    pub metadata: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct BuzzRelation {
-    pub id: Uuid,
-    pub workspace_path: String,
-    pub source_entity_id: Uuid,
-    pub target_entity_id: Uuid,
-    pub relation_type: String,
-    pub confidence: f32,
-    pub valid_at: DateTime<Utc>,
-    pub invalid_at: Option<DateTime<Utc>>,
-    pub recorded_at: DateTime<Utc>,
-    pub provenance_chunk_id: Option<Uuid>,
-    pub metadata: serde_json::Value,
+pub trait GraphStore: Send + Sync {
+    async fn upsert_entities(&self, entities: &[Entity]) -> Result<()>;
+    async fn upsert_relations(&self, relations: &[Relation]) -> Result<()>;
+    async fn neighborhood(&self, seed_ids: &[EntityId], hops: u8)
+        -> Result<Vec<GraphHit>>;
 }
 ```
 
-### 2. Secret Redactor: `crates/buzz-db/src/redactor.rs`
+The rest of ORBIT must depend on these traits, not vendor-specific APIs.
 
-Protects against storing sensitive credentials:
-- AWS access keys (`AKIA...`)
-- GitHub Personal Access Tokens (`ghp_...`)
-- Bearer tokens & JWTs
-- RSA / OpenSSH private keys (`BEGIN PRIVATE KEY`)
-- Generic API keys (`sk-...`, `Bearer ...`)
+## Data flow
 
-### 3. Data Storage & Cloud-Sync Staging Directory Layout
-
+```text
+                    ORBIT MEMORY FACADE
+                           |
+          +----------------+----------------+
+          |                |                |
+       SQLite          LanceDB       Ladybug/Kuzu
+     metadata/txns       vectors         graph
+          |                |                |
+          +----------------+----------------+
+                           |
+                    SuperRAG / Recall
+                           |
+                    Working Context
+                           |
+                        MCP / IDE
 ```
-~/.buzz/orbit_brain/
-├── storage/              ← PostgreSQL cluster directory
-├── sync/
-│   ├── changelog.wal     ← Append-only write-ahead log for cloud sync
-│   └── snapshot_meta.json← Sync watermarks & replication state
-```
 
----
+## What is retained from the old design
+
+The following are retained:
+
+- five-layer context model
+- immutable source hashes
+- AST-aware chunks
+- 384-d or configurable embeddings
+- lexical retrieval
+- RRF
+- graph retrieval
+- cross-encoder reranking
+- token-budget context packing
+- provenance
+- temporal memory
+- MCP tools
+- recall plugins
+- sync changelog
+
+Only the **storage implementation boundary** changes.
+
+## What is removed from V1
+
+Remove from the desktop V1 path:
+
+- bundled PostgreSQL server
+- local pgvector dependency
+- PostgreSQL GIN/tsvector dependency
+- PostgreSQL recursive CTE as graph traversal
+- PostgreSQL as the authoritative local graph store
+
+These remain future adapters for remote/team deployments.
+
+## Local/Hosted data contract
+
+ORBIT has two product modes but one logical memory model:
+
+| Concern | Local mode | Cloud-sync / Enterprise mode |
+|---|---|---|
+| Interactive processing | Local Rust engine | Still local by default |
+| Metadata authority | Local SQLite | Local SQLite + server canonical event/state replica |
+| Vector index | Local LanceDB | Local LanceDB on each device; optional server-side `pgvector` index |
+| Graph index | Local embedded graph | Local graph on device; optional hosted graph service |
+| Raw source | Local filesystem/object store | Local by default; explicit opt-in sync to encrypted cloud object storage |
+| Sync unit | N/A | Logical memory/source/event mutations, never DB page/WAL files |
+| Offline operation | Full | Full for already-downloaded data |
+| Device identity | Local device ID | Registered device + workspace/user scope |
+
+The hosted service is a **replication and coordination layer**, not a requirement for the desktop memory engine. A cloud subscription enables encrypted synchronization of selected ORBIT data between devices; it does not turn local retrieval into a network dependency.
+
+### Derived indexes are rebuildable
+
+Treat embeddings, FTS indexes, graph materializations, caches and reranker artifacts as derived state. The canonical sync payload is the logical record/event model plus immutable source references. This lets a Windows desktop, macOS desktop and future mobile client rebuild compatible local indexes without attempting to copy database files between platforms.
+
+### Optional warm-sync artifacts
+
+For faster second-device startup, the hosted service may also store versioned derived artifacts such as embeddings, summaries and compact retrieval metadata. These are optional accelerators, never the only copy of a memory. A client must be able to rebuild them from canonical records.
 
 ## Verification & Quality Gates
 
-1. Run `cargo test -p buzz-db` to verify SQLx queries and redactor tests.
-2. Run `just ci` to ensure formatting, Clippy, and pre-push hooks pass.
+- Start ORBIT with no Docker and no separately installed database.
+- Create a fresh brain in an empty directory.
+- Ingest 10k code/text chunks.
+- Verify crash-safe reopen of all stores.
+- Verify vector IDs and metadata remain consistent after restart.
+- Verify graph IDs resolve back to SQLite/LanceDB evidence.
+- Verify deletion removes/invalidates data across all three stores.
+- Benchmark startup, RSS, ingestion throughput, vector search, graph traversal, and end-to-end recall on real ORBIT fixtures.

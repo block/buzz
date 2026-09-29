@@ -1211,3 +1211,12 @@ For organizations that want centralized ingestion of company Slack channels, Git
 - **Single-Binary Deployment**:
   - The private cloud relay is packaged as a single Docker container (`orbit-relay:latest`) or a lightweight standalone binary requiring only a standard PostgreSQL instance, allowing any engineer to self-host their private cloud brain for $5/month on a basic VPS.
 
+
+
+## ORBIT identity and governance update (2026-09-29 implementation decision)
+
+The current product plan separates the authentication/control plane from the memory plane. The desktop can present Log In / Sign Up / Continue Local; signup and password handling are performed on the hosted ORBIT authentication server, and the desktop receives a one-time deep-link authorization result.
+
+For enterprise deployment, personal and organization-owned workspaces are separate authorization domains. Device/security metadata is kept outside the memory graph; a random installation device ID is preferred over raw MAC-address tracking. Storage/processing policy must govern ingestion, sync, hosted inference, retrieval and context export.
+
+This section records the product decision and does not replace the underlying research findings above.

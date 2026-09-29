@@ -65,3 +65,28 @@ Extracts context from the local `.git` repository:
 - Verify modified files update `mtime_ns` and regenerate embeddings without duplicating documents.
 - Verify secrets are redacted before embedding.
 - Run `cargo test -p orbit-ingest`.
+
+## Local-first processing and cloud outbox
+
+Ingestion must complete local normalization, hashing, chunking and memory extraction before any network sync work is attempted. After a durable logical change is committed locally, the sync layer may append an encrypted mutation to the local outbox when cloud sync is enabled.
+
+```text
+file/session change
+      ↓
+local parse + chunk + extract
+      ↓
+local SQLite/LanceDB/graph update
+      ↓
+logical mutation recorded
+      ↓
+optional encrypted sync outbox
+```
+
+The ingestion hot path must remain functional when the user is offline.
+
+
+## Governance gate before persistence
+
+Every ingested item must resolve the current user, tenant, workspace and `WorkspacePolicy` before content leaves the ingestion boundary. Secret detection, source exclusions, classification, local-only rules, cloud-sync eligibility and hosted-processing eligibility are evaluated before persistence or outbound transfer.
+
+For local-only data, the ingestion pipeline may build local indexes but must not enqueue cloud-sync events. For enterprise workspaces, the same policy context must be propagated to embedding, graph and memory-consolidation workers so a downstream worker cannot bypass the ingestion decision.

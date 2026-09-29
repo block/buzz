@@ -44,3 +44,18 @@ To protect AI agents from prompt injections and hallucinated data:
 - Integration test: invoke `orbit.search_context` over JSON-RPC stdio → verify ranked results.
 - Run `cargo test -p orbit-mcp`.
 - Run `just ci`.
+
+## Local versus hosted MCP policy
+
+The MCP surface is local-first in both product editions. A local agent call should normally execute against the local ORBIT engine and local indexes, even when the user is signed in.
+
+When cloud sync is enabled, the MCP server may expose sync state tools, but memory retrieval should not silently redirect to a remote database. Remote retrieval is an explicit capability controlled by workspace policy and user settings.
+
+Recommended additional tools:
+
+- `orbit.sync_status` — pending changes, last successful sync, device identifier.
+- `orbit.sync_now` — request an immediate logical-state sync.
+- `orbit.list_devices` — show registered devices for the signed-in account/workspace.
+- `orbit.cloud_policy` — report whether the current workspace permits cloud storage or hosted processing.
+
+No MCP tool should ever return access tokens, subscription secrets, raw credentials or another device's local-only data.
