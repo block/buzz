@@ -80,6 +80,43 @@ Identity, device metadata, subscription state, sync events, and enterprise polic
 - Local storage root for data, models, and indexes must be `~/.orbit/` or `~/.orbit/brain/` (never `~/.buzz/`).
 - The user interface and local files visible to the user must carry the Orbit identity exclusively with no user-visible Buzz naming.
 
+## UI Navigation & Settings Overrides
+
+### Primary Navigation: "AI Brain" on Left Sidebar
+- The main left sidebar navigation (`desktop/src/features/sidebar/ui/AppSidebar.tsx` / `CommunityRail.tsx`) must feature a prominent, first-class navigation entry labeled **"AI Brain"** (with glowing brain/cosmos icon and keyboard shortcut e.g. `Cmd+B` / `Ctrl+B`).
+- Routing: Navigates to `/ai-brain` (`desktop/src/app/routes/ai-brain.tsx`), providing access to the Obsidian-style Knowledge Graph, live Ingestion status HUD, SuperRAG query search, and connected MCP/agent session monitors.
+
+### Settings UI: "Plugins & MCP Tools" Configuration
+- The desktop application settings view (`desktop/src/features/settings/ui/SettingsPanels.tsx` and `SettingsView.tsx`) must include a dedicated settings panel: **"Plugins & MCP Tools"** (`PluginsMcpSettingsPanel.tsx`).
+- Users must be able to:
+  - Toggle built-in tools (`orbit.search_context`, `orbit.store_memory`, `buzz-dev-mcp:shell`, `buzz-dev-mcp:file_edit`, etc.) ON or OFF.
+  - Register custom MCP servers (stdio command/args/env or SSE/HTTP endpoint + auth headers).
+  - Test connection and discover tools in real-time.
+  - Install, enable, and configure plugins (GitHub, Slack, Jira, Postgres, etc.).
+  - Set security approval policies per tool (Auto-Approve read-only vs Confirm-on-Execute).
+
+## Local Runtime Embedder, Bundling & Container Architecture Overrides
+
+### Zero-Docker Native Desktop Packaging
+- Local mode is 100% native, self-contained, and offline-capable. The installer must never install or require Docker, PostgreSQL, Redis, or Neo4j.
+- Local storage relies on embedded SQLite (`orbit.db`), LanceDB for vectors, and embedded Ladybug/Kùzu for graph traversal in `~/.orbit/brain/`.
+
+### Local Runtime Embedder Bundling
+- Embedded ONNX Runtime (`ort` crate) and quantized model weights (`bge-small-en-v1.5` at ~30MB, `bge-reranker-small` at ~45MB) must be pre-packaged directly in `desktop/src-tauri/resources/models/`.
+- On initial launch, the desktop backend automatically verifies or populates `~/.orbit/brain/models/` without requiring external network downloads.
+- `desktop/src-tauri/tauri.conf.json` must bundle all required external binaries in `bundle.externalBin`: `buzz-mcp`, `buzz-dev-mcp`, `buzz-agent`, `buzz-acp`, and `buzz`.
+
+### Container & Server Boundary
+- Containers (Docker Compose, Kubernetes Helm charts) are strictly reserved for the central team relay and hosted enterprise sync deployments (`crates/buzz-relay`, PostgreSQL + pgvector, Redis pub/sub).
+- The desktop client never runs inside or depends on these containers for local operation.
+
+## Mandatory 4-Tier Implementation Layer Structure
+Every feature implementation plan in `orbit_release` must explicitly detail work across four architectural layers:
+1. **Frontend**: Desktop UI (React 19, TanStack Router, Catppuccin CSS variables, D3 canvas, Tailwind).
+2. **Desktop Backend**: Tauri v2 Rust IPC commands (`desktop/src-tauri/src/commands/`), local embedded engines, OS keyring.
+3. **Core Workspace Crates**: Reusable Rust crates (`crates/buzz-*`: `buzz-core`, `buzz-db`, `buzz-search`, `buzz-ai`, `buzz-ingest`, `buzz-mcp`, `buzz-recall`, etc.).
+4. **Server & Enterprise Layer**: Hosted team relay (`buzz-relay`), cloud sync, containers, and data governance.
+
 ## External-reference rule
 
 The architecture package can contain research citations for historical context, but an implementation agent must not browse or adopt an external design merely because a preserved document contains a citation. Use the repository specification as the build source of truth.

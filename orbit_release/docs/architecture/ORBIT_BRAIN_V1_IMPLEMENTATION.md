@@ -478,51 +478,79 @@ Buzz provides an auto-wiring subcommand in `buzz-cli` to detect installed agents
 
 ## 9. Desktop UI & Packaging Implementation Plan
 
-### 9.1 UI Typography & Theme Contract Alignment
-The Orbit Desktop Brain UI is built in React 19 (`desktop/src/features/memory/`) and strictly complies with the design system contract established in `desktop/src/shared/styles/globals/`:
+### 9.1 Primary Navigation: "AI Brain" on Left Sidebar
+The Orbit Desktop App integrates long-term memory and intelligence as a first-class citizen directly into the main desktop interface:
+- **Left Sidebar Navigation Entry (`desktop/src/features/sidebar/ui/AppSidebar.tsx` / `CommunityRail.tsx`)**:
+  - Prominent top-level navigation item labeled **"AI Brain"** with a glowing neural/cosmos orb icon.
+  - Keyboard shortcut: `Cmd+B` / `Ctrl+B` for instantaneous access.
+  - Real-time status badge: displays active indexing activity or number of currently connected AI agents.
+- **Route & Screen (`desktop/src/app/routes/ai-brain.tsx`)**:
+  - **Obsidian-Style Brain Graph**: Interactive D3 force-directed physics universe visualizing projects, conversation threads, agents, files, concepts, and decisions.
+  - **Live Ingestion HUD**: Top status banner displaying active monitored workspace directories, total indexed files, AST chunks count, and vector index health.
+  - **SuperRAG Search Bar**: High-speed hybrid lexical/vector search bar with instant candidate confidence scores and query expansion.
+  - **Slide-out Inspection Drawer**: Clicking any graph node smoothly docks a drawer on the right showing connected chats, code diffs, temporal ADR status, and 1-click jump actions.
+  - **Active MCP & Agent Session Monitor**: Live HUD pills indicating connected agents (Claude Code, Antigravity, Cursor, etc.) and active MCP tool execution events.
 
-- **Typography Contract (`typography.css`)**:
-  - Root scale: Derived dynamically from `var(--buzz-type-scale)` and `var(--buzz-type-rem)`.
-  - Body & Message Text: `var(--conversation-message-font-size)` (14px at 100% zoom), line-height `var(--conversation-message-line-height)`.
-  - Node Labels & Metadata: `var(--text-xs)` (calc(`var(--buzz-type-rem) * 0.75`)).
-  - Section Headers: `var(--text-lg)` and `var(--text-xl)` with `font-weight: 600`.
-- **Catppuccin Theme Contract (`theme.css`)**:
-  - Canvas Surface: `hsl(var(--background))` with subtle radial glow.
-  - Inspection Drawer: `hsl(var(--card))` with border `hsl(var(--border))` and `--radius: 0.625rem`.
-  - Accent Color: `hsl(var(--primary))` (mauve accent).
+### 9.2 Desktop Settings: "Plugins & MCP Tools" Configuration Panel
+A dedicated settings panel empowers developers to configure MCP tools, external servers, and plugins according to their specific workflows:
+- **Location (`desktop/src/features/settings/ui/PluginsMcpSettingsPanel.tsx`)**:
+  - Registered in `desktop/src/features/settings/ui/SettingsPanels.tsx` and `SettingsView.tsx` under **"Plugins & MCP Tools"**.
+- **Interactive UI Capabilities**:
+  - **Built-in Orbit & Developer Tools**: Toggle switches to enable/disable standard `orbit.*` tools (`orbit.search_context`, `orbit.store_memory`, `orbit.get_project_context`, `orbit.recall_session`, `orbit.get_file_history`, `orbit.mark_decision`, `orbit.get_index_stats`, `orbit.delete_memory`) and `buzz-dev-mcp` tools (`shell`, `read_file`, `edit_file`).
+  - **Custom MCP Server Registration**: `+ Add MCP Server` dialog supporting:
+    - Transport selection: `stdio` (executable path, command-line arguments, working directory, environment variables) or `sse` / `http` (endpoint URL, authorization headers).
+    - Friendly name and server identifier.
+    - Active toggle switch.
+  - **Test Connection & Real-Time Discovery**: "Test Connection" button sends a JSON-RPC `tools/list` handshake to verify connectivity, measure latency, and render an interactive preview of discovered tool schemas.
+  - **Plugins Catalog & Custom Installation**:
+    - Directory of installable plugins (GitHub repository connector, Slack thread reader, PostgreSQL schema inspector, Jira task tracker, Web search).
+    - Custom plugin install via Git repository URL, local path, or manifest JSON.
+  - **Security & Execution Governance**:
+    - Per-tool execution approval policy: `Auto-Approve` (safe read-only queries), `Confirm-on-Execute` (file modifications, shell commands, memory deletion), or `Disabled`.
+    - Secret redaction toggle and audit log viewer link.
 
-### 9.2 Local-first packaging and hosted connection
+### 9.3 Mandatory 4-Tier Implementation Layer Architecture Across Features
+All Orbit features are engineered across four clear, decoupled architectural tiers:
+1. **Frontend Tier (Desktop UI)**:
+   - React 19 components, TanStack Router (`desktop/src/app/routes/`), and React hooks.
+   - Design System: Catppuccin theme surfaces (`theme.css`), typography scale (`--buzz-type-scale`, `--buzz-type-rem`), and accessible ARIA widgets.
+2. **Desktop Backend Tier (Tauri v2 Rust IPC & Local Runtimes)**:
+   - Tauri commands (`desktop/src-tauri/src/commands/`: `mcp_config.rs`, `brain_graph.rs`, `ingest_control.rs`, `rag_query.rs`).
+   - In-process ONNX Runtime engine (`ort`) and cross-encoder reranker.
+   - Embedded local databases: SQLite (`rusqlite` + FTS5 + `sqlite-vec`), LanceDB for vectors, and Ladybug/Kùzu for graph traversal in `~/.orbit/brain/orbit.db`.
+   - OS hardware keyring storage via `buzz-auth` for cloud provider API tokens.
+3. **Core Workspace Crates Tier (`crates/buzz-*`)**:
+   - `buzz-core`: Domain models, AST types, RRF ranking math, and bi-temporal graph structures.
+   - `buzz-db`: Database schemas, `orbit_*` migrations, transactional operations, and secret redactor.
+   - `buzz-search`: Multi-RAG query router, reciprocal rank fusion, and semantic cache.
+   - `buzz-ai`: Local ONNX embedder, cross-encoder reranker, and cloud provider clients.
+   - `buzz-ingest`: File watcher (`notify`), Tree-sitter AST chunker, git history parser.
+   - `buzz-mcp`: Stdio / SSE MCP server, client manager, dynamic tool registry, and security arbiter.
+   - `buzz-dev-mcp`: Developer execution tools (shell, file editing).
+   - `buzz-recall`: 9 IDE transcript parsers and historical session importer.
+4. **Packaging, Enterprise & Container Tier**:
+   - `desktop/src-tauri/tauri.conf.json`: Native bundling of binaries (`bundle.externalBin`) and local model weights (`bundle.resources`).
+   - Zero-Docker local desktop release (Windows `.exe`, macOS `.dmg`, Linux AppImage).
+   - Containerized hosted team relay (`crates/buzz-relay`, PostgreSQL + pgvector, Redis) for team synchronization and enterprise deployments (`docker-compose.yml`, Helm charts).
 
-The desktop installer ships no database server. The native runtime contains:
-
-- Tauri v2
-- Rust memory/retrieval engine
-- SQLite
-- embedded LanceDB
-- embedded graph backend
-- optional ONNX models
-- MCP/agent integrations
-
-The product may contain an optional **Account / Cloud Sync** entry point. That action opens the ORBIT website in the external browser; it does not embed the signup flow into the desktop app.
-
-After browser authentication, the website returns a short-lived authorization result through the registered ORBIT deep link. The desktop then establishes the native session and registers the device. Cloud sync remains asynchronous and must never be required for local retrieval.
-
-The desktop package therefore does **not** install:
-
-- PostgreSQL
-- Redis
-- Neo4j
-- FalkorDB server
-- Docker
-
-Hosted infrastructure is documented separately in `ORBIT_HOSTED_ENTERPRISE_ARCHITECTURE.md` and feature 11/12.
+### 9.4 Local Runtime Embedder Bundling & Zero-Docker Architecture
+To guarantee immediate out-of-the-box operation without external dependencies:
+- **Bundled Model Weights**: Quantized `bge-small-en-v1.5` (~30MB) and `bge-reranker-small` (~45MB) are placed directly in `desktop/src-tauri/resources/models/`.
+- **First-Run Provisioning**: On launch, the Tauri desktop backend inspects `~/.orbit/brain/models/`. If empty, it extracts the bundled models from app resources into the local directory. The user can start indexing immediately without an internet connection.
+- **Bundled External Binaries (`bundle.externalBin`)**:
+  - `buzz-mcp`: Dedicated stdio MCP server for external AI agents.
+  - `buzz-dev-mcp`: Developer tool provider.
+  - `buzz-agent`: Local ACP-compliant agent harness.
+  - `buzz-acp`: Agent Client Protocol bridge.
+  - `buzz`: Agent-first CLI.
+- **Zero Database Server Requirement**: The desktop app never starts or expects PostgreSQL, Redis, Neo4j, or Docker. All local data is strictly contained within `~/.orbit/brain/`.
 
 ## 10. Step-by-Step Implementation Roadmap (Sprints 1–6)
 
 ```
 2026 ROADMAP
 Sprint 1 ──────► Sprint 2 ──────► Sprint 3 ──────► Sprint 4 ──────► Sprint 5 ──────► Sprint 6
-Storage & Embed  SuperRAG & Plg   Tri-Modal MCP    Installer & UI   Desktop Polish   Packaging
+Storage & Embed  SuperRAG & Plg   Tri-Modal MCP    Settings & Tools AI Brain & UI    Hardening & Bundle
 ```
 
 ### Sprint 1 — Storage Foundation & Embed/Rerank Engines (Weeks 1–2)
@@ -534,7 +562,7 @@ Storage & Embed  SuperRAG & Plg   Tri-Modal MCP    Installer & UI   Desktop Poli
 - [ ] Implement Local ONNX embedder (`bge-small-en-v1.5`) via `ort` crate in `crates/buzz-ai`
 - [ ] Implement Local ONNX cross-encoder reranker (`bge-reranker-small`) in `crates/buzz-ai`
 - [ ] Implement Configurable API clients for OpenAI, Cohere, Voyage, Gemini, Ollama
-- [ ] Bundle ONNX models (~32MB embed, ~25MB rerank) into `desktop/src-tauri/resources/`
+- [ ] Bundle ONNX models (~30MB embed, ~45MB rerank) into `desktop/src-tauri/resources/models/`
 - [ ] Validate `just ci` passes
 
 ### Sprint 2 — Ingestion Pipeline & SuperRAG Retrieval Layer (Weeks 3–4)
@@ -559,25 +587,28 @@ Storage & Embed  SuperRAG & Plg   Tri-Modal MCP    Installer & UI   Desktop Poli
 - [ ] Ingest past session histories idempotently using `content_hash` deduplication into `orbit_documents` and `orbit_chunks`
 - [ ] Validate `just ci` passes
 
-### Sprint 4 — Tri-Modal MCP Fabric & Centralized Ingestion (Week 7)
-- [ ] Extend `crates/buzz-dev-mcp` (or `crates/buzz-mcp`) to expose the 8 standardized `orbit.*` tools
+### Sprint 4 — Tri-Modal MCP Fabric, Plugins & Settings UI (Week 7)
+- [ ] Extend `crates/buzz-dev-mcp` and `crates/buzz-mcp` to expose the 8 standardized `orbit.*` tools
 - [ ] Implement MCP Client manager connecting to external MCP servers (GitHub, GitLab, Slack, Jira, PostgreSQL)
 - [ ] Implement Centralized Ingestion pipeline pulling external MCP data into `orbit_documents`
-- [ ] Implement Context Arbiter security layer (delimiter fencing, input sanitization)
+- [ ] Implement Context Arbiter security layer (delimiter fencing, secret redaction, audit logging)
+- [ ] Implement Desktop Settings UI: `desktop/src/features/settings/ui/PluginsMcpSettingsPanel.tsx`
+- [ ] Wire Tauri IPC commands in `desktop/src-tauri/src/commands/mcp_config.rs` (`list_mcp_servers`, `save_mcp_server`, `delete_mcp_server`, `test_mcp_connection`, `toggle_mcp_tool`)
 - [ ] Implement agent auto-discovery logic in `crates/buzz-cli` (`buzz memory install --auto`)
 - [ ] Create shared skill definition in `.agents/skills/orbit-memory/SKILL.md`
 - [ ] Validate `just ci` passes
 
-### Sprint 5 — Desktop UI & Obsidian-Style Brain Graph (Weeks 8–9)
-- [ ] Build React 19 Memory Explorer view in `desktop/src/features/memory/`
-- [ ] Implement D3 force-directed physics graph visualizing the 5-layer knowledge universe
+### Sprint 5 — "AI Brain" Primary Navigation & Desktop Universe (Weeks 8–9)
+- [ ] Add primary navigation entry **"AI Brain"** in `desktop/src/features/sidebar/ui/AppSidebar.tsx` / `CommunityRail.tsx` linking to `/ai-brain`
+- [ ] Implement route screen `desktop/src/app/routes/ai-brain.tsx` with Top Ingestion HUD, SuperRAG query input, and MCP status
+- [ ] Implement D3 force-directed physics graph visualizing the 5-layer knowledge universe in `desktop/src/features/memory/BrainGraph.tsx`
+- [ ] Build slide-out Node Inspection Drawer for connected chats, code diffs, and ADR history
 - [ ] Strictly apply codebase typography contract (`--buzz-type-scale`, `--text-xs`, `--text-sm`) and Catppuccin theme tokens
-- [ ] Build Settings UI for Embedding Models, Rerankers, Local/Cloud Sync, and processing policy
 - [ ] Wire Tauri IPC commands for graph fetch, search, store, delete, and settings updates
-- [ ] Capture UI screenshot: `just desktop-screenshot --name memory-graph`
+- [ ] Capture UI screenshot: `just desktop-screenshot --name ai-brain-graph`
 - [ ] Validate `just ci` passes
 
-### Sprint 6 — Packaging, Performance Validation & Hardening (Week 10)
+### Sprint 6 — Packaging, Local Embedder Bundling & Hardening (Week 10)
 - [ ] Verify clean desktop install creates SQLite/LanceDB/graph stores with no external database service
 - [ ] Verify local-only mode works with the network disconnected
 - [ ] Verify account/cloud-sync entry point opens the website and returns through the ORBIT deep link

@@ -239,3 +239,26 @@ These states should be visible in desktop settings and diagnostics.
 - [ ] A `HOSTED_PROCESSING` request is rejected when workspace policy disallows it
 - [ ] Audit records identify policy decisions without storing sensitive memory content
 - [ ] Deletion tombstones propagate across devices
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Data Governance & Privacy Dashboard UX
+- **Desktop Settings (`desktop/src/features/settings/ui/`)**:
+  - Data Governance Card: displays data retention period, privacy classification, and export/erasure actions.
+  - Audit Trail Viewer: searchable log of policy decisions and tool invocations.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Policy Enforcement Gate
+- **Location**: `desktop/src-tauri/src/egress_guard.rs` and `desktop/src-tauri/src/commands/`
+- Enforces local-only rules: blocks outbound network egress for sensitive workspaces.
+- Handles hard-deletion requests and appends deletion tombstones to `sync/changelog.jsonl`.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-audit` & `crates/buzz-auth`)
+- `crates/buzz-audit`: Cryptographic hash-chain audit log recording memory access and tool executions.
+- `crates/buzz-auth`: Policy evaluation engine resolving `WorkspacePolicy`, retention schedules, and classification tags.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker**: Local governance and audit logs are maintained natively in SQLite and local disk.
+- **Enterprise Hosted Containers**: Centralized governance compliance reporting deployed in staging/production Kubernetes cluster.
+

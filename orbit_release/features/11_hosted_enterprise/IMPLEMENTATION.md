@@ -358,3 +358,30 @@ The product documentation should state clearly:
 5. Local data remains available offline.
 6. Sign-out does not automatically erase the local brain; a deliberate device-data removal action is required.
 
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Web Control Plane & Desktop Sync Cards
+- **Web App (`orbit.example.com`)**: Next.js / React web portal for account creation, team management, billing, and device registration.
+- **Desktop Sync Status UI (`desktop/src/features/settings/ui/HostedCommunitiesSettingsCard.tsx`)**:
+  - Displays cloud connection status, last sync timestamp, and device count.
+  - "Sync Now" action and cloud policy viewer.
+
+### 2. Desktop Backend Tier: Tauri Deep-Link & Outbox Manager
+- **OAuth PKCE Client (`desktop/src-tauri/src/deep_link.rs`)**:
+  - Handles `orbit://oauth/callback` deep link to exchange single-use authorization code for native session credentials.
+  - Stores session token in OS hardware keyring via `buzz-auth`.
+- **Sync Outbox Worker**:
+  - Encrypts and batches local mutation log items (`sync/changelog.jsonl`) for transmission to the hosted relay.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-relay`, `crates/buzz-auth`, `crates/buzz-db`)
+- `crates/buzz-relay`: Multi-tenant NIP-29 WebSocket relay server handling authenticated event streaming, presence, and sync.
+- `crates/buzz-auth`: Cryptographic key verification, NIP-42 authentication, and role-based access control.
+- `crates/buzz-db`: PostgreSQL 16 + pgvector enterprise storage adapter.
+
+### 4. Packaging, Enterprise & Container Tier
+- **Container Deployment**: Docker Compose (`docker-compose.yml`) and Kubernetes Helm charts deploying `buzz-relay`, PostgreSQL 16, and Redis pub/sub.
+- **Client Independence**: The native desktop app remains 100% functional without containers when running locally.
+
+

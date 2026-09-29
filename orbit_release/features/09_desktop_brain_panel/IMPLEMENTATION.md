@@ -1,22 +1,96 @@
-# Feature 09 — Obsidian-Style Desktop Brain Graph (D3 Force Graph & Memory Explorer)
+# Feature 09 — Obsidian-Style Desktop Brain Graph (D3 Force Graph, "AI Brain" Sidebar Navigation & Memory Explorer)
 
-> **Priority**: P1 — Visual, interactive knowledge universe for developers.  
+> **Priority**: P0 — Primary visual intelligence surface for developers.  
 > **Sprint**: Sprint 5 (Weeks 8–9)  
-> **Dependencies**: Feature 04 (SuperRAG Search), Feature 05 (Knowledge Graph), Feature 07 (MCP)  
-> **Components**: `desktop/src/features/memory/` (React 19), `desktop/src-tauri/src/graph.rs` (Tauri IPC)  
-> **Aesthetic Reference**: Obsidian Graph View (dark universe, glowing nodes, fluid physics)  
+> **Dependencies**: Feature 04 (SuperRAG Search), Feature 05 (Knowledge Graph), Feature 07 (MCP Tools & Settings)  
+> **Frontend Surface**: Sidebar (`desktop/src/features/sidebar/ui/AppSidebar.tsx`), Route (`desktop/src/app/routes/ai-brain.tsx`), Components (`desktop/src/features/memory/`)  
+> **Backend Surface**: Tauri IPC (`desktop/src-tauri/src/commands/brain_graph.rs`, `desktop/src-tauri/src/graph.rs`)  
+> **Crates**: `buzz-core`, `buzz-db`, `buzz-search`, `buzz-ai`  
+> **Aesthetic Reference**: Obsidian Graph View (dark universe, glowing neon nodes, fluid physics)  
 > **Codebase Design System**: Catppuccin Theme & Buzz Typography contract (`desktop/src/shared/styles/globals/`)
 
 ---
 
 ## Overview
 
-Feature 09 implements a **dynamic, interactive Obsidian-style Brain Graph** within the Orbit React 19 desktop application. Rather than navigating a static table of memories, developers explore their entire ecosystem as a living, interconnected universe of:
-- **Projects & Workspaces** (Layer 1)
-- **Chats & Conversation Threads** (Layer 1 & 3)
-- **AI Agents** working across tasks (Layer 3 & 5)
-- **Files & Source Code** (Layer 1 & 2)
-- **Entities, Concepts & Architectural Decisions** (Layer 3)
+Feature 09 establishes the **"AI Brain"** as a primary, first-class surface on the main desktop page of Orbit:
+1. Adds a prominent **"AI Brain"** navigation item on the left sidebar navigation (`AppSidebar.tsx` / `CommunityRail.tsx`), providing 1-click access to the central memory and context hub.
+2. Implements a **dynamic, interactive Obsidian-style Brain Graph** in React 19 using D3 force simulation, visualizing projects, conversation threads, agents, files, concepts, and architectural decisions.
+3. Provides an integrated **Live Ingestion HUD**, **SuperRAG Search Bar**, and **Slide-out Node Inspection Drawer**.
+4. Implements the complete 4-tier layer architecture across Frontend UI, Desktop Backend IPC, Core Crates, and Packaging.
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: "AI Brain" Primary Navigation & Route View
+- **Left Sidebar Navigation Entry (`desktop/src/features/sidebar/ui/AppSidebar.tsx` / `CommunityRail.tsx`)**:
+  - Primary navigation item labeled **"AI Brain"** located alongside channels and messages on the left side of the app.
+  - Icon: Glowing neural/cosmos orb icon with animated pulsing indicator when background indexing is active.
+  - Keyboard Shortcut: `Cmd+B` / `Ctrl+B`.
+  - Tooltip & Badge: Displays current indexed chunk count and connected active agent sessions.
+- **Route Screen (`desktop/src/app/routes/ai-brain.tsx`)**:
+  - Hosted at route `/ai-brain`.
+  - **Live Ingestion & Health HUD (`desktop/src/features/memory/BrainHUD.tsx`)**:
+    - Status pills: Monitored Workspaces count, Total Files Indexed, Chunks in `orbit_chunks`, Vector Index health, Connected MCP Agents.
+    - Cloud Sync state indicator: `Local (On Device)` / `Synced (Encrypted)` / `Syncing...`.
+  - **SuperRAG Search Input (`desktop/src/features/memory/SuperRagSearchBar.tsx`)**:
+    - Omnibar search input executing hybrid dense/lexical queries.
+    - Real-time candidate confidence gauge and instant node match highlighting on the canvas.
+  - **D3 Force Graph Canvas (`desktop/src/features/memory/BrainGraph.tsx`)**:
+    - Responsive SVG/Canvas renderer powered by D3 force simulation (`d3-force`).
+    - Fluid zoom and pan behaviors with mouse wheel, trackpad, and keyboard chords.
+    - Physics Sliders Bar: Live adjustment of Charge Repulsion, Link Spring Distance, and Gravity.
+    - Filter Toggles: Filter by Agent (`Claude`, `Antigravity`, `Cursor`, etc.), Project, or Node Type.
+    - Temporal Playback Slider: Scrub back through time to witness the evolutionary growth of decisions and code.
+  - **Node Inspection Drawer (`desktop/src/features/memory/NodeDetailsDrawer.tsx`)**:
+    - Docks smoothly on the right side upon clicking any node.
+    - Displays connected chats, code diffs, authoring agents, and temporal ADR status (`valid_at`, `invalid_at`).
+    - 1-Click Action Buttons: "Jump to Chat Thread", "Open File in Editor", "Invalidate Decision".
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Graph Provider
+- **Location**: `desktop/src-tauri/src/commands/brain_graph.rs` and `desktop/src-tauri/src/graph.rs`
+- **Tauri IPC Command Handlers**:
+  ```rust
+  #[tauri::command]
+  pub async fn fetch_brain_graph(
+      workspace_path: Option<String>,
+      filter_agent: Option<String>,
+      start_time: Option<DateTime<Utc>>,
+      end_time: Option<DateTime<Utc>>,
+  ) -> Result<BrainGraphPayload, String> {
+      // Queries orbit_documents, orbit_chunks, orbit_entities, orbit_relations
+      // Returns nodes & links ready for D3 force simulation
+  }
+
+  #[tauri::command]
+  pub async fn query_superrag(
+      query: String,
+      limit: Option<usize>,
+      workspace_path: Option<String>,
+  ) -> Result<SuperRagPayload, String>;
+
+  #[tauri::command]
+  pub async fn get_brain_stats() -> Result<BrainStatsPayload, String>;
+
+  #[tauri::command]
+  pub async fn delete_memory_node(node_id: String) -> Result<(), String>;
+  ```
+- **Registration**: Registered in `desktop/src-tauri/src/lib.rs` inside `generate_handler![]`.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-*`)
+- **`crates/buzz-db`**:
+  - Relational queries against SQLite tables: `orbit_documents`, `orbit_chunks`, `orbit_entities`, `orbit_relations`, `orbit_query_cache`, `orbit_working_contexts`.
+  - Bi-temporal relation filtering (`valid_at <= T AND (invalid_at IS NULL OR invalid_at > T)`).
+- **`crates/buzz-search`**:
+  - SuperRAG hybrid retrieval (dense LanceDB vector search + SQLite FTS5 lexical search).
+  - Reciprocal Rank Fusion (RRF) with temporal decay ($e^{-\lambda \Delta t}$).
+- **`crates/buzz-core`**:
+  - Node & edge schema definitions (`GraphNode`, `GraphEdge`, `NodeKind`, `EdgeKind`).
+
+### 4. Packaging & Bundling Tier
+- 100% native, self-contained desktop packaging with zero Docker and no external database servers.
+- Model weights (`bge-small-en-v1.5`, `bge-reranker-small`) bundled in `desktop/src-tauri/resources/models/`.
 
 ---
 
@@ -82,66 +156,9 @@ The panel consumes the active Catppuccin theme variables:
 
 ---
 
-## Interactive Capabilities
+## Local versus Cloud State Surface
 
-### 1. Physics Engine (D3 Force Simulation)
-- **`forceLink`**: Pulls related nodes together with spring tension.
-- **`forceManyBody`**: Repels unlinked nodes to create clean clusters by project and agent.
-- **`forceCollide`**: Prevents node overlaps.
-- **`forceCenter`**: Centers the visual universe on the viewport.
-- **Dynamic Physics Sliders**: Developers can adjust Gravity, Charge Repulsion, and Link Distance live.
-
-### 2. Inspection Drawer
-Clicking any node:
-1. Centers and smoothly zooms the camera onto the node.
-2. Dims all unrelated nodes in the background.
-3. Highlights 1-hop and 2-hop connected edges with luminous energy lines.
-4. Opens a slide-out drawer on the right displaying:
-   - **Node Details**: Type, timestamps, author/agent.
-   - **Connected Chats**: All discussions where this node was mentioned.
-   - **Associated Code Diffs**: Recent commits or edits.
-   - **Related Decisions**: Active ADRs and historical invalidations.
-   - **Jump Button**: 1-click jump to open the chat thread or file in editor.
-
-### 3. Filters & Temporal Playback
-- **Agent Filter**: Show only nodes created or touched by specific agents (e.g. filter by "Claude" or "Antigravity").
-- **Project Filter**: Scope the view to a single repository or crate.
-- **Type Toggles**: Show/hide Chats, Files, or Decisions.
-- **Temporal Time Slider**: Scrub back through time to visualize how knowledge grew across sprints!
-- **Real-Time Search**: Types directly into graph search to highlight matching nodes instantly.
-
----
-
-## Tauri IPC Bridge: `desktop/src-tauri/src/graph.rs`
-
-```rust
-#[tauri::command]
-pub async fn fetch_brain_graph(
-    workspace_path: Option<String>,
-    filter_agent: Option<String>,
-    start_time: Option<DateTime<Utc>>,
-    end_time: Option<DateTime<Utc>>,
-) -> Result<BrainGraphPayload, String> {
-    // Queries orbit_documents, orbit_chunks, orbit_entities, orbit_relations
-    // Returns nodes & links ready for D3 simulation
-}
-```
-
----
-
-## Verification & Quality Gates
-
-- Open `/memory/graph` in Desktop preview.
-- Verify D3 force graph initializes at 60 FPS.
-- Verify typography inherits `--buzz-type-scale` and `--buzz-type-rem` when user adjusts zoom or font preferences.
-- Click a Project node → verify connected chats and agents highlight correctly.
-- Verify clicking a chat opens the drawer with complete history.
-- Run `just desktop-screenshot --name memory-graph` to capture screenshot.
-- Run `just ci`.
-
-## Local / cloud state surface
-
-The Brain panel should show the storage mode without making cloud mode feel like a different brain:
+The Brain panel displays the storage mode clearly without making cloud mode feel like a different brain:
 
 ```text
 Brain: Local
@@ -158,4 +175,16 @@ Processing: On device (default)
 Cloud policy: Workspace managed
 ```
 
-The UI should expose `Sync now`, sync health, pending changes and connected devices. It must not display access tokens, secret material or raw remote payloads. A signed-in account alone is not evidence that memory is currently stored in the cloud; the user/workspace sync state must be shown explicitly.
+The UI exposes `Sync now`, sync health, pending changes, and connected devices. It never displays access tokens, secret material, or raw remote payloads.
+
+---
+
+## Verification & Quality Gates
+
+- [ ] Click **"AI Brain"** in the left sidebar → verify navigation to `/ai-brain`.
+- [ ] Verify D3 force graph initializes at 60 FPS with fluid pan/zoom.
+- [ ] Verify typography inherits `--buzz-type-scale` and `--buzz-type-rem` when user adjusts zoom or font preferences.
+- [ ] Click a Project node → verify connected chats and agents highlight correctly.
+- [ ] Verify clicking a chat opens the drawer with complete history and jump actions.
+- [ ] Run `just desktop-screenshot --name ai-brain-graph` to capture screenshot.
+- [ ] Run `just ci`.

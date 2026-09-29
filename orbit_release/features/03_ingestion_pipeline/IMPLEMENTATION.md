@@ -59,6 +59,33 @@ Extracts context from the local `.git` repository:
 
 ---
 
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Ingestion & Workspace UX
+- **AI Brain Top HUD (`desktop/src/features/memory/BrainHUD.tsx`)**:
+  - Displays live count of monitored workspaces and indexing progress.
+  - Active file watcher status indicator (pulsing green dot for idle/watching, amber for scanning/indexing).
+- **Workspace Manager Dialog (`desktop/src/features/workspace/`)**:
+  - "Add Monitored Folder" action utilizing native Tauri file picker.
+  - Exclude patterns editor (`.gitignore`, `node_modules`, `target`, `dist`).
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & File Watcher Task
+- **Location**: `desktop/src-tauri/src/commands/ingest_control.rs`
+- Spawns background asynchronous watcher task using `notify` crate.
+- Batches rapid filesystem events with debounce (~300ms) to avoid churning on compiler build artifacts.
+- Tauri IPC commands: `start_workspace_watch`, `stop_workspace_watch`, `get_ingest_progress`.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-ingest`, `crates/buzz-db`, `crates/buzz-ai`)
+- `crates/buzz-ingest`: Tree-sitter multi-language chunker, SHA-256 deduplication, Git commit enricher.
+- `crates/buzz-db`: Persists metadata and chunks to `orbit_documents` and `orbit_chunks`.
+- `crates/buzz-ai`: Generates dense 384-d embeddings in batches via local ONNX runtime.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker**: Ingestion operates 100% locally in-process inside the desktop application.
+- Tree-sitter language grammars are statically compiled into `buzz-ingest`.
+
+---
+
 ## Verification & Quality Gates
 
 - Ingest sample project files; verify records created in `orbit_documents` and `orbit_chunks`.

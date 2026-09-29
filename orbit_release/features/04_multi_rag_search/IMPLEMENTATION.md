@@ -58,7 +58,7 @@ Agent / User Query: "How does the relay authenticate connections?"
         ▼                         ▼                         ▼
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
 │ Dense Vector    │       │ Lexical BM25    │       │ Knowledge Graph │
-│ (embedded vector store) │       │ (GIN ts_rank_cd)│       │ (2-Hop Walk)    │
+│ (embedded vector store) │       │(SQLite FTS5 BM25)│      │ (2-Hop Walk)    │
 └────────┬────────┘       └────────┬────────┘       └────────┬────────┘
          │                         │                         │
          └─────────────────────────┼─────────────────────────┘
@@ -280,7 +280,38 @@ The winning top 10–15 reranked chunks are transformed into a clean, bounded wo
 
 ---
 
-## Verification & Quality Gates
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: SuperRAG Search & Retrieval UX
+- **Omnibar Search (`desktop/src/features/memory/SuperRagSearchBar.tsx`)**:
+  - Embedded directly inside the top of the **"AI Brain"** view (`/ai-brain`).
+  - Real-time search query dispatch with debouncing.
+  - Candidate Confidence Gauge: Visual indicator showing confidence score ($\theta_{\text{conf}}$).
+  - Graph Highlighting: Pulses and focuses top matched nodes and their 1-hop neighborhood in the Obsidian graph.
+- **Result Inspector Drawer (`desktop/src/features/memory/NodeDetailsDrawer.tsx`)**:
+  - Displays retrieved chunks with provenance citations, similarity scores, and authority badges.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Query Pipeline
+- **Location**: `desktop/src-tauri/src/commands/brain_graph.rs`
+- Tauri IPC command: `query_superrag(query: String, limit: Option<usize>, workspace_path: Option<String>) -> Result<SuperRagPayload, String>`.
+- Coordinates query flow: Semantic cache lookup $\rightarrow$ parallel multi-modal retrieval $\rightarrow$ RRF fusion $\rightarrow$ in-process reranker $\rightarrow$ XML context packer.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-search`, `crates/buzz-ai`, `crates/buzz-db`)
+- `crates/buzz-search`:
+  - Pre-Retrieval Data Re-Trial & Query Routing Arbiter.
+  - In-memory semantic cache (`orbit_query_cache`).
+  - Reciprocal Rank Fusion combiner with temporal decay ($e^{-\lambda \Delta t}$).
+  - Knapsack token budget packer generating `<orbit_context>`.
+- `crates/buzz-ai`:
+  - In-process Cross-Encoder Reranker (`bge-reranker-small`) scoring top 50 candidates in `<10ms`.
+- `crates/buzz-db`:
+  - SQLite FTS5 lexical index and LanceDB vector index access.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker**: Retrieval and reranking execute 100% locally on CPU without external processes.
+- **Model Weights**: `bge-reranker-small.onnx` bundled in `desktop/src-tauri/resources/models/`.
+
+---
 
 - **Unit Tests**:
   - `calculate_rrf` ranks multi-source matches higher than single-source matches.

@@ -12,7 +12,32 @@
 
 Feature 02 provides both an **Embedding Generation Engine** and a high-performance **Cross-Encoder Reranker Engine** for Orbit within the `buzz-ai` crate. It features zero-cost, zero-network **local ONNX runtimes** (`bge-small-en-v1.5` for embeddings and `bge-reranker-small` for reranking), while providing pluggable cloud providers (OpenAI, Voyage, Cohere, Gemini, Ollama) behind unified async traits.
 
-Model weights files are stored locally under `orbit_brain/models/`.
+Model weights files are stored locally under `~/.orbit/brain/models/`.
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Model Configuration UX
+- **Desktop Settings (`desktop/src/features/settings/ui/`)**:
+  - Model selector dropdown: `Local ONNX (bge-small-en-v1.5)` (default), `OpenAI (text-embedding-3-small)`, `Voyage (voyage-code-2)`, `Cohere`, `Gemini`, `Ollama`.
+  - Reranker selector dropdown: `Local ONNX (bge-reranker-small)` (default), `Cohere Rerank 3`, `Voyage Rerank`.
+  - Secure API key inputs with masked display and test ping verification.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Keyring
+- **Location**: `desktop/src-tauri/src/models.rs` and `desktop/src-tauri/src/commands/agent_models.rs`
+- In-process ONNX Runtime session execution via `ort` crate.
+- Cloud API credentials persisted securely to the OS hardware keychain (Windows DPAPI, macOS Keychain, Linux Secret Service) via `buzz-auth`.
+- Provisioning: Automatically extracts pre-packaged models from `desktop/src-tauri/resources/models/` into `~/.orbit/brain/models/` on initial boot.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-ai` & `crates/buzz-auth`)
+- `crates/buzz-ai`: Implements `EmbedProvider` and `RerankProvider` traits, tokenization, batch embedding, and ONNX tensor evaluation.
+- `crates/buzz-auth`: Cross-platform secure credential store.
+
+### 4. Packaging, Bundling & Container Tier
+- **Bundled Model Weights**: `bge-small-en-v1.5.onnx` (~30MB) and `bge-reranker-small.onnx` (~45MB) pre-packaged in `desktop/src-tauri/resources/models/`.
+- **Zero Docker**: Local inference runs 100% on CPU/GPU without containers or Python environments.
+- **Hosted Cloud / Enterprise**: Hosted relays can configure remote model endpoints or API gateways.
 
 ---
 

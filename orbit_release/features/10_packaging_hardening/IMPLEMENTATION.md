@@ -1,51 +1,114 @@
-# Feature 10 — Packaging & Hardening (Native Local Brain)
+# Feature 10 — Packaging & Hardening (Native Local Brain, Bundled Embedder & Zero-Docker Architecture)
 
-> **Priority**: P0  
-> **Sprint**: Sprint 6  
+> **Priority**: P0 — Distribution, packaging, and local execution guarantees.  
+> **Sprint**: Sprint 6 (Week 10)  
 > **Dependencies**: Features 01–09  
-> **Target Artifacts**: Windows `.exe`, macOS `.dmg` / `.app`
+> **Target Artifacts**: Windows `.exe` / `.msi`, macOS `.dmg` / `.app`, Linux `.AppImage` / `.deb`  
+> **Packaging Config**: `desktop/src-tauri/tauri.conf.json`
+
+---
 
 ## Overview
 
-Feature 10 packages ORBIT as a native desktop product with **no Docker and no user-managed database server**.
+Feature 10 packages Orbit as a native, self-contained desktop application with **zero Docker requirements, zero external database servers, and an embedded in-process AI runtime**.
 
-The desktop runtime consists of:
+The desktop runtime bundles:
+- Tauri v2 application shell and React 19 frontend
+- Embedded SQLite (`orbit.db` with `orbit_*` tables and FTS5)
+- Embedded LanceDB for vector storage
+- Embedded Ladybug/Kùzu for knowledge graph traversal
+- Embedded ONNX Runtime (`ort`) with pre-packaged `bge-small-en-v1.5` and `bge-reranker-small` models
+- Bundled external binaries (`buzz-mcp`, `buzz-dev-mcp`, `buzz-agent`, `buzz-acp`, `buzz`)
 
-- Tauri v2
-- Rust core
-- SQLite
-- embedded LanceDB
-- embedded Ladybug/Kuzu-compatible graph
-- optional local ONNX models
-- ORBIT MCP/agent integrations
+---
 
-## `orbit_brain/` layout
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Update & Packaging UX
+- **Desktop Settings (`desktop/src/features/settings/ui/`)**:
+  - Model status card: Displays bundled model health, disk usage, and inference latency.
+  - Storage footprint manager: Displays size of `~/.orbit/brain/` (db, vectors, graph, models, transcripts).
+  - Clear cache / Re-index button.
+- **Auto-Updater**: Integrates `tauri-plugin-updater` for seamless differential app updates.
+
+### 2. Desktop Backend Tier: In-Process Embedder & Provisioning
+- **Local Model Provisioning (`desktop/src-tauri/src/models.rs`)**:
+  - On application boot, checks `~/.orbit/brain/models/`.
+  - If model weights are missing, extracts pre-packaged models from Tauri's application resource directory (`desktop/src-tauri/resources/models/`) into `~/.orbit/brain/models/`.
+  - Zero network download is required for cold-start initialization.
+- **In-Process ONNX Runtime (`ort`)**:
+  - Dynamically links platform-native ONNX libraries (`onnxruntime.dll` on Windows, `libonnxruntime.dylib` on macOS, `libonnxruntime.so` on Linux).
+  - Executes embedding inference (`bge-small-en-v1.5`, 384 dimensions) in `<5ms`.
+  - Executes cross-encoder reranking (`bge-reranker-small`) in `<10ms` over 50 candidate pairs on CPU.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-*`)
+- `crates/buzz-ai`: Embedding and reranker abstractions, tensor tokenization, and ONNX session management.
+- `crates/buzz-db`: Authoritative SQLite schema and migrations for all `orbit_*` tables.
+- `crates/buzz-mcp` & `crates/buzz-dev-mcp`: Compiled into standalone binaries bundled with the desktop package.
+
+### 4. Packaging, Bundling & Container Architecture Tier
+
+#### Tauri Configuration: `desktop/src-tauri/tauri.conf.json`
+```json
+{
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "binaries/buzz-acp",
+      "binaries/buzz-agent",
+      "binaries/buzz-backend-kubernetes",
+      "binaries/buzz-dev-mcp",
+      "binaries/buzz-mcp",
+      "binaries/git-credential-nostr",
+      "binaries/buzz"
+    ],
+    "resources": [
+      "resources/models/*",
+      "resources/plugins/*"
+    ]
+  }
+}
+```
+
+#### Container Architecture & Boundary
+- **Desktop Application (Local Mode)**:
+  - 100% native execution.
+  - **Zero Docker**: The installer must never install or require Docker, PostgreSQL, Redis, or Neo4j.
+- **Hosted Team Relay (Enterprise Mode)**:
+  - Docker Compose (`docker-compose.yml`) and Kubernetes Helm charts are exclusively reserved for centralized relay synchronization (`crates/buzz-relay`), hosting PostgreSQL 16 + pgvector, and Redis pub/sub.
+  - The local desktop app never runs inside these containers and operates independently when disconnected.
+
+---
+
+## Local Directory Layout: `~/.orbit/brain/`
 
 ```text
-orbit_brain/
+~/.orbit/brain/
 ├── db/
-│   └── orbit.db
+│   └── orbit.db                  # Authoritative SQLite database (orbit_* tables + FTS5)
 ├── vectors/
-│   └── chunks/
+│   └── chunks/                   # Embedded LanceDB vector storage (384-d dense embeddings)
 ├── graph/
-│   └── knowledge/
-├── models/
-│   └── *.onnx
-├── transcripts/
-├── exports/
-└── sync/
+│   └── knowledge/                # Embedded Ladybug/Kuzu graph storage
+├── models/                       # Bundled ONNX model weights
+│   ├── bge-small-en-v1.5.onnx    # Dense embedder (~30MB)
+│   └── bge-reranker-small.onnx   # Cross-encoder reranker (~45MB)
+├── transcripts/                  # Ingested IDE session logs
+├── exports/                      # JSON-LD & markdown graph snapshots
+└── sync/                         # Logical sync records (when cloud sync is active)
     ├── changelog.jsonl
     ├── snapshot_meta.json
     └── peers.json
 ```
 
-This directory contains ORBIT's product-owned state. Store-level implementations can change without changing the user-visible brain layout.
+---
 
-## Sync architecture
+## Sync Architecture
 
 Do not replicate database files directly between devices.
 
-Instead, ORBIT emits an application-level append-only mutation log:
+Instead, Orbit emits an application-level append-only mutation log:
 
 ```json
 {
@@ -59,141 +122,55 @@ Instead, ORBIT emits an application-level append-only mutation log:
 }
 ```
 
-The sync layer later translates these logical mutations into local SQLite/LanceDB/graph updates. This prevents engine-specific page/WAL files from becoming the replication protocol.
+The sync layer translates these logical mutations into local SQLite/LanceDB/graph updates. This prevents engine-specific page/WAL files from becoming the replication protocol.
 
-## Zero-server packaging
+---
 
-The installer must not install or start:
+## Performance Gates
 
-- PostgreSQL
-- Redis
-- Neo4j
-- FalkorDB server
-- Docker
+Measured end-to-end product targets:
 
-Optional enterprise connectors can use remote servers when explicitly configured.
-
-## Graph/vector backend policy
-
-Desktop defaults:
-
-- relational: SQLite
-- vector: LanceDB
-- graph: Ladybug/Kuzu
-
-Remote adapters:
-
-- PostgreSQL + pgvector for team/relay deployments
-- Neo4j or FalkorDB for graph-heavy shared deployments
-
-LanceDB provides Rust/Node/TypeScript/Python support and is explicitly designed as an embedded retrieval library. citeturn474137search2
-
-## Performance gates
-
-Replace generic DB-process targets with end-to-end product measurements:
-
-| Metric | Initial target |
+| Metric | Target |
 |---|---:|
 | Cold start to interactive UI | < 2.0 s |
-| Vector retrieval | < 20 ms p95 on 10k–50k chunks |
-| Graph 2-hop retrieval | < 20 ms p95 on local benchmark |
+| In-process vector embedding (`bge-small-en-v1.5`) | < 5 ms per chunk |
+| Vector retrieval (LanceDB) | < 20 ms p95 on 10k–50k chunks |
+| Graph 2-hop retrieval (Kùzu) | < 20 ms p95 |
 | Hybrid retrieval before reranking | < 40 ms p95 |
-| Reranking | measured on target model/CPU |
-| Recall context assembly | < 100 ms p95 excluding remote LLM calls |
-| Idle ORBIT storage overhead | measured and reported |
-| Fresh local brain disk | measured and reported |
-| 10k-chunk ingestion | benchmarked |
+| Cross-encoder reranking (`bge-reranker-small`) | < 10 ms p95 for 50 pairs |
+| SuperRAG context compilation | < 80 ms p95 |
+| Idle desktop memory footprint | < 60 MB RAM |
+| Fresh local brain disk consumption | < 120 MB (including models) |
 | Restart recovery | 100% successful |
 
-Do not publish absolute RAM/disk claims until they are measured on release builds across Windows and macOS.
+---
 
-## Verification & Quality Gates
+## Account, Subscription, and Hosted-Sync Behavior
 
-- [ ] Clean Windows install creates a brain without DB setup
-- [ ] Clean macOS install creates a brain without DB setup
-- [ ] Kill/restart test preserves the last committed memory state
-- [ ] Export/import test reconstructs a brain
-- [ ] Sign-in opens the external browser and returns through the registered ORBIT deep link
-- [ ] Authorization-code interception test confirms PKCE binding
-- [ ] Cloud-sync test never copies SQLite/LanceDB/graph database files between devices
-- [ ] Offline mode continues to retrieve locally available context after cloud disconnect
-- [ ] Sync-log replay reconstructs logical state
-- [ ] `cargo test --workspace`
-- [ ] release benchmark suite passes
+Orbit remains fully usable as a local-first desktop application. First launch presents `Log In`, `Sign Up`, and `Continue Local`. Account creation and cloud features are website-first. The desktop app opens the Orbit web login in the external browser and receives a one-time authorization result back through a registered deep link (`orbit://oauth/callback`). The native app uses a public-client OAuth flow with PKCE (RFC 8252); do not embed the login page inside a WebView.
 
-## Account, subscription, and hosted-sync behavior
-
-ORBIT remains fully usable as a local-first desktop application. First launch presents `Log In`, `Sign Up`, and `Continue Local`. Account creation and cloud features are website-first. The desktop app opens the ORBIT web login in the external browser and receives a one-time authorization result back through a registered deep link. The native app must use a public-client OAuth flow with PKCE; do not embed the login page inside a WebView. RFC 8252 recommends external user-agent authorization for native apps and requires PKCE for public native clients. citeturn658627search0turn658627search1
-
-Tauri's deep-link plugin supports desktop custom schemes and app/universal links, so ORBIT can register both a branded HTTPS app link and a private-use fallback scheme. citeturn658627search4
-
-Example flow:
-
-```text
-ORBIT desktop
-    │
-    ├── Local mode → continue without account
-    │
-    └── Sign in / Enable Cloud Sync
-              │
-              ▼
-       https://orbit.example.com/login
-              │
-              ▼
-       account + subscription checks
-              │
-              ▼
-       one-time authorization code
-              │
-              ▼
-       https://app.example.com/oauth/callback
-              │
-              └──────► ORBIT desktop deep-link handler
-                            │
-                            ▼
-                   token exchange + device registration
-                            │
-                            ▼
-                    local session established
-```
-
-The authorization callback must not contain long-lived access or refresh tokens in a URL. The callback carries a short-lived, single-use code bound to the login transaction/PKCE verifier; the app exchanges it through the token service. OAuth security guidance requires encrypted network transport and recommends protections against authorization-code interception. citeturn658627search2turn658627search3
-
-### Local-first subscription behavior
+### Local-First Subscription Behavior
 
 | Product state | Local processing | Cloud data | Cross-device context |
 |---|---|---|---|
-| Local / no account | Yes | None | No |
+| Local / no account | Yes (100% offline) | None | No |
 | Signed-in, no sync entitlement | Yes | Account/device metadata only | No |
 | Cloud Sync subscription | Yes | Selected encrypted brain data | Yes |
 | Enterprise | Yes by default | Policy-controlled tenant storage and optional hosted processing | Yes |
 
-A subscription should unlock **replication and account services**, not make basic local memory dependent on an internet connection. If the user stops the subscription, previously downloaded local data remains locally available; new cloud synchronization and subscription-only services become unavailable according to the service policy.
+A subscription unlocks **replication and account services**, not basic local memory. If the user stops the subscription, previously indexed local data remains locally available.
 
-### Packaging/data directories
+---
 
-Extend the existing layout with account and sync state:
+## Verification & Quality Gates
 
-```text
-orbit_brain/
-├── db/orbit.db
-├── vectors/
-├── graph/
-├── models/
-├── transcripts/
-├── exports/
-└── sync/
-    ├── changelog.jsonl
-    ├── outbox/
-    ├── inbox/
-    ├── snapshots/
-    ├── device.json
-    └── account.json
-```
-
-Do not store bearer tokens in plain files. Store refresh credentials or equivalent native session secrets in the platform keyring and keep only non-sensitive account/device metadata in `account.json`.
-
-
-### Identity/device data boundary
-
-Account and device metadata are control-plane state, not memory state. Store session secrets in the OS keychain, use a random installation `device_id`, and do not make raw MAC addresses a required authentication factor. Enterprise telemetry must not include source-code, memory text or embeddings unless explicitly enabled by policy.
+- [ ] Clean Windows installation initializes `~/.orbit/brain/` without Docker or DB servers.
+- [ ] Clean macOS installation initializes `~/.orbit/brain/` without Docker or DB servers.
+- [ ] Pre-packaged ONNX models extract and load successfully on offline first boot.
+- [ ] In-process embedding and reranking execute within performance targets on CPU.
+- [ ] Kill/restart test preserves the last committed memory state in `orbit.db`.
+- [ ] Export/import test reconstructs a brain cleanly.
+- [ ] Deep-link authorization with PKCE completes without leaking credentials in URLs.
+- [ ] Offline mode continues to retrieve locally available context when network is disconnected.
+- [ ] `cargo test --workspace` passes cleanly.
+- [ ] `just ci` passes cleanly.

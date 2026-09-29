@@ -88,6 +88,37 @@ Default traversal:
 - retry path: max 3 hops
 - hard node cap: configurable
 
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Knowledge Graph Visualization UX
+- **Canvas Rendering (`desktop/src/features/memory/BrainGraph.tsx`)**:
+  - Visualized within the **"AI Brain"** route (`/ai-brain`).
+  - D3 force-directed layout rendering entities, concepts, files, chats, decisions, and agents.
+  - Multi-hop edge expansion on node click.
+- **Node Details Drawer (`desktop/src/features/memory/NodeDetailsDrawer.tsx`)**:
+  - Displays bi-temporal validity (`valid_at`, `invalid_at`).
+  - Interactive "Invalidate / Supersede Decision" button.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Graph Bridge
+- **Location**: `desktop/src-tauri/src/graph.rs`
+- Tauri IPC command `fetch_brain_graph` extracting nodes and links from `orbit_entities` and `orbit_relations`.
+- Implements bounded graph expansion (1-hop seed, 2-hop neighbor expansion).
+
+### 3. Core Workspace Crates Tier (`crates/buzz-db` & `crates/buzz-core`)
+- `crates/buzz-db`:
+  - Authoritative graph tables: `orbit_entities` and `orbit_relations`.
+  - Bi-temporal contradiction resolver marking superseded assertions (`invalid_at = NOW()`).
+- `crates/buzz-core`:
+  - Graph models, entity types, and relationship path definitions.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker / Zero Neo4j**: Embedded Ladybug/Kùzu in `~/.orbit/brain/graph/`.
+- Neo4j and FalkorDB adapters are optional, deferred to hosted enterprise relay deployments.
+
+---
+
 ## Verification & Quality Gates
 
 - [ ] Entity upsert is deterministic

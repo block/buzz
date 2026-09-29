@@ -372,3 +372,29 @@ The desktop remains the full indexing environment, while the protocol stays devi
 - [ ] Personal and enterprise workspace data remain isolated
 - [ ] Policy engine blocks disallowed sync/processing before upload or hosted inference
 - [ ] Retention/delete/export/audit controls are testable per workspace
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Identity & Subscription Management UX
+- **Desktop Settings (`desktop/src/features/settings/ui/ProfileSettingsCard.tsx`)**:
+  - Displays user profile, active subscription tier (`Local`, `Cloud Sync`, `Enterprise`), and connected devices.
+  - "Log In / Sign Up" button opening external browser OAuth PKCE flow.
+  - "Sign Out" with explicit "Keep Local Brain" or "Remove Local Data" prompt.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Deep-Link Handler
+- **Location**: `desktop/src-tauri/src/deep_link.rs` and `desktop/src-tauri/src/identity.rs`
+- Listens for `orbit://oauth/callback` scheme via `tauri-plugin-deep-link`.
+- Exchanges single-use auth code for session tokens; stores secrets in OS keychain via `buzz-auth`.
+- Dispatches incremental logical sync events from `~/.orbit/brain/sync/outbox/`.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-auth`, `crates/buzz-ws-client`, `crates/buzz-db`)
+- `crates/buzz-auth`: PKCE verification, cryptographic token validation, and workspace entitlement gate.
+- `crates/buzz-ws-client`: Secure WebSocket connection to team relay (`buzz-relay`).
+- `crates/buzz-db`: Authoritative sync ledger in `orbit_sync_log`.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker**: Native desktop client runs fully offline without containers or external auth services.
+- **Relay Containers**: Centralized relay and auth server deployed via Docker Compose and Kubernetes for hosted mode.
+

@@ -40,7 +40,7 @@ Harness Hub Displayed in Settings / Onboarding
 Tauri IPC Writes Agent MCP Config & Injects Shared Skill
                     │
                     ▼
-Agent Immediately Shares Centralized `orbit_brain/`
+Agent Immediately Shares Centralized `~/.orbit/brain/`
 ```
 
 ---
@@ -94,6 +94,29 @@ When a harness connects, Orbit injects an identical universal skill instructing 
 2. **Before Modifying Modules**: Call `orbit.get_file_history("path")` to see previous decisions.
 3. **Before Big Architectural Choices**: Call `orbit.search_context("query")` to verify constraints.
 4. **After Completing Tasks**: Call `orbit.store_memory("decision...")` to update the centralized brain for other agents.
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: 1-Click Harness Hub UX
+- **Desktop Settings (`desktop/src/features/settings/ui/HarnessesSettingsPanel.tsx`)**:
+  - Live scanning status cards for installed coding agents.
+  - 1-Click "Connect to Brain" button with animated progress indicator.
+  - Connected state badge (`✓ Connected`) with 1-click Disconnect option.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Agent Injector
+- **Location**: `desktop/src-tauri/src/commands/agent_discovery.rs`
+- Tauri IPC commands: `detect_agent_harnesses`, `connect_harness`, `disconnect_harness`.
+- Safely parses and modifies agent JSON / YAML configs, preserving existing developer settings.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-mcp` & `crates/buzz-cli`)
+- `crates/buzz-mcp`: The standalone MCP server binary injected into agent configs.
+- `crates/buzz-cli`: Optional CLI equivalent (`buzz memory install --auto`) for headless terminal users.
+
+### 4. Packaging, Bundling & Container Tier
+- `buzz-mcp` binary is pre-bundled in `desktop/src-tauri/tauri.conf.json` under `bundle.externalBin`.
+- Zero external package downloads required to wire agents.
 
 ---
 

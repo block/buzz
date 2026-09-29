@@ -64,8 +64,8 @@
   - [ ] Kimi (`~/.kimi/...`)
 - [ ] **F06**: Incremental sync ensures no duplicate transcript ingestion
 
-### Phase 4: MCP Tools & Desktop Agent Hub (Sprint 4)
-- [ ] **F07**: 8 `orbit.*` MCP tools implemented and registered in `buzz-dev-mcp`:
+### Phase 4: MCP Tools, Plugins & Desktop Settings Hub (Sprint 4)
+- [ ] **F07**: 8 `orbit.*` MCP tools implemented and registered in `buzz-dev-mcp` and `buzz-mcp`:
   - [ ] `orbit.search_context`
   - [ ] `orbit.store_memory`
   - [ ] `orbit.get_project_context`
@@ -74,22 +74,32 @@
   - [ ] `orbit.mark_decision`
   - [ ] `orbit.get_index_stats`
   - [ ] `orbit.delete_memory`
-- [ ] **F07**: Context Arbiter security fencing operational (`<orbit_untrusted_context>`)
+- [ ] **F07**: Context Arbiter security fencing operational (`<orbit_untrusted_context>`, secret redaction)
+- [ ] **F07**: Desktop Settings UI: **"Plugins & MCP Tools"** panel (`PluginsMcpSettingsPanel.tsx`)
+- [ ] **F07**: Settings tool toggles (enable/disable built-in tools) and execution policies (`Auto-Approve` vs `Confirm-on-Execute`)
+- [ ] **F07**: Custom MCP server registration (stdio & SSE) with live handshake & tool discovery tester
+- [ ] **F07**: Plugins directory, marketplace, and custom plugin installer
 - [ ] **F08**: Desktop App Onboarding / Settings "Agent Harnesses" screen implemented
 - [ ] **F08**: 1-Click "Connect to Orbit Brain" writes MCP config & skill files without terminal
-- [ ] **F08**: Centralized `orbit_brain/` shared automatically across all connected harnesses
+- [ ] **F08**: Centralized `~/.orbit/brain/` shared automatically across all connected harnesses
 
-### Phase 5: Obsidian-Style Brain Graph (Sprint 5)
-- [ ] **F09**: D3 force-directed physics graph renders in React 19 desktop (`/memory/graph`)
-- [ ] **F09**: Multi-project, chat, agent, document, and entity nodes rendered with distinct styles
+### Phase 5: "AI Brain" Primary Navigation & Obsidian-Style Brain Graph (Sprint 5)
+- [ ] **F09**: Primary navigation entry **"AI Brain"** on main page left sidebar (`AppSidebar.tsx` / `CommunityRail.tsx`)
+- [ ] **F09**: Route screen `desktop/src/app/routes/ai-brain.tsx` with Top Ingestion HUD and SuperRAG omnibar
+- [ ] **F09**: D3 force-directed physics graph renders in React 19 desktop (`/ai-brain`)
+- [ ] **F09**: Multi-project, chat, agent, document, entity, and decision nodes rendered with distinct styles
 - [ ] **F09**: Full compliance with codebase typography contract (`--buzz-type-scale`, `--text-xs`, `--text-sm`)
 - [ ] **F09**: Interactive physics controls (gravity, charge repulsion, link distance, collision)
-- [ ] **F09**: Node inspection drawer reveals connected chats, agent sessions, and code diffs
+- [ ] **F09**: Node inspection drawer reveals connected chats, agent sessions, code diffs, and ADR history
 - [ ] **F09**: Real-time filtering by agent, project, entity type, and temporal date slider
 
-### Phase 6: Hardening & Packaging (Sprint 6)
-- [ ] **F10**: Zero-Docker embedded SQLite + LanceDB + Ladybug runner functional
-- [ ] **F10**: Data directory structured under `orbit_brain/` (storage, models, transcripts, sync)
+### Phase 6: Hardening, Local Embedder Bundling & Packaging (Sprint 6)
+- [ ] **F10**: Zero-Docker embedded SQLite + LanceDB + Ladybug/Kùzu runner functional
+- [ ] **F10**: Data directory structured under `~/.orbit/brain/` (db, vectors, graph, models, transcripts, sync)
+- [ ] **F10**: Pre-packaged quantized ONNX models (`bge-small-en-v1.5`, `bge-reranker-small`) bundled in `desktop/src-tauri/resources/models/`
+- [ ] **F10**: First-boot model extractor populates `~/.orbit/brain/models/` offline
+- [ ] **F10**: `tauri.conf.json` bundles external binaries (`buzz-mcp`, `buzz-dev-mcp`, `buzz-agent`, `buzz-acp`, `buzz`)
+- [ ] **F10**: Container boundary verified: Docker Compose & Kubernetes reserved exclusively for hosted team relay
 - [ ] **F10**: Cloud sync staging log operational (`sync/changelog.jsonl`)
 - [ ] **F10**: Windows `.exe` installer (NSIS) and portable `.exe` built and verified
 - [ ] **F10**: macOS `.dmg` and `.app` bundle built and verified

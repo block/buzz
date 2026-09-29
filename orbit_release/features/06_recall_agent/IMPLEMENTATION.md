@@ -63,6 +63,30 @@ For each detected session:
 
 ---
 
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Agent Recall UX
+- **AI Brain Agent Filter (`desktop/src/features/memory/BrainGraph.tsx`)**:
+  - Filter the entire knowledge universe by agent identity (`Antigravity`, `Claude Code`, `Cursor`, `Goose`, etc.).
+- **Session History Dialog (`desktop/src/features/memory/NodeDetailsDrawer.tsx`)**:
+  - View normalized past conversation turns, tool calls, and decisions.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Agent Discovery
+- **Location**: `desktop/src-tauri/src/commands/agent_discovery.rs`
+- Probes local developer directory locations for active agent transcripts.
+- Triggers non-blocking background ingestion on startup and after workspace activity.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-recall`, `crates/buzz-db`, `crates/buzz-ai`)
+- `crates/buzz-recall`: 9 IDE transcript parser implementations (Antigravity, Claude Code, Codex, Cursor, Goose, OpenCode, ZCode, AGY, Kimi).
+- `crates/buzz-db`: Persists extracted session records to `orbit_documents` and `orbit_chunks`.
+- `crates/buzz-ai`: Embeds past sessions for multi-modal recall.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker**: Reads local host filesystem directly from `~/.gemini/`, `~/.claude/`, `~/.cursor/`, etc.
+- No network transmission of raw transcripts unless explicitly enabled by user policy.
+
+---
+
 ## Verification & Quality Gates
 
 - Unit tests for all 9 parser plugins with sample synthetic session files.

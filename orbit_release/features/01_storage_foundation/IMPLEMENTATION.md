@@ -51,18 +51,47 @@ Cognee-RS now provides a directly relevant Rust reference: its default build is 
 
 Tables:
 
-- `documents`
-- `chunks`
-- `memory_items`
-- `sources`
-- `sessions`
-- `decisions`
-- `sync_log`
-- `ingestion_jobs`
-- `memory_feedback`
-- `working_contexts`
+- `orbit_documents`
+- `orbit_chunks`
+- `orbit_entities`
+- `orbit_relations`
+- `orbit_query_cache`
+- `orbit_working_contexts`
+- `orbit_memory_items`
+- `orbit_sources`
+- `orbit_sessions`
+- `orbit_decisions`
+- `orbit_sync_log`
+- `orbit_ingestion_jobs`
+- `orbit_memory_feedback`
 
-SQLite remains the source of truth for IDs, relationships that do not require graph traversal, timestamps, hashes, scopes, permissions, and lifecycle state.
+SQLite (`~/.orbit/brain/db/orbit.db`) remains the source of truth for IDs, relationships that do not require graph traversal, timestamps, hashes, scopes, permissions, and lifecycle state.
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Storage Management UX
+- **Desktop Settings (`desktop/src/features/settings/ui/`)**:
+  - Displays `orbit.db` size, vector index size, and graph node counts.
+  - Hard-delete / purge memory button (GDPR compliance).
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Local Store Supervision
+- **Location**: `desktop/src-tauri/src/commands/`
+- Direct connection to local SQLite via `rusqlite`, LanceDB embedded dataset, and embedded Ladybug/Kùzu in `~/.orbit/brain/`.
+- Automatic schema migration and file permission initialization on first app boot.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-*`)
+- `crates/buzz-db`:
+  - Authoritative schema migrations (`001_orbit_storage_foundation.sql`).
+  - Storage traits: `MetadataStore`, `VectorStore`, `GraphStore`, `MemoryStore`.
+  - Secret redactor (`buzz-db/src/redactor.rs`) ensuring no secrets reach persistent storage.
+- `crates/buzz-core`:
+  - Common domain models, identifiers, and event wrappers.
+
+### 4. Packaging, Enterprise & Container Tier
+- **Local Desktop**: 100% native embedded storage with zero Docker, zero PostgreSQL, and zero external services.
+- **Hosted Enterprise**: Dedicated PostgreSQL 16 + pgvector adapter for team/relay deployments (`crates/buzz-relay`). Containerized via Docker Compose and Kubernetes Helm charts.
 
 ### LanceDB: vector index
 
