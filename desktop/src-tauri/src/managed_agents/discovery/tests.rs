@@ -1755,3 +1755,44 @@ fn discovery_publish_path_drops_mid_flight_delete() {
         "discovery's publish must not resurrect a harness deleted mid-discovery"
     );
 }
+
+#[test]
+fn inherited_global_harness_changes_without_persisting_a_pin() {
+    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
+    let record = record_with(None, Some("p1"), None);
+    let personas = vec![persona_with_runtime("p1", None)];
+    for (runtime, command) in [("codex", "codex-acp"), ("claude", "claude-agent-acp")] {
+        let global = GlobalAgentConfig {
+            preferred_runtime: Some(runtime.into()),
+            ..Default::default()
+        };
+        let resolved = resolve_effective_harness_descriptor(&record, &personas, &global).unwrap();
+        assert_eq!(resolved.command, command);
+        assert!(record.runtime.is_none());
+        assert!(personas[0].runtime.is_none());
+    }
+}
+
+#[test]
+fn explicit_harness_still_wins_over_global_default() {
+    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
+    let global = GlobalAgentConfig {
+        preferred_runtime: Some("claude".into()),
+        ..Default::default()
+    };
+    let personas = vec![persona_with_runtime("p1", Some("codex"))];
+    let record = record_with(None, Some("p1"), None);
+    assert_eq!(
+        resolve_effective_harness_descriptor(&record, &personas, &global)
+            .unwrap()
+            .command,
+        "codex-acp"
+    );
+    let pinned = record_with(None, Some("p1"), Some("goose"));
+    assert_eq!(
+        resolve_effective_harness_descriptor(&pinned, &personas, &global)
+            .unwrap()
+            .command,
+        "goose"
+    );
+}

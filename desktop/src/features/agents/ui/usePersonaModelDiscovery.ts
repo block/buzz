@@ -169,6 +169,7 @@ export function isSuccessfulEmptyDiscovery({
 }
 
 export function usePersonaModelDiscovery({
+  model,
   envVars,
   isCustomProviderEditing,
   modelFieldVisible,
@@ -176,6 +177,7 @@ export function usePersonaModelDiscovery({
   provider,
   selectedRuntime,
 }: {
+  model?: string;
   envVars: EnvVarsValue;
   isCustomProviderEditing: boolean;
   modelFieldVisible: boolean;
@@ -232,12 +234,14 @@ export function usePersonaModelDiscovery({
     }
 
     return JSON.stringify({
+      model,
       agentCommand: discoveryAgentCommand,
       agentArgs: modelDiscoveryArgsKey,
       provider: trimmedProvider,
       envVars: modelDiscoveryEnvKey,
     });
   }, [
+    model,
     canDiscoverModelOptions,
     discoveryAgentCommand,
     modelDiscoveryArgsKey,
@@ -295,6 +299,7 @@ export function usePersonaModelDiscovery({
     setModelDiscoveryLoading(true);
     function runModelDiscovery() {
       void discoverAgentModels({
+        model,
         agentCommand: activeAgentCommand,
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
@@ -362,6 +367,7 @@ export function usePersonaModelDiscovery({
       }
     };
   }, [
+    model,
     discoveryAgentCommand,
     envVars,
     modelDiscoveryKey,
@@ -404,6 +410,7 @@ export function usePersonaModelDiscovery({
   });
 
   return {
+    discoveredEffortOption: activeModelDiscoveryData?.effortOption,
     discoveredModelOptions,
     modelDiscoveryLoading: modelDiscoveryPending,
     modelDiscoveryStatus:

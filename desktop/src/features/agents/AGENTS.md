@@ -433,3 +433,19 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Harness defaults and native ACP effort
+
+Unconfigured definitions inherit `global.preferred_runtime` at resolution time;
+never persist that resolved value as a new profile or instance pin. Global
+restart comparison includes the resolved command as well as its environment.
+The defaults mode submits an absent runtime/model/provider and clears profile
+effort overrides; explicit harness-only profiles open in Customize.
+
+Codex and Claude expose `BUZZ_ACP_EFFORT_LEVEL` as their catalog-declared
+effort persistence/transport key. Their vocabulary comes from the selected
+model's ACP `thought_level` descriptor, discovered by the companion's
+`models --model` probe. Global and profile effort choices flow through the
+existing launch projection; the canonical per-instance effort still overrides
+inherited defaults. Changing the model resets its dependent effort only on the
+explicit user action. A delayed catalog response never clears saved settings.

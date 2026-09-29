@@ -181,6 +181,10 @@ impl std::fmt::Display for PermissionMode {
     about = "Query available models from the configured agent"
 )]
 pub struct ModelsArgs {
+    /// Select this model before discovering model-specific effort options.
+    #[arg(long)]
+    pub model: Option<String>,
+
     /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
     #[command(flatten)]
     pub agent: AuthAgentArgs,

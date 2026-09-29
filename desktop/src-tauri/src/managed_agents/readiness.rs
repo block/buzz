@@ -127,6 +127,9 @@ pub(crate) fn resolve_effective_harness_descriptor(
     personas: &[crate::managed_agents::types::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<EffectiveHarnessDescriptor, String> {
+    let resolved_record =
+        crate::managed_agents::record_with_global_runtime(record, personas, global);
+    let record = &resolved_record;
     let effective_command = crate::managed_agents::try_record_agent_command(record, personas)?;
     let runtime_meta = known_acp_runtime(&effective_command);
 
@@ -189,6 +192,9 @@ pub(crate) fn resolve_effective_agent_env(
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
+    let resolved_record =
+        crate::managed_agents::record_with_global_runtime(record, personas, global);
+    let record = &resolved_record;
     // Look up the harness definition for definition-level env (preset/custom).
     // Same resolution logic as spawn_agent_child: record runtime id first, then
     // persona runtime id, then nothing.
@@ -221,7 +227,8 @@ fn resolve_effective_agent_env_with_def(
     global: &GlobalAgentConfig,
     harness_def: Option<std::sync::Arc<crate::managed_agents::custom_harnesses::HarnessDefinition>>,
 ) -> EffectiveAgentEnv {
-    let effective_command = crate::managed_agents::record_agent_command(record, personas);
+    let effective_command =
+        crate::managed_agents::record_agent_command_with_global(record, personas, global);
 
     // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
     let mut env = baked_build_env();
