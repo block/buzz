@@ -481,38 +481,18 @@ impl EventQueue {
         };
         let channel_id = scope.channel_id();
 
-        // Relay replay delivers stored events newest-first (`ORDER BY
-        // created_at DESC`), but batch consumers — `format_prompt` scope and
-        // reply-anchor selection — require the LAST event to be the newest.
-        // Establish chronological order before locating an edit boundary:
-        // partitioning the raw replay deque would otherwise dispatch a newer
-        // ordinary event before an older edit. Stable sort: same-second
-        // events keep delivery order.
+        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
         let queue = self.queues.entry(scope.clone()).or_default();
-        queue
-            .make_contiguous()
-            .sort_by_key(|event| event.event.created_at);
-
-        // Drain up to MAX_BATCH_EVENTS, but isolate edit events. Routing is
-        // derived from a batch's last event, so an edit sharing a batch with a
-        // later event would lose its original-message anchor.
-        let max_drain = MAX_BATCH_EVENTS.min(queue.len());
-        let drain_count = if queue
-            .front()
-            .is_some_and(|event| edit_target_id(&event.event).is_some())
-        {
-            1
-        } else {
-            queue
-                .iter()
-                .take(max_drain)
-                .position(|event| edit_target_id(&event.event).is_some())
-                .unwrap_or(max_drain)
-        };
-        let events: Vec<BatchEvent> = queue
+        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
+        let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(QueuedEvent::into_batch_event)
             .collect();
+        // Relay replay delivers stored events newest-first (`ORDER BY
+        // created_at DESC`), but batch consumers — `format_prompt` scope and
+        // reply-anchor selection — require the LAST event to be the newest.
+        // Stable sort: same-second events keep delivery order.
+        events.sort_by_key(|be| be.event.created_at);
 
         // Remove the queue entry if now empty.
         if self.queues.get(&scope).is_some_and(|q| q.is_empty()) {
@@ -736,54 +716,15 @@ impl EventQueue {
     /// merged prompt is framed correctly. On a double-cancel, the most recent
     /// reason wins.
     ///
-    /// Unlike `requeue_preserve_timestamps`, events are normally NOT pushed
-    /// back into the generic queue — they are stored separately and merged by
+    /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
+    /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
-    ///
-    /// Exception: if the interrupted work contains an edit, the complete
-    /// interrupted sequence returns to the front of the ordinary queue.
-    /// Routing is derived from a batch's last event, so an edit merged as
-    /// cancelled context ahead of a later event would lose its
-    /// original-message anchor. `flush_next`'s chronological sort and edit
-    /// boundary then preserve both ordering and edit routing.
     pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
         let scope = batch.scope.clone();
-        let channel_id = batch.channel_id;
-        let mut cancelled = self.cancelled_batches.remove(&scope).unwrap_or_default();
+        let entry = self.cancelled_batches.entry(scope.clone()).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
-        cancelled.extend(batch.cancelled_events);
-        cancelled.extend(batch.events);
-
-        if cancelled
-            .iter()
-            .any(|event| edit_target_id(&event.event).is_some())
-        {
-            let queue = self.queues.entry(scope.clone()).or_default();
-            for be in cancelled.into_iter().rev() {
-                queue.push_front(QueuedEvent {
-                    channel_id,
-                    scope: scope.clone(),
-                    event: be.event,
-                    prompt_tag: be.prompt_tag,
-                    received_at: be.received_at,
-                    edit: be.edit,
-                });
-            }
-            while queue.len() > MAX_PENDING_PER_SCOPE {
-                queue.pop_back();
-                tracing::warn!(
-                    channel_id = %channel_id,
-                    scope = %scope.telemetry_label(),
-                    limit = MAX_PENDING_PER_SCOPE,
-                    "cancelled edit requeue overflow — dropped newest event to enforce cap"
-                );
-            }
-            self.cancel_reasons.remove(&scope);
-            self.enforce_channel_cap(channel_id);
-            return;
-        }
-
-        self.cancelled_batches.insert(scope.clone(), cancelled);
+        entry.extend(batch.cancelled_events);
+        entry.extend(batch.events);
         self.cancel_reasons.insert(scope, reason);
     }
 
@@ -6488,37 +6429,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_dispatches_in_its_own_batch() {
-        let mut q = EventQueue::new(DedupMode::Queue);
-        let ch = Uuid::new_v4();
-        let before = make_queued(ch, "before");
-        let before_id = before.event.id;
-        q.push(before);
-        let target = "ab".repeat(32);
-        q.push(queued_edit(ch, &target, None));
-        let after = make_queued(ch, "after");
-        let after_id = after.event.id;
-        q.push(after);
-
-        let first = q.flush_next().expect("ordinary prefix");
-        assert_eq!(
-            first.events.iter().map(|e| e.event.id).collect::<Vec<_>>(),
-            vec![before_id]
-        );
-        q.mark_complete(ch);
-        let edit = q.flush_next().expect("edit alone");
-        assert_eq!(edit.events.len(), 1);
-        assert_eq!(edit_target_id(&edit.events[0].event), Some(target));
-        q.mark_complete(ch);
-        let last = q.flush_next().expect("later event");
-        assert_eq!(
-            last.events.iter().map(|e| e.event.id).collect::<Vec<_>>(),
-            vec![after_id]
-        );
-    }
-
-    #[test]
-    fn cancelled_edit_returns_to_queue_and_keeps_routing_boundary() {
+    fn interrupted_edit_is_superseded_by_the_newer_request() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
         let target_id = "ab".repeat(32);
@@ -6531,25 +6442,46 @@ mod tests {
             },
         };
         q.push(queued_edit(ch, &target_id, Some(resolved.clone())));
-        let interrupted = q.flush_next().expect("edit should dispatch alone");
+        let interrupted = q.flush_next().expect("edit should dispatch");
         let edit_id = interrupted.events[0].event.id;
 
-        let later = make_queued(ch, "later request");
+        let later = make_queued(ch, "the replacement request");
         let later_id = later.event.id;
         q.push(later);
-        q.requeue_as_cancelled(interrupted, CancelReason::Steer);
+        q.requeue_as_cancelled(interrupted, CancelReason::Interrupt);
         q.mark_complete(ch);
 
-        let restored = q.flush_next().expect("cancelled edit should be restored");
-        assert_eq!(restored.events.len(), 1);
-        assert_eq!(restored.events[0].event.id, edit_id);
-        assert_eq!(restored.events[0].edit, Some(resolved));
-        assert!(restored.cancelled_events.is_empty());
+        // The replacement leads the next turn. The interrupted edit rides
+        // along as superseded context with its routing intact; it is never
+        // re-run on its own ahead of the replacement.
+        let merged = q.flush_next().expect("replacement should dispatch");
+        assert_eq!(
+            merged.events.iter().map(|e| e.event.id).collect::<Vec<_>>(),
+            vec![later_id]
+        );
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Interrupt));
+        assert_eq!(merged.cancelled_events.len(), 1);
+        assert_eq!(merged.cancelled_events[0].event.id, edit_id);
+        assert_eq!(merged.cancelled_events[0].edit, Some(resolved));
 
-        q.mark_complete(ch);
-        let later_batch = q.flush_next().expect("later request should remain queued");
-        assert_eq!(later_batch.events.len(), 1);
-        assert_eq!(later_batch.events[0].event.id, later_id);
+        let prompt = format_prompt(&merged, &FormatPromptArgs::default()).join("\n");
+        let framing = MergeFraming::for_reason(Some(CancelReason::Interrupt));
+        let prior = prompt
+            .find(&format!("<{}>", framing.prior_tag))
+            .expect("interrupted edit is labelled as prior work");
+        let new = prompt
+            .find(&format!("<{}>", framing.new_tag))
+            .expect("replacement uses supersede framing");
+        assert!(prior < new, "{prompt}");
+        assert!(
+            prompt[prior..new].contains(&format!("Edit of: {target_id}")),
+            "{prompt}"
+        );
+        assert!(
+            prompt[new..].contains("the replacement request"),
+            "{prompt}"
+        );
+        assert!(q.flush_next().is_none(), "nothing is left to re-run");
     }
 
     #[test]

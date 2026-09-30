@@ -4668,17 +4668,20 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
 
 /// Thread placement for a batch's terminal failure notice.
 ///
-/// Ordinary events keep their own thread tags. An edit follows its original
-/// message: into the original's thread when it is a reply, otherwise as a
-/// reply to the original itself — the edited message may be far up the
-/// channel, so a top-level notice would be detached from the request.
-fn failure_notice_thread_tags(batch: &FlushBatch) -> ThreadTags {
-    let Some(last) = batch.events.last() else {
-        return ThreadTags::default();
-    };
-    let tags = last.routing_thread_tags();
-    match queue::edit_target_id(&last.event) {
-        Some(target) if tags.root_event_id.is_none() => ThreadTags {
+/// Ordinary events keep their own thread tags. An edit follows its verified
+/// original message (`edit`): into the original's thread when it is a reply,
+/// otherwise as a reply to the original itself — the edited message may be
+/// far up the channel, so a top-level notice would be detached from the
+/// request. An unverified original is never claimed as a thread root: if it
+/// is itself a thread reply, the relay rejects the notice for mismatched
+/// ancestry and the user sees nothing. Such a notice posts at top level.
+fn failure_notice_thread_tags(
+    last: &queue::BatchEvent,
+    edit: Option<&queue::ResolvedEdit>,
+) -> ThreadTags {
+    let tags = queue::routing_thread_tags(&last.event, edit);
+    match (queue::edit_target_id(&last.event), edit) {
+        (Some(target), Some(_)) if tags.root_event_id.is_none() => ThreadTags {
             root_event_id: Some(target.clone()),
             parent_event_id: Some(target),
             mentioned_pubkeys: tags.mentioned_pubkeys,
@@ -4690,20 +4693,33 @@ fn failure_notice_thread_tags(batch: &FlushBatch) -> ThreadTags {
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
-/// dead-letter path so neither duplicates the tokio::spawn block.
+/// dead-letter path so neither duplicates the tokio::spawn block. An edit
+/// whose original was not resolved at admission gets one more lookup here, so
+/// a transient fetch failure does not detach the notice from its thread.
 fn spawn_failure_notice(
     rest_client: Option<&relay::RestClient>,
     batch: &FlushBatch,
     content: String,
 ) {
-    if let Some(rest) = rest_client {
-        let thread_tags = failure_notice_thread_tags(batch);
-        let rest = rest.clone();
-        let channel_id = batch.channel_id;
-        tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
-        });
-    }
+    let Some(rest) = rest_client else {
+        return;
+    };
+    let Some(last) = batch.events.last().cloned() else {
+        return;
+    };
+    let rest = rest.clone();
+    let channel_id = batch.channel_id;
+    tokio::spawn(async move {
+        let edit = match last.edit.clone() {
+            Some(edit) => Some(edit),
+            None if queue::edit_target_id(&last.event).is_some() => {
+                edit_routing::resolve_edit(&last.event, channel_id, &rest).await
+            }
+            None => None,
+        };
+        let thread_tags = failure_notice_thread_tags(&last, edit.as_ref());
+        pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11117,6 +11133,16 @@ mod error_outcome_emission_tests {
         event: nostr::Event,
         edit: Option<queue::ResolvedEdit>,
     ) -> (nostr::Event, relay::RestClient, uuid::Uuid) {
+        capture_model_not_found_notice_with_lookup(event, edit, serde_json::json!([])).await
+    }
+
+    /// Like [`capture_model_not_found_notice`], but answers any `/query`
+    /// lookup made before the notice with `lookup`.
+    async fn capture_model_not_found_notice_with_lookup(
+        event: nostr::Event,
+        edit: Option<queue::ResolvedEdit>,
+        lookup: serde_json::Value,
+    ) -> (nostr::Event, relay::RestClient, uuid::Uuid) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -11224,32 +11250,46 @@ mod error_outcome_emission_tests {
 
         // Capture the real signed notice sent by handle_prompt_result, without a live relay.
         let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(socket);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert_eq!(line, "POST /events HTTP/1.1\r\n");
-            let mut content_length = None;
-            for _ in 0..64 {
-                line.clear();
-                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
-                if line == "\r\n" {
-                    break;
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let is_lookup = line == "POST /query HTTP/1.1\r\n";
+                if !is_lookup {
+                    assert_eq!(line, "POST /events HTTP/1.1\r\n");
                 }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                let mut content_length = None;
+                for _ in 0..64 {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let size = content_length.expect("request Content-Length");
+                assert!(size < 65536);
+                let mut body = vec![0; size];
+                reader.read_exact(&mut body).await.unwrap();
+                let reply = if is_lookup { lookup.to_string() } else { "{}".to_string() };
+                reader
+                    .get_mut()
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if !is_lookup {
+                    break serde_json::from_slice(&body).unwrap();
                 }
             }
-            let size = content_length.expect("request Content-Length");
-            assert!(size < 65536);
-            let mut body = vec![0; size];
-            reader.read_exact(&mut body).await.unwrap();
-            reader
-                .get_mut()
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .await
-                .unwrap();
-            serde_json::from_slice(&body).unwrap()
         })
         .await
         .expect("failure notice must be posted on the first failure");
@@ -11323,16 +11363,38 @@ mod error_outcome_emission_tests {
         assert!(!notice_references(&notice, &edit.id.to_hex()));
     }
 
-    /// If the original could not be fetched, the notice still replies to the
-    /// edit target, never to the edit event or channel top level.
+    /// An original that was unresolved at admission is looked up again for
+    /// the notice. A threaded original then gets the notice in its thread.
     #[tokio::test]
-    async fn failure_notice_for_unresolved_edit_replies_to_target() {
+    async fn failure_notice_retries_unresolved_edit_lookup() {
+        let root = "aa".repeat(32);
+        let original = crate::edit_routing::test_support::message(Some(&root));
+        let edit = crate::edit_routing::test_support::edit_event(&original.id.to_hex(), &[]);
+        let (notice, _, _) = capture_model_not_found_notice_with_lookup(
+            edit.clone(),
+            None,
+            serde_json::json!([original]),
+        )
+        .await;
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.clone()));
+        assert_eq!(threading.parent_event_id, Some(root));
+        assert!(!notice_references(&notice, &edit.id.to_hex()));
+    }
+
+    /// If the original still cannot be fetched, the notice must not claim the
+    /// edit target as a thread root: the target can itself be a thread reply,
+    /// and the relay rejects a root that does not match its real ancestry.
+    /// The notice posts at channel top level instead.
+    #[tokio::test]
+    async fn failure_notice_for_unresolved_edit_claims_no_root() {
         let target = "cc".repeat(32);
         let edit = crate::edit_routing::test_support::edit_event(&target, &[]);
         let (notice, _, _) = capture_model_not_found_notice(edit.clone(), None).await;
         let threading = queue::parse_thread_tags(&notice);
-        assert_eq!(threading.root_event_id, Some(target.clone()));
-        assert_eq!(threading.parent_event_id, Some(target));
+        assert_eq!(threading.root_event_id, None);
+        assert_eq!(threading.parent_event_id, None);
+        assert!(!notice_references(&notice, &target));
         assert!(!notice_references(&notice, &edit.id.to_hex()));
     }
 

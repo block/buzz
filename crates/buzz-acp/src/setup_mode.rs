@@ -659,8 +659,10 @@ async fn handle_setup_membership(
 /// Threading: flat reply to the thread root if one exists; otherwise reply
 /// to the triggering event itself. An edit routes through its original
 /// message (`edit`, resolved by the caller): the original's thread root, or
-/// the original itself when top-level or unresolved — never the auxiliary
-/// edit event. P-tags the verified effective asker.
+/// the original itself when top-level — never the auxiliary edit event. An
+/// unresolved original is never claimed as a thread root, because the relay
+/// rejects a root that does not match the original's real ancestry; that
+/// nudge posts at top level. P-tags the verified effective asker.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
@@ -694,14 +696,20 @@ fn build_setup_nudge_event(
     recipient_hex: &str,
     payload: &SetupPayload,
 ) -> Result<nostr::Event> {
-    let anchor = crate::queue::routing_thread_tags(triggering_event, edit)
-        .root_event_id
-        .unwrap_or_else(|| crate::queue::reaction_target_id(triggering_event));
-    let anchor_id = nostr::EventId::from_hex(&anchor)
-        .map_err(|e| anyhow::anyhow!("invalid nudge anchor event id: {e}"))?;
-    let thread_ref = buzz_sdk::ThreadRef {
-        root_event_id: anchor_id,
-        parent_event_id: anchor_id,
+    let unresolved_edit =
+        crate::queue::edit_target_id(triggering_event).is_some() && edit.is_none();
+    let thread_ref = if unresolved_edit {
+        None
+    } else {
+        let anchor = crate::queue::routing_thread_tags(triggering_event, edit)
+            .root_event_id
+            .unwrap_or_else(|| crate::queue::reaction_target_id(triggering_event));
+        let anchor_id = nostr::EventId::from_hex(&anchor)
+            .map_err(|e| anyhow::anyhow!("invalid nudge anchor event id: {e}"))?;
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: anchor_id,
+            parent_event_id: anchor_id,
+        })
     };
 
     let body = payload.nudge_body();
@@ -709,7 +717,7 @@ fn build_setup_nudge_event(
     let event_builder = buzz_sdk::build_message(
         channel_id,
         &body,
-        Some(&thread_ref),
+        thread_ref.as_ref(),
         &[recipient_hex], // p-tag the verified effective asker
         false,
         &[],
@@ -999,15 +1007,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_listener_nudges_unresolved_edit_at_target_never_edit() {
+    async fn setup_listener_nudges_unresolved_edit_at_top_level() {
+        // The target may itself be a thread reply; claiming it as root would
+        // make the relay reject the nudge for mismatched ancestry.
         let target = "88".repeat(32);
-        let (edit, nudge) = nudge_for_edit(&target, serde_json::json!([])).await;
-        let e_tags = nudge_e_tags(&nudge);
-        assert_eq!(
-            e_tags,
-            vec![vec!["e".into(), target, "".into(), "reply".into()]]
-        );
-        assert_ne!(e_tags[0][1], edit.id.to_hex());
+        let (_edit, nudge) = nudge_for_edit(&target, serde_json::json!([])).await;
+        assert!(nudge_e_tags(&nudge).is_empty());
     }
 
     #[test]
