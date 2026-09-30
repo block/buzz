@@ -2778,39 +2778,7 @@ async fn run_harness(
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
-    let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
-        SubscribeMode::Mentions => {
-            vec![SubscriptionRule {
-                name: "mentions".into(),
-                channels: filter::ChannelScope::All("all".into()),
-                kinds: config
-                    .kinds_override
-                    .clone()
-                    .unwrap_or_else(config::default_mention_kinds),
-                require_mention: !config.no_mention_filter,
-                filter: None,
-                compiled_filter: None,
-                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                prompt_tag: Some("@mention".into()),
-            }]
-        }
-        SubscribeMode::All => {
-            vec![SubscriptionRule {
-                name: "all".into(),
-                channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_default(),
-                require_mention: false,
-                filter: None,
-                compiled_filter: None,
-                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                prompt_tag: Some("all".into()),
-            }]
-        }
-        SubscribeMode::Config => {
-            // load_rules() already warns if the config file has zero rules.
-            config::load_rules(&config.config_path)?
-        }
-    };
+    let rules = startup_subscription_rules(config)?;
 
     let channel_filters = config::resolve_channel_filters(config, &channel_ids, &rules);
     if channel_filters.is_empty() {
@@ -9720,6 +9688,79 @@ mod build_mcp_servers_tests {
         assert_eq!(
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
+        );
+    }
+}
+
+/// Local admission rules for the normal listener. The relay subscription is
+/// derived separately (`config::resolve_channel_filters`); an event must pass
+/// both, so each default kind has to be present here too.
+fn startup_subscription_rules(config: &Config) -> Result<Vec<SubscriptionRule>> {
+    let rules = match config.subscribe_mode {
+        SubscribeMode::Mentions => {
+            vec![SubscriptionRule {
+                name: "mentions".into(),
+                channels: filter::ChannelScope::All("all".into()),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(config::default_mention_kinds),
+                require_mention: !config.no_mention_filter,
+                filter: None,
+                compiled_filter: None,
+                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                prompt_tag: Some("@mention".into()),
+            }]
+        }
+        SubscribeMode::All => {
+            vec![SubscriptionRule {
+                name: "all".into(),
+                channels: filter::ChannelScope::All("all".into()),
+                kinds: config.kinds_override.clone().unwrap_or_default(),
+                require_mention: false,
+                filter: None,
+                compiled_filter: None,
+                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                prompt_tag: Some("all".into()),
+            }]
+        }
+        SubscribeMode::Config => {
+            // load_rules() already warns if the config file has zero rules.
+            config::load_rules(&config.config_path)?
+        }
+    };
+    Ok(rules)
+}
+
+#[cfg(test)]
+mod edit_mention_admission_tests {
+    use super::*;
+    use crate::edit_routing::test_support::edit_event;
+
+    /// Default normal-mode admission: an edit that newly mentions the agent
+    /// matches the startup rule; an edit without the agent's `p` tag does not.
+    #[tokio::test]
+    async fn default_startup_rules_admit_only_edits_that_mention_the_agent() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.subscribe_mode = SubscribeMode::Mentions;
+        let agent = config.keys.public_key().to_hex();
+        let rules = startup_subscription_rules(&config).expect("mentions rules");
+        let channel_id = Uuid::new_v4();
+        let target = "ab".repeat(32);
+
+        let mentioned = edit_event(&target, &[["p", agent.as_str()]]);
+        assert!(
+            filter::match_event(&mentioned, channel_id, &rules, &agent)
+                .await
+                .is_some(),
+            "a mention added by an edit must wake the agent"
+        );
+        let unmentioned = edit_event(&target, &[]);
+        assert!(
+            filter::match_event(&unmentioned, channel_id, &rules, &agent)
+                .await
+                .is_none(),
+            "an edit that does not mention the agent must not wake it"
         );
     }
 }
