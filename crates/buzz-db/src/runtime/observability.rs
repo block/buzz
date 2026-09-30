@@ -184,16 +184,18 @@ pub(crate) enum LockType {
     PushGate,
     Deletion,
     MigrationSchemaSafety,
+    PartitionMaintenance,
 }
 
 impl LockType {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Replacement,
         Self::Membership,
         Self::PushGate,
         Self::Deletion,
         Self::MigrationSchemaSafety,
+        Self::PartitionMaintenance,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -203,6 +205,7 @@ impl LockType {
             Self::PushGate => "push_gate",
             Self::Deletion => "deletion",
             Self::MigrationSchemaSafety => "migration_schema_safety",
+            Self::PartitionMaintenance => "partition_maintenance",
         }
     }
 }
@@ -643,6 +646,7 @@ mod tests {
                 "push_gate",
                 "deletion",
                 "migration_schema_safety",
+                "partition_maintenance",
             ]
         );
         assert_eq!(

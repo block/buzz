@@ -12,7 +12,7 @@ use uuid::Uuid;
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
-use buzz_db::{Db, DbConfig};
+use buzz_db::{partition::PARTITION_MANAGER_MONTHS_AHEAD, Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
@@ -480,16 +480,20 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
+    let partition_policy = buzz_db::partition::PartitionMaintenancePolicy {
+        create_enabled: config.partition_manager_create_enabled,
+        advance_enabled: config.partition_manager_advance_enabled,
+    };
     let mut step = StepTimer::start(StartupStep::PartitionEnsure);
     let startup_partition_audit = match db
-        .ensure_future_partitions(3, config.partition_manager_create_enabled)
+        .maintain_partitions(PARTITION_MANAGER_MONTHS_AHEAD, partition_policy)
         .await
     {
         Ok(audit) => Some(audit),
         Err(error) => {
             step.degrade();
             error!(%error, "Failed to ensure partitions");
-            match db.audit_partitions(3).await {
+            match db.audit_partitions(PARTITION_MANAGER_MONTHS_AHEAD).await {
                 Ok(audit) => Some(audit),
                 Err(error) => {
                     error!(%error, "Initial partition catalog audit failed");
@@ -812,8 +816,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         state.record_partition_audit(audit);
     }
 
-    // The periodic path is deliberately read-only. Partition creation only
-    // occurs during the bounded startup pass.
+    // The periodic path is read-only unless catch-all advancement is enabled.
+    // Maintenance takes no lock when the runway is already complete, so a
+    // periodic attempt usually costs one catalog audit.
     {
         let partition_state = Arc::clone(&state);
         let audit_interval = state.config.partition_audit_interval;
@@ -822,7 +827,21 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 PartitionAuditSchedule::new(audit_interval, has_startup_partition_audit);
             loop {
                 schedule.wait().await;
-                let result = partition_state.db.audit_partitions(3).await;
+                let db = &partition_state.db;
+                let result = if partition_policy.advance_enabled {
+                    match db
+                        .maintain_partitions(PARTITION_MANAGER_MONTHS_AHEAD, partition_policy)
+                        .await
+                    {
+                        Ok(audit) => Ok(audit),
+                        Err(error) => {
+                            warn!(%error, "Periodic partition maintenance failed");
+                            db.audit_partitions(PARTITION_MANAGER_MONTHS_AHEAD).await
+                        }
+                    }
+                } else {
+                    db.audit_partitions(PARTITION_MANAGER_MONTHS_AHEAD).await
+                };
                 schedule.record_attempt(result.is_ok());
                 match result {
                     Ok(audit) => partition_state.record_partition_audit(audit),

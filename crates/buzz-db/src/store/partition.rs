@@ -7,18 +7,24 @@ use std::time::{Duration, Instant};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
 use serde::Serialize;
-use sqlx::{Connection, PgConnection, PgPool, Row};
-use tracing::info;
+use sqlx::{PgConnection, PgPool, Row};
 
 use crate::error::{DbError, Result};
 use crate::Db;
+
+mod maintenance;
+
+pub use maintenance::{
+    maintain_partitions, PartitionMaintenanceOutcome, PartitionMaintenancePolicy,
+    PARTITION_MANAGER_MONTHS_AHEAD,
+};
 
 /// Tables that may be partition-managed. The allowlist prevents DDL injection.
 const PARTITIONED_TABLES: &[&str] = &["events", "delivery_log"];
 
 /// Maximum future-month horizon accepted by catalog audits and creation.
 ///
-/// The relay uses three months. Keeping the public API bounded prevents an
+/// The relay uses [`PARTITION_MANAGER_MONTHS_AHEAD`]. Keeping the public API bounded prevents an
 /// operator-supplied `buzz-admin partition-audit --months-ahead` value from
 /// allocating or iterating an effectively unbounded report.
 pub const MAX_PARTITION_MONTHS_AHEAD: u32 = 120;
@@ -453,8 +459,9 @@ async fn audit_partition_catalog_report_at_with_timeout(
 
 /// Audit first, then create only months proven to be uncovered.
 ///
-/// Covered ranges are never probed with DDL. Creation failures are collected
-/// across all managed parents and months before an aggregate error is returned.
+/// Covered ranges are never probed with DDL, and a catch-all is never
+/// advanced; see [`maintain_partitions`]. Failures are aggregated across
+/// managed parents before an error is returned.
 pub async fn ensure_future_partitions(
     pool: &PgPool,
     months_ahead: u32,
@@ -469,113 +476,16 @@ async fn ensure_future_partitions_at(
     create_enabled: bool,
     now: DateTime<Utc>,
 ) -> Result<PartitionAudit> {
-    let audit = audit_partition_catalog_at(pool, months_ahead, now).await?;
-    let mut errors = Vec::new();
-    let mut created_any = false;
-
-    for table in &audit.tables {
-        for month in &table.months {
-            match month.kind {
-                MonthCoverageKind::CoveredByMonthly
-                | MonthCoverageKind::CoveredByCatchAll
-                | MonthCoverageKind::CoveredByDefault => {
-                    metrics::counter!(
-                        "buzz_partition_create_attempts_total",
-                        "table" => table.table,
-                        "outcome" => "skipped_covered"
-                    )
-                    .increment(1);
-                }
-                MonthCoverageKind::Uncovered if !create_enabled => {}
-                MonthCoverageKind::Uncovered => {
-                    let expected_name = partition_name(table.table, month.start);
-                    let collision = match relation_name_exists(pool, &expected_name).await {
-                        Ok(collision) => collision,
-                        Err(error) => {
-                            metrics::counter!(
-                                "buzz_partition_create_attempts_total",
-                                "table" => table.table,
-                                "outcome" => "error"
-                            )
-                            .increment(1);
-                            errors.push(format!(
-                                "{} {}: failed to check canonical name {expected_name}: {error}",
-                                table.table,
-                                month.start.format("%Y-%m")
-                            ));
-                            continue;
-                        }
-                    };
-                    if collision {
-                        metrics::counter!(
-                            "buzz_partition_create_attempts_total",
-                            "table" => table.table,
-                            "outcome" => "error"
-                        )
-                        .increment(1);
-                        errors.push(format!(
-                            "{} {}: canonical name {expected_name} already exists without the expected attachment and bounds",
-                            table.table,
-                            month.start.format("%Y-%m")
-                        ));
-                        continue;
-                    }
-                    if !table.structurally_safe_for_creation() {
-                        metrics::counter!(
-                            "buzz_partition_create_attempts_total",
-                            "table" => table.table,
-                            "outcome" => "error"
-                        )
-                        .increment(1);
-                        errors.push(format!(
-                            "{} {}: catalog is not structurally safe for automatic partition creation",
-                            table.table,
-                            month.start.format("%Y-%m")
-                        ));
-                        continue;
-                    }
-                    match create_month_partition(pool, table.table, month.start).await {
-                        Ok(name) => {
-                            created_any = true;
-                            metrics::counter!(
-                                "buzz_partition_create_attempts_total",
-                                "table" => table.table,
-                                "outcome" => "created"
-                            )
-                            .increment(1);
-                            info!(table = table.table, partition = name, "added partition");
-                        }
-                        Err(error) => {
-                            metrics::counter!(
-                                "buzz_partition_create_attempts_total",
-                                "table" => table.table,
-                                "outcome" => "error"
-                            )
-                            .increment(1);
-                            errors.push(format!(
-                                "{} {}: {error}",
-                                table.table,
-                                month.start.format("%Y-%m")
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        if created_any {
-            audit_partition_catalog_at(pool, months_ahead, now).await
-        } else {
-            Ok(audit)
-        }
-    } else {
-        Err(DbError::InvalidData(format!(
-            "partition creation failed: {}",
-            errors.join("; ")
-        )))
-    }
+    maintenance::maintain_partitions_at(
+        pool,
+        months_ahead,
+        PartitionMaintenancePolicy {
+            create_enabled,
+            advance_enabled: false,
+        },
+        now,
+    )
+    .await
 }
 
 async fn audit_table(
@@ -635,6 +545,16 @@ impl Db {
         create_enabled: bool,
     ) -> Result<PartitionAudit> {
         ensure_future_partitions(&self.pool, months_ahead, create_enabled).await
+    }
+
+    /// Issues the bounded partition DDL `policy` permits, then returns a fresh audit.
+    #[datastore_span(name = "maintain_partitions", system = "postgresql")]
+    pub async fn maintain_partitions(
+        &self,
+        months_ahead: u32,
+        policy: PartitionMaintenancePolicy,
+    ) -> Result<PartitionAudit> {
+        maintain_partitions(&self.pool, months_ahead, policy).await
     }
 }
 
@@ -1536,84 +1456,7 @@ fn parse_timestamp_literal(literal: &str) -> Option<DateTime<Utc>> {
     Some(Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0)?))
 }
 
-async fn create_month_partition(
-    pool: &PgPool,
-    table: &str,
-    start: DateTime<Utc>,
-) -> Result<String> {
-    if !PARTITIONED_TABLES.contains(&table) {
-        return Err(DbError::InvalidData(format!(
-            "table not in partition allowlist: {table:?}"
-        )));
-    }
-    let (end_year, end_month) = add_months(start.year(), start.month(), 1)?;
-    let end = month_start(end_year, end_month)?;
-    let partition_name = partition_name(table, start);
-    let start_date = start.format("%Y-%m-%d");
-    let end_date = end.format("%Y-%m-%d");
-    let sql = format!(
-        "CREATE TABLE {} PARTITION OF {} \
-         FOR VALUES FROM ('{start_date}') TO ('{end_date}')",
-        quote_identifier(&partition_name),
-        quote_identifier(table)
-    );
-    let mut connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::Bootstrap,
-    )
-    .await?;
-    let mut transaction = connection.begin().await?;
-    pin_catalog_rendering(&mut transaction).await?;
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .execute(&mut *transaction)
-        .await?;
-    let row = sqlx::query(
-        r#"
-        SELECT child.relkind::text AS relation_kind,
-               inherited.inhdetachpending AS detach_pending,
-               pg_catalog.pg_get_partkeydef(parent.oid) AS partition_key,
-               pg_catalog.pg_get_expr(child.relpartbound, child.oid) AS bound
-        FROM pg_catalog.pg_inherits inherited
-        JOIN pg_catalog.pg_class parent ON parent.oid = inherited.inhparent
-        JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
-        JOIN pg_catalog.pg_class child ON child.oid = inherited.inhrelid
-        JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child.relnamespace
-        WHERE parent_ns.nspname = current_schema()
-          AND child_ns.nspname = current_schema()
-          AND parent.relname = $1
-          AND child.relname = $2
-        "#,
-    )
-    .bind(table)
-    .bind(&partition_name)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let exact = row.is_some_and(|row| {
-        let relation_kind = row.try_get::<String, _>("relation_kind").ok();
-        let detach_pending = row.try_get::<bool, _>("detach_pending").ok();
-        let partition_key = row
-            .try_get::<Option<String>, _>("partition_key")
-            .ok()
-            .flatten();
-        let bounds = row
-            .try_get::<String, _>("bound")
-            .ok()
-            .and_then(|bound| parse_range_bounds(&bound));
-        relation_kind.as_deref() == Some("r")
-            && detach_pending == Some(false)
-            && partition_key.as_deref() == expected_partition_key(table)
-            && bounds == Some((PartitionBound::Finite(start), PartitionBound::Finite(end)))
-    });
-    if !exact {
-        transaction.rollback().await?;
-        return Err(DbError::InvalidData(format!(
-            "created partition {partition_name} failed exact catalog postcondition"
-        )));
-    }
-    transaction.commit().await?;
-    Ok(partition_name)
-}
-
+#[cfg(test)]
 async fn relation_name_exists(pool: &PgPool, relation: &str) -> Result<bool> {
     Ok(sqlx::query_scalar(
         r#"
@@ -1903,17 +1746,17 @@ mod tests {
         assert_eq!(extra, Some(1.0));
     }
 
-    mod postgres_tests {
+    pub(super) mod postgres_tests {
         use sqlx::postgres::PgPoolOptions;
         use uuid::Uuid;
 
         use super::*;
 
-        async fn scratch_pool() -> (PgPool, PgPool, String) {
+        pub(in crate::store::partition) async fn scratch_pool() -> (PgPool, PgPool, String) {
             scratch_pool_with_max_connections(4).await
         }
 
-        async fn scratch_pool_with_max_connections(
+        pub(in crate::store::partition) async fn scratch_pool_with_max_connections(
             max_connections: u32,
         ) -> (PgPool, PgPool, String) {
             let url = crate::test_support::database_url();
@@ -1941,7 +1784,7 @@ mod tests {
             (pool, admin, schema)
         }
 
-        async fn drop_schema(admin: &PgPool, schema: &str) {
+        pub(in crate::store::partition) async fn drop_schema(admin: &PgPool, schema: &str) {
             let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DROP SCHEMA IF EXISTS {schema} CASCADE"
             )))
@@ -1949,7 +1792,7 @@ mod tests {
             .await;
         }
 
-        async fn seed_parents(pool: &PgPool) {
+        pub(in crate::store::partition) async fn seed_parents(pool: &PgPool) {
             seed_parents_with_keys(pool, "created_at", "delivered_at").await;
         }
 
@@ -1984,7 +1827,13 @@ mod tests {
             }
         }
 
-        async fn create_child(pool: &PgPool, table: &str, name: &str, lower: &str, upper: &str) {
+        pub(in crate::store::partition) async fn create_child(
+            pool: &PgPool,
+            table: &str,
+            name: &str,
+            lower: &str,
+            upper: &str,
+        ) {
             let sql = format!(
                 "CREATE TABLE {name} PARTITION OF {table} FOR VALUES FROM ({lower}) TO ({upper})"
             );
@@ -2032,7 +1881,9 @@ mod tests {
                 .expect("create nested child");
         }
 
-        async fn catalog_snapshot(pool: &PgPool) -> Vec<(String, String, String, i64)> {
+        pub(in crate::store::partition) async fn catalog_snapshot(
+            pool: &PgPool,
+        ) -> Vec<(String, String, String, i64)> {
             let mut transaction = pool.begin().await.expect("begin catalog snapshot");
             sqlx::query("SET TRANSACTION READ ONLY")
                 .execute(&mut *transaction)
@@ -2067,11 +1918,11 @@ mod tests {
             snapshot
         }
 
-        fn fixed_now() -> DateTime<Utc> {
+        pub(in crate::store::partition) fn fixed_now() -> DateTime<Utc> {
             Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap()
         }
 
-        async fn seed_fresh_layout(pool: &PgPool) {
+        pub(in crate::store::partition) async fn seed_fresh_layout(pool: &PgPool) {
             seed_parents(pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
