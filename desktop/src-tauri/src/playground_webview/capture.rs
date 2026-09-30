@@ -198,14 +198,27 @@ pub fn snapshot_viewport_png_for_drive(webview: &Webview) -> Result<Vec<u8>, Str
     snapshot_playground_webview(webview)
 }
 
+/// Drive Record frames: do **not** reset scroll/zoom each tick (avoids scroll-jack
+/// and lost wall-clock), and fail fast so a hung parked paint cannot eat ~8s/frame.
+pub fn snapshot_viewport_png_for_drive_record(webview: &Webview) -> Result<Vec<u8>, String> {
+    snapshot_playground_webview_with_timeout(webview, std::time::Duration::from_millis(1_500))
+}
+
 fn snapshot_playground_webview(webview: &Webview) -> Result<Vec<u8>, String> {
+    snapshot_playground_webview_with_timeout(webview, std::time::Duration::from_secs(8))
+}
+
+fn snapshot_playground_webview_with_timeout(
+    webview: &Webview,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
-        return snapshot_wkwebview(webview, SnapshotMode::Viewport);
+        return snapshot_wkwebview_timeout(webview, SnapshotMode::Viewport, timeout);
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = webview;
+        let _ = (webview, timeout);
         empty_png()
     }
 }
@@ -235,8 +248,17 @@ enum SnapshotMode {
 
 #[cfg(target_os = "macos")]
 fn snapshot_wkwebview(webview: &Webview, mode: SnapshotMode) -> Result<Vec<u8>, String> {
+    snapshot_wkwebview_timeout(webview, mode, std::time::Duration::from_secs(8))
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_wkwebview_timeout(
+    webview: &Webview,
+    mode: SnapshotMode,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
     match mode {
-        SnapshotMode::Viewport => take_wk_snapshot(webview, None),
+        SnapshotMode::Viewport => take_wk_snapshot(webview, None, timeout),
         SnapshotMode::FullPage => snapshot_wkwebview_full_page(webview),
     }
 }
@@ -247,7 +269,7 @@ fn snapshot_wkwebview_full_page(webview: &Webview) -> Result<Vec<u8>, String> {
         Ok(size) => size,
         Err(_) => {
             // Soft fallback: viewport snapshot still beats a hard failure for thumbs.
-            return take_wk_snapshot(webview, Some(FULL_PAGE_SNAPSHOT_WIDTH_PX));
+            return take_wk_snapshot(webview, Some(FULL_PAGE_SNAPSHOT_WIDTH_PX), std::time::Duration::from_secs(8));
         }
     };
     let _ = content_w;
@@ -272,7 +294,7 @@ fn snapshot_wkwebview_full_page(webview: &Webview) -> Result<Vec<u8>, String> {
             .map_err(|error| error.to_string())?;
     }
 
-    let result = take_wk_snapshot(webview, Some(FULL_PAGE_SNAPSHOT_WIDTH_PX));
+    let result = take_wk_snapshot(webview, Some(FULL_PAGE_SNAPSHOT_WIDTH_PX), std::time::Duration::from_secs(8));
 
     if resized {
         let _ = webview.set_size(LogicalSize::new(viewport_w, viewport_h));
@@ -430,7 +452,11 @@ pub fn prepare_viewport_for_capture(webview: &Webview) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn take_wk_snapshot(webview: &Webview, snapshot_width: Option<f64>) -> Result<Vec<u8>, String> {
+fn take_wk_snapshot(
+    webview: &Webview,
+    snapshot_width: Option<f64>,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
     use block2::RcBlock;
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSImage;
@@ -483,7 +509,7 @@ fn take_wk_snapshot(webview: &Webview, snapshot_width: Option<f64>) -> Result<Ve
         })
         .map_err(|error| error.to_string())?;
 
-    match rx.recv_timeout(Duration::from_secs(8)) {
+    match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(_) => Err("playground webview snapshot timed out".into()),
     }

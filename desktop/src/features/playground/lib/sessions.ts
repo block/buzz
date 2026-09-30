@@ -365,6 +365,37 @@ export function disposePlaygroundBrowser(browserId: string) {
  * Close one secondary tab. The main/primary tab (tabSids[0]) cannot be
  * dismissed here — use disposePlaygroundBrowser / Browsers Remove.
  */
+
+async function rebindGrantOffClosingTab(fromSid: string, toSid: string) {
+  if (!fromSid || !toSid || fromSid === toSid) return;
+  try {
+    const { rebindBrowserAgentGrantToTab } = await import(
+      "@/features/browser-agent/lib/api"
+    );
+    const { browserWebviewLabel } = await import(
+      "@/features/browser-agent/lib/labels"
+    );
+    const { currentWindowLabel } = await import("./webview");
+    const windowLabel = currentWindowLabel();
+    await rebindBrowserAgentGrantToTab({
+      fromSurfaceId: fromSid,
+      toSurfaceId: toSid,
+      toWebviewLabel: browserWebviewLabel({
+        surface: "playground",
+        surfaceId: toSid,
+        windowLabel,
+      }),
+      fromWebviewLabel: browserWebviewLabel({
+        surface: "playground",
+        surfaceId: fromSid,
+        windowLabel,
+      }),
+    });
+  } catch {
+    // Best-effort — closing tab must not fail if grant rebind fails.
+  }
+}
+
 export function closePlaygroundTab(sid: string) {
   const browser = findBrowserByTabSid([...store.browsers.values()], sid);
   if (!browser) {
@@ -393,6 +424,9 @@ export function closePlaygroundTab(sid: string) {
   if (store.overlaySid === sid) {
     store.overlaySid = next.activeTabSid;
   }
+  // If Drive/Observe was bound to the closing tab (e.g. Print PDF), move the
+  // grant onto the surviving active tab instead of ending the grant.
+  void rebindGrantOffClosingTab(sid, next.activeTabSid);
   disposePlaygroundSessionOnly(sid);
   if (store.overlaySid == null) {
     store.overlaySid = next.activeTabSid;
@@ -439,6 +473,31 @@ function releaseOsPopoutsHostingSid(sid: string): void {
 }
 
 /** True when this sid already has a left-menu playground row. */
+/** Update live URL/title so browser_tabs mirrors stay current across SPA nav. */
+export function updatePlaygroundSessionNav(
+  sid: string,
+  input: { url?: string; title?: string },
+): void {
+  const session = store.sessions.get(sid);
+  if (!session) return;
+  const url = input.url?.trim();
+  const title = input.title?.trim();
+  let changed = false;
+  const next = { ...session };
+  if (url && url !== "about:blank" && url !== session.url) {
+    next.url = url;
+    changed = true;
+  }
+  if (title && title !== session.name) {
+    next.name = title.slice(0, 80);
+    changed = true;
+  }
+  if (!changed) return;
+  store.sessions.set(sid, next);
+  persist();
+  emit();
+}
+
 export function hasPlaygroundSession(sid: string): boolean {
   return store.sessions.has(sid);
 }
@@ -562,6 +621,7 @@ export function disposePlayground(sid: string) {
       if (store.overlaySid === sid) {
         store.overlaySid = next.activeTabSid;
       }
+      void rebindGrantOffClosingTab(sid, next.activeTabSid);
     }
   }
   disposePlaygroundSessionOnly(sid);

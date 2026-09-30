@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{create_dir_all, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -66,7 +66,38 @@ impl Default for BrowserObserveBuffer {
 impl BrowserObserveBuffer {
     pub fn set_root(&self, root: PathBuf) {
         if let Ok(mut slot) = self.root.lock() {
-            *slot = Some(root);
+            *slot = Some(root.clone());
+        }
+        self.seed_next_id_from_disk(&root);
+    }
+
+    /// Keep host event ids monotonic across Desktop restarts so MCP waiters
+    /// that watermark with `max(id)` in events.jsonl still see new events.
+    fn seed_next_id_from_disk(&self, root: &PathBuf) {
+        let mut max_id = 0u64;
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("events.jsonl");
+            let Ok(file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            for line in std::io::BufRead::lines(std::io::BufReader::new(file)).flatten() {
+                if let Ok(ev) = serde_json::from_str::<ObserveEvent>(&line) {
+                    if ev.id > max_id {
+                        max_id = ev.id;
+                    }
+                }
+            }
+        }
+        if max_id == 0 {
+            return;
+        }
+        if let Ok(mut next) = self.next_id.lock() {
+            if *next <= max_id {
+                *next = max_id.saturating_add(1);
+            }
         }
     }
 
@@ -159,6 +190,15 @@ impl BrowserObserveBuffer {
         }
         if let Ok(mut cursors) = self.page_cursors.lock() {
             cursors.remove(webview_label);
+        }
+        // Drop the on-disk mirror so a later grant on the same label does not
+        // append after stale high ids that confuse MCP after_id watermarks.
+        // next_id stays global/monotonic (seeded from disk on set_root).
+        if let Ok(root_guard) = self.root.lock() {
+            if let Some(root) = root_guard.as_ref() {
+                let path = root.join(webview_label).join("events.jsonl");
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
@@ -1295,6 +1335,41 @@ mod tests {
         let host_js = drain_page_queue_js(0, 25);
         assert!(host_js.contains("drainForHost"));
         assert!(!host_js.contains("__buzz_ba_drain"));
+    }
+
+    #[test]
+
+    #[test]
+    fn set_root_seeds_next_id_from_existing_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let label_dir = dir.path().join("playground-a");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        std::fs::write(
+            label_dir.join("events.jsonl"),
+            r#"{"id":40,"webviewLabel":"playground-a","kind":"nav","atMs":1}
+{"id":41,"webviewLabel":"playground-a","kind":"console","atMs":2}
+"#,
+        )
+        .unwrap();
+        let buf = BrowserObserveBuffer::default();
+        buf.set_root(dir.path().to_path_buf());
+        buf.push("playground-a", "grant", None, 3);
+        let polled = buf.poll("playground-a", 0, 10);
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].id, 42, "new ids must continue past disk max");
+        assert_eq!(polled[0].kind, "grant");
+    }
+
+    #[test]
+    fn clear_removes_events_jsonl_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let buf = BrowserObserveBuffer::default();
+        buf.set_root(dir.path().to_path_buf());
+        buf.push("playground-a", "nav", None, 1);
+        let path = dir.path().join("playground-a").join("events.jsonl");
+        assert!(path.is_file());
+        buf.clear("playground-a");
+        assert!(!path.is_file(), "clear must drop stale jsonl for MCP watermarks");
     }
 
     #[test]

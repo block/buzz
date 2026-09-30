@@ -1087,7 +1087,7 @@ fn drive_wait_response(
     let mut snapshot = Value::Null;
     if include_snapshot {
         let after = request_snapshot(dir, pubkey, false);
-        if let Some(ev) = wait_for_snapshot(dir, after, 8_000, 40) {
+        if let Some(ev) = wait_for_snapshot(dir, after, 15_000, 40) {
             snapshot = ev.get("payload").cloned().unwrap_or(Value::Null);
         }
     }
@@ -1189,38 +1189,66 @@ fn event_kind(ev: &Value) -> Option<&str> {
     ev.get("kind").and_then(|v| v.as_str())
 }
 
-fn last_event_id(dir: &Path) -> u64 {
-    let Ok(file) = fs::File::open(dir.join("events.jsonl")) else {
-        return 0;
+/// Byte-offset watermark into events.jsonl. Survives Desktop id resets after
+/// restart (append of low ids after stale high ids) — id-only after_id misses.
+#[derive(Debug, Clone, Copy)]
+struct EventsWatermark {
+    file_len: u64,
+}
+
+fn events_file_len(dir: &Path) -> u64 {
+    fs::metadata(dir.join("events.jsonl"))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+fn events_watermark(dir: &Path) -> EventsWatermark {
+    EventsWatermark {
+        file_len: events_file_len(dir),
+    }
+}
+
+/// Read events.jsonl lines appended after `after.file_len`.
+fn read_events_after(dir: &Path, after: EventsWatermark) -> Vec<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = dir.join("events.jsonl");
+    let Ok(mut file) = fs::File::open(&path) else {
+        return Vec::new();
     };
-    let mut max = 0u64;
-    for line in BufReader::new(file).lines().flatten() {
-        if let Ok(ev) = serde_json::from_str::<Value>(&line) {
-            let id = ev.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-            if id > max {
-                max = id;
-            }
+    if after.file_len > 0 {
+        if file.seek(SeekFrom::Start(after.file_len)).is_err() {
+            return Vec::new();
         }
     }
-    max
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return Vec::new();
+    }
+    // If we seek mid-line (rare truncation), drop the partial first line.
+    let body = if after.file_len > 0 && !buf.is_empty() && !buf.starts_with('{') {
+        match buf.find('\n') {
+            Some(i) => &buf[i + 1..],
+            None => return Vec::new(),
+        }
+    } else {
+        buf.as_str()
+    };
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
 }
 
 fn wait_for_snapshot(
     dir: &Path,
-    after_id: u64,
+    after: EventsWatermark,
     timeout_ms: u64,
     poll_ms: u64,
 ) -> Option<Value> {
     let started = std::time::Instant::now();
     loop {
-        if let Ok(file) = fs::File::open(dir.join("events.jsonl")) {
-            for line in BufReader::new(file).lines().flatten() {
-                if let Ok(ev) = serde_json::from_str::<Value>(&line) {
-                    let id = ev.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    if id > after_id && event_kind(&ev) == Some("snapshot") {
-                        return Some(ev);
-                    }
-                }
+        for ev in read_events_after(dir, after) {
+            if event_kind(&ev) == Some("snapshot") {
+                return Some(ev);
             }
         }
         if started.elapsed().as_millis() as u64 >= timeout_ms {
@@ -1230,8 +1258,8 @@ fn wait_for_snapshot(
     }
 }
 
-fn request_snapshot(dir: &Path, pubkey: &str, screenshot: bool) -> u64 {
-    let after = last_event_id(dir);
+fn request_snapshot(dir: &Path, pubkey: &str, screenshot: bool) -> EventsWatermark {
+    let after = events_watermark(dir);
     let _ = fs::write(
         dir.join("snapshot-request.json"),
         json!({
@@ -1275,7 +1303,8 @@ pub fn snapshot(p: SnapshotParams) -> Result<CallToolResult, ErrorData> {
     let want_shot = p.screenshot.unwrap_or(false);
     let started = std::time::Instant::now();
     let after = request_snapshot(&dir, &pubkey, want_shot);
-    let timeout_ms = if want_shot { 12_000 } else { 8_000 };
+    // Desktop usually ACKs in ≤2s; keep headroom for parked background paint.
+    let timeout_ms = if want_shot { 20_000 } else { 15_000 };
     let snap_ev = wait_for_snapshot(&dir, after, timeout_ms, 40);
 
     let mut last_url = Value::Null;
@@ -1369,36 +1398,26 @@ fn write_record_request(dir: &Path, body: &Value) -> Result<(), ErrorData> {
 
 fn wait_for_record_event(
     dir: &Path,
-    after_id: u64,
+    after: EventsWatermark,
     request_id: &str,
     kinds: &[&str],
     timeout_ms: u64,
     poll_ms: u64,
 ) -> Option<Value> {
     let started = std::time::Instant::now();
-    let path = dir.join("events.jsonl");
     loop {
-        if let Ok(file) = fs::File::open(&path) {
-            for line in BufReader::new(file).lines().flatten() {
-                let Ok(ev) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                let id = ev.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                if id <= after_id {
-                    continue;
-                }
-                let kind = event_kind(&ev).unwrap_or("");
-                if !kinds.iter().any(|k| *k == kind) {
-                    continue;
-                }
-                let rid = ev
-                    .get("payload")
-                    .and_then(|p| p.get("requestId"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if rid == request_id {
-                    return Some(ev);
-                }
+        for ev in read_events_after(dir, after) {
+            let kind = event_kind(&ev).unwrap_or("");
+            if !kinds.iter().any(|k| *k == kind) {
+                continue;
+            }
+            let rid = ev
+                .get("payload")
+                .and_then(|p| p.get("requestId"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if rid == request_id {
+                return Some(ev);
             }
         }
         if started.elapsed().as_millis() as u64 >= timeout_ms {
@@ -1422,7 +1441,7 @@ pub fn record_start(p: RecordStartParams) -> Result<CallToolResult, ErrorData> {
         p.surface_id.as_deref(),
     )?;
     let request_id = new_record_id();
-    let after = last_event_id(&dir);
+    let after = events_watermark(&dir);
     write_record_request(
         &dir,
         &json!({
@@ -1437,7 +1456,7 @@ pub fn record_start(p: RecordStartParams) -> Result<CallToolResult, ErrorData> {
         after,
         &request_id,
         &["record_started", "record_error"],
-        8_000,
+        15_000,
         40,
     );
     let (ok, payload) = match ev {
@@ -1482,7 +1501,7 @@ pub fn record_stop_and_post(p: RecordStopParams) -> Result<CallToolResult, Error
         p.surface_id.as_deref(),
     )?;
     let request_id = new_record_id();
-    let after = last_event_id(&dir);
+    let after = events_watermark(&dir);
     let mut body = json!({
         "action": "stop",
         "requestId": request_id,
@@ -1585,6 +1604,74 @@ mod tests {
         });
         let text = format!("{result:?}");
         assert!(text.contains("console"), "{text}");
+    }
+
+
+    #[test]
+    fn wait_for_snapshot_sees_events_after_id_reset_via_byte_watermark() {
+        let dir = tempdir().unwrap();
+        let gdir = dir.path().join("playground-demo");
+        fs::create_dir_all(&gdir).unwrap();
+        // Stale high ids from a prior Desktop session.
+        let mut events = fs::File::create(gdir.join("events.jsonl")).unwrap();
+        writeln!(
+            events,
+            r#"{{"id":100,"webviewLabel":"playground-demo","kind":"nav","atMs":1}}"#
+        )
+        .unwrap();
+        writeln!(
+            events,
+            r#"{{"id":101,"webviewLabel":"playground-demo","kind":"console","atMs":2}}"#
+        )
+        .unwrap();
+        events.flush().unwrap();
+        let after = events_watermark(&gdir);
+        // Desktop restart: new low ids appended (the old id-only waiter would miss).
+        writeln!(
+            events,
+            r#"{{"id":1,"webviewLabel":"playground-demo","kind":"grant","atMs":3}}"#
+        )
+        .unwrap();
+        writeln!(
+            events,
+            r#"{{"id":2,"webviewLabel":"playground-demo","kind":"snapshot","atMs":4,"payload":{{"ok":true}}}}"#
+        )
+        .unwrap();
+        events.flush().unwrap();
+        let ev = wait_for_snapshot(&gdir, after, 200, 10).expect("snapshot");
+        assert_eq!(event_kind(&ev), Some("snapshot"));
+        assert_eq!(ev.get("id").and_then(|v| v.as_u64()), Some(2));
+    }
+
+    #[test]
+    fn wait_for_record_event_matches_request_id_after_id_reset() {
+        let dir = tempdir().unwrap();
+        let gdir = dir.path().join("playground-demo");
+        fs::create_dir_all(&gdir).unwrap();
+        let mut events = fs::File::create(gdir.join("events.jsonl")).unwrap();
+        writeln!(
+            events,
+            r#"{{"id":50,"webviewLabel":"playground-demo","kind":"nav","atMs":1}}"#
+        )
+        .unwrap();
+        events.flush().unwrap();
+        let after = events_watermark(&gdir);
+        writeln!(
+            events,
+            r#"{{"id":1,"webviewLabel":"playground-demo","kind":"record_started","atMs":2,"payload":{{"ok":true,"requestId":"rABC"}}}}"#
+        )
+        .unwrap();
+        events.flush().unwrap();
+        let ev = wait_for_record_event(
+            &gdir,
+            after,
+            "rABC",
+            &["record_started", "record_error"],
+            200,
+            10,
+        )
+        .expect("record_started");
+        assert_eq!(event_kind(&ev), Some("record_started"));
     }
 
     #[test]

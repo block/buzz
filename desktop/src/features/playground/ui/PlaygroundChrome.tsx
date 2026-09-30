@@ -48,7 +48,12 @@ import {
   playgroundScreenshotFile,
   stagePlaygroundScreenshotDraft,
 } from "../lib/screenshot";
-import { dismissPlayground } from "../lib/sessions";
+import {
+  dismissPlayground,
+  getLiveBrowserForSid,
+  updatePlaygroundSessionNav,
+} from "../lib/sessions";
+import { syncAndAnnounceBrowserTabs } from "../lib/runtime";
 import type { PlaygroundSession } from "../lib/sessions";
 import { playgroundPin } from "../lib/types";
 import type { PlaygroundNavState } from "../lib/types";
@@ -202,6 +207,13 @@ export function PlaygroundChrome({
       if (payload.sid !== session.sid) return;
       setNav(payload);
       setSuffix(suffixFromCurrentUrl(session.url, payload.currentUrl));
+      updatePlaygroundSessionNav(session.sid, {
+        url: payload.currentUrl || undefined,
+      });
+      const browserId = getLiveBrowserForSid(session.sid)?.browserId;
+      if (browserId) {
+        void syncAndAnnounceBrowserTabs(browserId).catch(() => undefined);
+      }
     });
     return () => {
       cancelled = true;

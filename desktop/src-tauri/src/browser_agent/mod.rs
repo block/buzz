@@ -229,6 +229,18 @@ pub fn ensure_instrumentation_for_label(app: &AppHandle, webview_label: &str) {
                 if prior != label {
                     mirror_grant(&root, None, prior, false);
                     state.observe.clear(prior);
+                    if state.drive_records.migrate_label(prior, label) {
+                        viewport_gate::clear_background_paint(&state, prior);
+                        let _ = viewport_gate::prepare_background_drive_viewport(
+                            app, &state, label,
+                        );
+                        let old_rec = root.join(prior).join("recording.json");
+                        let new_dir = root.join(label);
+                        let _ = std::fs::create_dir_all(&new_dir);
+                        if old_rec.is_file() {
+                            let _ = std::fs::rename(&old_rec, new_dir.join("recording.json"));
+                        }
+                    }
                 }
             }
             mirror_grant(&root, Some(&rebound), label, webview_is_hidden(&state, label));
@@ -449,6 +461,20 @@ pub async fn browser_agent_rebind_surface(
             if prior != &new_label {
                 mirror_grant(&root, None, prior, false);
                 state.observe.clear(prior);
+                // Follow active tab: keep Record capturing the focused webview.
+                if state.drive_records.migrate_label(prior, &new_label) {
+                    viewport_gate::clear_background_paint(&state, prior);
+                    let _ = viewport_gate::prepare_background_drive_viewport(
+                        &app, &state, &new_label,
+                    );
+                    // Move recording.json mirror onto the live grant dir.
+                    let old_rec = root.join(prior).join("recording.json");
+                    let new_dir = root.join(&new_label);
+                    let _ = std::fs::create_dir_all(&new_dir);
+                    if old_rec.is_file() {
+                        let _ = std::fs::rename(&old_rec, new_dir.join("recording.json"));
+                    }
+                }
                 // Unlock prior tab if Drive lock was installed.
                 let _ = eval_on_label(
                     &app,
@@ -1438,11 +1464,63 @@ async fn process_snapshot_request(
             }
         }
     }
+    // Keep viewport.json fresh from the live page (Stage museum size alone goes stale).
+    mirror_live_viewport_from_snapshot(app, state, label, root, &payload, &grant.surface_id);
+
     state
         .observe
         .push(label, "snapshot", Some(payload.clone()), now_ms());
     emit_observe(app, label, "snapshot", Some(payload));
     1
+}
+
+/// Refresh grant `viewport.json` from snapshot CSS viewport and/or native layout.
+fn mirror_live_viewport_from_snapshot(
+    app: &AppHandle,
+    _state: &BrowserAgentState,
+    label: &str,
+    root: &PathBuf,
+    payload: &serde_json::Value,
+    surface_id: &str,
+) {
+    let mut width = payload
+        .pointer("/viewport/width")
+        .and_then(|v| v.as_f64())
+        .filter(|w| *w > 0.0);
+    let mut height = payload
+        .pointer("/viewport/height")
+        .and_then(|v| v.as_f64())
+        .filter(|h| *h > 0.0);
+    if width.is_none() || height.is_none() {
+        if let Some((w, h)) = viewport_gate::webview_layout_size(app, label) {
+            if viewport_gate::layout_is_usable(w, h) {
+                width = Some(width.unwrap_or(w));
+                height = Some(height.unwrap_or(h));
+            }
+        }
+    }
+    let (Some(w), Some(h)) = (width, height) else {
+        return;
+    };
+    let dpr = payload
+        .pointer("/viewport/dpr")
+        .and_then(|v| v.as_f64())
+        .filter(|d| *d > 0.0);
+    let body = serde_json::json!({
+        "surfaceId": surface_id,
+        "mode": "live",
+        "width": w,
+        "height": h,
+        "scalePercent": dpr.map(|d| d * 100.0),
+        "source": "snapshot",
+        "updatedAtMs": now_ms(),
+    });
+    let dir = root.join(label);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("viewport.json"), body.to_string());
+    let vp_dir = root.join("viewports").join(surface_id);
+    let _ = std::fs::create_dir_all(&vp_dir);
+    let _ = std::fs::write(vp_dir.join("viewport.json"), body.to_string());
 }
 
 #[derive(Debug, Deserialize)]

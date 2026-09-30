@@ -39,6 +39,9 @@ struct ActiveRecording {
     started_at_ms: u64,
     /// Set when the capture loop finishes (stop, max duration, or error).
     finished: Arc<AtomicBool>,
+    /// Live webview label — updated when Drive grant rebinds across tabs so
+    /// the capture loop follows the active tab.
+    live_label: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +64,25 @@ impl DriveRecordTracker {
             session.stop.store(true, Ordering::Relaxed);
             let _ = std::fs::remove_dir_all(&session.frames_dir);
         }
+    }
+
+    /// Move an active recording onto a new webview label after tab switch /
+    /// grant rebind so frames follow the active tab.
+    pub fn migrate_label(&self, from_label: &str, to_label: &str) -> bool {
+        if from_label == to_label || to_label.is_empty() {
+            return false;
+        }
+        let Ok(mut map) = self.active.lock() else {
+            return false;
+        };
+        let Some(session) = map.remove(from_label) else {
+            return false;
+        };
+        if let Ok(mut live) = session.live_label.lock() {
+            *live = to_label.to_string();
+        }
+        map.insert(to_label.to_string(), session);
+        true
     }
 }
 
@@ -149,7 +171,7 @@ fn build_record_caption(url: &str, title: Option<&str>, agent_caption: Option<&s
     lines.join("\n")
 }
 
-fn capture_label_png(app: &AppHandle, label: &str) -> Result<Vec<u8>, String> {
+fn capture_label_png_record(app: &AppHandle, label: &str) -> Result<Vec<u8>, String> {
     let webview = app
         .get_webview(label)
         .ok_or_else(|| "webview not open".to_string())?;
@@ -161,7 +183,9 @@ fn capture_label_png(app: &AppHandle, label: &str) -> Result<Vec<u8>, String> {
             return Err("recording must target the playground webview".into());
         }
     }
-    crate::playground_webview::capture::snapshot_viewport_png_for_drive(&webview)
+    // Record path: no scroll/zoom reset per frame; short timeout so parked
+    // paint hangs cannot burn ~8s of wall clock per miss.
+    crate::playground_webview::capture::snapshot_viewport_png_for_drive_record(&webview)
 }
 
 fn push_record_event(
@@ -335,6 +359,7 @@ async fn start_recording(
 
     let stop = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
+    let live_label = Arc::new(Mutex::new(label.to_string()));
     let started_at_ms = now_ms();
     {
         let Ok(mut map) = state.drive_records.active.lock() else {
@@ -349,6 +374,7 @@ async fn start_recording(
                 stop: stop.clone(),
                 started_at_ms,
                 finished: finished.clone(),
+                live_label: live_label.clone(),
             },
         );
     }
@@ -377,12 +403,13 @@ async fn start_recording(
     );
 
     let app_capture = app.clone();
-    let label_capture = label.to_string();
     let frames_capture = frames_dir.clone();
     let stop_capture = stop.clone();
     let finished_capture = finished.clone();
+    let live_capture = live_label.clone();
     tauri::async_runtime::spawn(async move {
         let mut frame_index: u32 = 0;
+        let mut consecutive_misses: u32 = 0;
         let started = std::time::Instant::now();
         while !stop_capture.load(Ordering::Relaxed) {
             if started.elapsed().as_millis() as u64 >= RECORD_MAX_DURATION_MS {
@@ -391,8 +418,17 @@ async fn start_recording(
             if frame_index >= RECORD_MAX_FRAMES {
                 break;
             }
-            match capture_label_png(&app_capture, &label_capture) {
+            let label_now = live_capture
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if label_now.is_empty() {
+                break;
+            }
+            match capture_label_png_record(&app_capture, &label_now) {
                 Ok(png) => {
+                    consecutive_misses = 0;
                     frame_index = frame_index.saturating_add(1);
                     let path = frame_path(&frames_capture, frame_index);
                     if let Err(e) = std::fs::write(&path, &png) {
@@ -401,8 +437,20 @@ async fn start_recording(
                     }
                 }
                 Err(e) => {
-                    // Soft: skip a missed frame (hidden/parked webview) and continue.
+                    consecutive_misses = consecutive_misses.saturating_add(1);
+                    // Soft: skip a missed frame; re-warm offscreen paint so
+                    // parked WKWebViews keep producing frames.
                     eprintln!("buzz-desktop: drive record capture miss: {e}");
+                    if let Some(ba) = app_capture.try_state::<BrowserAgentState>() {
+                        let _ = viewport_gate::prepare_background_drive_viewport(
+                            &app_capture,
+                            &ba,
+                            &label_now,
+                        );
+                    }
+                    if consecutive_misses >= 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(RECORD_FRAME_INTERVAL_MS)).await;
@@ -709,6 +757,31 @@ mod tests {
         assert_eq!(stop.action, RecordAction::Stop);
         assert_eq!(stop.caption.as_deref(), Some("done"));
         assert_eq!(stop.agent_pubkey, "abc");
+    }
+
+    #[test]
+    fn migrate_label_updates_live_label_and_map_key() {
+        let tracker = DriveRecordTracker::default();
+        let live = Arc::new(Mutex::new("playground-a".into()));
+        {
+            let mut map = tracker.active.lock().unwrap();
+            map.insert(
+                "playground-a".into(),
+                ActiveRecording {
+                    request_id: "r1".into(),
+                    frames_dir: std::env::temp_dir().join("buzz-drive-record-test-migrate"),
+                    stop: Arc::new(AtomicBool::new(false)),
+                    started_at_ms: 1,
+                    finished: Arc::new(AtomicBool::new(false)),
+                    live_label: live.clone(),
+                },
+            );
+        }
+        assert!(tracker.migrate_label("playground-a", "playground-b"));
+        assert!(!tracker.is_recording("playground-a"));
+        assert!(tracker.is_recording("playground-b"));
+        assert_eq!(live.lock().unwrap().as_str(), "playground-b");
+        tracker.clear("playground-b");
     }
 
     #[test]

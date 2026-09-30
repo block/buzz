@@ -151,6 +151,11 @@ export function handlePlaygroundNewTabRequest(payload: {
         windowLabel,
       }),
   }).catch(() => undefined);
+  // Print / PDF viewers leave orphan secondary tabs across restarts; drop
+  // prior PDF-like siblings (keep main + the new tab).
+  if (looksLikePdfTabUrl(url)) {
+    closePriorPdfSiblingTabs(browser.browserId, session.sid);
+  }
   void syncAndAnnounceBrowserTabs(browser.browserId, {
     kind: "tab_opened",
     surfaceId: session.sid,
@@ -329,6 +334,34 @@ function usePlaygroundTabSwitchListener() {
       stop?.();
     };
   }, []);
+}
+
+
+function looksLikePdfTabUrl(url: string): boolean {
+  const u = url.trim().toLowerCase();
+  if (!u) return false;
+  if (u.startsWith("blob:")) return true;
+  if (u.includes(".pdf")) return true;
+  if (u.includes("application/pdf")) return true;
+  if (u.includes("/pdf.js/") || u.includes("chrome-extension://")) return true;
+  return false;
+}
+
+/** Close older PDF/print sibling tabs so each Print does not accumulate orphans. */
+function closePriorPdfSiblingTabs(browserId: string, keepSid: string) {
+  const browser =
+    getLiveBrowserForSid(keepSid) ?? getPlaygroundBrowser(browserId);
+  if (!browser) return;
+  const store = getPlaygroundStore();
+  const main = mainTabSid(browser);
+  for (const sid of [...browser.tabSids]) {
+    if (sid === keepSid || sid === main) continue;
+    const session = store.sessions.get(sid);
+    const tabUrl = session?.url ?? "";
+    if (looksLikePdfTabUrl(tabUrl)) {
+      closePlaygroundTab(sid);
+    }
+  }
 }
 
 /** Mirror browser-group tabs for MCP + optional observe announce. */
