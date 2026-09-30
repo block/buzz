@@ -570,11 +570,46 @@ pub(super) fn transcode_and_extract_poster_with_cancellation(
 }
 
 
+/// Relay video resolution envelope (matches `buzz-media` validation):
+/// short edge ≤ 2160 and long edge ≤ 3840 (portrait or landscape).
+pub(crate) const RELAY_VIDEO_MAX_SHORT_EDGE: u32 = 2160;
+pub(crate) const RELAY_VIDEO_MAX_LONG_EDGE: u32 = 3840;
+
+/// ffmpeg `-vf` that fits frames into [`RELAY_VIDEO_MAX_LONG_EDGE`]×[`RELAY_VIDEO_MAX_SHORT_EDGE`]
+/// (orientation-aware), then pads to even dimensions for yuv420p.
+///
+/// Retina Drive Stages often capture CSS×DPR (e.g. 2203×1217 @2× → 4406×2434), which
+/// exceeds the relay limit; without this scale, encode succeeds then upload returns 422.
+fn relay_video_scale_pad_vf() -> &'static str {
+    // Raw string so ffmpeg's \, escapes stay literal (plain "\," is invalid Rust).
+    r"scale=w=if(gte(iw\,ih)\,3840\,2160):h=if(gte(iw\,ih)\,2160\,3840):force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+}
+
+/// Fit `(width, height)` into the relay video envelope, preserving aspect ratio.
+/// Does not upscale. Edges are not forced even (encode vf pads for yuv420p).
+pub(crate) fn fit_relay_video_dims(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (width, height);
+    }
+    let long = width.max(height) as f64;
+    let short = width.min(height) as f64;
+    let scale = (1.0_f64)
+        .min(RELAY_VIDEO_MAX_LONG_EDGE as f64 / long)
+        .min(RELAY_VIDEO_MAX_SHORT_EDGE as f64 / short);
+    if scale >= 1.0 {
+        return (width, height);
+    }
+    let w = ((width as f64) * scale).round().max(1.0) as u32;
+    let h = ((height as f64) * scale).round().max(1.0) as u32;
+    (w.max(1), h.max(1))
+}
+
 /// Encode a contiguous `frame_0001.png`… sequence into H.264 MP4 (no audio).
 ///
 /// Output matches the relay video constraints used by composer uploads
-/// (yuv420p, even dimensions, faststart). Caller must clean up the returned path
-/// and the frames directory.
+/// (yuv420p, even dimensions, faststart) and scales Retina/device-pixel frames
+/// down into the relay ≤3840×2160 envelope so Drive Record uploads do not 422.
+/// Caller must clean up the returned path and the frames directory.
 pub(crate) fn encode_png_sequence_to_mp4(
     frames_dir: &std::path::Path,
     fps: u32,
@@ -617,7 +652,7 @@ pub(crate) fn encode_png_sequence_to_mp4(
                 "-pix_fmt",
                 "yuv420p",
                 "-vf",
-                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                relay_video_scale_pad_vf(),
                 "-movflags",
                 "+faststart",
                 "-map_metadata",
@@ -775,6 +810,114 @@ mod tests {
         assert!(!has_heic_extension(Path::new("photo.jpg")));
         assert!(!has_heic_extension(Path::new("photo.png")));
         assert!(!has_heic_extension(Path::new("noextension")));
+    }
+
+    #[test]
+    fn fit_relay_video_dims_leaves_small_frames_alone() {
+        assert_eq!(fit_relay_video_dims(1280, 800), (1280, 800));
+        assert_eq!(fit_relay_video_dims(1920, 1080), (1920, 1080));
+        assert_eq!(
+            fit_relay_video_dims(RELAY_VIDEO_MAX_LONG_EDGE, RELAY_VIDEO_MAX_SHORT_EDGE),
+            (RELAY_VIDEO_MAX_LONG_EDGE, RELAY_VIDEO_MAX_SHORT_EDGE)
+        );
+        assert_eq!(
+            fit_relay_video_dims(RELAY_VIDEO_MAX_SHORT_EDGE, RELAY_VIDEO_MAX_LONG_EDGE),
+            (RELAY_VIDEO_MAX_SHORT_EDGE, RELAY_VIDEO_MAX_LONG_EDGE)
+        );
+    }
+
+    #[test]
+    fn fit_relay_video_dims_scales_retina_desktop_stage() {
+        // Reported failure: Desktop Stage 2203×1217 CSS @2× → 4406×2434 device px.
+        let (w, h) = fit_relay_video_dims(4406, 2434);
+        assert!(w <= RELAY_VIDEO_MAX_LONG_EDGE, "long edge {w}");
+        assert!(h <= RELAY_VIDEO_MAX_SHORT_EDGE, "short edge {h}");
+        assert_eq!(w.max(h), RELAY_VIDEO_MAX_LONG_EDGE);
+        // Aspect ≈ 4406/2434 ≈ 1.810
+        let aspect = w as f64 / h as f64;
+        assert!((aspect - 4406.0 / 2434.0).abs() < 0.01, "aspect {aspect}");
+    }
+
+    #[test]
+    fn fit_relay_video_dims_scales_tall_portrait() {
+        let (w, h) = fit_relay_video_dims(2000, 5000);
+        assert_eq!(w.max(h), RELAY_VIDEO_MAX_LONG_EDGE);
+        assert!(w.min(h) <= RELAY_VIDEO_MAX_SHORT_EDGE);
+        let aspect = h as f64 / w as f64;
+        assert!((aspect - 5000.0 / 2000.0).abs() < 0.02, "aspect {aspect}");
+    }
+
+    #[test]
+    fn encode_png_sequence_scales_oversized_retina_frames() {
+        let Ok(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping drive-record scale round-trip: ffmpeg not found");
+            return;
+        };
+        let frames_dir = std::env::temp_dir().join(format!(
+            "buzz-drive-record-scale-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&frames_dir).expect("frames dir");
+        // Two oversized frames matching the Retina Stage failure case.
+        for i in 1..=2u32 {
+            let frame = frames_dir.join(format!("frame_{i:04}.png"));
+            let gen = std::process::Command::new(&ffmpeg)
+                .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg("color=c=blue:s=4406x2434:d=1")
+                .args(["-frames:v", "1"])
+                .arg(&frame)
+                .output()
+                .expect("generate frame");
+            if !gen.status.success() {
+                eprintln!("skipping: ffmpeg cannot write oversized PNG");
+                let _ = std::fs::remove_dir_all(&frames_dir);
+                return;
+            }
+        }
+
+        let output = match encode_png_sequence_to_mp4(&frames_dir, 4) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("skipping encode round-trip: {e}");
+                let _ = std::fs::remove_dir_all(&frames_dir);
+                return;
+            }
+        };
+
+        let probe = std::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-i",
+            ])
+            .arg(&output)
+            .output()
+            .expect("ffprobe via ffmpeg -i");
+        let stderr = String::from_utf8_lossy(&probe.stderr);
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_dir_all(&frames_dir);
+
+        // ffmpeg -i prints e.g. "Video: h264 ..., 3840x2122, ..."
+        let dims = stderr
+            .split_whitespace()
+            .find_map(|tok| {
+                let mut parts = tok.trim_end_matches(',').split('x');
+                let w: u32 = parts.next()?.parse().ok()?;
+                let h: u32 = parts.next()?.parse().ok()?;
+                if parts.next().is_some() {
+                    return None;
+                }
+                Some((w, h))
+            });
+        let Some((w, h)) = dims else {
+            panic!("could not parse video dimensions from ffmpeg stderr:\n{stderr}");
+        };
+        let long = w.max(h);
+        let short = w.min(h);
+        assert!(
+            long <= RELAY_VIDEO_MAX_LONG_EDGE && short <= RELAY_VIDEO_MAX_SHORT_EDGE,
+            "encoded {w}x{h} still outside relay envelope"
+        );
+        assert!(w % 2 == 0 && h % 2 == 0, "yuv420p requires even dims, got {w}x{h}");
     }
 
     #[test]
