@@ -16,7 +16,7 @@ community rather than overriding it.
 
 Deployment-root community management uses operator-signed NIP-98 HTTP requests.
 `POST /operator/communities/delete` accepts only an exact normalized, archived
-community whose asserted pubkey is still its owner. The caller supplies the
+community whose asserted pubkey is its sole current owner. The caller supplies the
 request UUID as the stable correlation/idempotency identity; the durable row
 records operator-attested owner intent, mediating operator, and acknowledgement
 version. Admission returns `202` at the `submitted` stage and performs no
@@ -31,7 +31,7 @@ Owner consent on this path is asserted, not proven. The mediating operator
 authenticates the owner and collects the deletion acknowledgement out of band,
 upstream of the relay; the request itself carries only the operator's NIP-98
 signature. The relay verifies operator authority and that the asserted pubkey
-is still the community's owner, then records the owner pubkey, mediating
+is the community's sole current owner, then records the owner pubkey, mediating
 operator pubkey, and acknowledgement version as durable provenance for that
 upstream ceremony. No owner-signed attestation is required or checked, and
 owners have no self-service cancellation. Recovery is a privileged abort,

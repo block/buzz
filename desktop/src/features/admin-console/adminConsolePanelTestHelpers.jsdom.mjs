@@ -193,7 +193,11 @@ export function mountPanel({
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const doRender = async ({ origin: o, pubkey: p } = { origin, pubkey }) => {
+  const doRender = async ({
+    origin: o = origin,
+    pubkey: p = pubkey,
+    canMutate: m = canMutate,
+  } = {}) => {
     await act(async () => {
       root.render(
         React.createElement(
@@ -203,7 +207,7 @@ export function mountPanel({
             CommunitiesProvider,
             null,
             React.createElement(AdminConsolePanel, {
-              canMutate,
+              canMutate: m,
               origin: o,
               pubkey: p,
               ...(role !== undefined ? { role } : {}),
