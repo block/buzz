@@ -31,7 +31,25 @@ export function getResolvedThreadTargets({
   };
 }
 
+type LayoutScrollTarget = {
+  messageId: string;
+  threadHeadId: string;
+};
+
+export function getScopedLayoutScrollTargetId({
+  activeThreadHeadId,
+  layoutTarget,
+}: {
+  activeThreadHeadId: string | null;
+  layoutTarget: LayoutScrollTarget | null;
+}): string | null {
+  return layoutTarget?.threadHeadId === activeThreadHeadId
+    ? layoutTarget.messageId
+    : null;
+}
+
 type ThreadViewModeSwitchOptions = {
+  activeThreadHeadId: string | null;
   externalScrollTargetId: string | null;
   onExternalTargetResolved: () => void;
   onModeChange?: (mode: ThreadViewMode) => void;
@@ -39,45 +57,76 @@ type ThreadViewModeSwitchOptions = {
 
 /** Preserves the reply being read while the thread changes presentation. */
 export function useThreadViewModeSwitch({
+  activeThreadHeadId,
   externalScrollTargetId,
   onExternalTargetResolved,
   onModeChange,
 }: ThreadViewModeSwitchOptions) {
-  const [layoutScrollTargetId, setLayoutScrollTargetId] = React.useState<
-    string | null
-  >(null);
+  const [layoutScrollTarget, setLayoutScrollTarget] =
+    React.useState<LayoutScrollTarget | null>(null);
+  const layoutScrollTargetId = getScopedLayoutScrollTargetId({
+    activeThreadHeadId,
+    layoutTarget: layoutScrollTarget,
+  });
+
+  React.useEffect(() => {
+    setLayoutScrollTarget((current) =>
+      current?.threadHeadId === activeThreadHeadId ? current : null,
+    );
+  }, [activeThreadHeadId]);
 
   const changeThreadViewMode = React.useCallback(
-    (mode: ThreadViewMode) => {
+    (mode: ThreadViewMode, restoreFocus: boolean) => {
       const body = document.querySelector<HTMLElement>(
         '[data-testid="message-thread-body"]',
       );
       const anchorId = findTopVisibleThreadMessageId(body);
 
-      setLayoutScrollTargetId(anchorId);
+      setLayoutScrollTarget(
+        anchorId && activeThreadHeadId
+          ? { messageId: anchorId, threadHeadId: activeThreadHeadId }
+          : null,
+      );
       onModeChange?.(mode);
       setThreadViewMode(mode);
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           document
             .querySelector<HTMLElement>(
-              '[data-testid="thread-view-mode-toggle"]',
+              restoreFocus
+                ? '[data-testid="thread-view-mode-toggle"]'
+                : '[data-testid="message-thread-body"]',
             )
             ?.focus({ preventScroll: true });
         });
       });
     },
-    [onModeChange],
+    [activeThreadHeadId, onModeChange],
   );
 
-  const resolveScrollTarget = React.useCallback(() => {
-    const resolution = getResolvedThreadTargets({
-      externalTargetId: externalScrollTargetId,
-      layoutTargetId: layoutScrollTargetId,
-    });
-    if (resolution.resolveLayout) setLayoutScrollTargetId(null);
-    if (resolution.resolveExternal) onExternalTargetResolved();
-  }, [externalScrollTargetId, layoutScrollTargetId, onExternalTargetResolved]);
+  const resolveScrollTarget = React.useCallback(
+    (settledMessageId?: string) => {
+      const resolution = getResolvedThreadTargets({
+        externalTargetId: externalScrollTargetId,
+        layoutTargetId: layoutScrollTargetId,
+      });
+      if (resolution.resolveExternal) onExternalTargetResolved();
+      if (settledMessageId) {
+        setLayoutScrollTarget((current) =>
+          current?.threadHeadId === activeThreadHeadId &&
+          current.messageId === settledMessageId
+            ? null
+            : current,
+        );
+      }
+    },
+    [
+      activeThreadHeadId,
+      externalScrollTargetId,
+      layoutScrollTargetId,
+      onExternalTargetResolved,
+    ],
+  );
 
   return {
     changeThreadViewMode,

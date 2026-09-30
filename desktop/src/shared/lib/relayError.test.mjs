@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isRelayUnreachableError } from "./relayError.ts";
+import { isQueryDeadlineError, isRelayUnreachableError } from "./relayError.ts";
 
 test("isRelayUnreachableError: Error with prefix returns true", () => {
   assert.equal(
@@ -54,4 +54,40 @@ test("isRelayUnreachableError: plain object returns false", () => {
     isRelayUnreachableError({ message: "relay unreachable: oops" }),
     false,
   );
+});
+
+test("isQueryDeadlineError: relay statement deadline, HTTP and WS forms", () => {
+  assert.equal(
+    isQueryDeadlineError(
+      new Error("relay returned 503 Service Unavailable: query timed out"),
+    ),
+    true,
+  );
+  assert.equal(isQueryDeadlineError("error: query timed out"), true);
+});
+
+test("isQueryDeadlineError: client-side timeouts stay retryable", () => {
+  for (const message of [
+    "relay unreachable: request timed out",
+    "relay request timed out",
+    "relay request timed out or cancelled",
+  ]) {
+    assert.equal(isQueryDeadlineError(new Error(message)), false, message);
+  }
+});
+
+test("isQueryDeadlineError: other relay errors stay retryable", () => {
+  assert.equal(
+    isQueryDeadlineError(
+      new Error(
+        "relay returned 500 Internal Server Error: internal server error",
+      ),
+    ),
+    false,
+  );
+  assert.equal(
+    isQueryDeadlineError(new Error("relay unreachable: 403")),
+    false,
+  );
+  assert.equal(isQueryDeadlineError(undefined), false);
 });

@@ -110,3 +110,10 @@
     }
   }
 }
+
+/* Community switches retain the outgoing app snapshot until the target relay
+   is ready, then swap atomically. Animating the snapshots creates a flash. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}

@@ -7,4 +7,4 @@
 /gen/schemas
 
 # Sidecar binaries (built by scripts/bundle-sidecars.sh)
-/binaries/
+/binaries

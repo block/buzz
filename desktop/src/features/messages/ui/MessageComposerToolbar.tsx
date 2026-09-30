@@ -1,10 +1,16 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
-import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { ALargeSmall, Mic, Paperclip, X } from "lucide-react";
 
+import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import {
+  type ComposerAddressAgent,
+  ComposerMentionButton,
+  ComposerSendButton,
+} from "./ComposerAddressControls";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
@@ -15,45 +21,89 @@ const presenceSpring = {
   stiffness: 400,
   damping: 28,
 } as const;
+const ingressControlVariants = {
+  exit: {
+    opacity: 0,
+    x: -12,
+    transition: presenceSpring,
+  },
+} as const;
+const NO_ADDRESSED_AGENTS: readonly ComposerAddressAgent[] = [];
+const ignoreAddressRemoval = () => {};
 
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
+    addressedAgents = NO_ADDRESSED_AGENTS,
+    autoPinConfirmationTitle,
     composerDisabled,
     editor,
     extraActions,
     formattingDisabled,
+    gifMediaController,
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
     isUploading,
+    isVoiceNoteProcessing = false,
+    isVoiceNoteRecording = false,
+    hasVoiceNoteAttachment = false,
+    voiceNoteRecorder,
     onCaptureSelection,
+    onAutoPinConfirmationDismiss,
+    onAutoPinConfirmationHoverChange,
+    onAutoPinConfirmationTurnOff,
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
+    onFinishVoiceNote,
+    onVoiceNote,
+    onRemoveAddressedAgent = ignoreAddressRemoval,
+    pulseVersionByPubkey,
     sendDisabled,
+    shakeVersionByPubkey,
   }: {
+    addressedAgents?: readonly ComposerAddressAgent[];
+    autoPinConfirmationTitle?: string | null;
     composerDisabled: boolean;
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
     isUploading: boolean;
+    isVoiceNoteProcessing?: boolean;
+    isVoiceNoteRecording?: boolean;
+    hasVoiceNoteAttachment?: boolean;
+    voiceNoteRecorder?: React.ReactNode;
     onCaptureSelection: () => void;
+    onAutoPinConfirmationDismiss?: () => void;
+    onAutoPinConfirmationHoverChange?: (hovered: boolean) => void;
+    onAutoPinConfirmationTurnOff?: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onFinishVoiceNote?: () => void;
+    onVoiceNote?: () => void;
+    onRemoveAddressedAgent?: (pubkey: string) => void;
+    pulseVersionByPubkey?: Readonly<Record<string, number>>;
     sendDisabled: boolean;
+    shakeVersionByPubkey?: Readonly<Record<string, number>>;
   }) {
+    const shouldReduceMotion = useReducedMotion();
+
     return (
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+      <div
+        className="mt-2 flex flex-wrap items-center justify-between gap-3"
+        data-testid="message-composer-toolbar"
+      >
         <SelectionFormattingTray
           disabled={formattingDisabled}
           editor={editor}
@@ -66,11 +116,26 @@ export const MessageComposerToolbar = React.memo(
            * can animate in simultaneously. No sequencing.
            *
            * The Aa toggle is duplicated inside both groups so
-           * AnimatePresence handles the crossfade. No layoutId,
-           * no order hacks, no overflow clipping needed.
+           * AnimatePresence handles the crossfade.
            */}
           <AnimatePresence mode="popLayout" initial={false}>
-            {isFormattingOpen ? (
+            {voiceNoteRecorder ? (
+              <motion.div
+                key="voice-note-controls"
+                className="flex min-w-0 flex-1 items-center"
+                data-testid="voice-note-controls"
+                initial={shouldReduceMotion ? false : { opacity: 0, x: 12 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={
+                  shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: 12 }
+                }
+                transition={
+                  shouldReduceMotion ? { duration: 0 } : presenceSpring
+                }
+              >
+                {voiceNoteRecorder}
+              </motion.div>
+            ) : isFormattingOpen ? (
               /*
                * ── Expanded: [Aa] [✕] | [formatting buttons] ──
                */
@@ -153,34 +218,37 @@ export const MessageComposerToolbar = React.memo(
               <motion.div
                 key="ingress-controls"
                 className="flex items-center gap-1"
+                data-testid="composer-ingress-controls"
                 initial={{ opacity: 0, x: -12 }}
                 animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -12 }}
+                exit="exit"
+                variants={ingressControlVariants}
                 transition={presenceSpring}
               >
-                {/* disableHoverableContent keeps tooltips from lingering over the editor. */}
+                <ComposerMentionButton
+                  agents={addressedAgents}
+                  confirmationTitle={autoPinConfirmationTitle}
+                  disabled={composerDisabled}
+                  onConfirmationDismiss={onAutoPinConfirmationDismiss}
+                  onConfirmationHoverChange={onAutoPinConfirmationHoverChange}
+                  onConfirmationTurnOff={onAutoPinConfirmationTurnOff}
+                  onCaptureSelection={onCaptureSelection}
+                  onOpen={onOpenMentionPicker}
+                  onRemove={onRemoveAddressedAgent}
+                  pulseVersionByPubkey={pulseVersionByPubkey}
+                  shakeVersionByPubkey={shakeVersionByPubkey}
+                  showAgents
+                />
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
-                      aria-label="Mention someone"
-                      data-testid="message-insert-mention"
-                      disabled={composerDisabled}
-                      onClick={onOpenMentionPicker}
-                      onMouseDown={onCaptureSelection}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <AtSign />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Mention someone</TooltipContent>
-                </Tooltip>
-                <Tooltip disableHoverableContent>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label="Attach image"
-                      disabled={composerDisabled || isUploading}
+                      aria-label="Attach file"
+                      disabled={
+                        composerDisabled ||
+                        isUploading ||
+                        isVoiceNoteRecording ||
+                        hasVoiceNoteAttachment
+                      }
                       onClick={onPaperclip}
                       onMouseDown={onCaptureSelection}
                       size="icon"
@@ -190,10 +258,32 @@ export const MessageComposerToolbar = React.memo(
                       <Paperclip />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Attach image</TooltipContent>
+                  <TooltipContent>Attach file</TooltipContent>
                 </Tooltip>
+                {onVoiceNote ? (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label="Record voice note"
+                        disabled={composerDisabled || isUploading}
+                        onClick={onVoiceNote}
+                        onMouseDown={onCaptureSelection}
+                        size="icon"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <span className="inline-flex">
+                          <Mic />
+                        </span>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Record voice note</TooltipContent>
+                  </Tooltip>
+                ) : null}
                 <ComposerEmojiPicker
-                  disabled={composerDisabled}
+                  disabled={composerDisabled || isVoiceNoteRecording}
+                  gifsDisabled={hasVoiceNoteAttachment}
+                  gifMediaController={gifMediaController}
                   onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}
@@ -231,23 +321,15 @@ export const MessageComposerToolbar = React.memo(
 
         <div className="flex items-center gap-2">
           {extraActions}
-          <Button
-            aria-label={isSending ? "Sending" : "Send message"}
-            className="rounded-full"
-            data-testid="send-message"
-            disabled={sendDisabled || isSending}
-            size="icon"
-            type="submit"
-          >
-            {isSending ? (
-              <span
-                aria-hidden
-                className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
-              />
-            ) : (
-              <ArrowUp aria-hidden />
-            )}
-          </Button>
+          <ComposerSendButton
+            isSending={isSending}
+            onFinishVoiceNote={
+              isVoiceNoteRecording ? onFinishVoiceNote : undefined
+            }
+            sendDisabled={
+              isVoiceNoteRecording ? isVoiceNoteProcessing : sendDisabled
+            }
+          />
         </div>
       </div>
     );

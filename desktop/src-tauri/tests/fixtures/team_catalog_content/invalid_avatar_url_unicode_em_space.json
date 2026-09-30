@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "name": "Review Squad",
+  "members": [
+    {
+      "member_key": "reviewer",
+      "display_name": "Relay Reviewer",
+      "system_prompt": "Review.",
+      "avatar_url": "https://example.com/ path"
+    }
+  ]
+}

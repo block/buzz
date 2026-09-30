@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  formatModelDiscoveryErrorStatus,
-  formatModelDiscoveryLoadingMessage,
-  isModelDiscoveryTimeoutError,
-  MODEL_DISCOVERY_SLOW_MS,
-} from "./personaModelDiscoveryStatus.ts";
+import { formatModelDiscoveryErrorStatus } from "./personaModelDiscoveryStatus.ts";
 
 test("model discovery status names missing Anthropic credentials", () => {
   const status = formatModelDiscoveryErrorStatus(
@@ -17,8 +12,6 @@ test("model discovery status names missing Anthropic credentials", () => {
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /Anthropic API key/);
   assert.match(status?.message ?? "", /Anthropic models/);
-  // Credential gaps need user input — not a Retry-only fix.
-  assert.equal(status?.retryable, undefined);
 });
 
 test("model discovery status names missing OpenAI-compatible credentials", () => {
@@ -28,9 +21,9 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   );
 
   assert.equal(status?.tone, "warning");
-  assert.match(status?.message ?? "", /OpenAI API key/);
+  assert.match(status?.message ?? "", /OpenAI runtime API key/);
+  assert.match(status?.message ?? "", /OPENAI_COMPAT_API_KEY/);
   assert.match(status?.message ?? "", /OpenAI models/);
-  assert.equal(status?.retryable, undefined);
 });
 
 test("Buzz shared compute names the empty state and next action", () => {
@@ -42,7 +35,6 @@ test("Buzz shared compute names the empty state and next action", () => {
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /No members are sharing compute/);
   assert.match(status?.message ?? "", /Settings > Compute/);
-  assert.equal(status?.retryable, true);
 });
 
 test("Buzz shared compute distinguishes relay lookup failures", () => {
@@ -54,7 +46,6 @@ test("Buzz shared compute distinguishes relay lookup failures", () => {
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /couldn't check shared compute/);
   assert.match(status?.message ?? "", /relay connection/);
-  assert.equal(status?.retryable, true);
 });
 
 test("Buzz shared compute names a missing relay member roster", () => {
@@ -67,7 +58,6 @@ test("Buzz shared compute names a missing relay member roster", () => {
   assert.match(status?.message ?? "", /waiting for the relay's member roster/);
   assert.match(status?.message ?? "", /membership configuration/);
   assert.doesNotMatch(status?.message ?? "", /relay connection/);
-  assert.equal(status?.retryable, true);
 });
 
 test("model discovery status stays quiet for missing Databricks defaults", () => {
@@ -79,68 +69,119 @@ test("model discovery status stays quiet for missing Databricks defaults", () =>
   assert.equal(status, null);
 });
 
-test("runtime unavailable is not retryable (Retry would be a no-op)", () => {
+test("Databricks sign-in-required is a muted note pointing at the picker and CLI", () => {
   const status = formatModelDiscoveryErrorStatus(
-    new Error("Runtime not available: not_installed"),
-    "anthropic",
-  );
-  assert.equal(status?.tone, "warning");
-  assert.equal(status?.retryable, undefined);
-  assert.match(status?.message ?? "", /not available/i);
-  assert.match(status?.message ?? "", /Settings/i);
-});
-
-// ── #2261 timeout / PATH / progressive loading ────────────────────────────────
-
-test("isModelDiscoveryTimeoutError matches buzz-acp probe timeout text", () => {
-  assert.equal(
-    isModelDiscoveryTimeoutError("error: agent timed out (10s)"),
-    true,
-  );
-  assert.equal(
-    isModelDiscoveryTimeoutError(
-      "buzz-acp models failed (exit 1): error: agent timed out (45s)",
+    new Error(
+      "Databricks sign-in is required; save this agent, then open its model picker to sign in, or run `buzz-agent auth databricks`",
     ),
-    true,
+    "databricks_v2",
   );
-  assert.equal(
-    isModelDiscoveryTimeoutError("config: ANTHROPIC_API_KEY required"),
-    false,
-  );
+
+  assert.equal(status?.tone, "muted");
+  assert.match(status?.message ?? "", /model picker/);
+  assert.match(status?.message ?? "", /buzz-agent auth databricks/);
 });
 
-test("formatModelDiscoveryErrorStatus_timeout_isRetryableWithClearCopy", () => {
+test("Databricks sign-in failure warns and points at the explicit retry", () => {
   const status = formatModelDiscoveryErrorStatus(
-    new Error("error: agent timed out (10s)"),
+    new Error("Databricks sign-in failed: oauth callback: access_denied"),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /didn't complete/);
+  assert.match(status?.message ?? "", /model picker/);
+});
+
+test("Databricks sign-in timeout warns and points at the explicit retry", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "Databricks sign-in timed out; open the model picker to retry, or run `buzz-agent auth databricks`",
+    ),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /didn't complete/);
+  assert.match(status?.message ?? "", /buzz-agent auth databricks/);
+});
+
+test("other Databricks discovery failures fall through to the generic notice", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Databricks model discovery failed: relay offline"),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Using built-in model options/);
+});
+
+test("auth-required errors name the agent and ask for sign-in", () => {
+  // Real shape from run_agent_models_command wrapping buzz-acp stderr when
+  // cursor-agent is signed out (spec ErrorCode::AuthRequired text).
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "buzz-acp models failed (exit 1): agent communication failed: Agent reported error (code -32000): Authentication required",
+    ),
+    "",
+    "Cursor",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Cursor requires sign-in/);
+  assert.match(status?.message ?? "", /Sign in with the Cursor CLI/);
+});
+
+test("auth-required copy degrades gracefully without an agent label", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Agent reported error (code -32000): Authentication required"),
     "",
   );
+
   assert.equal(status?.tone, "warning");
-  assert.equal(status?.retryable, true);
-  assert.match(status?.message ?? "", /timed out/i);
-  assert.match(status?.message ?? "", /retry/i);
-  assert.match(status?.message ?? "", /Codex|20–60|20-60/i);
+  assert.match(status?.message ?? "", /This agent requires sign-in/);
 });
 
-test("formatModelDiscoveryErrorStatus_programNotFound_isRetryable", () => {
+test("non-auth -32000 errors do NOT get the sign-in copy", () => {
+  // -32000 is the catch-all fallback code for unclassified agent errors
+  // (agent_error_from_json unwrap_or(-32000)); only the spec-reserved
+  // "Authentication required" text may route to the sign-in message.
   const status = formatModelDiscoveryErrorStatus(
-    new Error("failed to spawn agent: program not found"),
-    "codex",
+    new Error(
+      "buzz-acp models failed (exit 1): Agent reported error (code -32000): model catalog fetch timed out",
+    ),
+    "anthropic",
+    "Cursor",
   );
+
   assert.equal(status?.tone, "warning");
-  assert.equal(status?.retryable, true);
-  assert.match(status?.message ?? "", /PATH/i);
+  assert.doesNotMatch(status?.message ?? "", /sign-in/i);
+  assert.match(status?.message ?? "", /Model discovery timed out/);
 });
 
-test("formatModelDiscoveryLoadingMessage is null until slow phase", () => {
-  assert.equal(formatModelDiscoveryLoadingMessage(false), null);
-});
-
-test("formatModelDiscoveryLoadingMessage returns long note only when slow", () => {
-  const message = formatModelDiscoveryLoadingMessage(true);
-  assert.match(message ?? "", /Still loading/i);
-  assert.match(message ?? "", /Codex/i);
-});
-
-test("MODEL_DISCOVERY_SLOW_MS is 10s before under-field note appears", () => {
-  assert.equal(MODEL_DISCOVERY_SLOW_MS, 10_000);
-});
+for (const message of [
+  "agent timed out (45s)",
+  "program not found: codex",
+  "spawn ENOENT",
+]) {
+  test(`retry offered for ${message}`, () => {
+    assert.equal(
+      formatModelDiscoveryErrorStatus(new Error(message), "")?.retryable,
+      true,
+    );
+  });
+}
+for (const message of [
+  "Runtime not available: missing",
+  "ANTHROPIC_API_KEY required",
+  "Authentication required",
+  "Databricks sign-in timed out",
+  "Databricks sign-in failed: canceled",
+]) {
+  test(`no blind retry for ${message}`, () => {
+    assert.notEqual(
+      formatModelDiscoveryErrorStatus(new Error(message), "")?.retryable,
+      true,
+    );
+  });
+}

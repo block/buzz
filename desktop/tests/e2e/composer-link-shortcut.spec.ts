@@ -61,10 +61,11 @@ test("⌘K with caret inside an existing link opens the edit-link dialog", async
     "docs",
   );
 
-  // Click into the linked text to place the caret inside it, then re-trigger
-  // the shortcut. (The click also surfaces the composer link hover card —
-  // ⌘K must open the full dialog from that state.)
+  // Click into the linked text to place the caret inside it. This must not
+  // surface contextual controls; editing stays accessible through ⌘K.
   await input.locator('a[href="https://example.com"]').click();
+  await expect(page.getByRole("button", { name: "Edit link" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Unlink" })).toHaveCount(0);
   await page.keyboard.press("ControlOrMeta+k");
 
   const editDialog = page.getByRole("dialog", { name: "Edit link" });

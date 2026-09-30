@@ -7,13 +7,15 @@ import {
   type PersonaDropdownOption,
   type PersonaModelOption,
 } from "./agentConfigOptions";
-import { MODEL_DISCOVERY_LOADING_SHORT } from "./personaModelDiscoveryStatus";
 
 function withSharedComputeAutoOption(
   options: readonly PersonaModelOption[],
 ): readonly PersonaModelOption[] {
   const modelOptions = options.filter((option) => option.id.trim() !== "");
-  return [{ id: "", label: "Default (auto)" }, ...modelOptions];
+  return [
+    { id: "", label: "Auto (collective when available)" },
+    ...modelOptions,
+  ];
 }
 
 export function relayMeshModelPickerState({
@@ -88,14 +90,7 @@ export function modelDropdownOptions({
   return [
     ...modelOptions,
     ...(loading
-      ? [
-          {
-            disabled: true,
-            // Keep short — long progressive copy is under-field only (#2261).
-            label: MODEL_DISCOVERY_LOADING_SHORT,
-            value: loadingValue,
-          },
-        ]
+      ? [{ disabled: true, label: "Loading models...", value: loadingValue }]
       : []),
     ...(allowCustom
       ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]

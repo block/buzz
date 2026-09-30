@@ -3,12 +3,15 @@ import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
-import { shouldWarnMissingMembershipSnapshot } from "@/shared/api/relayMembers";
-import { getFeature } from "@/shared/features/manifest";
 import {
+  canManageCommunityMembers,
+  shouldWarnMissingMembershipSnapshot,
+} from "@/shared/api/relayMembers";
+import {
+  getFeature,
   resolveEnabled,
   useFeatureSnapshot,
-} from "@/shared/features/useFeatureEnabled";
+} from "@/shared/features";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -45,7 +48,7 @@ type SettingsViewProps = SettingsPanelProps & {
   section: SettingsSection;
 };
 
-const settingsNavGroups: Array<{
+export const settingsNavGroups: Array<{
   label: string;
   sections: SettingsSection[];
 }> = [
@@ -55,14 +58,16 @@ const settingsNavGroups: Array<{
       "profile",
       "appearance",
       "notifications",
+      "voice",
       "shortcuts",
       "custom-emoji",
       "local-archive",
+      "channel-templates",
     ],
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "channel-templates", "community-members"],
+    sections: ["hosted-communities", "community-members", "relay-admin"],
   },
   {
     label: "App",
@@ -126,24 +131,30 @@ export function SettingsView({
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
-    const membership = myMembershipQuery.data?.membership;
-
     return settingsSections.filter((s) => {
       // Feature gate check. Manifest is preview-only — if the gate id is in
       // the manifest, it's preview and needs an opt-in; if it's not, it's
       // stable and renders unconditionally (fail-open).
       if (s.featureGate) {
         const feature = getFeature(s.featureGate);
-        if (feature && !resolveEnabled(s.featureGate, featureState)) {
+        if (
+          feature &&
+          !resolveEnabled(s.featureGate, featureState, feature.defaultEnabled)
+        ) {
           return false;
         }
       }
-      // Community members requires admin/owner role
+      // Invites and member management require a discovered owner/admin role.
+      // Open relays have no membership snapshot or invite controls.
       if (s.value === "community-members") {
-        return (
-          membership != null &&
-          (membership.role === "owner" || membership.role === "admin")
-        );
+        return canManageCommunityMembers(myMembershipQuery.data);
+      }
+      // Relay admin surfaces the relay admin console. Always reachable so an
+      // operator can enter a manual origin even when NIP-11 discovery is
+      // absent, invalid, or pending — hiding the entry would lock them out of
+      // the only place to configure one. Auth still gates the panel itself.
+      if (s.value === "relay-admin") {
+        return true;
       }
       return true;
     });
@@ -214,8 +225,12 @@ export function SettingsView({
       >
         <div
           aria-hidden="true"
-          className={cn("shrink-0", topChromeBackdrop.height)}
+          className={cn(
+            "shrink-0 cursor-default select-none",
+            topChromeBackdrop.height,
+          )}
           data-tauri-drag-region
+          data-testid="settings-sidebar-top-chrome"
         />
         <SidebarHeader
           className="cursor-default select-none pb-0 pt-3"
@@ -243,7 +258,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking community access…
+              Checking invite permissions…
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -253,7 +268,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Community access could not be checked.
+                Invite settings could not be checked.
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -271,8 +286,8 @@ export function SettingsView({
               data-testid="community-access-snapshot-missing"
             >
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Community access data is unavailable. Relay recovery may still be
-              in progress.
+              Invite settings are unavailable. Relay recovery may still be in
+              progress.
             </div>
           ) : null}
           {visibleNavGroups.map((group) => (
@@ -317,8 +332,12 @@ export function SettingsView({
       >
         <div
           aria-hidden="true"
-          className={cn("relative z-10 shrink-0", topChromeBackdrop.height)}
+          className={cn(
+            "relative z-10 shrink-0 cursor-default select-none",
+            topChromeBackdrop.height,
+          )}
           data-tauri-drag-region
+          data-testid="settings-top-chrome"
         />
         <div
           className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-content-edge"

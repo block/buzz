@@ -20,6 +20,8 @@ import {
   getModelSelectValue,
   getPersonaProviderOptions,
   hasPersonaModelOption,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
   providerDisplayLabel,
   type PersonaModelOption,
 } from "./agentConfigOptions";
@@ -58,15 +60,64 @@ export function appendNoModelsSentinel(
   return options;
 }
 
+export function resolveModelFieldStatusMessage({
+  discoveredModelOptions,
+  loading,
+  status,
+}: {
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  loading: boolean;
+  status: PersonaModelDiscoveryStatus | null;
+}): string | null {
+  if (loading) return "Loading models...";
+  if (status !== null) return status.message;
+  return discoveredModelOptions !== null
+    ? "Saved changes take effect on the next start."
+    : null;
+}
+
 function optionTestId(testId: string | undefined, value: string) {
   if (!testId) return undefined;
   return `${testId}-option-${value || "empty"}`;
+}
+
+export function AgentConfigTextInput({
+  className,
+  usePersonaInputStyle = false,
+  ...props
+}: React.ComponentProps<typeof Input> & {
+  usePersonaInputStyle?: boolean;
+}) {
+  const input = (
+    <Input
+      {...props}
+      className={cn(
+        usePersonaInputStyle && "h-8 px-0 py-0 leading-6",
+        usePersonaInputStyle && PERSONA_FIELD_CONTROL_CLASS,
+        className,
+      )}
+    />
+  );
+
+  return usePersonaInputStyle ? (
+    <div
+      className={cn(
+        "mt-2 flex min-h-11 items-center px-3",
+        PERSONA_FIELD_SHELL_CLASS,
+      )}
+    >
+      {input}
+    </div>
+  ) : (
+    input
+  );
 }
 
 export function AgentDropdownSelect({
   ariaRequired,
   className,
   disabled = false,
+  emptyOptionsLabel = "No options available",
   id,
   onValueChange,
   options,
@@ -81,6 +132,8 @@ export function AgentDropdownSelect({
   ariaRequired?: boolean;
   className?: string;
   disabled?: boolean;
+  /** Shown when the option list is empty (not a search filter miss). */
+  emptyOptionsLabel?: string;
   id: string;
   onValueChange: (value: string) => void;
   options: readonly AgentDropdownOption[];
@@ -106,10 +159,12 @@ export function AgentDropdownSelect({
   const filteredOptions = React.useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     if (!showSearch || trimmed === "") return options;
-    return options.filter((option) =>
-      (typeof option.label === "string" ? option.label : option.value)
-        .toLowerCase()
-        .includes(trimmed),
+    // Search the raw id too, so `system.ai` finds rows whose label hides it.
+    return options.filter(
+      (option) =>
+        (typeof option.label === "string" &&
+          option.label.toLowerCase().includes(trimmed)) ||
+        option.value.toLowerCase().includes(trimmed),
     );
   }, [options, query, showSearch]);
 
@@ -188,8 +243,15 @@ export function AgentDropdownSelect({
               />
             </div>
           ) : null}
-          {showSearch && filteredOptions.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-foreground/55">No matches</p>
+          {filteredOptions.length === 0 ? (
+            <p
+              className="px-3 py-2 text-sm text-foreground/55"
+              data-testid={testId ? `${testId}-empty` : undefined}
+            >
+              {showSearch && query.trim().length > 0
+                ? "No matches"
+                : emptyOptionsLabel}
+            </p>
           ) : null}
           {filteredOptions.map((option) => {
             const selected = option.value === value;
@@ -270,7 +332,9 @@ export function resolveDefaultModelLabel({
   return (
     defaultModelLabel ??
     discoveredModelOptions?.find((option) => option.id.trim() === "")?.label ??
-    (isSharedCompute ? "Default (auto)" : getDefaultLlmModelLabel(globalModel))
+    (isSharedCompute
+      ? "Auto (collective when available)"
+      : getDefaultLlmModelLabel(globalModel))
   );
 }
 
@@ -281,7 +345,6 @@ export function AgentModelField({
   allowDefaultModel = true,
   defaultModelLabel,
   disableSelectDuringDiscovery = true,
-  keepSelectedModelValueLabel = false,
   id = "agent-model",
   isCustomModelEditing,
   isRequired,
@@ -303,6 +366,7 @@ export function AgentModelField({
   showStatusMessage = true,
   showCustomModelOption = true,
   useChevronIcon = false,
+  usePersonaInputStyle = false,
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
@@ -314,8 +378,6 @@ export function AgentModelField({
   defaultModelLabel?: string;
   /** Disable the trigger while live model discovery refreshes the option list. */
   disableSelectDuringDiscovery?: boolean;
-  /** Keep the closed trigger from swapping to discovered display labels. */
-  keepSelectedModelValueLabel?: boolean;
   /** DOM id for the model select. Defaults to `"agent-model"`. Override in
    *  contexts where multiple instances coexist on the same page (e.g. the
    *  global-config settings card) to avoid duplicate DOM ids. */
@@ -352,6 +414,8 @@ export function AgentModelField({
   showCustomModelOption?: boolean;
   /** Render a controlled chevron instead of the native select indicator. */
   useChevronIcon?: boolean;
+  /** Match custom agent text inputs when this field is shown in that flow. */
+  usePersonaInputStyle?: boolean;
 }) {
   const trimmedModel = model.trim();
   const isSharedCompute = provider?.trim() === "relay-mesh";
@@ -464,42 +528,39 @@ export function AgentModelField({
   // yields an empty list and discovery has finished, add a disabled sentinel
   // row so the user sees "No models found" instead of a bare white bar.
   appendNoModelsSentinel(modelOptions, modelDiscoveryLoading);
-  const stableSelectedModelLabel =
-    keepSelectedModelValueLabel &&
-    modelSelectValue === trimmedModel &&
-    trimmedModel.length > 0
-      ? trimmedModel
-      : undefined;
-
-  // Closed trigger: while loading, always SHORT — do not fall through to
-  // selectedOption.label / selectedLabel, which could surface longer copy.
-  const controlSelectedLabel = controlShowsLoading
-    ? MODEL_DISCOVERY_LOADING_SHORT
-    : stableSelectedModelLabel;
-  const controlPlaceholder = controlShowsLoading
-    ? MODEL_DISCOVERY_LOADING_SHORT
-    : placeholder;
+  // While discovery is in flight with nothing selected, the closed field
+  // reads "Loading models…" instead of a select-prompt — the field isn't
+  // waiting on the user, it's waiting on the harness.
+  const restingPlaceholder =
+    modelDiscoveryLoading &&
+    discoveredModelOptions === null &&
+    trimmedModel.length === 0 &&
+    !isCustomModelEditing
+      ? MODEL_DISCOVERY_LOADING_SHORT
+      : placeholder;
+  const statusMessage = resolveModelFieldStatusMessage({
+    discoveredModelOptions,
+    loading: modelDiscoveryLoading,
+    status: modelDiscoveryStatus,
+  });
 
   const modelSelect = useCustomSelect ? (
     <AgentDropdownSelect
       ariaRequired={isRequired}
       className={selectClassName}
       disabled={selectDisabled}
+      emptyOptionsLabel="Couldn't load models"
       id={id}
       onValueChange={handleModelSelectChange}
       options={modelOptions}
-      placeholder={controlPlaceholder}
+      placeholder={restingPlaceholder}
       placeholderClassName={placeholderClassName}
-      searchable
-      selectedLabel={controlSelectedLabel}
-      testId={testId ?? id}
-      value={
-        controlShowsLoading &&
-        trimmedModel.length === 0 &&
-        !isCustomModelEditing
-          ? MODEL_DISCOVERY_LOADING_VALUE
-          : modelSelectValue
+      selectedLabel={
+        controlShowsLoading ? MODEL_DISCOVERY_LOADING_SHORT : undefined
       }
+      searchable
+      testId={testId ?? id}
+      value={modelSelectValue}
     />
   ) : (
     <select
@@ -553,17 +614,18 @@ export function AgentModelField({
         modelSelect
       )}
       {showCustomModelInput ? (
-        <Input
+        <AgentConfigTextInput
           aria-label="Custom model ID"
           autoCorrect="off"
           disabled={disabled}
           onChange={(event) => onModelChange(event.target.value)}
           placeholder="Custom model ID"
+          usePersonaInputStyle={usePersonaInputStyle}
           value={model}
         />
       ) : null}
       {showStatusMessage ? (
-        modelDiscoveryLoadingMessage || modelDiscoveryStatus !== null ? (
+        modelDiscoveryLoading || modelDiscoveryStatus ? (
           <ModelDiscoveryStatusLine
             disabled={disabled}
             loading={modelDiscoveryLoading}
@@ -571,13 +633,9 @@ export function AgentModelField({
             onRetry={onRetryModelDiscovery}
             status={modelDiscoveryStatus}
           />
-        ) : modelDiscoveryLoading ? null : (
-          <p className="text-xs text-muted-foreground">
-            {discoveredModelOptions !== null
-              ? "Saved changes take effect on the next start."
-              : "Select a provider above to see available models."}
-          </p>
-        )
+        ) : statusMessage ? (
+          <p className="text-xs text-muted-foreground">{statusMessage}</p>
+        ) : null
       ) : null}
     </div>
   );

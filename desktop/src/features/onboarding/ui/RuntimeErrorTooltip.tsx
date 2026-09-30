@@ -18,7 +18,7 @@ export function RuntimeErrorTooltip({
   testId,
 }: RuntimeErrorTooltipProps) {
   return (
-    <Tooltip>
+    <Tooltip disableHoverableContent={false}>
       <TooltipTrigger asChild>
         <span
           aria-label={`${label}. ${detail}`}
@@ -38,11 +38,13 @@ export function RuntimeErrorTooltip({
         </span>
       </TooltipTrigger>
       <TooltipContent
-        className="max-w-80 text-left"
+        className="pointer-events-auto max-w-80 text-left"
         side="bottom"
         sideOffset={12}
       >
-        <span className="leading-4">{detail}</span>
+        <span className="block max-h-48 overflow-y-auto overflow-x-hidden break-words whitespace-pre-line leading-4">
+          {detail}
+        </span>
       </TooltipContent>
     </Tooltip>
   );

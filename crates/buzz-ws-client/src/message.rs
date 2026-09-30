@@ -37,6 +37,13 @@ pub enum RelayMessage {
         /// The challenge string to sign.
         challenge: String,
     },
+    /// A NIP-45 COUNT response.
+    Count {
+        /// The subscription ID this count belongs to.
+        subscription_id: String,
+        /// The number of matching events.
+        count: u64,
+    },
 }
 
 /// The relay's response to a published event (NIP-01 `OK` message).
@@ -136,6 +143,22 @@ pub fn parse_relay_message(text: &str) -> Result<RelayMessage, WsClientError> {
                 .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?
                 .to_string();
             Ok(RelayMessage::Auth { challenge })
+        }
+        "COUNT" => {
+            let sub_id = arr
+                .get(1)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?
+                .to_string();
+            let count = arr
+                .get(2)
+                .and_then(|o| o.get("count"))
+                .and_then(|c| c.as_u64())
+                .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?;
+            Ok(RelayMessage::Count {
+                subscription_id: sub_id,
+                count,
+            })
         }
         other => Err(WsClientError::UnexpectedMessage(format!(
             "unknown message type: {other}"

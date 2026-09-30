@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::Digest as _;
 
-pub(crate) const PUSH_KINDS: &[u64] = &[7, 9, 1059, 40007, 46010];
-pub(crate) const URGENT_KINDS: &[u64] = &[];
+/// Message kinds that can produce a mobile Activity-inbox notification.
+/// Generic Nostr notes and non-message workflow/agent events are deliberately
+/// excluded from the dogfood MVP.
+pub(crate) const PUSH_KINDS: &[u64] = &[9, 40_002, 45_001, 45_003];
 
 /// NIP-PL addressable push-lease event kind.
 pub const KIND_PUSH_LEASE: u32 = 30_350;
@@ -68,7 +70,6 @@ pub struct LeaseLimits<'a> {
     pub app_profiles: &'a [AppProfile<'a>],
     pub supported_classes: &'a [&'a str],
     pub push_kinds: &'a [u64],
-    pub urgent_kinds: &'a [u64],
     pub max_subscriptions: usize,
     pub max_kinds: usize,
     pub max_authors: usize,
@@ -245,14 +246,13 @@ fn validate_subscription(sub: &Subscription, limits: &LeaseLimits<'_>) -> Result
     if !limits.supported_classes.contains(&sub.class.as_str()) {
         return Err("class not supported".into());
     }
-    validate_filter(&sub.filter, limits, true, &sub.class)?;
+    validate_filter(&sub.filter, limits, true)?;
     if sub.ignore.len() > limits.max_ignore {
         return Err("ignore quota exceeded".into());
     }
     for filter in &sub.ignore {
-        // Ignore filters can only subtract from an already-positive match, so
-        // urgent-kind confinement belongs solely to the positive filter.
-        validate_filter(filter, limits, false, "")?;
+        // Ignore filters can only subtract from an already-positive match.
+        validate_filter(filter, limits, false)?;
     }
     if sub.suppress.as_ref().is_some_and(|s| s.p_tags_max == 0) {
         return Err("p_tags_max must be positive".into());
@@ -264,7 +264,6 @@ fn validate_filter(
     filter: &Map<String, Value>,
     limits: &LeaseLimits<'_>,
     require_narrowing: bool,
-    class: &str,
 ) -> Result<(), String> {
     const ALLOWED: &[&str] = &["kinds", "authors", "#p", "#h", "#e"];
     if let Some(key) = filter.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
@@ -282,10 +281,6 @@ fn validate_filter(
     if kinds.iter().any(|kind| !limits.push_kinds.contains(kind)) {
         return Err("kind not push-eligible".into());
     }
-    if class == "urgent" && kinds.iter().any(|kind| !limits.urgent_kinds.contains(kind)) {
-        return Err("class not permitted for kind".into());
-    }
-
     let authors = optional_string_array(filter, "authors", limits.max_authors)?;
     let p = optional_string_array(filter, "#p", limits.max_tag_values)?;
     let h = optional_string_array(filter, "#h", limits.max_h)?;
@@ -477,7 +472,7 @@ pub async fn accept(
     const MAX_CONTENT: usize = 65_536;
     const MAX_PLAINTEXT: usize = 32_768;
     const MAX_ACTIVE_LEASES: i64 = 16;
-    if state.config.push_gateway_delivery_url.is_none() {
+    if !state.config.push_enabled {
         return Err(AcceptError::Validation("push not supported".to_string()));
     }
     let envelope = validate_envelope(event, now, ALLOWED_SKEW, MAX_LEASE_TTL, MAX_CONTENT)?;
@@ -496,19 +491,12 @@ pub async fn accept(
     let limits = LeaseLimits {
         expected_origin: &origin,
         author_hex: &author_hex,
-        app_profiles: &[
-            AppProfile {
-                id: "buzz-ios-production",
-                transport: "apns",
-            },
-            AppProfile {
-                id: "buzz-ios-sandbox",
-                transport: "apns",
-            },
-        ],
-        supported_classes: &["silent", "default", "time_sensitive"],
+        app_profiles: &[AppProfile {
+            id: "buzz-ios-dogfood",
+            transport: "apns",
+        }],
+        supported_classes: &["default"],
         push_kinds: PUSH_KINDS,
-        urgent_kinds: URGENT_KINDS,
         max_subscriptions: 16,
         max_kinds: 16,
         max_authors: 20,
@@ -531,25 +519,29 @@ pub async fn accept(
     let subscriptions;
     let capability;
     let active = if body.active {
-        let endpoint = body.endpoint.as_deref().expect("validated active endpoint");
-        endpoint_hash = sha2::Sha256::digest(endpoint.as_bytes()).to_vec();
-        let max_class = body
+        let endpoint = body
+            .endpoint
+            .as_deref()
+            .ok_or_else(|| "active lease is missing endpoint".to_string())?;
+        let body_subscriptions = body
             .subscriptions
             .as_ref()
-            .expect("validated subscriptions")
+            .ok_or_else(|| "active lease is missing subscriptions".to_string())?;
+        let app_profile = body
+            .app_profile
+            .as_deref()
+            .ok_or_else(|| "active lease is missing app profile".to_string())?;
+        endpoint_hash = sha2::Sha256::digest(endpoint.as_bytes()).to_vec();
+        let max_class = body_subscriptions
             .iter()
             .map(|sub| sub.class.as_str())
             .max_by_key(|class| class_rank(class))
-            .expect("non-empty subscriptions");
+            .ok_or_else(|| "active lease has no subscriptions".to_string())?;
         capability = endpoint.to_owned();
-        subscriptions = serde_json::to_value(
-            body.subscriptions
-                .as_ref()
-                .expect("validated subscriptions"),
-        )
-        .map_err(|_| "invalid subscriptions".to_string())?;
+        subscriptions = serde_json::to_value(body_subscriptions)
+            .map_err(|_| "invalid subscriptions".to_string())?;
         Some(buzz_db::push::ActiveLease {
-            app_profile: body.app_profile.as_deref().expect("validated profile"),
+            app_profile,
             endpoint_hash: &endpoint_hash,
             endpoint_grant: &capability,
             max_class,
@@ -572,14 +564,8 @@ pub async fn accept(
         .map_err(|_| AcceptError::Internal("lease persistence failed".to_string()))
 }
 
-fn class_rank(class: &str) -> u8 {
-    match class {
-        "silent" => 0,
-        "default" => 1,
-        "time_sensitive" => 2,
-        "urgent" => 3,
-        _ => 0,
-    }
+fn class_rank(_: &str) -> u8 {
+    1
 }
 
 fn canonical_origin(relay_url: &str, host: &str) -> Result<String, String> {
@@ -680,9 +666,8 @@ mod tests {
                 id: "p",
                 transport: "apns",
             }],
-            supported_classes: &["default", "urgent"],
-            push_kinds: &[9, 46010],
-            urgent_kinds: &[46010],
+            supported_classes: &["default"],
+            push_kinds: &[9],
             max_subscriptions: 4,
             max_kinds: 4,
             max_authors: 4,
@@ -702,7 +687,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let predicate = format!("NEW.kind IN ({kinds})");
-        let migration = include_str!("../../../../migrations/0018_push_match_queue.sql");
+        let migration = include_str!("../../../../migrations/0040_push_message_kinds.sql");
         assert!(
             migration.contains(&predicate),
             "migration trigger must use PUSH_KINDS exactly: {predicate}"
@@ -758,14 +743,5 @@ mod tests {
         );
         assert!(canonical_origin("https://relay.example", "tenant.example").is_err());
         assert!(canonical_origin("wss://relay.example", "").is_err());
-    }
-
-    #[test]
-    fn urgent_is_limited_by_event_kind() {
-        let body = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"p","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9],"#p":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},"class":"urgent"}]}"##, 4096).unwrap();
-        assert_eq!(
-            validate_plaintext(&body, &limits()).unwrap_err(),
-            "class not permitted for kind"
-        );
     }
 }

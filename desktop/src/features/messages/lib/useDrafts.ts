@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { discardQueuedAttachmentsForDraft } from "@/features/messages/lib/backgroundMediaUploadStore";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
@@ -101,6 +102,59 @@ function canonicalizeRelayScope(relayUrl: string): string {
   }
 }
 
+/** Semantic intent survives value deletion and composer visits within this store. */
+type DraftAuthority = {
+  revision: number;
+  authoredRevision: number;
+  emptyContentIsAuthoritative: boolean;
+};
+const draftAuthorities = new Map<string, DraftAuthority>();
+
+/** Mutable state stays private to the scoped draft owner. */
+function mutableDraftAuthority(draftKey: string): DraftAuthority {
+  let authority = draftAuthorities.get(draftKey);
+  if (!authority) {
+    authority = {
+      revision: 0,
+      authoredRevision: 0,
+      emptyContentIsAuthoritative: false,
+    };
+    draftAuthorities.set(draftKey, authority);
+  }
+  return authority;
+}
+
+/** Capture the shared intent for this key; remains readable across visits/deletion. */
+export function getDraftAuthority(draftKey: string): Readonly<DraftAuthority> {
+  return mutableDraftAuthority(draftKey);
+}
+
+/** Record deliberate editor intent even when there is no persisted value. */
+export function recordDraftAuthoredContent(
+  draftKey: string,
+  content: string,
+): void {
+  const authority = mutableDraftAuthority(draftKey);
+  authority.revision += 1;
+  authority.authoredRevision += 1;
+  authority.emptyContentIsAuthoritative = content.length === 0;
+}
+
+/** A newer send owns recovery/cleanup, independently of publication authority. */
+export function claimDraftSend(draftKey: string | null | undefined): void {
+  if (!draftKey) return;
+  mutableDraftAuthority(draftKey).revision += 1;
+}
+
+function resetDraftAuthorities(): void {
+  // Invalidate handles retained by old continuations before dropping the scope.
+  for (const authority of draftAuthorities.values()) {
+    authority.revision += 1;
+    authority.authoredRevision += 1;
+  }
+  draftAuthorities.clear();
+}
+
 /** Module-level workspace identity set by `initDraftStore`. Empty = no workspace. */
 let currentPubkey = "";
 let currentRelayScope = "";
@@ -111,6 +165,10 @@ function storageKey(): string {
   return currentRelayScope
     ? `${DRAFT_STORE_KEY_PREFIX}:${currentRelayScope}:${currentPubkey}`
     : legacyStorageKey();
+}
+
+export function getDraftStoreScope(): string {
+  return storageKey();
 }
 
 function legacyStorageKey(): string {
@@ -127,6 +185,7 @@ export function initDraftStore(pubkey: string, relayUrl = ""): void {
   const relayScope = canonicalizeRelayScope(relayUrl);
   if (currentPubkey !== pubkey || currentRelayScope !== relayScope) {
     _memCache = null;
+    resetDraftAuthorities();
   }
   currentPubkey = pubkey;
   currentRelayScope = relayScope;
@@ -140,6 +199,7 @@ export function initDraftStore(pubkey: string, relayUrl = ""): void {
  * Replaces the old `clearAllDrafts()`.
  */
 export function clearAllDrafts(): void {
+  resetDraftAuthorities();
   currentPubkey = "";
   currentRelayScope = "";
   _memCache = null;
@@ -282,6 +342,11 @@ function evictOldest(map: Map<string, DraftState>): void {
 // use them without a React context.
 
 export function saveDraftEntry(draftKey: string, draft: DraftState): void {
+  recordDraftAuthoredContent(draftKey, draft.content);
+  writeDraftEntry(draftKey, draft);
+}
+
+function writeDraftEntry(draftKey: string, draft: DraftState): void {
   if (draft.content.trim().length === 0 && draft.pendingImeta.length === 0) {
     return;
   }
@@ -294,6 +359,12 @@ export function saveDraftEntry(draftKey: string, draft: DraftState): void {
 
 export function loadDraftEntry(draftKey: string): DraftState | undefined {
   return readStore().get(draftKey);
+}
+
+export function deleteDraftEntry(draftKey: string): void {
+  recordDraftAuthoredContent(draftKey, "");
+  discardQueuedAttachmentsForDraft(draftKey);
+  clearDraftEntry(draftKey);
 }
 
 export function clearDraftEntry(draftKey: string): void {
@@ -401,6 +472,8 @@ export function renameDraftEntry(
     if (!draftStatesEqual(existing, destination)) {
       return "collision";
     }
+    recordDraftAuthoredContent(oldKey, "");
+    recordDraftAuthoredContent(newKey, existing.content);
     // Identical records: remove the legacy key, keep the destination entry.
     map.delete(oldKey);
     flushStore(map);
@@ -408,6 +481,8 @@ export function renameDraftEntry(
     return "migrated";
   }
 
+  recordDraftAuthoredContent(oldKey, "");
+  recordDraftAuthoredContent(newKey, existing.content);
   // No destination conflict: move the record. Cardinality is unchanged
   // (one delete + one set), so evictOldest is not called.
   map.set(newKey, existing);
@@ -434,7 +509,7 @@ export function persistDraftEntry(
     const map = readStore();
     const existing = map.get(draftKey);
     const now = new Date().toISOString();
-    saveDraftEntry(draftKey, {
+    writeDraftEntry(draftKey, {
       content,
       selectionEnd: content.length,
       selectionStart: content.length,
@@ -495,12 +570,24 @@ export function getSentDraftEntries(): Array<{
  */
 export function markDraftSentEntry(
   draftKey: string,
-  _content: string,
-  _channelId: string,
-  _pendingImeta: ImetaMedia[],
-  _spoileredAttachmentUrls: string[],
+  content: string,
+  channelId: string,
+  pendingImeta: ImetaMedia[],
+  spoileredAttachmentUrls: string[],
 ): void {
-  clearDraftEntry(draftKey);
+  const draft = loadDraftEntry(draftKey);
+  // A background upload can finish after the user has started the next draft
+  // in this same channel. Clear only the exact submitted snapshot rather than
+  // deleting whichever newer entry currently owns the key.
+  if (
+    draft?.content === content &&
+    draft.channelId === channelId &&
+    JSON.stringify(draft.pendingImeta) === JSON.stringify(pendingImeta) &&
+    JSON.stringify(draft.spoileredAttachmentUrls) ===
+      JSON.stringify(spoileredAttachmentUrls)
+  ) {
+    clearDraftEntry(draftKey);
+  }
 }
 
 // ── Reactive hooks ────────────────────────────────────────────────────────────

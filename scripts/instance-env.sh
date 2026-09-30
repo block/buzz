@@ -32,11 +32,13 @@ unset VITE_DEV_BRANCH
 # identity and icon so multiple local desktop instances can run side by side.
 #
 # Worktree detection: compare --git-dir to --git-common-dir. In the main
-# working tree these are identical; in any worktree (whether under .worktrees/,
-# .claude/worktrees/, or elsewhere on disk) they differ.
+# working tree these identify the same directory; in any linked worktree
+# (whether under .worktrees/, .claude/worktrees/, or elsewhere) they differ.
+# Normalize both paths: callers run from desktop/, where Git can otherwise
+# return an absolute --git-dir but a relative --git-common-dir for the same .git.
 if git rev-parse --is-inside-work-tree &>/dev/null; then
-    GIT_DIR=$(git rev-parse --git-dir)
-    GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+    GIT_DIR=$(git rev-parse --path-format=absolute --git-dir)
+    GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
     if [[ -n "$GIT_COMMON_DIR" && "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
         BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
         export BUZZ_WORKTREE_LABEL="${BRANCH_NAME##*/}"
@@ -47,14 +49,36 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         # identifier is kept so concurrent instances don't collide on
         # tauri-plugin-single-instance or the app data directory.
         if [[ "${BUZZ_SHARE_IDENTITY:-0}" == "1" ]]; then
+            KEYRING_SERVICE="buzz-desktop-dev"
+            KEYRING_BLOB=""
+            case "$(uname -s)" in
+                Darwin)
+                    if command -v security &>/dev/null; then
+                        KEYRING_BLOB="$(security find-generic-password -s "$KEYRING_SERVICE" -a secrets -w 2>/dev/null || true)"
+                    fi
+                    ;;
+                Linux)
+                    if command -v secret-tool &>/dev/null; then
+                        KEYRING_BLOB="$(secret-tool lookup service "$KEYRING_SERVICE" username secrets target default 2>/dev/null || true)"
+                    fi
+                    ;;
+            esac
+
+            KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("identity", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
             CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.buzz.app.dev/identity.key"
             LEGACY_CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.sprout.app.dev/identity.key"
-            if [[ -f "$CANONICAL_KEY" ]]; then
-                export BUZZ_PRIVATE_KEY="$(cat "$CANONICAL_KEY")"
-            elif [[ -f "$LEGACY_CANONICAL_KEY" ]]; then
-                export BUZZ_PRIVATE_KEY="$(cat "$LEGACY_CANONICAL_KEY")"
+
+            SHARED_IDENTITY="$KEYRING_IDENTITY"
+            if [[ -z "$SHARED_IDENTITY" && -f "$CANONICAL_KEY" ]]; then
+                SHARED_IDENTITY="$(cat "$CANONICAL_KEY")"
+            elif [[ -z "$SHARED_IDENTITY" && -f "$LEGACY_CANONICAL_KEY" ]]; then
+                SHARED_IDENTITY="$(cat "$LEGACY_CANONICAL_KEY")"
+            fi
+
+            if [[ -n "$SHARED_IDENTITY" ]]; then
+                export BUZZ_PRIVATE_KEY="$SHARED_IDENTITY"
             else
-                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found at $CANONICAL_KEY or $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
+                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found in keyring service $KEYRING_SERVICE, at $CANONICAL_KEY, or at $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
             fi
         fi
 

@@ -25,7 +25,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
-use crate::invite_token::{self, DEFAULT_INVITE_TTL_SECS};
+use crate::nip_fi_http::admit_nip_fi_http_on_state;
+use buzz_core::invite::{
+    hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
+    MIN_INVITE_TTL_SECS, V2_PREFIX,
+};
+
+use crate::invite_token;
 use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
@@ -43,10 +49,42 @@ pub(crate) const CLAIM_RATE_CACHE_CAPACITY: u64 = 10_000;
 /// Body for `POST /api/invites`.
 #[derive(Debug, Default, Deserialize)]
 pub struct MintInviteRequest {
-    /// Requested lifetime in seconds. Clamped to
+    /// Requested lifetime in seconds. Must be between
+    /// [`MIN_INVITE_TTL_SECS`] and
     /// [`invite_token::MAX_INVITE_TTL_SECS`]; defaults to 72 h.
     #[serde(default)]
     pub ttl_secs: Option<u64>,
+    /// Maximum number of uses before the invite is exhausted. `None` (omitted
+    /// or `null`) means unlimited — preserves current behavior. When present,
+    /// must be an integer from 1 through [`MAX_INVITE_USES`].
+    #[serde(default)]
+    pub max_uses: Option<i32>,
+}
+
+fn validate_mint_request(
+    request: &MintInviteRequest,
+) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
+    let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
+    if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "ttl_secs must be between {} and {MAX_INVITE_TTL_SECS}",
+                MIN_INVITE_TTL_SECS
+            ),
+        ));
+    }
+
+    if let Some(max_uses) = request.max_uses {
+        if !(1..=MAX_INVITE_USES).contains(&max_uses) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("max_uses must be between 1 and {MAX_INVITE_USES}"),
+            ));
+        }
+    }
+
+    Ok((ttl, request.max_uses))
 }
 
 /// Body for `POST /api/invites/claim`.
@@ -210,17 +248,27 @@ async fn authenticate(
         })?;
 
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
-        headers,
-        "POST",
-        &url,
-        Some(body),
-        true, // invites always require NIP-98; no X-Pubkey dev fallback
-        true, // POST bodies must be covered by a payload tag
-    )?;
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = bridge::verify_nip98_exempt_invite_claim(headers, "POST", &url, Some(body))?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
     Ok((tenant, pubkey))
+}
+
+fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+    match error {
+        buzz_db::DbError::InvalidData(message) | buzz_db::DbError::DeletionSafety(message) => {
+            api_error(StatusCode::BAD_REQUEST, &message)
+        }
+        buzz_db::DbError::AccessDenied(_) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community writes are temporarily unavailable",
+        ),
+        error => internal_error(&format!("invite mint: {error}")),
+    }
 }
 
 /// Mint an invite code — `POST /api/invites`, NIP-98 signed by an owner/admin.
@@ -231,9 +279,75 @@ pub async fn mint_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites", &body).await?;
+) -> axum::response::Response {
+    // NIP-FI gate wraps the entire handler so the denial is emitted as exact
+    // text/plain bytes. [FI-TRACE-AUTHORITY-UNIFORM]
+    mint_invite_checked(state, headers, body).await
+}
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+async fn mint_invite_checked(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+        Ok(t) => t,
+        Err(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+            .into_response()
+        }
+    };
+
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites");
+
+    // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
+    // assertion verify → pair → deny-map in fixed order. The proven pubkey is
+    // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let admission = match admit_nip_fi_http_on_state(
+        &state,
+        &headers,
+        bridge::make_nip98_closure_for_admission(
+            headers.clone(),
+            "POST",
+            url,
+            Some(body.to_vec()),
+            true, // invites always require NIP-98; no X-Pubkey dev fallback
+            true, // POST bodies must be covered by a payload tag
+        ),
+    ) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    let pubkey = *admission.proven_pubkey();
+    let (event_id_bytes, _signed_created_at) = admission.into_extra();
+
+    // Replay detection runs after NIP-98+assertion admission (both proofs verified).
+    if let Err(e) = bridge::check_nip98_replay(&state, &tenant, event_id_bytes).await {
+        return e.into_response();
+    }
+
+    match mint_invite_inner(&state, body, tenant, pubkey).await {
+        Ok(json) => json.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn mint_invite_inner(
+    state: &AppState,
+    body: axum::body::Bytes,
+    tenant: buzz_core::TenantContext,
+    pubkey: nostr::PublicKey,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
     let member = state
@@ -260,9 +374,14 @@ pub async fn mint_invite(
         })?
     };
 
-    let key = invite_token::derive_invite_key(&state.relay_keypair);
-    let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
-    let (code, expires_at) = invite_token::mint_invite(&key, tenant.community(), ttl);
+    let (ttl, max_uses) = validate_mint_request(&request)?;
+
+    // Mint a v2 opaque, database-backed invite.
+    let invite = state
+        .db
+        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .await
+        .map_err(map_mint_error)?;
 
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.
@@ -275,19 +394,30 @@ pub async fn mint_invite(
     tracing::info!(
         community = %tenant.community(),
         minted_by = %sender_hex,
-        expires_at,
+        invite_id = %invite.invite_id,
+        expires_at = %invite.expires_at,
+        max_uses = ?invite.max_uses,
         "relay invite minted"
     );
 
+    // expires_at as unix seconds for the response contract.
+    let expires_at_unix = invite.expires_at.timestamp() as u64;
+
     Ok(Json(serde_json::json!({
-        "code": code,
-        "expires_at": expires_at,
-        "url": format!("{scheme}://{}/invite/{}", tenant.host(), code),
+        "code": invite.code,
+        "expires_at": expires_at_unix,
+        "max_uses": invite.max_uses,
+        "uses_remaining": invite.uses_remaining,
+        "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
     })))
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
 /// *joining* pubkey. Exempt from the relay-membership gate by design.
+///
+/// Routing is by exact prefix: `v2.` codes go to the database-backed
+/// redemption path; every other code goes to the v1 HMAC verifier. A `v2.`
+/// code is never fallen back to v1 verification.
 pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -305,7 +435,88 @@ pub async fn claim_invite(
     let request: ClaimInviteRequest = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
 
+    let claimer_hex = pubkey.to_hex();
     let key = invite_token::derive_invite_key(&state.relay_keypair);
+
+    // --- v2 database-backed path ---
+    //
+    // Route by exact prefix: v2. codes use the durable invite table. No
+    // fallback to v1 HMAC verification for malformed v2 input.
+    if request.code.starts_with(V2_PREFIX) {
+        validate_v2_code(&request.code)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_invalid"))?;
+
+        // Join-policy receipt verification, same mechanism as v1: the receipt
+        // is bound to the code string by SHA-256, so it works for v2 codes.
+        if let Some(policy) = &state.config.join_policy {
+            let receipt = request
+                .policy_receipt
+                .as_deref()
+                .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+            invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        }
+
+        let token_hash = hash_v2_code(&request.code);
+        let outcome = state
+            .db
+            .claim_relay_invite(
+                tenant.community(),
+                &token_hash,
+                &claimer_hex,
+                state
+                    .config
+                    .join_policy
+                    .as_ref()
+                    .map(|policy| policy.version.as_str()),
+            )
+            .await
+            .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
+
+        return match outcome {
+            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
+                tracing::info!(
+                    community = %tenant.community(),
+                    member = %claimer_hex,
+                    "relay member added via v2 invite"
+                );
+                // NIP-43 side effects only on Joined, never on other outcomes.
+                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
+                    tracing::warn!(
+                        "failed to publish NIP-43 member-added delta after v2 claim: {e}"
+                    );
+                }
+                if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+                    tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
+                }
+                Ok(Json(serde_json::json!({
+                    "status": "joined",
+                    "community_id": tenant.community().to_string(),
+                    "host": tenant.host(),
+                    "role": "member",
+                })))
+            }
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+                Ok(Json(serde_json::json!({
+                    "status": "already_member",
+                    "community_id": tenant.community().to_string(),
+                    "host": tenant.host(),
+                    "role": "member",
+                })))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Expired => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_expired"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Exhausted => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Invalid => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
+            }
+        };
+    }
+
+    // --- v1 HMAC path (stateless tokens, drain window) ---
     let payload = invite_token::verify_invite(&key, tenant.community(), &request.code).map_err(
         |e| match e {
             // Expired is post-MAC: revealing it helps the UX without helping a forger.
@@ -317,7 +528,6 @@ pub async fn claim_invite(
         },
     )?;
 
-    let claimer_hex = pubkey.to_hex();
     if let Some(policy) = &state.config.join_policy {
         let receipt = request
             .policy_receipt
@@ -391,11 +601,11 @@ fn claim_key_rate_limited(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT};
+    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT, MAX_INVITE_USES, MIN_INVITE_TTL_SECS};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -409,7 +619,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::invite_token::{derive_invite_key, InvitePayload};
+    use crate::invite_token::{derive_invite_key, InvitePayload, MAX_INVITE_TTL_SECS};
 
     use crate::router::build_router;
     use crate::state::AppState;
@@ -514,7 +724,7 @@ mod tests {
     /// Build a closed-relay (`require_relay_membership = true`) test state with
     /// a fresh community on `host`; returns `None` when Postgres is unavailable.
     async fn invite_test_state(host: &str) -> Option<Arc<AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -590,6 +800,368 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    async fn mint_code(state: Arc<AppState>, host: &str, owner: &Keys, request: Value) -> String {
+        let response = post_json(state, host, "/api/invites", owner, request.to_string()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        read_json(response)
+            .await
+            .get("code")
+            .and_then(Value::as_str)
+            .expect("minted code")
+            .to_string()
+    }
+
+    async fn event_count(state: &AppState, community: buzz_core::CommunityId, kind: i32) -> i64 {
+        state
+            .db
+            .count_events(&buzz_db::EventQuery {
+                kinds: Some(vec![kind]),
+                global_only: true,
+                ..buzz_db::EventQuery::for_community(community)
+            })
+            .await
+            .expect("count side-effect events")
+    }
+
+    #[test]
+    fn mint_request_deserialization_is_strict() {
+        for valid in [
+            serde_json::json!({}),
+            serde_json::json!({ "max_uses": null }),
+            serde_json::json!({ "max_uses": 1 }),
+            serde_json::json!({ "max_uses": MAX_INVITE_USES }),
+        ] {
+            serde_json::from_value::<super::MintInviteRequest>(valid).expect("valid request");
+        }
+
+        for invalid in [
+            serde_json::json!({ "max_uses": 1.5 }),
+            serde_json::json!({ "max_uses": "10" }),
+            serde_json::json!({ "ttl_secs": -1 }),
+            serde_json::json!({ "ttl_secs": 1.5 }),
+            serde_json::json!({ "ttl_secs": "3600" }),
+        ] {
+            assert!(
+                serde_json::from_value::<super::MintInviteRequest>(invalid.clone()).is_err(),
+                "accepted wrong JSON type: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn mint_request_validation_enforces_bounds_without_a_database() {
+        use super::validate_mint_request;
+
+        for (request, expected) in [
+            (
+                super::MintInviteRequest::default(),
+                (crate::invite_token::DEFAULT_INVITE_TTL_SECS, None),
+            ),
+            (
+                super::MintInviteRequest {
+                    ttl_secs: Some(MIN_INVITE_TTL_SECS),
+                    max_uses: Some(1),
+                },
+                (MIN_INVITE_TTL_SECS, Some(1)),
+            ),
+            (
+                super::MintInviteRequest {
+                    ttl_secs: Some(MAX_INVITE_TTL_SECS),
+                    max_uses: Some(MAX_INVITE_USES),
+                },
+                (MAX_INVITE_TTL_SECS, Some(MAX_INVITE_USES)),
+            ),
+        ] {
+            assert_eq!(
+                validate_mint_request(&request).expect("valid request"),
+                expected
+            );
+        }
+
+        for request in [
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(0),
+            },
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(-1),
+            },
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(MAX_INVITE_USES + 1),
+            },
+            super::MintInviteRequest {
+                ttl_secs: Some(MIN_INVITE_TTL_SECS - 1),
+                max_uses: None,
+            },
+            super::MintInviteRequest {
+                ttl_secs: Some(MAX_INVITE_TTL_SECS + 1),
+                max_uses: None,
+            },
+        ] {
+            assert_eq!(
+                validate_mint_request(&request)
+                    .expect_err("invalid request")
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mint_validates_max_uses_and_ttl_bounds() {
+        let host = format!("invites-validation-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        for body in [
+            serde_json::json!({ "max_uses": 0 }),
+            serde_json::json!({ "max_uses": -1 }),
+            serde_json::json!({ "max_uses": MAX_INVITE_USES + 1 }),
+            serde_json::json!({ "ttl_secs": MIN_INVITE_TTL_SECS - 1 }),
+            serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS + 1 }),
+        ] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites",
+                &owner,
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "max_uses": null }),
+            serde_json::json!({ "max_uses": 1 }),
+            serde_json::json!({ "max_uses": MAX_INVITE_USES }),
+            serde_json::json!({ "ttl_secs": MIN_INVITE_TTL_SECS }),
+            serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS }),
+        ] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites",
+                &owner,
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{body}");
+        }
+    }
+
+    #[test]
+    fn mint_fence_errors_map_to_temporary_unavailability() {
+        let (status, body) = super::map_mint_error(buzz_db::DbError::AccessDenied(
+            "community is write-fenced".to_string(),
+        ));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.0.get("error").and_then(Value::as_str),
+            Some("community writes are temporarily unavailable")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn malformed_and_unknown_v2_codes_are_forbidden_without_v1_fallback() {
+        let host = format!("invites-v2-invalid-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let unknown = format!("v2.{}", URL_SAFE_NO_PAD.encode([9_u8; 32]));
+
+        for code in [
+            "v2.".to_string(),
+            "v2.not-base64!".to_string(),
+            format!("v2.{}", URL_SAFE_NO_PAD.encode([9_u8; 31])),
+            unknown,
+        ] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &joiner,
+                serde_json::json!({ "code": code }).to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{code}");
+            assert_eq!(
+                read_json(response)
+                    .await
+                    .get("error")
+                    .and_then(Value::as_str),
+                Some("invite_invalid")
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bounded_v2_claims_publish_side_effects_only_for_joined() {
+        let host = format!(
+            "invites-v2-side-effects-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let first = Keys::generate();
+        let second = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+        let before_delta_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+        )
+        .await;
+        let before_list_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+        )
+        .await;
+        let code = mint_code(
+            state.clone(),
+            &host,
+            &owner,
+            serde_json::json!({ "max_uses": 1 }),
+        )
+        .await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &first,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+        let delta_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+        )
+        .await;
+        let list_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+        )
+        .await;
+        assert_eq!(delta_count, before_delta_count + 1);
+        assert_eq!(list_count, before_list_count + 1);
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &first,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("already_member")
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+            )
+            .await,
+            delta_count
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            )
+            .await,
+            list_count
+        );
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &second,
+            claim_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_exhausted")
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+            )
+            .await,
+            delta_count
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            )
+            .await,
+            list_count
+        );
     }
 
     #[tokio::test]
@@ -1300,5 +1872,240 @@ mod tests {
 
         let response = get_page(state, "/api/join-policy/privacy").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── NIP-FI seam tests: POST /api/invites ──────────────────────────────────
+    //
+    // Gate under test: `admit_nip_fi_http_on_state` in `mint_invite_checked`.
+    // The router's assertion guard runs first and only verifies the assertion,
+    // so the handler's own admission is what enforces key pairing.
+    //
+    // Infrastructure: `#[ignore = "requires Postgres"]` + tokio::test on the
+    // invites harness; NIP-FI Enforce is enabled by patching the config after
+    // state construction.
+
+    // Static P-256 test key, shared with the bridge/media/settings NIP-FI tests.
+    const NIP_FI_TEST_ISSUER: &str = "https://issuer.example";
+    const NIP_FI_TEST_AUDIENCE: &str = "https://relay.example";
+    const NIP_FI_TEST_KID: &str = "test-key-1";
+    const NIP_FI_TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
+        WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
+        zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
+        -----END PRIVATE KEY-----\n";
+
+    /// Clone `base` into an Enforce-mode state. With `with_verifier`, a real
+    /// ES256 verifier over the static test key is injected so a signed
+    /// assertion passes the router guard and reaches the handler.
+    fn nip_fi_enforce_state(base: &AppState, with_verifier: bool) -> Arc<AppState> {
+        use buzz_auth::{
+            AssertionKeySet, FederatedAssertionVerifier, FreshnessClass, IssuerPolicy,
+            IssuerRegistry, StaticIssuerKeySource, TokenClass, VerifyAssertion,
+        };
+        use jsonwebtoken::{jwk::JwkSet, Algorithm};
+
+        let mut state = base.clone();
+        let mut config = (*state.config).clone();
+        config.require_auth_token = true;
+        config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        state.config = Arc::new(config);
+        if !with_verifier {
+            return Arc::new(state);
+        }
+
+        let jwks: JwkSet = serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256",
+                "kid": NIP_FI_TEST_KID,
+                "x": "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI",
+                "y": "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA"
+            }]
+        }))
+        .expect("valid test JWKS");
+        let hard_deadline = chrono::Utc::now() + chrono::Duration::seconds(3600);
+        let key_set =
+            AssertionKeySet::new_for_test(NIP_FI_TEST_ISSUER.to_owned(), 1, jwks, hard_deadline)
+                .expect("valid test key set");
+        let jwks_contract = buzz_auth::JwksSourceContract::new(
+            format!("{NIP_FI_TEST_ISSUER}/.well-known/jwks.json"),
+            300,
+            3600,
+        )
+        .expect("valid jwks contract");
+        let policy = IssuerPolicy::new(
+            NIP_FI_TEST_ISSUER.to_owned(),
+            vec![NIP_FI_TEST_AUDIENCE.to_owned()],
+            TokenClass::DedicatedNipFi,
+            FreshnessClass::OfflineJwt,
+            vec![Algorithm::ES256],
+            60,
+            3600,
+            None,
+            jwks_contract,
+        )
+        .expect("valid issuer policy");
+        let mut registry = IssuerRegistry::new();
+        registry.insert(policy);
+        let verifier: Arc<dyn VerifyAssertion> = Arc::new(FederatedAssertionVerifier::new(
+            registry,
+            StaticIssuerKeySource::new([key_set]),
+        ));
+        state.nip_fi_verifier = Some(verifier);
+        Arc::new(state)
+    }
+
+    /// Mint a signed NIP-FI assertion binding `keys`' pubkey.
+    fn nip_fi_signed_assertion(keys: &Keys) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "iss": NIP_FI_TEST_ISSUER,
+            "aud": NIP_FI_TEST_AUDIENCE,
+            "iat": now,
+            "exp": now + 600,
+            "sub": "test-subject",
+            "nostr_pubkey": keys.public_key().to_hex(),
+        });
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some(NIP_FI_TEST_KID.to_owned());
+        header.typ = Some("nip-fi+jwt".to_owned());
+        let key = EncodingKey::from_ec_pem(NIP_FI_TEST_EC_PKCS8_PEM.as_bytes())
+            .expect("valid test EC PEM");
+        jsonwebtoken::encode(&header, &claims, &key).expect("sign assertion")
+    }
+
+    /// POST `/api/invites` with a NIP-98 proof from `nip98_keys` and, when
+    /// given, a NIP-FI assertion; returns `(status, body)`.
+    async fn nip_fi_post_mint(
+        state: Arc<AppState>,
+        host: &str,
+        nip98_keys: &Keys,
+        assertion: Option<String>,
+    ) -> (StatusCode, Vec<u8>) {
+        let url = format!("https://{host}/api/invites");
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/invites")
+            .header(header::HOST, host)
+            .header(
+                header::AUTHORIZATION,
+                nip98_auth_header(nip98_keys, &url, b"{}"),
+            )
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = assertion {
+            request = request.header("Nostr-Federated-Identity", format!("Bearer {token}"));
+        }
+        let response = build_router(state)
+            .oneshot(request.body(Body::from("{}")).expect("request"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read body")
+            .to_vec();
+        (status, body)
+    }
+
+    /// Valid NIP-98 + no assertion → the router's outer assertion guard denies
+    /// 401 before the handler runs. This witnesses the guard only; handler
+    /// pairing is covered by `nip_fi_enforce_mint_invite_key_mismatch_is_403`.
+    ///
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_enforce_mint_invite_no_assertion_is_401() {
+        let host = format!("nip-fi-invites-seam-{}.local", Uuid::new_v4().simple());
+        let Some(state_base) = invite_test_state(&host).await else {
+            return;
+        };
+        // No verifier: the guard's missing-assertion check fires before any
+        // verifier lookup.
+        let state = nip_fi_enforce_state(&state_base, false);
+
+        let (status, _) = nip_fi_post_mint(state, &host, &Keys::generate(), None).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "NIP-FI enforce mode: POST /api/invites with valid NIP-98 + no assertion MUST be \
+             denied 401 by the router's outer assertion guard [FI-TRACE-HTTP-INGRESS]"
+        );
+    }
+
+    /// Valid assertion for key A + NIP-98 proof for key B → the request passes
+    /// the router guard (which only verifies the assertion) and the handler's
+    /// `admit_nip_fi_http_on_state` denies on key pairing with exactly 403
+    /// `authorization denied\n`. Key B is a seeded owner, so without the
+    /// handler's admission the mint would succeed.
+    ///
+    /// Falsifying mutation: replace the handler's `admit_nip_fi_http_on_state`
+    /// with NIP-98-only admission (`admit_nip_fi_http` in Off mode) — the
+    /// owner's mint succeeds with 200.
+    ///
+    /// [FI-INV-05] [FI-TRACE-ASSERTION-KEY-MISMATCH]
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_enforce_mint_invite_key_mismatch_is_403() {
+        let host = format!("nip-fi-invites-pair-{}.local", Uuid::new_v4().simple());
+        let state_base = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let asserted = Keys::generate();
+        let owner = Keys::generate();
+        seed_nip_fi_owner(&state_base, &host, &owner).await;
+        let state = nip_fi_enforce_state(&state_base, true);
+
+        let (status, body) = nip_fi_post_mint(
+            state,
+            &host,
+            &owner,
+            Some(nip_fi_signed_assertion(&asserted)),
+        )
+        .await;
+        assert_eq!(
+            (status, body.as_slice()),
+            (StatusCode::FORBIDDEN, b"authorization denied\n".as_slice()),
+            "assertion for key A + NIP-98 for key B MUST reach mint_invite_checked and be \
+             denied by its NIP-FI key pairing"
+        );
+    }
+
+    /// Same-key control for the mismatch test: assertion and NIP-98 both for
+    /// the seeded owner → admission succeeds and the handler mints normally.
+    /// Proves the handler does not deny every assertion-bearing request.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_enforce_mint_invite_same_key_mints() {
+        let host = format!("nip-fi-invites-ctrl-{}.local", Uuid::new_v4().simple());
+        let state_base = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let owner = Keys::generate();
+        seed_nip_fi_owner(&state_base, &host, &owner).await;
+        let state = nip_fi_enforce_state(&state_base, true);
+
+        let (status, body) =
+            nip_fi_post_mint(state, &host, &owner, Some(nip_fi_signed_assertion(&owner))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "matching assertion and NIP-98 keys must be admitted and mint: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let json: Value = serde_json::from_slice(&body).expect("mint response JSON");
+        assert!(json.get("code").and_then(Value::as_str).is_some(), "{json}");
+    }
+
+    async fn seed_nip_fi_owner(state: &AppState, host: &str, owner: &Keys) {
+        let community = state
+            .db
+            .lookup_community_by_host(host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
     }
 }

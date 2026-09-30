@@ -4,11 +4,13 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/message_content.dart';
 import '../profile/profile_provider.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/utils/string_utils.dart';
 import 'note_card.dart';
 import 'pulse_actions.dart';
 import 'pulse_models.dart';
@@ -76,10 +78,15 @@ class ComposeNotePage extends HookConsumerWidget {
                 shape: const StadiumBorder(),
               ),
               child: isSending.value
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                      child: BuzzLoadingIndicator(
+                        size: 16,
+                        semanticLabel: _isReply
+                            ? 'Sending reply'
+                            : 'Publishing post',
+                      ),
                     )
                   : Text(_isReply ? 'Reply' : 'Post'),
             ),
@@ -160,7 +167,7 @@ class _ReplyContext extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pubkey])) ??
         ref.read(userCacheProvider.notifier).get(pubkey);
-    final displayName = profile?.label ?? _shortPubkey(pubkey);
+    final displayName = profile?.label ?? shortPubkey(pubkey);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
@@ -185,7 +192,12 @@ class _ReplyContext extends ConsumerWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  (profile?.initial ?? displayName[0]).toUpperCase(),
+                  // Name-derived when the profile is cached; keyed to the
+                  // hex public key when it isn't, so the compact-npub
+                  // fallback label doesn't render `N` for every unnamed
+                  // author.
+                  profile?.initial ??
+                      (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?'),
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                   ),
@@ -198,20 +210,24 @@ class _ReplyContext extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        Flexible(
+                        Expanded(
                           child: Text(
                             displayName,
-                            style: context.textTheme.labelMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
+                            maxLines: 1,
+                            style: messageUsernameTextStyle,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         const SizedBox(width: Grid.half),
-                        Text(
-                          formatPulseRelativeTime(note.createdAt),
-                          style: context.textTheme.labelSmall?.copyWith(
-                            color: context.colors.onSurfaceVariant,
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: Grid.xxl),
+                          child: Text(
+                            formatPulseRelativeTime(note.createdAt),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: messageTimestampTextStyle.copyWith(
+                              color: context.colors.onSurfaceVariant,
+                            ),
                           ),
                         ),
                       ],
@@ -229,6 +245,9 @@ class _ReplyContext extends ConsumerWidget {
                           child: MessageContent(
                             content: note.content,
                             tags: note.tags,
+                            baseStyle: messageBodyTextStyle.copyWith(
+                              color: context.colors.onSurface,
+                            ),
                           ),
                         ),
                       ),
@@ -247,7 +266,4 @@ class _ReplyContext extends ConsumerWidget {
       ),
     );
   }
-
-  String _shortPubkey(String pubkey) =>
-      pubkey.length >= 8 ? '${pubkey.substring(0, 8)}...' : pubkey;
 }

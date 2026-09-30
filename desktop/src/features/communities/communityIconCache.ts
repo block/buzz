@@ -5,13 +5,28 @@
  */
 
 const ICON_CACHE_KEY = "buzz-community-icons";
+export const MAX_CACHED_COMMUNITY_ICONS = 32;
+// Keep aligned with MAX_WORKSPACE_ICON_DATA_URL_LEN in
+// crates/buzz-relay/src/handlers/relay_admin.rs.
+export const MAX_CACHED_COMMUNITY_ICON_LENGTH = 98_304;
+
+export function boundCommunityIconCache(
+  cache: Record<string, string>,
+): Record<string, string> {
+  const entries = Object.entries(cache).filter(
+    ([, icon]) =>
+      typeof icon === "string" &&
+      icon.length <= MAX_CACHED_COMMUNITY_ICON_LENGTH,
+  );
+  return Object.fromEntries(entries.slice(-MAX_CACHED_COMMUNITY_ICONS));
+}
 
 function loadCache(): Record<string, string> {
   try {
     const raw = localStorage.getItem(ICON_CACHE_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : null;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, string>;
+      return boundCommunityIconCache(parsed as Record<string, string>);
     }
   } catch {
     // Corrupt cache — fall through to empty.
@@ -28,13 +43,17 @@ export function saveCachedCommunityIcon(
   icon: string | null,
 ): void {
   const cache = loadCache();
-  if (icon) {
+  if (icon && icon.length <= MAX_CACHED_COMMUNITY_ICON_LENGTH) {
+    delete cache[relayUrl];
     cache[relayUrl] = icon;
   } else {
     delete cache[relayUrl];
   }
   try {
-    localStorage.setItem(ICON_CACHE_KEY, JSON.stringify(cache));
+    localStorage.setItem(
+      ICON_CACHE_KEY,
+      JSON.stringify(boundCommunityIconCache(cache)),
+    );
   } catch {
     // Quota exceeded — the icon still renders from the in-memory query.
   }

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -36,6 +37,7 @@ type SidebarLoadingShape = {
 };
 
 type SidebarLoadingCachePayload = SidebarLoadingShape & {
+  updatedAt: number;
   version: 1;
 };
 
@@ -130,11 +132,12 @@ function writeSidebarLoadingShape(
   const payload: SidebarLoadingCachePayload = {
     channels: shape.channels.slice(0, 3),
     directMessages: shape.directMessages.slice(0, 2),
+    updatedAt: Date.now(),
     version: 1,
   };
 
   try {
-    window.localStorage.setItem(cacheKey, JSON.stringify(payload));
+    setLocalStorageItemWithRecovery(cacheKey, JSON.stringify(payload));
   } catch {
     // localStorage can be unavailable or full in embedded webviews.
   }

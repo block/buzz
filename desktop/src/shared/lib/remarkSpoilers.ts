@@ -37,17 +37,29 @@ function transformNode(node: Node) {
     transformNode(child);
   }
 
-  node.children = groupBlockSpoilers(groupSpoilers(node.children));
+  node.children = groupBlockSpoilers(
+    groupSpoilers(node.children, node.type === "paragraph"),
+  );
 }
 
-function groupSpoilers(children: Node[]): Node[] {
+function groupSpoilers(
+  children: Node[],
+  rejectTableDelimiterRow: boolean,
+): Node[] {
   const output: Node[] = [];
   let spoilerBuffer: Node[] | null = null;
 
   for (const part of splitDelimiterParts(children)) {
     if (part.type === "delimiter") {
       if (spoilerBuffer) {
-        output.push(buildSpoilerNode(spoilerBuffer));
+        if (rejectTableDelimiterRow && isTableDelimiterRow(spoilerBuffer)) {
+          output.push({ type: "text", value: "||" }, ...spoilerBuffer, {
+            type: "text",
+            value: "||",
+          });
+        } else {
+          output.push(buildSpoilerNode(spoilerBuffer));
+        }
         spoilerBuffer = null;
       } else {
         spoilerBuffer = [];
@@ -98,6 +110,13 @@ function splitDelimiterParts(children: Node[]): Part[] {
   }
 
   return parts;
+}
+
+function isTableDelimiterRow(children: Node[]): boolean {
+  if (children.some((child) => child.type !== "text")) return false;
+
+  const value = children.map((child) => String(child.value ?? "")).join("");
+  return /^\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)+\s*$/.test(value);
 }
 
 function buildSpoilerNode(

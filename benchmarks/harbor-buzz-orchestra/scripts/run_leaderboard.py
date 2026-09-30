@@ -45,64 +45,101 @@ AGENT_BINARIES = ("buzz-acp", "buzz-agent", "buzz-dev-mcp")
 # host-header tenant-bound, so agents must present its canonical Host).
 FORWARDER_BINARY = "relay-forwarder"
 
-PROVIDER_ORGS = {"anthropic": "Anthropic", "openai": "OpenAI", "databricks": "Databricks"}
+PROVIDER_ORGS = {
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "databricks": "Databricks",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     problems = parser.add_mutually_exclusive_group(required=True)
     problems.add_argument(
-        "--dataset", "-d", help="Registry dataset (e.g. terminal-bench/terminal-bench-2-1)"
+        "--dataset",
+        "-d",
+        help="Registry dataset (e.g. terminal-bench/terminal-bench-2-1)",
     )
     problems.add_argument(
         "--path", "-p", type=Path, help="Local task or dataset directory"
     )
     parser.add_argument(
-        "--include-task", "-i", action="append", default=[],
+        "--include-task",
+        "-i",
+        action="append",
+        default=[],
         help="Task name to include from the dataset (glob, repeatable)",
     )
     parser.add_argument(
-        "--exclude-task", "-x", action="append", default=[],
+        "--exclude-task",
+        "-x",
+        action="append",
+        default=[],
         help="Task name to exclude from the dataset (glob, repeatable)",
     )
     parser.add_argument(
-        "--attempts", "-k", type=int, required=True,
+        "--attempts",
+        "-k",
+        type=int,
+        required=True,
         help="Runs per problem (leaderboards require 5)",
     )
-    parser.add_argument("--manifest", type=Path, required=True, help="Team manifest YAML")
     parser.add_argument(
-        "--endpoint-config", type=Path, required=True,
+        "--manifest", type=Path, required=True, help="Team manifest YAML"
+    )
+    parser.add_argument(
+        "--endpoint-config",
+        type=Path,
+        required=True,
         help="JSON mapping manifest endpoint names to providers/API keys",
     )
     parser.add_argument(
-        "--provisioner-config", type=Path, required=True,
+        "--provisioner-config",
+        type=Path,
+        required=True,
         help="JSON config for the Buzz relay/Postgres provisioner",
     )
     parser.add_argument(
-        "--buzz-bin-dir", type=Path, default=None,
+        "--buzz-bin-dir",
+        type=Path,
+        default=None,
         help="Directory with the host buzz CLI (default: repo target/release, then target/debug)",
     )
     parser.add_argument(
-        "--agent-bin-dir", type=Path, required=True,
+        "--agent-bin-dir",
+        type=Path,
+        required=True,
         help="Directory with Linux builds of buzz-acp/buzz-agent/buzz-dev-mcp "
         "to upload into each task container",
     )
     parser.add_argument(
-        "--relay-gateway", default="",
+        "--relay-gateway",
+        default="",
         help="host:port of the benchmark relay as reachable from inside the "
         "task container (e.g. host.docker.internal:3600). When set, a "
         "loopback forwarder from --agent-bin-dir bridges the canonical "
         "relay address to this gateway",
     )
-    parser.add_argument("--n-concurrent", "-n", type=int, default=4, help="Concurrent trials")
-    parser.add_argument("--jobs-dir", type=Path, default=Path("jobs"), help="Job output root")
-    parser.add_argument("--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)")
     parser.add_argument(
-        "--upload", action="store_true", help="Upload to Harbor Hub when the job finishes"
+        "--n-concurrent", "-n", type=int, default=4, help="Concurrent trials"
     )
-    parser.add_argument("--dry-run", action="store_true", help="Print the harbor command and exit")
+    parser.add_argument(
+        "--jobs-dir", type=Path, default=Path("jobs"), help="Job output root"
+    )
+    parser.add_argument(
+        "--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)"
+    )
+    parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="Upload to Harbor Hub when the job finishes",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print the harbor command and exit"
+    )
     return parser.parse_args(argv)
 
 
@@ -110,7 +147,9 @@ def find_binaries(bin_dir: Path | None) -> dict[str, Path]:
     candidates = (
         [bin_dir]
         if bin_dir is not None
-        else [PACKAGE_ROOT.parents[1] / "target" / kind for kind in ("release", "debug")]
+        else [
+            PACKAGE_ROOT.parents[1] / "target" / kind for kind in ("release", "debug")
+        ]
     )
     for candidate in candidates:
         found = {name: candidate / name for name in BINARIES}
@@ -146,11 +185,17 @@ def build_command(
     resource override would fail leaderboard static validation, so none are
     accepted or forwarded."""
     command = [
-        "harbor", "run", "--yes",
-        "--job-name", args.job_name,
-        "--jobs-dir", str(args.jobs_dir),
-        "-k", str(args.attempts),
-        "--n-concurrent", str(args.n_concurrent),
+        "harbor",
+        "run",
+        "--yes",
+        "--job-name",
+        args.job_name,
+        "--jobs-dir",
+        str(args.jobs_dir),
+        "-k",
+        str(args.attempts),
+        "--n-concurrent",
+        str(args.n_concurrent),
     ]
     if args.dataset:
         command += ["--dataset", args.dataset]
@@ -250,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{PACKAGE_ROOT / 'testbed'} {Path(__file__).resolve()} ..."
         )
 
-    result = subprocess.run(command)
+    result = subprocess.run(command, check=False)
     job_dir = args.jobs_dir / args.job_name
     if result.returncode != 0:
         print(f"harbor run failed (exit {result.returncode}); job dir: {job_dir}")

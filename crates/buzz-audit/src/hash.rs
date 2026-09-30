@@ -1,27 +1,88 @@
+use chrono::{DateTime, SubsecRound, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::entry::AuditEntry;
 use crate::error::AuditError;
 
 /// The 32-byte sentinel hashed in place of `prev_hash` for a community's first
-/// entry. Stored as `prev_hash = NULL`; hashed as all-zero bytes.
+/// entry in the legacy encoding. TLV omits the absent field instead.
 pub const GENESIS_HASH: [u8; 32] = [0u8; 32];
 
-/// SHA-256 over the entry's identity, chain, and context fields.
+/// Encoding used for new entries. Version 1 is retained for historical rows.
+pub const CURRENT_HASH_VERSION: i16 = 2;
+
+/// Reduce a timestamp to the precision the audit store round-trips.
 ///
-/// Field order is fixed — changing it invalidates all existing chains. The
-/// `community_id` is hashed first so chain identity carries the tenant: an entry
-/// cannot be lifted out of one community's chain and re-verified inside another.
+/// `audit_log.created_at` is `TIMESTAMPTZ`, which Postgres keeps at microsecond
+/// resolution. [`compute_hash`] covers `created_at.to_rfc3339()`, and that
+/// string's sub-second digit count follows the value (chrono emits 0, 3, 6 or 9
+/// digits), so a timestamp carrying nanoseconds hashes to a digest that can
+/// never be recomputed from the stored row — the entry is written with one
+/// preimage and verified against another.
 ///
-/// `detail` is serialized via [`canonical_json`] (sorted keys) so the hash is
-/// stable across machines and Rust versions. A serialization failure is a hard
-/// error, never silently hashed as empty.
+/// Every `created_at` must therefore pass through here *before* it is hashed
+/// and stored, so the in-memory entry and the row are byte-identical.
+pub fn to_storage_precision(created_at: DateTime<Utc>) -> DateTime<Utc> {
+    created_at.trunc_subsecs(6)
+}
+
+/// SHA-256 over the entry's fields using its stored encoding version.
+///
+/// Version 2 uses one-byte tags and big-endian u64 byte lengths. Fields are
+/// appended in tag order; absent optional fields are omitted, while present
+/// empty values retain their tag and zero length. JSON keys are sorted and
+/// timestamps are truncated to storage precision before encoding.
 pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    match entry.hash_version {
+        1 => compute_legacy_hash(entry),
+        CURRENT_HASH_VERSION => compute_tlv_hash(entry),
+        version => Err(AuditError::UnsupportedHashVersion { version }),
+    }
+}
+
+fn compute_tlv_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    let mut encoded = b"buzz:audit:v2\0".to_vec();
+    append_tlv(&mut encoded, 1, entry.community_id.as_bytes());
+    append_tlv(&mut encoded, 2, &entry.seq.to_be_bytes());
+    append_tlv(
+        &mut encoded,
+        3,
+        to_storage_precision(entry.created_at)
+            .to_rfc3339()
+            .as_bytes(),
+    );
+    append_tlv(&mut encoded, 4, entry.action.as_str().as_bytes());
+    if let Some(pk) = &entry.actor_pubkey {
+        append_tlv(&mut encoded, 5, pk);
+    }
+    if let Some(id) = &entry.object_id {
+        append_tlv(&mut encoded, 6, id.as_bytes());
+    }
+    append_tlv(&mut encoded, 7, canonical_json(&entry.detail)?.as_bytes());
+    if let Some(hash) = &entry.prev_hash {
+        append_tlv(&mut encoded, 8, hash);
+    }
+    Ok(Sha256::digest(encoded).into())
+}
+
+fn append_tlv(encoded: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    encoded.push(tag);
+    encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    encoded.extend_from_slice(value);
+}
+
+// Preserve historical digests. This encoding retains its original ambiguity;
+// only the version 2 writer prevents bytes from moving between fields.
+fn compute_legacy_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
     let mut hasher = Sha256::new();
     // Tenant binding: community_id leads the hash.
     hasher.update(entry.community_id.as_bytes());
     hasher.update(entry.seq.to_be_bytes());
-    hasher.update(entry.created_at.to_rfc3339().as_bytes());
+    hasher.update(
+        to_storage_precision(entry.created_at)
+            .to_rfc3339()
+            .as_bytes(),
+    );
     hasher.update(entry.action.as_str().as_bytes());
     match &entry.actor_pubkey {
         Some(pk) => {
@@ -97,6 +158,7 @@ mod tests {
 
     fn sample_entry() -> AuditEntry {
         AuditEntry {
+            hash_version: CURRENT_HASH_VERSION,
             community_id: Uuid::from_u128(1),
             seq: 1,
             hash: Vec::new(),
@@ -111,11 +173,98 @@ mod tests {
         }
     }
 
+    /// A wall-clock instant carrying sub-microsecond digits, like `Utc::now()`
+    /// returns on Linux (`clock_gettime`, nanosecond resolution).
+    fn nanosecond_instant() -> chrono::DateTime<Utc> {
+        chrono::DateTime::from_timestamp_nanos(1_700_000_000_123_456_789)
+    }
+
+    /// What Postgres hands back for a `TIMESTAMPTZ`: microsecond resolution.
+    fn after_database_round_trip(ts: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+        ts.trunc_subsecs(6)
+    }
+
     #[test]
     fn deterministic() {
         let entry = sample_entry();
         assert_eq!(compute_hash(&entry).unwrap(), compute_hash(&entry).unwrap());
         assert_eq!(compute_hash(&entry).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn encoding_versions_have_stable_digests() {
+        let mut entry = sample_entry();
+        assert_eq!(
+            hex::encode(compute_hash(&entry).unwrap()),
+            "e12c899d941af9794679602ae83ef2ab1c8f029fe380349263a046a93374d580"
+        );
+        entry.hash_version = 1;
+        assert_eq!(
+            hex::encode(compute_hash(&entry).unwrap()),
+            "5fd6c48ddbd39979bd7fcc94357d78b5fcffa0d1443a0cdda997ad7e22f4f2ce"
+        );
+        entry.hash_version = 99;
+        assert!(matches!(
+            compute_hash(&entry),
+            Err(AuditError::UnsupportedHashVersion { version: 99 })
+        ));
+    }
+
+    #[test]
+    fn storage_precision_drops_sub_microsecond_digits() {
+        let stored = to_storage_precision(nanosecond_instant());
+        assert_eq!(stored.timestamp_subsec_nanos(), 123_456_000);
+        // Idempotent, so a stored value re-read from Postgres is unchanged.
+        assert_eq!(stored, after_database_round_trip(stored));
+    }
+
+    #[test]
+    fn rfc3339_sub_second_width_follows_the_value() {
+        // The underlying trap, pinned on the preimage rather than the digest:
+        // chrono emits 0/3/6/9 fractional digits depending on the value, so a
+        // nanosecond timestamp and its microsecond truncation are *different
+        // strings*. Hashing the untruncated value therefore produces a digest
+        // that cannot be recomputed from the stored row — which is what made
+        // every entry fail `verify_chain` with `HashMismatch`.
+        let ns = nanosecond_instant();
+        assert_eq!(ns.to_rfc3339(), "2023-11-14T22:13:20.123456789+00:00");
+        assert_eq!(
+            after_database_round_trip(ns).to_rfc3339(),
+            "2023-11-14T22:13:20.123456+00:00"
+        );
+        assert_ne!(ns.to_rfc3339(), after_database_round_trip(ns).to_rfc3339());
+    }
+
+    #[test]
+    fn compute_hash_normalizes_sub_microsecond_timestamps() {
+        // The enforcement point: even handed an untruncated `created_at`,
+        // `compute_hash` digests the storage-precision value, so a write path
+        // that forgot to truncate cannot split the write/read preimage.
+        let ns = nanosecond_instant();
+        let mut written = sample_entry();
+        written.created_at = ns;
+        let mut read_back = sample_entry();
+        read_back.created_at = after_database_round_trip(ns);
+
+        assert_eq!(
+            compute_hash(&written).unwrap(),
+            compute_hash(&read_back).unwrap()
+        );
+    }
+
+    #[test]
+    fn storage_precision_timestamps_survive_a_database_round_trip() {
+        // The invariant the write path must hold: hash what will be stored, so
+        // recomputing from the row reproduces the digest.
+        let mut written = sample_entry();
+        written.created_at = to_storage_precision(nanosecond_instant());
+        let mut read_back = written.clone();
+        read_back.created_at = after_database_round_trip(read_back.created_at);
+
+        assert_eq!(
+            compute_hash(&written).unwrap(),
+            compute_hash(&read_back).unwrap()
+        );
     }
 
     #[test]
@@ -159,13 +308,46 @@ mod tests {
     }
 
     #[test]
-    fn presence_tag_distinguishes_none_from_empty() {
-        // Some(empty) must not collide with None — the presence tag prevents it.
+    fn omitted_fields_are_distinct_from_empty_values() {
         let mut none = sample_entry();
         none.actor_pubkey = None;
         let mut empty = sample_entry();
         empty.actor_pubkey = Some(Vec::new());
         assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+
+        none.object_id = None;
+        empty = none.clone();
+        empty.object_id = Some(String::new());
+        assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+
+        empty = none.clone();
+        empty.prev_hash = Some(Vec::new());
+        assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+        empty.prev_hash = Some(vec![0; 32]);
+        assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+    }
+
+    #[test]
+    fn object_id_and_detail_have_distinct_boundaries() {
+        let mut a = sample_entry();
+        a.object_id = Some("record1".into());
+        a.detail = serde_json::json!(23);
+        let mut b = a.clone();
+        b.object_id = Some("record12".into());
+        b.detail = serde_json::json!(3);
+        // The old encoding concatenated both pairs as "record123".
+        assert_ne!(compute_hash(&a).unwrap(), compute_hash(&b).unwrap());
+    }
+
+    #[test]
+    fn actor_and_object_id_have_distinct_boundaries() {
+        let mut a = sample_entry();
+        a.actor_pubkey = Some(vec![1; 32]);
+        let mut b = a.clone();
+        b.actor_pubkey = Some(vec![1; 31]);
+        b.object_id = Some(format!("\u{1}{}", a.object_id.as_deref().unwrap()));
+        // Moving the old presence byte into the object ID preserved its hash.
+        assert_ne!(compute_hash(&a).unwrap(), compute_hash(&b).unwrap());
     }
 
     #[test]

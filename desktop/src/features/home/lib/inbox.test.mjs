@@ -3,17 +3,24 @@ import test from "node:test";
 
 import {
   buildInboxItems,
+  findInboxItemByEventId,
   getInboxConversationId,
   getInboxTypeLabel,
 } from "./inbox.ts";
 
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const DM_CHANNEL_ID = "8ad375a7-6990-4b22-985f-e3fd34f634d7";
 
 const channels = [
   {
     id: CHANNEL_ID,
     name: "buzz-bugs",
     channelType: "stream",
+  },
+  {
+    id: DM_CHANNEL_ID,
+    name: "dm-alice",
+    channelType: "dm",
   },
 ];
 
@@ -161,6 +168,197 @@ test("thread groups use the latest row label even when the root was a mention", 
   });
 });
 
+test("thread groups resume at the oldest unread reply", () => {
+  const [inboxItem] = buildInboxItems({
+    channels,
+    feed: feedWith({
+      activity: [
+        item({
+          id: "reply-1",
+          category: "activity",
+          content: "Already read reply",
+          createdAt: 1,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "root-event", "", "reply"],
+          ],
+        }),
+        item({
+          id: "reply-2",
+          category: "activity",
+          content: "First unread reply",
+          createdAt: 2,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "reply-1", "", "reply"],
+          ],
+        }),
+        item({
+          id: "reply-3",
+          category: "activity",
+          content: "Newest unread reply",
+          createdAt: 3,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "reply-2", "", "reply"],
+          ],
+        }),
+      ],
+    }),
+    getThreadReadAt: (rootId) => (rootId === "root-event" ? 1 : null),
+  });
+
+  assert.equal(inboxItem.id, "reply-2");
+  assert.equal(inboxItem.preview, "First unread reply");
+  assert.equal(inboxItem.latestActivityAt, 3);
+  assert.equal(inboxItem.unreadCount, 2);
+});
+
+test("thread groups skip an individually read reply when choosing the resume point", () => {
+  const [inboxItem] = buildInboxItems({
+    channels,
+    feed: feedWith({
+      activity: [
+        item({
+          id: "reply-1",
+          createdAt: 1,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "root-event", "", "reply"],
+          ],
+        }),
+        item({
+          id: "reply-2",
+          createdAt: 2,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "reply-1", "", "reply"],
+          ],
+        }),
+      ],
+    }),
+    getMessageReadAt: (messageId) => (messageId === "reply-1" ? 1 : null),
+    getThreadReadAt: () => null,
+  });
+
+  assert.equal(inboxItem.id, "reply-2");
+  assert.equal(inboxItem.unreadCount, 1);
+});
+
+test("thread groups follow per-message unread state when the aggregate thread marker is newer", () => {
+  const [inboxItem] = buildInboxItems({
+    channels,
+    feed: feedWith({
+      activity: [
+        item({
+          id: "reply-1",
+          createdAt: 1,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "root-event", "", "reply"],
+          ],
+        }),
+        item({
+          id: "reply-2",
+          createdAt: 2,
+          tags: [
+            ["h", CHANNEL_ID],
+            ["e", "root-event", "", "root"],
+            ["e", "reply-1", "", "reply"],
+          ],
+        }),
+      ],
+    }),
+    getMessageReadAt: (messageId) => (messageId === "reply-1" ? 1 : null),
+    getThreadReadAt: () => 2,
+  });
+
+  assert.equal(inboxItem.id, "reply-2");
+  assert.equal(inboxItem.unreadCount, 1);
+});
+
+test("DMs are grouped by channel and represented by the first unread message", () => {
+  const inboxItems = buildInboxItems({
+    channels,
+    feed: feedWith({
+      activity: [
+        item({
+          id: "dm-1",
+          channelId: DM_CHANNEL_ID,
+          channelType: undefined,
+          content: "Already read",
+          createdAt: 1,
+          tags: [["h", DM_CHANNEL_ID]],
+        }),
+        item({
+          id: "dm-2",
+          channelId: DM_CHANNEL_ID,
+          channelType: undefined,
+          content: "First unread",
+          createdAt: 2,
+          tags: [["h", DM_CHANNEL_ID]],
+        }),
+        item({
+          id: "dm-3",
+          channelId: DM_CHANNEL_ID,
+          channelType: undefined,
+          content: "Newest unread",
+          createdAt: 3,
+          tags: [["h", DM_CHANNEL_ID]],
+        }),
+      ],
+    }),
+    getChannelReadAt: (channelId) => (channelId === DM_CHANNEL_ID ? 1 : null),
+  });
+
+  assert.equal(inboxItems.length, 1);
+  assert.equal(inboxItems[0].conversationId, `dm:${DM_CHANNEL_ID}`);
+  assert.equal(inboxItems[0].id, "dm-2");
+  assert.equal(inboxItems[0].preview, "First unread");
+  assert.equal(inboxItems[0].latestActivityAt, 3);
+  assert.equal(inboxItems[0].unreadCount, 2);
+  assert.deepEqual(
+    inboxItems[0].groupItems.map((groupItem) => groupItem.id),
+    ["dm-1", "dm-2", "dm-3"],
+  );
+  assert.equal(findInboxItemByEventId(inboxItems, "dm-3"), inboxItems[0]);
+});
+
+test("a fully read DM conversation falls back to its latest message", () => {
+  const [inboxItem] = buildInboxItems({
+    channels,
+    feed: feedWith({
+      activity: [
+        item({
+          id: "dm-1",
+          channelId: DM_CHANNEL_ID,
+          content: "Older",
+          createdAt: 1,
+          tags: [["h", DM_CHANNEL_ID]],
+        }),
+        item({
+          id: "dm-2",
+          channelId: DM_CHANNEL_ID,
+          content: "Latest",
+          createdAt: 2,
+          tags: [["h", DM_CHANNEL_ID]],
+        }),
+      ],
+    }),
+    getChannelReadAt: () => 2,
+  });
+
+  assert.equal(inboxItem.id, "dm-2");
+  assert.equal(inboxItem.preview, "Latest");
+  assert.equal(inboxItem.unreadCount, 0);
+});
+
 // ── conversationId stability tests ──────────────────────────────────────────
 
 test("conversationId is stable when a live reply advances the representative", () => {
@@ -269,6 +467,18 @@ test("getInboxConversationId falls back to eventId when no root tag", () => {
   assert.equal(
     getInboxConversationId(tags, "top-level-event"),
     "top-level-event",
+  );
+});
+
+test("getInboxConversationId groups direct messages by channel", () => {
+  assert.equal(
+    getInboxConversationId(
+      [["h", DM_CHANNEL_ID]],
+      "dm-event",
+      DM_CHANNEL_ID,
+      "dm",
+    ),
+    `dm:${DM_CHANNEL_ID}`,
   );
 });
 

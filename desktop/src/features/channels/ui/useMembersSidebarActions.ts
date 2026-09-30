@@ -1,3 +1,7 @@
+import {
+  agentPresenceStartBlockReason,
+  type AgentAvailabilityReader,
+} from "@/features/agents/lib/useAgentAvailability";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -12,18 +16,31 @@ import {
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import {
+  clearActiveTurnsForAgentOnStop,
+  useManagedAgentRuntimeAction,
+} from "@/features/agents/managedAgentRuntimeHooks";
+import { managedAgentPairAction } from "@/features/agents/managedAgentRuntimeStatus";
+import {
   channelsQueryKey,
   useRemoveChannelMemberMutation,
 } from "@/features/channels/hooks";
 import { removeChannelMember } from "@/shared/api/tauri";
-import type { ChannelMember, ManagedAgent } from "@/shared/api/types";
+import type {
+  ChannelMember,
+  ManagedAgent,
+  ManagedAgentRuntimeStatus,
+} from "@/shared/api/types";
 
 type UseMembersSidebarActionsOptions = {
   channelId: string | null;
+  getAvailability: AgentAvailabilityReader;
   controllableManagedBots: readonly ManagedAgent[];
   removableManagedBots: readonly ManagedAgent[];
   currentPubkey?: string;
   onOpenChange: (open: boolean) => void;
+  /** Active community relay. When set, local-agent lifecycle actions are
+   * scoped to this agent+community pair instead of the whole agent. */
+  relayUrl?: string;
 };
 
 type BulkAgentActionResult = {
@@ -37,15 +54,28 @@ const EMPTY_AGENT_CONTEXT = {
 
 export function useMembersSidebarActions({
   channelId,
+  getAvailability,
   controllableManagedBots,
   removableManagedBots,
   currentPubkey,
   onOpenChange,
+  relayUrl,
 }: UseMembersSidebarActionsOptions) {
   const queryClient = useQueryClient();
+  function assertStartNotBlockedByPresence(
+    agent: ManagedAgent,
+    lifecycleActive: boolean,
+  ) {
+    const reason = agentPresenceStartBlockReason(
+      lifecycleActive,
+      getAvailability(agent.pubkey),
+    );
+    if (reason) throw new Error(reason);
+  }
   const removeMemberMutation = useRemoveChannelMemberMutation(channelId);
   const startManagedAgentMutation = useStartManagedAgentMutation();
   const stopManagedAgentMutation = useStopManagedAgentMutation();
+  const runtimeActionMutation = useManagedAgentRuntimeAction();
   const [actionNoticeMessage, setActionNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -66,7 +96,8 @@ export function useMembersSidebarActions({
     activeActionKey !== null ||
     removeMemberMutation.isPending ||
     startManagedAgentMutation.isPending ||
-    stopManagedAgentMutation.isPending;
+    stopManagedAgentMutation.isPending ||
+    runtimeActionMutation.isPending;
 
   const clearActionFeedback = React.useCallback(() => {
     setActionNoticeMessage(null);
@@ -126,11 +157,36 @@ export function useMembersSidebarActions({
     }
   }
 
-  async function handleLifecycleAction(agent: ManagedAgent) {
+  async function handleLifecycleAction(
+    agent: ManagedAgent,
+    runtime?: ManagedAgentRuntimeStatus,
+  ) {
     clearActionFeedback();
     setActiveActionKey(`agent:${agent.pubkey}`);
 
     try {
+      // Local agents run one harness per agent+community pair. Scope the
+      // action to the active community so stopping the agent here never
+      // touches its runtimes in other communities. Provider agents keep the
+      // agent-wide deploy/!shutdown flow below.
+      if (agent.backend.type === "local" && relayUrl) {
+        const action = managedAgentPairAction(runtime);
+        assertStartNotBlockedByPresence(agent, action === "stop");
+        await runtimeActionMutation.mutateAsync({
+          action,
+          pubkey: agent.pubkey,
+          relayUrl,
+        });
+        setActionNoticeMessage(
+          action === "stop"
+            ? `Stopped ${agent.name} in this community.`
+            : action === "restart"
+              ? `Restarted ${agent.name} in this community.`
+              : `Started ${agent.name} in this community.`,
+        );
+        return;
+      }
+
       if (isManagedAgentActive(agent)) {
         await stopManagedAgentWithRules({
           agent,
@@ -138,6 +194,9 @@ export function useMembersSidebarActions({
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
         });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
         setActionNoticeMessage(
           agent.backend.type === "provider"
             ? `Shutdown command sent to ${agent.name}.`
@@ -146,6 +205,7 @@ export function useMembersSidebarActions({
         return;
       }
 
+      assertStartNotBlockedByPresence(agent, false);
       await startManagedAgentWithRules({
         agent,
         startManagedAgent: startManagedAgentMutation.mutateAsync,
@@ -163,10 +223,12 @@ export function useMembersSidebarActions({
   async function handleRespawnAll() {
     await runBulkAgentAction({
       action: async (agent) => {
+        assertStartNotBlockedByPresence(agent, isManagedAgentActive(agent));
         await respawnManagedAgentWithRules({
           agent,
           startManagedAgent: startManagedAgentMutation.mutateAsync,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
+          onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
         });
         return undefined;
       },
@@ -180,13 +242,18 @@ export function useMembersSidebarActions({
 
   async function handleStopAll() {
     await runBulkAgentAction({
-      action: (agent) =>
-        stopManagedAgentWithRules({
+      action: async (agent) => {
+        const result = await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
-        }),
+        });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
+        return result;
+      },
       actionKey: "bulk-stop",
       agents: stoppableManagedBots,
       failureMessage: "Failed to stop agent.",

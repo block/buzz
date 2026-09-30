@@ -3,7 +3,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchText";
 import { useHuddle } from "@/features/huddle";
+import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import {
   Attachment,
   AttachmentAction,
@@ -19,6 +21,7 @@ type WaveMessageAttachmentProps = {
   fallbackText: string;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
+  searchQuery?: string;
 };
 
 export function WaveMessageAttachment({
@@ -26,6 +29,7 @@ export function WaveMessageAttachment({
   fallbackText,
   huddleMemberPubkeys = [],
   huddleMemberPubkeysPending = false,
+  searchQuery,
 }: WaveMessageAttachmentProps) {
   const queryClient = useQueryClient();
   const { isStarting, startHuddle } = useHuddle();
@@ -45,9 +49,7 @@ export function WaveMessageAttachment({
         await startHuddle(channelId, [...huddleMemberPubkeys]);
         await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to start huddle.",
-        );
+        toast.error(formatHuddleActionError(error, "start"));
       }
     },
     [
@@ -69,7 +71,12 @@ export function WaveMessageAttachment({
         <span className="buzz-wave-hand">👋</span>
       </AttachmentMedia>
       <AttachmentContent>
-        <AttachmentTitle>{fallbackText}</AttachmentTitle>
+        <AttachmentTitle>
+          <HighlightedSearchText
+            query={searchQuery ?? ""}
+            text={fallbackText}
+          />
+        </AttachmentTitle>
         <AttachmentDescription>
           Start a huddle to talk to them.
         </AttachmentDescription>

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canManageCommunityMembers,
   loadRelayMembershipLookup,
   shouldWarnMissingMembershipSnapshot,
 } from "./relayMembers.ts";
@@ -33,6 +34,50 @@ test("membership relays request their membership snapshot", async () => {
   assert.equal(lookup.snapshotFound, true);
   assert.equal(lookup.membershipRequired, true);
   assert.equal(lookup.membership?.role, "admin");
+});
+
+test("community member management is hidden on open relays", () => {
+  assert.equal(
+    canManageCommunityMembers({
+      snapshotFound: false,
+      membershipRequired: false,
+      membership: null,
+    }),
+    false,
+  );
+});
+
+test("community member management is visible to closed-relay admins and owners", () => {
+  for (const role of ["admin", "owner"]) {
+    assert.equal(
+      canManageCommunityMembers({
+        snapshotFound: true,
+        membershipRequired: true,
+        membership: { pubkey: "a".repeat(64), role },
+      }),
+      true,
+    );
+  }
+});
+
+test("community member management stays hidden while loading and from closed-relay non-admins", () => {
+  assert.equal(canManageCommunityMembers(undefined), false);
+  assert.equal(
+    canManageCommunityMembers({
+      snapshotFound: true,
+      membershipRequired: true,
+      membership: { pubkey: "a".repeat(64), role: "member" },
+    }),
+    false,
+  );
+  assert.equal(
+    canManageCommunityMembers({
+      snapshotFound: true,
+      membershipRequired: true,
+      membership: null,
+    }),
+    false,
+  );
 });
 
 test("missing snapshot warns when the relay requires membership", () => {

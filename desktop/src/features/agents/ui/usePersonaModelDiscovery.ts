@@ -14,6 +14,10 @@ import {
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
 import { providerRequiresExplicitModel } from "./agentConfigOptions";
+import {
+  disambiguateModelLabels,
+  resolveModelLabel,
+} from "@/features/agents/lib/formatAgentModelLabel";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -66,7 +70,7 @@ export function getDiscoveredPersonaModelOptions(
               provider === "relay-mesh"
                 ? "Default (auto)"
                 : agentDefaultModel
-                  ? `Default model (${agentDefaultModel})`
+                  ? `Default model (${resolveModelLabel(agentDefaultModel, null, provider)})`
                   : "Default model",
           },
         ];
@@ -77,10 +81,13 @@ export function getDiscoveredPersonaModelOptions(
 
   return [
     ...defaultModelOption,
-    ...explicitModels.map((model) => ({
-      id: model.id,
-      label: model.name?.trim() || model.id,
-    })),
+    ...disambiguateModelLabels(
+      explicitModels.map((model) => ({
+        id: model.id,
+        label: resolveModelLabel(model.id, model.name, provider),
+      })),
+      provider,
+    ),
   ];
 }
 
@@ -142,6 +149,28 @@ export function deriveModelDiscoveryPending({
   );
 }
 
+/**
+ * True when discovery IPC resolved with a response that yielded no usable
+ * model options. Distinct from a thrown/unavailable failure (data stays null).
+ * Callers that omit the Model control or heal persisted values must gate on
+ * this — not on `discoveredModelOptions === null` alone.
+ */
+export function isSuccessfulEmptyDiscovery({
+  activeModelDiscoveryData,
+  discoveredModelOptions,
+  modelDiscoveryPending,
+}: {
+  activeModelDiscoveryData: AgentModelsResponse | null;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  modelDiscoveryPending: boolean;
+}): boolean {
+  return (
+    !modelDiscoveryPending &&
+    activeModelDiscoveryData !== null &&
+    discoveredModelOptions === null
+  );
+}
+
 export function usePersonaModelDiscovery({
   envVars,
   isCustomProviderEditing,
@@ -188,7 +217,9 @@ export function usePersonaModelDiscovery({
   // reference from a React Query refetch (same data, unstable ref) does not
   // abandon and re-issue an in-flight discovery IPC call.
   const selectedRuntimeAvailability = selectedRuntime?.availability;
+  const selectedRuntimeLabel = selectedRuntime?.label;
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
+  const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
   const canDiscoverModelOptions =
     open &&
     modelFieldVisible &&
@@ -221,7 +252,6 @@ export function usePersonaModelDiscovery({
     trimmedProvider,
   ]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry must re-run discovery for an unchanged cache key.
   React.useEffect(() => {
     if (modelDiscoveryKey === null || discoveryAgentCommand === null) {
       modelDiscoveryRequestRef.current += 1;
@@ -237,6 +267,7 @@ export function usePersonaModelDiscovery({
           formatModelDiscoveryErrorStatus(
             new Error(`Runtime not available: ${selectedRuntimeAvailability}`),
             trimmedProvider,
+            selectedRuntimeLabel,
           ),
         );
         setModelDiscoveryStatusKey(null);
@@ -276,6 +307,7 @@ export function usePersonaModelDiscovery({
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
         envVars,
+        definitionEnv: selectedRuntimeDefinitionEnv ?? {},
       })
         .then((response) => {
           if (modelDiscoveryRequestRef.current !== requestId) {
@@ -305,7 +337,11 @@ export function usePersonaModelDiscovery({
           setModelDiscoveryData(null);
           setModelDiscoveryDataKey(null);
           setModelDiscoveryStatus(
-            formatModelDiscoveryErrorStatus(error, trimmedProvider),
+            formatModelDiscoveryErrorStatus(
+              error,
+              trimmedProvider,
+              selectedRuntimeLabel,
+            ),
           );
           setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
@@ -318,7 +354,11 @@ export function usePersonaModelDiscovery({
 
     if (!shouldDebounceModelDiscovery) {
       runModelDiscovery();
-      return;
+      return () => {
+        if (modelDiscoveryRequestRef.current === requestId) {
+          modelDiscoveryRequestRef.current += 1;
+        }
+      };
     }
 
     const timeout = window.setTimeout(
@@ -340,13 +380,14 @@ export function usePersonaModelDiscovery({
     modelDiscoveryKey,
     selectedRuntimeAvailability,
     selectedRuntimeDefaultArgs,
+    selectedRuntimeDefinitionEnv,
+    selectedRuntimeLabel,
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);
 
   // One-shot slow-phase flip for status-line copy (#2261). Prefer a single
   // timeout over a 500ms elapsed ticker that re-renders the tree for no gain.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: A new key or retry restarts the slow-loading timer even when loading stays true.
   React.useEffect(() => {
     if (!modelDiscoveryLoading) {
       setDiscoveryLoadingSlow(false);
@@ -392,9 +433,12 @@ export function usePersonaModelDiscovery({
     activeModelDiscoveryData,
     activeModelDiscoveryStatus,
   });
+  const modelDiscoverySuccessfulEmpty = isSuccessfulEmptyDiscovery({
+    activeModelDiscoveryData,
+    discoveredModelOptions,
+    modelDiscoveryPending,
+  });
 
-  // null until slow phase — under-field line stays empty for the first
-  // MODEL_DISCOVERY_SLOW_MS; control already shows the short label.
   const modelDiscoveryLoadingMessage =
     modelDiscoveryPending && discoveryLoadingSlow
       ? formatModelDiscoveryLoadingMessage(true)
@@ -404,10 +448,11 @@ export function usePersonaModelDiscovery({
     discoveredModelOptions,
     modelDiscoveryLoading: modelDiscoveryPending,
     modelDiscoveryLoadingMessage,
+    retryModelDiscovery,
     modelDiscoveryStatus:
       modelDiscoveryPending || discoveredModelOptions !== null
         ? null
         : activeModelDiscoveryStatus,
-    retryModelDiscovery,
+    modelDiscoverySuccessfulEmpty,
   };
 }

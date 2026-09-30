@@ -45,9 +45,55 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// A serving write admitted before the lifecycle transition is still live.
+    /// This is an ordinary retryable drain condition, not a safety violation.
+    #[error(
+        "community {community_id} still has {active_count} active serving write lease(s): {operations:?}"
+    )]
+    ServingWritesNotDrained {
+        /// Community whose lifecycle transition must retry.
+        community_id: uuid::Uuid,
+        /// Number of currently unexpired serving-write leases.
+        active_count: i64,
+        /// Distinct operation categories holding those leases.
+        operations: Vec<String>,
+    },
+
+    /// A deletion safety invariant is structurally violated and requires
+    /// operator/code remediation rather than blind retry.
+    #[error("deletion safety error: {0}")]
+    DeletionSafety(String),
+
+    /// A complete read-state snapshot exceeds its bounded resource budget.
+    #[error("read-state snapshot exceeds event or byte limit")]
+    ReadStateSnapshotTooLarge,
+
+    /// A complete thread window exceeds its request-wide work allowance.
+    #[error("thread window exceeds {0} budget")]
+    ThreadWindowBudgetExceeded(&'static str),
+
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// A roster mutation would remove the last effective relay Operator,
+    /// leaving no one able to administer the deployment through the API.
+    /// The transaction is rolled back and the caller must add a replacement
+    /// Operator before demoting or deleting the current one.
+    #[error("operation would remove the last relay operator")]
+    LastOperator,
+}
+
+impl DbError {
+    /// Whether Postgres cancelled the statement (SQLSTATE 57014:
+    /// `statement_timeout` or an explicit cancel). Re-running such a query on
+    /// the writer would only repeat the same expensive work.
+    pub fn is_statement_cancelled(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        )
+    }
 }
 
 /// Convenience alias for `Result<T, DbError>`.

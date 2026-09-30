@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
@@ -30,6 +31,12 @@ Exception classifyRelayAuthFailure(String message) {
 }
 
 class RelaySocket {
+  /// Interval for sending a ping and awaiting its pong before disconnecting.
+  static const pingInterval = Duration(seconds: 30);
+
+  @visibleForTesting
+  static Duration debugPingInterval = pingInterval;
+
   final String _wsUrl;
   final String? _nsec;
   final void Function(List<dynamic> message) _onMessage;
@@ -63,7 +70,10 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+      _channel = IOWebSocketChannel.connect(
+        Uri.parse(_wsUrl),
+        pingInterval: debugPingInterval,
+      );
       await _channel!.ready;
     } catch (e) {
       _state = SocketState.disconnected;

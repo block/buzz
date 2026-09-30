@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -5,7 +7,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{parse_command_response, query_relay, submit_event},
+    relay::{get_relay_json, parse_command_response, query_relay, submit_event},
 };
 
 // ── Wire shapes (snake_case, consumed by tauriWorkflows.ts) ──────────────────
@@ -27,6 +29,8 @@ use crate::{
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WorkflowWire {
     pub id: String,
+    /// Event id of the current kind:30620 revision, used for conflict-protected updates.
+    pub revision: String,
     pub name: String,
     pub owner_pubkey: String,
     pub channel_id: Option<String>,
@@ -45,6 +49,41 @@ pub struct WorkflowSaveWire {
     pub workflow: WorkflowWire,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
+pub struct WorkflowRunCursorWire {
+    pub before: String,
+    pub before_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
+pub struct WorkflowRunsWire {
+    pub runs: Vec<Value>,
+    pub next: Option<WorkflowRunCursorWire>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
+pub struct WorkflowApprovalsWire {
+    pub approvals: Vec<Value>,
+}
+
+/// Canonical trigger acknowledgement consumed by the Desktop client.
+///
+/// The relay currently returns only `run_id`; the workflow id is the command
+/// input and a newly-created run always begins pending. Keeping that adaptation
+/// here prevents the frontend from guessing fields or confusing the trigger
+/// event id with the persisted run id.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WorkflowTriggerWire {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowTriggerAck {
+    run_id: String,
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -66,34 +105,73 @@ pub async fn get_channel_workflows(
     Ok(events.iter().map(workflow_from_event).collect())
 }
 
-/// Fetch workflows across many channels in a single relay round-trip.
+// Keep this aligned with the relay's aggregate explicit-`#h` request bound.
+// Each filter below carries exactly one explicit value so old relays retain the
+// known-compatible shape while current relays cannot reject large memberships.
+const WORKFLOW_QUERY_CHANNEL_BATCH_SIZE: usize = 128;
+
+/// Fetch workflows across many channels using bounded relay round-trips.
 ///
 /// The Workflows overview screen previously issued one `get_channel_workflows`
 /// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+/// relay POSTs. This sends one single-channel filter per channel, in requests of
+/// at most 128 filters. Using one multi-value `#h` filter is equivalent under
+/// NIP-01, but older relays incorrectly narrowed that shape to its first
+/// channel. Each `WorkflowWire` carries its own `channel_id` (from the event's
+/// `h` tag), so the frontend can still group results by channel. Neither this
+/// nor the per-channel command sets a `limit`, so batching does not change
+/// result completeness. Results are deduplicated by signed event ID in case a
+/// caller supplies duplicate channel IDs.
 #[tauri::command]
 pub async fn get_channels_workflows(
     channel_ids: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkflowWire>, String> {
-    if channel_ids.is_empty() {
-        return Ok(Vec::new());
+    let filter_batches = channel_workflow_filter_batches(channel_ids)?;
+    let mut seen_event_ids = HashSet::new();
+    let mut workflows = Vec::new();
+
+    for filters in filter_batches {
+        let events = query_relay(&state, &filters).await?;
+        append_unique_workflows(&mut workflows, &mut seen_event_ids, &events);
     }
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
+    Ok(workflows)
+}
 
-    Ok(events.iter().map(workflow_from_event).collect())
+fn append_unique_workflows(
+    workflows: &mut Vec<WorkflowWire>,
+    seen_event_ids: &mut HashSet<nostr::EventId>,
+    events: &[nostr::Event],
+) {
+    workflows.extend(
+        events
+            .iter()
+            .filter(|event| seen_event_ids.insert(event.id))
+            .map(workflow_from_event),
+    );
+}
+
+fn channel_workflow_filter_batches(channel_ids: Vec<String>) -> Result<Vec<Vec<Value>>, String> {
+    let filters = channel_workflow_filters(channel_ids)?;
+    Ok(filters
+        .chunks(WORKFLOW_QUERY_CHANNEL_BATCH_SIZE)
+        .map(<[Value]>::to_vec)
+        .collect())
+}
+
+fn channel_workflow_filters(channel_ids: Vec<String>) -> Result<Vec<Value>, String> {
+    channel_ids
+        .into_iter()
+        .map(|channel_id| {
+            let channel_id = uuid::Uuid::parse_str(channel_id.trim())
+                .map_err(|_| "invalid channel id".to_string())?;
+            Ok(serde_json::json!({
+                "kinds": [30620],
+                "#h": [channel_id.to_string()],
+            }))
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -121,26 +199,16 @@ pub async fn get_workflow(
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
-) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
-    let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    state: State<'_, AppState>,
+) -> Result<WorkflowRunsWire, String> {
+    let workflow_id =
+        uuid::Uuid::parse_str(&workflow_id).map_err(|_| "invalid workflow id".to_string())?;
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    get_relay_json(
+        &state,
+        &format!("/workflows/{workflow_id}/runs?limit={limit}"),
+    )
+    .await
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -152,7 +220,8 @@ pub async fn create_workflow(
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
     let workflow_id = uuid::Uuid::new_v4().to_string();
-    let builder = events::build_workflow_definition(&workflow_id, &channel_id, &yaml_definition)?;
+    let builder =
+        events::build_workflow_definition(&workflow_id, &channel_id, &yaml_definition, None)?;
     let result = submit_event(builder, &state).await?;
 
     // The relay returns `webhook_secret` in the OK response message for
@@ -170,6 +239,7 @@ pub async fn create_workflow(
     let now = now_secs();
     let workflow = workflow_record(
         workflow_id,
+        result.event_id,
         Some(channel_id),
         current_pubkey_hex(&state)?,
         &yaml_definition,
@@ -187,6 +257,7 @@ pub async fn create_workflow(
 pub async fn update_workflow(
     workflow_id: String,
     yaml_definition: String,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
     // Find the channel id (and creation time) from the existing workflow event
@@ -205,15 +276,24 @@ pub async fn update_workflow(
     let prior_event = prior
         .first()
         .ok_or_else(|| "workflow not found".to_string())?;
+    if prior_event.id.to_hex() != expected_revision {
+        return Err("workflow changed since it was loaded; refresh and try again".to_string());
+    }
     let channel_id = tag_value(prior_event, "h").ok_or_else(|| "workflow not found".to_string())?;
     let created_at = prior_event.created_at.as_secs() as i64;
 
-    let builder = events::build_workflow_definition(&workflow_id, &channel_id, &yaml_definition)?;
-    submit_event(builder, &state).await?;
+    let builder = events::build_workflow_definition(
+        &workflow_id,
+        &channel_id,
+        &yaml_definition,
+        Some(&expected_revision),
+    )?;
+    let result = submit_event(builder, &state).await?;
 
     let updated_at = now_secs();
     let workflow = workflow_record(
         workflow_id,
+        result.event_id,
         Some(channel_id),
         current_pubkey_hex(&state)?,
         &yaml_definition,
@@ -242,10 +322,10 @@ pub async fn delete_workflow(
 pub async fn trigger_workflow(
     workflow_id: String,
     state: State<'_, AppState>,
-) -> Result<Value, String> {
+) -> Result<WorkflowTriggerWire, String> {
     let builder = events::build_workflow_trigger(&workflow_id)?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    trigger_wire_from_message(workflow_id, &result.message)
 }
 
 // ── Approvals ────────────────────────────────────────────────────────────────
@@ -254,15 +334,17 @@ pub async fn trigger_workflow(
 pub async fn get_run_approvals(
     workflow_id: String,
     run_id: String,
-    _state: State<'_, AppState>,
-) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Like runs (see `get_workflow_runs`), reconstructing
-    // approvals into the frontend's `WorkflowApproval` shape from lifecycle
-    // events (46010/46011/46012) is a clearly-scoped follow-up tracked under
-    // TODO(workflow-runs). Return a bare empty array so the frontend's
-    // `getRunApprovals` (`raw.map(fromRawApproval)`) is safe.
-    let _ = (workflow_id, run_id);
-    Ok(Vec::new())
+    state: State<'_, AppState>,
+) -> Result<WorkflowApprovalsWire, String> {
+    let workflow_id =
+        uuid::Uuid::parse_str(&workflow_id).map_err(|_| "invalid workflow id".to_string())?;
+    let run_id =
+        uuid::Uuid::parse_str(&run_id).map_err(|_| "invalid workflow run id".to_string())?;
+    get_relay_json(
+        &state,
+        &format!("/workflows/{workflow_id}/runs/{run_id}/approvals"),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -288,6 +370,21 @@ pub async fn deny_approval(
 }
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────
+
+fn trigger_wire_from_message(
+    workflow_id: String,
+    message: &str,
+) -> Result<WorkflowTriggerWire, String> {
+    let ack: WorkflowTriggerAck = parse_command_response(message)?;
+    if ack.run_id.trim().is_empty() {
+        return Err("workflow trigger response contained an empty run_id".to_string());
+    }
+    Ok(WorkflowTriggerWire {
+        run_id: ack.run_id,
+        workflow_id,
+        status: "pending".to_string(),
+    })
+}
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
@@ -325,6 +422,7 @@ fn parse_definition(yaml: &str) -> Value {
 /// (from a relay event) and the write path (from local inputs).
 fn workflow_record(
     id: String,
+    revision: String,
     channel_id: Option<String>,
     owner_pubkey: String,
     yaml_definition: &str,
@@ -341,6 +439,7 @@ fn workflow_record(
 
     WorkflowWire {
         id,
+        revision,
         name,
         owner_pubkey,
         channel_id,
@@ -356,7 +455,15 @@ fn workflow_from_event(ev: &nostr::Event) -> WorkflowWire {
     let id = tag_value(ev, "d").unwrap_or_default();
     let channel_id = tag_value(ev, "h");
     let ts = ev.created_at.as_secs() as i64;
-    workflow_record(id, channel_id, ev.pubkey.to_hex(), &ev.content, ts, ts)
+    workflow_record(
+        id,
+        ev.id.to_hex(),
+        channel_id,
+        ev.pubkey.to_hex(),
+        &ev.content,
+        ts,
+        ts,
+    )
 }
 
 #[cfg(test)]

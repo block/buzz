@@ -19,6 +19,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
 ulid = "1"
+uuid = { workspace = true }
 axum = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 infer = "0.19"
@@ -31,7 +32,7 @@ tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 futures-core = "0.3"
+quick-xml = { version = "0.38", features = ["serialize"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-uuid = { workspace = true }

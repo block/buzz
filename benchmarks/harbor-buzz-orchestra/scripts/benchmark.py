@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """One-command benchmark: bring up the Buzz stack in Docker and run it.
 
-``just benchmark`` wraps this script. Defaults are leaderboard-eligible out
-of the box (Terminal-Bench 2.1, 5 attempts per problem, the Sonnet+Haiku
-team); every ``run_leaderboard.py`` selector passes through unchanged. The
-script owns everything around the run:
+``just benchmark`` wraps this script. Terminal-Bench defaults remain
+leaderboard-eligible (2.1, 5 attempts per problem, the Sonnet+Haiku team).
+Buzz-native tasks use their ``evaluation_layer`` metadata: regression runs
+default to 1 attempt and workflow runs default to 3. The script owns
+everything around the run:
 
 - A dedicated ``buzz-benchmark`` compose project reusing the production
   bundle (``deploy/compose/compose.yml``) plus the benchmark port overlay,
@@ -26,6 +27,8 @@ Run inside the testbed environment (the just recipe does this):
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import fnmatch
 import importlib.util
 import json
 import os
@@ -34,6 +37,8 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -52,6 +57,9 @@ GUI_BUNDLE_IDENTIFIER = "xyz.block.buzz.app.benchmark"
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 DEFAULT_ATTEMPTS = 5
+BUZZ_DATASET_ROOT = REPO_ROOT / "benchmarks" / "buzz-dataset"
+EVALUATION_LAYERS = ("regression", "workflow")
+LAYER_DEFAULT_ATTEMPTS = {"regression": 1, "workflow": 3}
 DEFAULT_MANIFEST = PACKAGE_ROOT / "manifests" / "tb-cobol-sonnet-haiku.yaml"
 DEFAULT_ENDPOINTS = PACKAGE_ROOT / "testbed" / "endpoints" / "anthropic-live.json"
 SCHEMA_SQL = PACKAGE_ROOT / "testbed" / "sql" / "benchmark_schema.sql"
@@ -69,6 +77,16 @@ FORWARDER_BINARY = "relay-forwarder"
 LINUX_TARGET_DIR = STATE_DIR / "linux-target"
 RUST_IMAGE = "rust:1.95-alpine"
 
+
+@dataclass(frozen=True)
+class BuzzTask:
+    """The identity and evaluation layer declared by one Buzz task."""
+
+    name: str
+    layer: str
+    path: Path
+
+
 _spec = importlib.util.spec_from_file_location(
     "run_leaderboard", Path(__file__).resolve().parent / "run_leaderboard.py"
 )
@@ -84,54 +102,237 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     problems = parser.add_mutually_exclusive_group()
     problems.add_argument(
-        "--dataset", "-d", default=None,
+        "--dataset",
+        "-d",
+        default=None,
         help=f"Registry dataset (default: {DEFAULT_DATASET})",
     )
     problems.add_argument(
         "--path", "-p", type=Path, help="Local task or dataset directory"
     )
     parser.add_argument(
-        "--include-task", "-i", action="append", default=[],
+        "--include-task",
+        "-i",
+        action="append",
+        default=[],
         help="Task name to include (glob, repeatable)",
     )
     parser.add_argument(
-        "--exclude-task", "-x", action="append", default=[],
+        "--exclude-task",
+        "-x",
+        action="append",
+        default=[],
         help="Task name to exclude (glob, repeatable)",
     )
     parser.add_argument(
-        "--attempts", "-k", type=int, default=DEFAULT_ATTEMPTS,
-        help=f"Runs per problem (default: {DEFAULT_ATTEMPTS}, the leaderboard requirement)",
+        "--layer",
+        choices=EVALUATION_LAYERS,
+        help="Buzz evaluation layer to run (selected from task metadata)",
     )
     parser.add_argument(
-        "--manifest", type=Path, default=DEFAULT_MANIFEST,
+        "--attempts",
+        "-k",
+        type=int,
+        default=None,
+        help="Runs per problem (default: Terminal-Bench 5, Buzz regression 1, "
+        "Buzz workflow 3)",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=DEFAULT_MANIFEST,
         help=f"Team manifest YAML (default: {DEFAULT_MANIFEST.name})",
     )
     parser.add_argument(
-        "--endpoint-config", type=Path, default=DEFAULT_ENDPOINTS,
+        "--endpoint-config",
+        type=Path,
+        default=DEFAULT_ENDPOINTS,
         help=f"Endpoint provider/API-key mapping (default: {DEFAULT_ENDPOINTS.name})",
     )
-    parser.add_argument("--n-concurrent", "-n", type=int, default=4, help="Concurrent trials")
+    parser.add_argument(
+        "--n-concurrent", "-n", type=int, default=4, help="Concurrent trials"
+    )
     parser.add_argument(
         "--jobs-dir", type=Path, default=PACKAGE_ROOT / "jobs", help="Job output root"
     )
-    parser.add_argument("--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)")
     parser.add_argument(
-        "--upload", action="store_true", help="Upload to Harbor Hub when the job finishes"
+        "--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)"
     )
     parser.add_argument(
-        "--gui", action="store_true",
+        "--upload",
+        action="store_true",
+        help="Upload to Harbor Hub when the job finishes",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
         help="Open the Buzz desktop app as the benchmark user to watch the run live",
     )
     parser.add_argument(
-        "--fresh", action="store_true",
+        "--fresh",
+        action="store_true",
         help="Reset first: drop the stack's Docker volumes and the benchmark "
-             "GUI's app state (keys in state.json are kept)",
+        "GUI's app state (keys in state.json are kept)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Print the underlying harbor command and exit (no stack bring-up)",
     )
     return parser.parse_args(argv)
+
+
+def _read_buzz_task(task_toml: Path) -> BuzzTask:
+    """Read and validate the evaluation metadata used by the wrapper."""
+    try:
+        config = tomllib.loads(task_toml.read_text())
+        name = config["task"]["name"]
+        layer = config["metadata"]["evaluation_layer"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise SystemExit(
+            f"invalid Buzz task metadata in {task_toml}: {error}"
+        ) from error
+    if not isinstance(name, str) or not name:
+        raise SystemExit(f"invalid Buzz task name in {task_toml}: expected a string")
+    if layer not in EVALUATION_LAYERS:
+        allowed = ", ".join(EVALUATION_LAYERS)
+        raise SystemExit(
+            f"invalid evaluation_layer in {task_toml}: {layer!r}; expected {allowed}"
+        )
+    return BuzzTask(name=name, layer=layer, path=task_toml.parent)
+
+
+def buzz_tasks_for_path(path: Path | None) -> tuple[BuzzTask, ...] | None:
+    """Return validated Buzz tasks, or ``None`` for an unrelated problem set."""
+    if path is None:
+        return None
+    root = BUZZ_DATASET_ROOT.resolve()
+    selected_path = path.resolve()
+    if not selected_path.is_relative_to(root):
+        return None
+    direct_task = selected_path / "task.toml"
+    task_files = (
+        [direct_task]
+        if direct_task.is_file()
+        else sorted(selected_path.glob("*/task.toml"))
+    )
+    if not task_files:
+        raise SystemExit(f"no Buzz tasks found under {path}")
+    tasks = tuple(_read_buzz_task(task_file) for task_file in task_files)
+    names = [task.name for task in tasks]
+    if len(names) != len(set(names)):
+        raise SystemExit(f"duplicate Buzz task names found under {path}")
+    return tasks
+
+
+def _matches_task(task: BuzzTask, pattern: str) -> bool:
+    return fnmatch.fnmatchcase(task.name, pattern) or fnmatch.fnmatchcase(
+        task.path.name, pattern
+    )
+
+
+def select_buzz_tasks(
+    tasks: tuple[BuzzTask, ...],
+    *,
+    layer: str | None,
+    include: list[str],
+    exclude: list[str],
+) -> tuple[BuzzTask, ...]:
+    """Apply layer metadata and the wrapper's existing name selectors."""
+    selected = tuple(task for task in tasks if layer is None or task.layer == layer)
+    if include:
+        selected = tuple(
+            task
+            for task in selected
+            if any(_matches_task(task, pattern) for pattern in include)
+        )
+    if exclude:
+        selected = tuple(
+            task
+            for task in selected
+            if not any(_matches_task(task, pattern) for pattern in exclude)
+        )
+    if not selected:
+        detail = f" for layer {layer!r}" if layer else ""
+        raise SystemExit(f"no Buzz tasks selected{detail}")
+    return selected
+
+
+def _copy_run_args(
+    args: argparse.Namespace,
+    *,
+    tasks: tuple[BuzzTask, ...] | None,
+    attempts: int,
+    job_name: str | None = None,
+) -> argparse.Namespace:
+    run_args = argparse.Namespace(**vars(args))
+    run_args.attempts = attempts
+    run_args.job_name = args.job_name if job_name is None else job_name
+    if tasks is not None:
+        # Harbor filters local-path datasets by directory basename. Keep the
+        # canonical task.toml identity for metadata, but pass Harbor its key.
+        run_args.include_task = [task.path.name for task in tasks]
+        run_args.exclude_task = []
+    return run_args
+
+
+def plan_benchmark_runs(
+    args: argparse.Namespace, *, stamp: str | None = None
+) -> tuple[argparse.Namespace, ...]:
+    """Resolve selectors and per-layer attempts into one or more Harbor jobs."""
+    tasks = buzz_tasks_for_path(args.path)
+    if args.layer and tasks is None:
+        raise SystemExit(
+            "--layer is only valid with --path under benchmarks/buzz-dataset"
+        )
+    if tasks is None:
+        return (
+            _copy_run_args(
+                args,
+                tasks=None,
+                attempts=(
+                    args.attempts if args.attempts is not None else DEFAULT_ATTEMPTS
+                ),
+            ),
+        )
+
+    selected = select_buzz_tasks(
+        tasks,
+        layer=args.layer,
+        include=args.include_task,
+        exclude=args.exclude_task,
+    )
+    if args.attempts is not None:
+        return (_copy_run_args(args, tasks=selected, attempts=args.attempts),)
+
+    layers = (args.layer,) if args.layer else EVALUATION_LAYERS
+    groups = tuple(
+        (layer, tuple(task for task in selected if task.layer == layer))
+        for layer in layers
+    )
+    groups = tuple((layer, group) for layer, group in groups if group)
+    if len(groups) == 1:
+        layer, group = groups[0]
+        return (
+            _copy_run_args(args, tasks=group, attempts=LAYER_DEFAULT_ATTEMPTS[layer]),
+        )
+
+    if stamp is None:
+        stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    if args.job_name:
+        base_job_name = args.job_name
+    else:
+        manifest = run_leaderboard.yaml.safe_load(args.manifest.read_text())
+        base_job_name = f"lb-{manifest.get('condition', 'team')}-{stamp}"
+    return tuple(
+        _copy_run_args(
+            args,
+            tasks=group,
+            attempts=LAYER_DEFAULT_ATTEMPTS[layer],
+            job_name=f"{base_job_name}-{layer}",
+        )
+        for layer, group in groups
+    )
 
 
 # -- state: secrets and identities, generated once --------------------------
@@ -153,7 +354,6 @@ def load_state() -> dict[str, str]:
             "user_secret_key": user.secret_key,
             "postgres_password": secrets.token_urlsafe(24),
             "redis_password": secrets.token_urlsafe(24),
-            "typesense_api_key": secrets.token_hex(16),
             "s3_access_key": secrets.token_hex(10),
             "s3_secret_key": secrets.token_hex(20),
             "git_hook_hmac_secret": secrets.token_hex(32),
@@ -202,7 +402,6 @@ def write_env_file(state: dict[str, str]) -> Path:
         "POSTGRES_USER": "buzz",
         "POSTGRES_PASSWORD": state["postgres_password"],
         "REDIS_PASSWORD": state["redis_password"],
-        "TYPESENSE_API_KEY": state["typesense_api_key"],
         "BUZZ_S3_ACCESS_KEY": state["s3_access_key"],
         "BUZZ_S3_SECRET_KEY": state["s3_secret_key"],
         "BUZZ_S3_BUCKET": "buzz-media",
@@ -217,14 +416,11 @@ def write_env_file(state: dict[str, str]) -> Path:
 
 def postgres_dsn(state: dict[str, str]) -> str:
     return (
-        f"postgresql://buzz:{state['postgres_password']}"
-        f"@127.0.0.1:{PG_HOST_PORT}/buzz"
+        f"postgresql://buzz:{state['postgres_password']}@127.0.0.1:{PG_HOST_PORT}/buzz"
     )
 
 
-def write_provisioner_config(
-    state: dict[str, str], endpoint_config: Path
-) -> Path:
+def write_provisioner_config(state: dict[str, str], endpoint_config: Path) -> Path:
     """Resolve per-endpoint API keys from the environment and write the
     provisioner config: pinned user, keep-channels teardown."""
     endpoints = json.loads(endpoint_config.read_text())
@@ -262,10 +458,14 @@ def write_provisioner_config(
 
 def compose_command(*args: str) -> list[str]:
     command = [
-        "docker", "compose",
-        "--project-name", COMPOSE_PROJECT,
-        "--project-directory", str(STATE_DIR),
-        "--env-file", str(STATE_DIR / ".env"),
+        "docker",
+        "compose",
+        "--project-name",
+        COMPOSE_PROJECT,
+        "--project-directory",
+        str(STATE_DIR),
+        "--env-file",
+        str(STATE_DIR / ".env"),
     ]
     for file in COMPOSE_FILES:
         command += ["-f", str(file)]
@@ -360,7 +560,9 @@ def linux_triple() -> str:
     """The musl triple matching the Docker engine that runs task containers."""
     arch = subprocess.run(
         ["docker", "version", "--format", "{{.Server.Arch}}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     try:
         return {
@@ -385,22 +587,32 @@ def ensure_agent_binaries() -> Path:
     targets = AGENT_BINARIES + (FORWARDER_BINARY,)
     if all((bin_dir / name).is_file() for name in targets):
         return bin_dir
-    print(f"Linux agent binaries missing — cross-building for {triple} "
-          f"in {RUST_IMAGE} (first run only, ~2 min)...")
+    print(
+        f"Linux agent binaries missing — cross-building for {triple} "
+        f"in {RUST_IMAGE} (first run only, ~2 min)..."
+    )
     LINUX_TARGET_DIR.mkdir(parents=True, exist_ok=True)
     (STATE_DIR / "cargo-registry").mkdir(exist_ok=True)
     packages = [arg for name in AGENT_BINARIES for arg in ("-p", name)]
     forwarder_src = FORWARDER_SOURCE.relative_to(REPO_ROOT)
     subprocess.run(
         [
-            "docker", "run", "--rm",
-            "-v", f"{REPO_ROOT}:/src:ro",
-            "-v", f"{LINUX_TARGET_DIR}:/target",
-            "-v", f"{STATE_DIR / 'cargo-registry'}:/usr/local/cargo/registry",
-            "-e", "CARGO_TARGET_DIR=/target",
-            "-w", "/src",
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{REPO_ROOT}:/src:ro",
+            "-v",
+            f"{LINUX_TARGET_DIR}:/target",
+            "-v",
+            f"{STATE_DIR / 'cargo-registry'}:/usr/local/cargo/registry",
+            "-e",
+            "CARGO_TARGET_DIR=/target",
+            "-w",
+            "/src",
             RUST_IMAGE,
-            "sh", "-c",
+            "sh",
+            "-c",
             "apk add --no-cache musl-dev >/dev/null && "
             f"cargo build --release --locked --target {triple} "
             + " ".join(packages)
@@ -429,8 +641,13 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
     """
     subprocess.run(
         compose_command(
-            "exec", "-T", "relay",
-            "buzz-admin", "add-member", "--pubkey", state["user_pubkey"],
+            "exec",
+            "-T",
+            "relay",
+            "buzz-admin",
+            "add-member",
+            "--pubkey",
+            state["user_pubkey"],
         ),
         check=True,
     )
@@ -445,12 +662,20 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
         ["rustc", "-vV"], capture_output=True, text=True, check=True
     ).stdout
     triple = next(
-        line.split(": ", 1)[1] for line in target.splitlines() if line.startswith("host: ")
+        line.split(": ", 1)[1]
+        for line in target.splitlines()
+        if line.startswith("host: ")
     )
     sidecar_dir = desktop_dir / "src-tauri" / "binaries"
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     binaries = ensure_binaries()
-    for name in ("buzz-acp", "buzz-agent", "buzz-dev-mcp", "git-credential-nostr", "buzz"):
+    for name in (
+        "buzz-acp",
+        "buzz-agent",
+        "buzz-dev-mcp",
+        "git-credential-nostr",
+        "buzz",
+    ):
         stub = sidecar_dir / f"{name}-{triple}"
         if not stub.exists():
             stub.touch()
@@ -498,21 +723,30 @@ def leaderboard_argv(
     for pattern in args.exclude_task:
         argv += ["--exclude-task", pattern]
     argv += [
-        "--attempts", str(args.attempts),
-        "--manifest", str(args.manifest),
-        "--endpoint-config", str(args.endpoint_config),
-        "--provisioner-config", str(provisioner_config),
-        "--agent-bin-dir", str(agent_bin_dir),
+        "--attempts",
+        str(args.attempts),
+        "--manifest",
+        str(args.manifest),
+        "--endpoint-config",
+        str(args.endpoint_config),
+        "--provisioner-config",
+        str(provisioner_config),
+        "--agent-bin-dir",
+        str(agent_bin_dir),
         # The relay as reachable from inside a task container: Docker's
         # host alias, bridged to the canonical localhost address by the
         # uploaded forwarder. Override the alias with
         # BUZZ_BENCHMARK_DOCKER_HOST if your engine exposes the host
         # differently.
         "--relay-gateway",
-        f"{os.environ.get('BUZZ_BENCHMARK_DOCKER_HOST', 'host.docker.internal')}"
-        f":{RELAY_HTTP_PORT}",
-        "--n-concurrent", str(args.n_concurrent),
-        "--jobs-dir", str(args.jobs_dir),
+        (
+            f"{os.environ.get('BUZZ_BENCHMARK_DOCKER_HOST', 'host.docker.internal')}"
+            f":{RELAY_HTTP_PORT}"
+        ),
+        "--n-concurrent",
+        str(args.n_concurrent),
+        "--jobs-dir",
+        str(args.jobs_dir),
     ]
     if args.job_name:
         argv += ["--job-name", args.job_name]
@@ -525,6 +759,7 @@ def leaderboard_argv(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    runs = plan_benchmark_runs(args)
     state = load_state()
     print_user_identity(state)
     write_env_file(state)
@@ -541,9 +776,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.gui:
             launch_gui(state)
 
-    return run_leaderboard.main(
-        leaderboard_argv(args, provisioner_config, agent_bin_dir)
-    )
+    for run_args in runs:
+        result = run_leaderboard.main(
+            leaderboard_argv(run_args, provisioner_config, agent_bin_dir)
+        )
+        if result != 0:
+            return result
+    return 0
 
 
 if __name__ == "__main__":

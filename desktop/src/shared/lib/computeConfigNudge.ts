@@ -45,3 +45,15 @@ export function selectProseOrNudge(
 ): ReactNode {
   return configNudge === null ? markdownNode : null;
 }
+
+/**
+ * Keeps inline content visible beside the nudge card when the prose node is
+ * suppressed. This preserves controls, such as a video-review timecode, that
+ * were extracted from the original message before the sentinel was removed.
+ */
+export function selectNudgeLeadingContent(
+  configNudge: ConfigNudgePayload | null,
+  leadingInlineContent: ReactNode | undefined,
+): ReactNode {
+  return configNudge !== null ? leadingInlineContent : null;
+}

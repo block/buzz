@@ -109,8 +109,16 @@ def test_forbidden_flags_are_not_accepted(tmp_path):
     for flag in FORBIDDEN_FLAGS:
         with pytest.raises(SystemExit):
             run_leaderboard.parse_args(
-                ["--dataset", "d", "--attempts", "5",
-                 "--agent-bin-dir", str(tmp_path), flag, "1"]
+                [
+                    "--dataset",
+                    "d",
+                    "--attempts",
+                    "5",
+                    "--agent-bin-dir",
+                    str(tmp_path),
+                    flag,
+                    "1",
+                ]
             )
 
 

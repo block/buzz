@@ -6,26 +6,31 @@ import {
   reconcileObserverArchive,
   startReconciliation,
 } from "./useObserverArchiveSeed.ts";
-import { ArchiveSyncManager } from "./archiveSyncManager.ts";
 
 // ── Fake deps factory ────────────────────────────────────────────────────────
 
-function makeDeps({
-  policyOn = false,
-  mergeShouldFail = false,
-  flagShouldFail = false,
-} = {}) {
+function makeDeps({ mergeShouldFail = false, explicitChoice = "unset" } = {}) {
   const calls = { merge: [] };
+  // Simulates a per-pubkey localStorage map. "unset" means no choice stored.
+  const choices = new Map();
+  if (explicitChoice !== "unset") {
+    // Pre-populate a choice for any pubkey that asks (single-pubkey tests).
+    choices.set("__default__", explicitChoice);
+  }
 
   return {
     calls,
-    observerArchiveDefaultEnabled: async () => {
-      if (flagShouldFail) throw new Error("flag check failed");
-      return policyOn;
-    },
     mergeSaveSubscriptionKinds: async (kind) => {
       if (mergeShouldFail) throw new Error("merge failed");
       calls.merge.push({ kind });
+    },
+    readExplicitChoice: (pubkey) => {
+      if (choices.has(pubkey)) return choices.get(pubkey);
+      if (choices.has("__default__")) return choices.get("__default__");
+      return "unset";
+    },
+    setExplicitChoice: (pubkey, enabled) => {
+      choices.set(pubkey, enabled);
     },
   };
 }
@@ -35,154 +40,111 @@ function tick() {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-// ── Internal policy build ────────────────────────────────────────────────────
+// ── Reconciliation always seeds 24200 ────────────────────────────────────────
 
-test("test_internal_policy_seeds_24200", async () => {
-  const deps = makeDeps({ policyOn: true });
-  await reconcileObserverArchive(deps);
+test("test_reconcile_always_seeds_24200", async () => {
+  const deps = makeDeps();
+  await reconcileObserverArchive("pk1", deps);
 
   assert.equal(deps.calls.merge.length, 1);
   assert.equal(deps.calls.merge[0].kind, 24200);
 });
 
-// ── OSS build — policy-off is a pure no-op ──────────────────────────────────
-
-test("test_oss_policy_off_no_merge", async () => {
-  const deps = makeDeps({ policyOn: false });
-  await reconcileObserverArchive(deps);
-
-  assert.equal(deps.calls.merge.length, 0, "OSS must not merge");
-});
-
 // ── Failure behavior ─────────────────────────────────────────────────────────
 
 test("test_merge_failure_rejects", async () => {
-  const deps = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const deps = makeDeps({ mergeShouldFail: true });
 
-  await assert.rejects(() => reconcileObserverArchive(deps), {
+  await assert.rejects(() => reconcileObserverArchive("pk1", deps), {
     message: "merge failed",
   });
 });
 
-test("test_flag_check_failure_rejects", async () => {
-  const deps = makeDeps({ flagShouldFail: true });
+// ── Explicit opt-out survives restart ────────────────────────────────────────
 
-  await assert.rejects(() => reconcileObserverArchive(deps), {
-    message: "flag check failed",
-  });
-  assert.equal(deps.calls.merge.length, 0);
-});
+test("test_reconcile_explicit_optout_skips_merge", async () => {
+  // Simulate a user who explicitly opted out (choice stored as false).
+  const deps = makeDeps({ explicitChoice: false });
+  await reconcileObserverArchive("pk1", deps);
 
-// ── Startup ordering (real ArchiveSyncManager + real reconciler) ─────────────
-
-test("test_archive_sync_blocked_until_reconciliation", async () => {
-  let resolveFlag;
-  const flagPromise = new Promise((resolve) => {
-    resolveFlag = resolve;
-  });
-
-  const subscribeCalls = [];
-  const fakeRelay = {
-    subscribeLive(filter, _callback) {
-      subscribeCalls.push(filter);
-      return Promise.resolve(async () => {});
-    },
-  };
-
-  const reconcilerDeps = {
-    observerArchiveDefaultEnabled: () => flagPromise,
-    mergeSaveSubscriptionKinds: async () => {},
-  };
-
-  const manager = new ArchiveSyncManager({
-    relayClient: fakeRelay,
-    listSaveSubscriptions: async () => [
-      {
-        scopeType: "owner_p",
-        scopeValue: "pk1",
-        kinds: [24200],
-        identityPubkey: "pk1",
-        relayUrl: "wss://r",
-        createdAt: 0,
-      },
-    ],
-    archiveEvents: async () => ({ persisted: 0, dropped: 0 }),
-    onSubscriptionChange: () => () => {},
-  });
-
-  // Start reconciliation (pending — flag check not yet resolved).
-  const reconciling = reconcileObserverArchive(reconcilerDeps);
-
-  // Before reconciliation resolves, manager must not have been started.
-  await tick();
   assert.equal(
-    subscribeCalls.length,
+    deps.calls.merge.length,
     0,
-    "subscribeLive must not run before reconciliation",
+    "merge must NOT fire when user has explicitly opted out",
   );
-
-  // Resolve reconciliation — now start the manager (simulating the gate).
-  resolveFlag(true);
-  await reconciling;
-  await manager.start();
-
-  assert.ok(
-    subscribeCalls.length > 0,
-    "subscribeLive must run after gate opens",
-  );
-  const hasOwnerP = subscribeCalls.some((f) => f["#p"]?.length > 0);
-  assert.ok(hasOwnerP, "subscription must use owner_p (#p) filter");
-  const hasKind24200 = subscribeCalls.some((f) => f.kinds?.includes(24200));
-  assert.ok(hasKind24200, "subscription filter must include kind 24200");
-
-  manager.destroy();
 });
 
-test("test_archive_sync_blocked_on_reconciliation_rejection", async () => {
-  const reconcilerDeps = makeDeps({ policyOn: true, mergeShouldFail: true });
+test("test_reconcile_storage_error_treated_as_fail_closed", async () => {
+  // Storage errors return `true` (not "unset"), which means reconcile
+  // treats them as an already-set choice and skips the merge.
+  // This prevents auto-seeding from silently overriding a stored opt-out
+  // that we couldn't read due to the error.
+  const deps = makeDeps();
+  // Override readExplicitChoice to simulate a storage error returning `true`.
+  deps.readExplicitChoice = () => true;
 
-  const subscribeCalls = [];
-  const fakeRelay = {
-    subscribeLive(filter) {
-      subscribeCalls.push(filter);
-      return Promise.resolve(async () => {});
-    },
-  };
+  await reconcileObserverArchive("pk1", deps);
 
-  const manager = new ArchiveSyncManager({
-    relayClient: fakeRelay,
-    listSaveSubscriptions: async () => [
-      {
-        scopeType: "owner_p",
-        scopeValue: "pk1",
-        kinds: [24200],
-        identityPubkey: "pk1",
-        relayUrl: "wss://r",
-        createdAt: 0,
-      },
-    ],
-    archiveEvents: async () => ({ persisted: 0, dropped: 0 }),
-    onSubscriptionChange: () => () => {},
-  });
-
-  // Reconciliation rejects — gate must remain closed.
-  let rejected = false;
-  try {
-    await reconcileObserverArchive(reconcilerDeps);
-  } catch {
-    rejected = true;
-  }
-  assert.ok(rejected, "reconciliation must reject on merge failure");
-
-  // Manager must NOT start after failed reconciliation.
   assert.equal(
-    subscribeCalls.length,
+    deps.calls.merge.length,
     0,
-    "subscribeLive must not run after failed reconciliation",
+    "merge must NOT fire when storage error returns fail-closed true",
   );
-
-  manager.destroy();
 });
+
+test("test_reconcile_explicit_optin_already_seeded_skips_merge", async () => {
+  // Simulate a user who already has an explicit opt-in recorded (already
+  // seeded on a prior run). The new tri-state model skips merge for any
+  // non-"unset" choice — re-merging is idempotent but wasteful.
+  const deps = makeDeps({ explicitChoice: true });
+  await reconcileObserverArchive("pk1", deps);
+
+  assert.equal(
+    deps.calls.merge.length,
+    0,
+    "merge must NOT fire when choice is already recorded as opted-in",
+  );
+});
+
+test("test_reconcile_no_prior_choice_seeds_and_records_choice", async () => {
+  const deps = makeDeps(); // no explicitChoice set
+  await reconcileObserverArchive("pk1", deps);
+
+  assert.equal(deps.calls.merge.length, 1, "merge must fire on first run");
+  // After reconciliation the choice should now be recorded as true.
+  assert.equal(
+    deps.readExplicitChoice("pk1"),
+    true,
+    "stored choice must be true after seed",
+  );
+});
+
+test("test_reconcile_toggle_off_then_restart_does_not_remerge", async () => {
+  // This is the exact failure mode Paul described:
+  // 1. User toggles OFF → setExplicitChoice("pk1", false)
+  // 2. App restarts → reconcileObserverArchive runs again
+  // 3. Expected: merge is NOT called (opt-out preserved)
+  const deps = makeDeps();
+
+  // Simulate the card's handleObserverToggle(false) path: explicit opt-out stored.
+  deps.setExplicitChoice("pk1", false);
+
+  // Simulate app restart — reconciliation fires.
+  await reconcileObserverArchive("pk1", deps);
+
+  assert.equal(
+    deps.calls.merge.length,
+    0,
+    "merge must NOT fire after explicit opt-out on app restart",
+  );
+});
+
+// ── Startup ordering ─────────────────────────────────────────────────────────
+//
+// The two ordering tests that lived here drove `ArchiveSyncManager` directly.
+// That manager is gone: archive sync runs in Rust and the renderer keeps only
+// the start gate. The same invariant — no listener opens before kind 24200 is
+// seeded — is now asserted against the real gate in useArchiveSync.test.mjs.
 
 // ── Identity-scoped readiness (exercises exported isReconciledFor) ──────────
 
@@ -207,8 +169,8 @@ test("test_identity_change_resets_readiness", async () => {
   let reconciledPubkey = null;
 
   // Identity A reconciles successfully.
-  const depsA = makeDeps({ policyOn: true });
-  await reconcileObserverArchive(depsA);
+  const depsA = makeDeps();
+  await reconcileObserverArchive("pkA", depsA);
   reconciledPubkey = "pkA";
   assert.equal(
     isReconciledFor(reconciledPubkey, "pkA"),
@@ -224,8 +186,8 @@ test("test_identity_change_resets_readiness", async () => {
   );
 
   // B reconciles successfully.
-  const depsB = makeDeps({ policyOn: true });
-  await reconcileObserverArchive(depsB);
+  const depsB = makeDeps();
+  await reconcileObserverArchive("pkB", depsB);
   reconciledPubkey = "pkB";
   assert.equal(
     isReconciledFor(reconciledPubkey, "pkB"),
@@ -243,14 +205,14 @@ test("test_identity_change_b_failure_stays_closed", async () => {
   let reconciledPubkey = null;
 
   // Identity A reconciles successfully.
-  const depsA = makeDeps({ policyOn: true });
-  await reconcileObserverArchive(depsA);
+  const depsA = makeDeps();
+  await reconcileObserverArchive("pkA", depsA);
   reconciledPubkey = "pkA";
 
   // Identity changes to B — B's reconciliation fails.
-  const depsB = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const depsB = makeDeps({ mergeShouldFail: true });
   try {
-    await reconcileObserverArchive(depsB);
+    await reconcileObserverArchive("pkB", depsB);
     reconciledPubkey = "pkB";
   } catch {
     // B failed — reconciledPubkey stays "pkA" (stale).
@@ -272,7 +234,7 @@ test("test_identity_change_b_failure_stays_closed", async () => {
 // re-running an effect with new deps (identity switch).
 
 test("test_startReconciliation_calls_onReady_after_success", async () => {
-  const deps = makeDeps({ policyOn: true });
+  const deps = makeDeps();
   const readyCalls = [];
 
   startReconciliation("pk1", deps, (pubkey) => readyCalls.push(pubkey));
@@ -283,13 +245,14 @@ test("test_startReconciliation_calls_onReady_after_success", async () => {
 });
 
 test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async () => {
-  let resolveFlag;
-  const flagPromise = new Promise((resolve) => {
-    resolveFlag = resolve;
+  let resolveMerge;
+  const mergePromise = new Promise((resolve) => {
+    resolveMerge = resolve;
   });
   const deps = {
-    observerArchiveDefaultEnabled: () => flagPromise,
-    mergeSaveSubscriptionKinds: async () => {},
+    mergeSaveSubscriptionKinds: () => mergePromise,
+    readExplicitChoice: () => "unset",
+    setExplicitChoice: () => {},
   };
   const readyCalls = [];
 
@@ -297,9 +260,9 @@ test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async
     readyCalls.push(pubkey),
   );
 
-  // Unmount (or re-run effect) before the flag check resolves.
+  // Unmount (or re-run effect) before the merge resolves.
   cancel();
-  resolveFlag(true);
+  resolveMerge();
   await tick();
 
   assert.deepEqual(
@@ -310,15 +273,16 @@ test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async
 });
 
 test("test_startReconciliation_identity_switch_stale_completion_suppressed", async () => {
-  let resolveFlagA;
-  const flagPromiseA = new Promise((resolve) => {
-    resolveFlagA = resolve;
+  let resolveMergeA;
+  const mergePromiseA = new Promise((resolve) => {
+    resolveMergeA = resolve;
   });
   const depsA = {
-    observerArchiveDefaultEnabled: () => flagPromiseA,
-    mergeSaveSubscriptionKinds: async () => {},
+    mergeSaveSubscriptionKinds: () => mergePromiseA,
+    readExplicitChoice: () => "unset",
+    setExplicitChoice: () => {},
   };
-  const depsB = makeDeps({ policyOn: true });
+  const depsB = makeDeps();
   const readyCalls = [];
   const onReady = (pubkey) => readyCalls.push(pubkey);
 
@@ -330,8 +294,8 @@ test("test_startReconciliation_identity_switch_stale_completion_suppressed", asy
   cancelA();
   startReconciliation("pkB", depsB, onReady);
 
-  // A's flag check now resolves late — its stale completion must not fire.
-  resolveFlagA(true);
+  // A's merge now resolves late — its stale completion must not fire.
+  resolveMergeA();
   await tick();
 
   assert.deepEqual(
@@ -342,7 +306,7 @@ test("test_startReconciliation_identity_switch_stale_completion_suppressed", asy
 });
 
 test("test_startReconciliation_failure_does_not_call_onReady", async () => {
-  const deps = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const deps = makeDeps({ mergeShouldFail: true });
   const readyCalls = [];
 
   startReconciliation("pk1", deps, (pubkey) => readyCalls.push(pubkey));
@@ -354,8 +318,8 @@ test("test_startReconciliation_failure_does_not_call_onReady", async () => {
 // ── Metric seed independence ─────────────────────────────────────────────────
 
 test("test_metric_seed_remains_independently_deferrable", async () => {
-  const deps = makeDeps({ policyOn: true });
-  await reconcileObserverArchive(deps);
+  const deps = makeDeps();
+  await reconcileObserverArchive("pk1", deps);
 
   assert.equal(deps.calls.merge.length, 1);
   assert.equal(deps.calls.merge[0].kind, 24200, "must only touch kind 24200");

@@ -34,7 +34,7 @@ export function formatModelDiscoveryLoadingMessage(
   slow: boolean,
 ): string | null {
   if (!slow) return null;
-  return "Still loading models… first launch of some harnesses (especially Codex) can take 20–60 seconds.";
+  return "Still loading models… the first launch can take longer.";
 }
 
 function errorMessage(error: unknown): string {
@@ -103,6 +103,7 @@ function isProgramNotFoundError(message: string): boolean {
 export function formatModelDiscoveryErrorStatus(
   error: unknown,
   provider: string,
+  agentLabel?: string,
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
 
@@ -150,6 +151,19 @@ export function formatModelDiscoveryErrorStatus(
     };
   }
 
+  // Spec-reserved auth error text (agent-client-protocol ErrorCode::AuthRequired),
+  // surfaced verbatim through buzz-acp's stderr — generic across conformant
+  // harnesses (e.g. cursor-agent when not signed in). Match the message text,
+  // NOT code -32000: that code is also the catch-all fallback for unclassified
+  // errors, so matching it would swallow unrelated failures into "sign in".
+  if (message.toLowerCase().includes("authentication required")) {
+    const label = agentLabel?.trim();
+    return {
+      message: `${label || "This agent"} requires sign-in before models can load. Sign in with the ${label || "agent's"} CLI in a terminal, then try again.`,
+      tone: "warning",
+    };
+  }
+
   if (message.includes("ANTHROPIC_API_KEY required")) {
     return {
       message: "Enter an Anthropic API key to load Anthropic models.",
@@ -159,7 +173,8 @@ export function formatModelDiscoveryErrorStatus(
 
   if (message.includes("OPENAI_COMPAT_API_KEY required")) {
     return {
-      message: "Enter an OpenAI API key to load OpenAI models.",
+      message:
+        "Enter an OpenAI runtime API key (OPENAI_COMPAT_API_KEY) to load OpenAI models.",
       tone: "warning",
     };
   }
@@ -172,9 +187,17 @@ export function formatModelDiscoveryErrorStatus(
     return null;
   }
 
-  // Hook synthesizes this when availability !== "available". Discovery is
-  // never attempted (no modelDiscoveryKey), so Retry would be a no-op —
-  // point the user at install/settings instead of offering Retry (#2267).
+  // Databricks transparent auth (agent_models_databricks.rs). The backend
+  // launches the browser OAuth flow itself from every discovery surface, so
+  // these are terminal outcomes the user should see, not raw error text.
+  // Matched on the stable error strings the backend emits (string matching is
+  // this file's convention until typed error codes arrive).
+  const databricksStatus = formatDatabricksAuthStatus(message);
+  if (databricksStatus !== null) {
+    return databricksStatus;
+  }
+
+  // An unavailable runtime has no discovery key; Retry would do nothing.
   if (message.toLowerCase().includes("runtime not available")) {
     return {
       message:
@@ -182,16 +205,14 @@ export function formatModelDiscoveryErrorStatus(
       tone: "warning",
     };
   }
-
   if (isModelDiscoveryTimeoutError(message)) {
     return {
       message:
-        "Model discovery timed out. Codex and some other harnesses can take 20–60 seconds to start the first time — retry, or wait a moment and try again.",
+        "Model discovery timed out. The first launch can take longer. Retry to load models again.",
       tone: "warning",
       retryable: true,
     };
   }
-
   if (isProgramNotFoundError(message)) {
     return {
       message:
@@ -200,7 +221,6 @@ export function formatModelDiscoveryErrorStatus(
       retryable: true,
     };
   }
-
   return {
     message: `Using built-in model options. Could not load live models for ${providerObjectLabel(
       provider,
@@ -208,4 +228,36 @@ export function formatModelDiscoveryErrorStatus(
     tone: "warning",
     retryable: true,
   };
+}
+
+/**
+ * Maps the terminal Databricks sign-in states to user-facing guidance, or null
+ * when the error is not a Databricks sign-in outcome. "Sign-in required" is a
+ * quiet muted note (a passive surface hit its cooldown, or an unsaved draft
+ * can't launch the browser); a failed, cancelled, or timed-out sign-in is a
+ * warning that points the user at the explicit retry path.
+ */
+function formatDatabricksAuthStatus(
+  message: string,
+): PersonaModelDiscoveryStatus | null {
+  if (message.includes("Databricks sign-in is required")) {
+    return {
+      message:
+        "Databricks sign-in is required. Open the model picker to sign in, or run `buzz-agent auth databricks` in a terminal.",
+      tone: "muted",
+    };
+  }
+
+  if (
+    message.includes("Databricks sign-in failed") ||
+    message.includes("Databricks sign-in timed out")
+  ) {
+    return {
+      message:
+        "Databricks sign-in didn't complete. Open the model picker to retry, or run `buzz-agent auth databricks` in a terminal.",
+      tone: "warning",
+    };
+  }
+
+  return null;
 }

@@ -68,7 +68,7 @@ export function CommunityEditForm({
 
     let cancelled = false;
     const timeoutId = window.setTimeout(() => {
-      void getJoinPolicy(normalizedUrl)
+      void getJoinPolicy(normalizedUrl, "native")
         .then((policy) => {
           if (cancelled || !policy) return;
           setJoinPolicy(policy);
@@ -105,7 +105,7 @@ export function CommunityEditForm({
 
       if (joinPolicyRequired) {
         try {
-          const policy = await getJoinPolicy(normalizedUrl);
+          const policy = await getJoinPolicy(normalizedUrl, "native");
           if (!policy) {
             onSubmit(trimmedName, normalizedUrl);
             return;

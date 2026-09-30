@@ -32,13 +32,8 @@ test("identity key help explains the first-run choice", async ({ page }) => {
   await expect(
     dialog.getByRole("heading", { name: "What’s an identity key?" }),
   ).toBeVisible();
-  await expect(dialog).toHaveClass(/shadow-none/);
-  await expect(page.getByTestId("dialog-overlay")).toHaveCSS(
-    "background-color",
-    "rgba(0, 0, 0, 0)",
-  );
-  const dialogWrapper = dialog.locator("..");
-  await expect(dialogWrapper).toHaveCSS("overflow-x", "hidden");
+  await expect(dialog).toHaveClass(/w-full/);
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
   const dialogBounds = await dialog.boundingBox();
   expect(dialogBounds).not.toBeNull();
   expect(dialogBounds?.x).toBeGreaterThanOrEqual(0);
@@ -46,7 +41,7 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     (dialogBounds?.x ?? 0) + (dialogBounds?.width ?? 0),
   ).toBeLessThanOrEqual(720);
 
-  await page.keyboard.press("Escape");
+  await page.getByTestId("onboarding-back").click();
   await expect(dialog).not.toBeVisible();
   await expect(trigger).toHaveCSS("opacity", "1");
 
@@ -55,4 +50,39 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     "opacity",
     "1",
   );
+});
+
+test("identity key help stays readable when the app resolves dark mode", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  // Fresh profiles follow the system scheme, so the emulated dark scheme is
+  // the first-run repro: the app resolves the dark theme while onboarding.
+  await expect
+    .poll(() =>
+      page.evaluate(() => document.documentElement.classList.contains("dark")),
+    )
+    .toBe(true);
+
+  const trigger = page.getByTestId("identity-key-help-trigger");
+  await expect(trigger).toHaveCSS("opacity", "1", { timeout: 5000 });
+  await trigger.click();
+
+  const dialog = page.getByTestId("identity-key-help-dialog");
+  await expect(dialog).toBeVisible();
+  await waitForAnimations(page);
+
+  // The textured powder card is baked light in both themes, so the dialog pins
+  // the neutral onboarding theme to its light variant. Without the pin the
+  // dark theme flips --foreground to near-white and the title disappears
+  // against the white card.
+  await expect(
+    dialog.getByRole("heading", { name: "What’s an identity key?" }),
+  ).toHaveCSS("color", "rgb(23, 23, 23)");
 });

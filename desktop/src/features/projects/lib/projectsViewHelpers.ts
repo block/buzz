@@ -1,23 +1,58 @@
 import type {
   Project,
   ProjectActivitySummary,
+  Repository,
 } from "@/features/projects/hooks";
+import { hasLocalRepositoryCheckout } from "@/features/projects/lib/projectLocalRepos";
+import { projectRepoHostForRepository } from "@/features/projects/lib/projectRepoHost";
+import { selectProjectRepository } from "@/features/projects/projectModels";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type ProjectsViewMode = "grid" | "list";
-export type ProjectsRepositoryScope = "all" | "mine" | "local";
-export type ProjectsWorkItemScope = "all" | "mine";
+export type ProjectsRepositoryScope =
+  | "all"
+  | "accessible"
+  | "mine"
+  | "local"
+  | "buzz"
+  | "linked";
+export type ProjectsWorkItemScope = "all" | "mine" | "assigned";
 export type ProjectsFilter =
   | "all"
   | "mine"
   | "local"
+  | "projects"
   | "repositories"
+  | "channels"
   | "prs"
   | "issues"
   | "agents"
   | "users";
 export type ProjectsSort = "updated" | "created" | "name";
+
+export const REPOSITORY_ENTRY_PAGE_SIZE = 200;
+
+export function formatLastChangedAt(timestamp: number | null) {
+  if (!timestamp) return "—";
+  return new Date(timestamp * 1_000).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+export function formatFileSize(size: number | null) {
+  if (size === null) return "—";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function nextRepositoryEntryLimit(current: number, total: number) {
+  return Math.min(current + REPOSITORY_ENTRY_PAGE_SIZE, total);
+}
 
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
 const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
@@ -51,7 +86,9 @@ export function readStoredFilter(): ProjectsFilter {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
     return value === "mine" ||
       value === "local" ||
+      value === "projects" ||
       value === "repositories" ||
+      value === "channels" ||
       value === "prs" ||
       value === "issues" ||
       value === "agents" ||
@@ -76,7 +113,15 @@ export function readStoredRepositoryScope(): ProjectsRepositoryScope {
     const value = globalThis.localStorage?.getItem(
       PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY,
     );
-    if (value === "mine" || value === "local") return value;
+    if (
+      value === "accessible" ||
+      value === "mine" ||
+      value === "local" ||
+      value === "buzz" ||
+      value === "linked"
+    ) {
+      return value;
+    }
     const legacyFilter = globalThis.localStorage?.getItem(
       PROJECTS_FILTER_STORAGE_KEY,
     );
@@ -99,9 +144,13 @@ export function writeStoredRepositoryScope(scope: ProjectsRepositoryScope) {
   }
 }
 
-function readStoredWorkItemScope(key: string): ProjectsWorkItemScope {
+function readStoredWorkItemScope(
+  key: string,
+  allowed: ProjectsWorkItemScope[],
+): ProjectsWorkItemScope {
   try {
-    return globalThis.localStorage?.getItem(key) === "mine" ? "mine" : "all";
+    const value = globalThis.localStorage?.getItem(key);
+    return allowed.find((scope) => scope === value) ?? "all";
   } catch {
     return "all";
   }
@@ -116,7 +165,9 @@ function writeStoredWorkItemScope(key: string, scope: ProjectsWorkItemScope) {
 }
 
 export function readStoredPullRequestScope(): ProjectsWorkItemScope {
-  return readStoredWorkItemScope(PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY);
+  return readStoredWorkItemScope(PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY, [
+    "mine",
+  ]);
 }
 
 export function writeStoredPullRequestScope(scope: ProjectsWorkItemScope) {
@@ -124,7 +175,10 @@ export function writeStoredPullRequestScope(scope: ProjectsWorkItemScope) {
 }
 
 export function readStoredIssueScope(): ProjectsWorkItemScope {
-  return readStoredWorkItemScope(PROJECTS_ISSUE_SCOPE_STORAGE_KEY);
+  return readStoredWorkItemScope(PROJECTS_ISSUE_SCOPE_STORAGE_KEY, [
+    "mine",
+    "assigned",
+  ]);
 }
 
 export function writeStoredIssueScope(scope: ProjectsWorkItemScope) {
@@ -184,6 +238,24 @@ export function markdownToPlainText(input: string): string {
   );
 }
 
+/** One-line list subtitle. Empty, whitespace-only, and title-duplicate bodies stay hidden. */
+export function listRowDescription(
+  value: string | null | undefined,
+  title?: string,
+): string | undefined {
+  const text = markdownToPlainText(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length === 0) return undefined;
+  if (
+    title &&
+    text.localeCompare(title.trim(), undefined, { sensitivity: "accent" }) === 0
+  ) {
+    return undefined;
+  }
+  return text;
+}
+
 export function formatCreatedDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
     month: "short",
@@ -191,20 +263,29 @@ export function formatCreatedDate(createdAt: number) {
   });
 }
 
-export function relativeTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
+export function relativeTime(
+  createdAt: number,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+) {
+  const elapsedSeconds = Math.max(1, Math.floor(nowSeconds - createdAt));
   const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "week", seconds: 7 * 24 * 60 * 60 },
     { label: "day", seconds: 24 * 60 * 60 },
     { label: "hour", seconds: 60 * 60 },
     { label: "minute", seconds: 60 },
     { label: "second", seconds: 1 },
   ];
+
+  if (elapsedSeconds >= 7 * 24 * 60 * 60) {
+    const createdDate = new Date(createdAt * 1_000);
+    const nowDate = new Date(nowSeconds * 1_000);
+    return createdDate.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(createdDate.getFullYear() === nowDate.getFullYear()
+        ? {}
+        : { year: "numeric" }),
+    });
+  }
 
   for (const unit of units) {
     const value = Math.floor(elapsedSeconds / unit.seconds);
@@ -235,7 +316,10 @@ export function projectPeople(
     ...new Set(
       [
         project.owner,
-        ...project.contributors,
+        ...project.repositories.flatMap((repository) => [
+          repository.owner,
+          ...repository.contributors,
+        ]),
         ...(summary?.participantPubkeys ?? []),
       ].map(normalizePubkey),
     ),
@@ -260,7 +344,7 @@ export function normalizeRepositoryUrl(url: string) {
 }
 
 export function getClonePathLabel(project: Project) {
-  const cloneUrl = project.cloneUrls[0];
+  const cloneUrl = selectProjectRepository(project, null)?.cloneUrls[0];
   if (!cloneUrl) return "Clone path pending";
 
   try {
@@ -272,9 +356,7 @@ export function getClonePathLabel(project: Project) {
 }
 
 function repositoryIdentityKey(project: Project) {
-  const cloneUrl = project.cloneUrls[0];
-  if (cloneUrl) return normalizeRepositoryUrl(cloneUrl);
-  return (project.name || project.dtag).trim().toLowerCase();
+  return project.id;
 }
 
 export function uniqueRepositories(projects: Project[]) {
@@ -294,8 +376,8 @@ export function getActivityLabel(summary: ProjectActivitySummary | undefined) {
 
   return [
     pluralize(summary.commitCount, "commit"),
-    pluralize(summary.prCount, "PR"),
-    pluralize(summary.issueCount, "issue"),
+    pluralize(summary.prCount, "review"),
+    pluralize(summary.issueCount, "task"),
   ].join(" · ");
 }
 
@@ -316,8 +398,12 @@ export function isProjectMine(
   const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
   return (
     normalizePubkey(project.owner) === normalizedCurrentPubkey ||
-    project.contributors.some(
-      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+    project.repositories.some(
+      (repository) =>
+        normalizePubkey(repository.owner) === normalizedCurrentPubkey ||
+        repository.contributors.some(
+          (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+        ),
     )
   );
 }
@@ -329,6 +415,63 @@ export function isProjectOwnedByCurrentUser(
   return currentPubkey
     ? normalizePubkey(project.owner) === normalizePubkey(currentPubkey)
     : false;
+}
+
+export type RepositoryAccessInput = {
+  currentPubkey: string | undefined;
+  localRepoNames: Set<string>;
+  /** `null` while channel memberships are still loading. */
+  memberChannelIds: readonly string[] | null;
+  relayOrigin: string | null | undefined;
+};
+
+/**
+ * Whether the viewer can actually read a repository's git data. The relay
+ * gates git reads on membership in the repository's bound `buzz-channel`,
+ * so a repository is considered accessible when the viewer owns it (owners
+ * can repair a missing binding), has a local checkout, the code is hosted
+ * externally (no relay ACL applies), or the viewer is a member of the bound
+ * channel. While memberships are still loading (`memberChannelIds === null`)
+ * channel-bound repositories are kept visible rather than flashing out.
+ */
+export function isRepositoryAccessibleToViewer(
+  repository: Repository,
+  input: RepositoryAccessInput,
+) {
+  if (
+    input.currentPubkey &&
+    normalizePubkey(repository.owner) === normalizePubkey(input.currentPubkey)
+  ) {
+    return true;
+  }
+  if (hasLocalRepositoryCheckout(repository, input.localRepoNames)) {
+    return true;
+  }
+  if (
+    projectRepoHostForRepository(repository, input.relayOrigin).kind ===
+    "external"
+  ) {
+    return true;
+  }
+  if (!repository.channelId) return false;
+  if (input.memberChannelIds === null) return true;
+  return input.memberChannelIds.includes(repository.channelId);
+}
+
+/**
+ * A project is accessible when the viewer owns it or can read at least one
+ * of its repositories.
+ */
+export function isProjectAccessibleToViewer(
+  project: Project,
+  input: RepositoryAccessInput,
+) {
+  return (
+    isProjectOwnedByCurrentUser(project, input.currentPubkey) ||
+    project.repositories.some((repository) =>
+      isRepositoryAccessibleToViewer(repository, input),
+    )
+  );
 }
 
 export function projectHasAgent(

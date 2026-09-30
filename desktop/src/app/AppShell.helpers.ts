@@ -86,6 +86,41 @@ export function shouldBounceForChannelNotification(tags: string[][]): boolean {
   return !isThreadReply(tags);
 }
 
+export function markAllReadSources({
+  activeChannelId,
+  channelActivityItems,
+  markAllChannelReadMarkers,
+  markActiveChannelRead,
+  undoUnreadFeedItem,
+  unreadFeedItemIds,
+}: {
+  activeChannelId: string | null;
+  channelActivityItems: ReadonlyArray<{
+    channelId: string | null;
+    createdAt: number;
+  }>;
+  markAllChannelReadMarkers: () => void;
+  markActiveChannelRead: (channelId: string, createdAt: number) => void;
+  undoUnreadFeedItem: (itemId: string) => void;
+  unreadFeedItemIds: ReadonlySet<string>;
+}) {
+  for (const itemId of unreadFeedItemIds) {
+    undoUnreadFeedItem(itemId);
+  }
+  markAllChannelReadMarkers();
+
+  if (!activeChannelId) return;
+
+  let latestActivityAt: number | null = null;
+  for (const item of channelActivityItems) {
+    if (item.channelId !== activeChannelId) continue;
+    latestActivityAt = Math.max(latestActivityAt ?? 0, item.createdAt);
+  }
+  if (latestActivityAt !== null) {
+    markActiveChannelRead(activeChannelId, latestActivityAt);
+  }
+}
+
 export function toSearchHit(
   target: DesktopNotificationTarget,
 ): SearchHit | null {
@@ -104,6 +139,79 @@ export function toSearchHit(
     score: 0,
     threadRootId: target.threadRootId ?? null,
   };
+}
+
+export function createDesktopNotificationActivationQueue(
+  activate: (
+    target: DesktopNotificationTarget,
+    signal: AbortSignal,
+  ) => Promise<void>,
+  onError?: (error: unknown) => void,
+): {
+  cancel: () => void;
+  enqueue: (target: DesktopNotificationTarget) => void;
+} {
+  const controller = new AbortController();
+  let pending = Promise.resolve();
+
+  return {
+    cancel: () => {
+      controller.abort();
+    },
+    enqueue: (target) => {
+      // Preserve native click order when macOS drains multiple queued targets.
+      // Contain failures so one rejected navigation cannot poison later clicks.
+      pending = pending
+        .then(() => {
+          if (!controller.signal.aborted) {
+            return activate(target, controller.signal);
+          }
+        })
+        .catch((error) => {
+          try {
+            onError?.(error);
+          } catch {
+            // Reporting must not poison the activation queue either.
+          }
+        });
+    },
+  };
+}
+
+export async function activateDesktopNotificationTarget(
+  target: DesktopNotificationTarget,
+  actions: {
+    goChannel: (
+      channelId: string,
+      options?: { force?: boolean },
+    ) => Promise<unknown>;
+    goHome: () => Promise<unknown>;
+    openSearchHit: (
+      hit: SearchHit,
+      behavior?: { force?: boolean; signal?: AbortSignal },
+    ) => Promise<unknown>;
+    revealWindow: () => Promise<void>;
+  },
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) {
+    return;
+  }
+
+  let navigation: Promise<unknown>;
+  if (!target.channelId) {
+    navigation = actions.goHome();
+  } else {
+    const anchor = toSearchHit(target);
+    navigation = anchor
+      ? actions.openSearchHit(anchor, { force: true, signal })
+      : actions.goChannel(target.channelId, { force: true });
+  }
+
+  // Native activation already foregrounds the app on macOS. Other platforms
+  // still get a best-effort reveal, but it must never gate click-through.
+  void actions.revealWindow().catch(() => undefined);
+  await navigation;
 }
 
 export function deriveShellRoute(pathname: string): {

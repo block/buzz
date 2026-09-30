@@ -6,6 +6,7 @@ import hashlib
 import json
 
 import coincurve
+
 from harbor_buzz_testbed.keys import (
     compute_auth_tag,
     encode_nsec,
@@ -21,8 +22,10 @@ RUST_TAG = [
     "auth",
     "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
     "",
-    "20105c618d6e5d8f559cffb6f0d7a7b4f44f3a567e1be94c96378d45ac3625da"
-    "34c2e7357ea1d3ce980978334546b3e740c155e81b833ebe140d519d39ed8867",
+    (
+        "20105c618d6e5d8f559cffb6f0d7a7b4f44f3a567e1be94c96378d45ac3625da"
+        "34c2e7357ea1d3ce980978334546b3e740c155e81b833ebe140d519d39ed8867"
+    ),
 ]
 
 

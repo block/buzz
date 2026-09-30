@@ -9,6 +9,10 @@ import {
 } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
+import {
+  canonicalChannelName,
+  channelNamesMatch,
+} from "@/features/channels/lib/canonicalChannelName";
 import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
 import {
   type ChannelSortMode,
@@ -127,8 +131,9 @@ export function ChannelBrowserDialog({
     left: 0,
     width: 0,
   });
-  const deferredQuery = React.useDeferredValue(query.trim().toLowerCase());
-  const trimmedQuery = query.trim();
+  const canonicalQuery = canonicalChannelName(query);
+  const deferredQuery = React.useDeferredValue(canonicalQuery.toLowerCase());
+  const trimmedQuery = canonicalQuery;
   // Immediate (non-deferred) lowercased query. The create row's visibility
   // (via hasExactMatch) and its label both read from the live query so they
   // can never disagree for a frame while the fuzzy filter catches up.
@@ -244,7 +249,7 @@ export function ChannelBrowserDialog({
       channels.some(
         (channel) =>
           channel.channelType !== "dm" &&
-          channel.name.toLowerCase() === normalizedQuery &&
+          channelNamesMatch(channel.name, normalizedQuery) &&
           (channelTypeFilter
             ? channel.channelType === channelTypeFilter
             : true),

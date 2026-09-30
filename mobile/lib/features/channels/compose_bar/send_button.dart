@@ -17,28 +17,25 @@ class _SendButton extends StatelessWidget {
       width: 36,
       height: 36,
       child: IconButton(
-        onPressed: (isSending || isDisabled) ? null : onTap,
+        onPressed: (isSending || isDisabled)
+            ? null
+            : () => _runComposerAction(onTap),
         style: IconButton.styleFrom(
           backgroundColor: context.colors.primary,
           disabledBackgroundColor: context.colors.primary.withValues(
             alpha: 0.5,
           ),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(Radii.md),
-          ),
+          shape: const CircleBorder(),
         ),
         padding: EdgeInsets.zero,
         icon: isSending
-            ? SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: context.colors.onPrimary,
-                ),
+            ? BuzzLoadingIndicator(
+                size: 18,
+                color: context.colors.onPrimary,
+                semanticLabel: 'Sending message',
               )
             : Icon(
-                LucideIcons.sendHorizontal,
+                LucideIcons.arrowUp,
                 size: 18,
                 color: context.colors.onPrimary,
               ),
