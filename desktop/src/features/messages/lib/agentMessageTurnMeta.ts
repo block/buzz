@@ -71,9 +71,14 @@ export function normalizeUnixSeconds(
 }
 
 /**
- * Latency for THIS turn: prefer triggering prompt, then turn_started.
- * Prefer a span ≤ {@link MAX_RELIABLE_TURN_DURATION_SEC}; otherwise return the
- * best non-negative candidate so the duration chip can still show a value.
+ * Latency for THIS turn from the closest reliable start (prompt or turn_started).
+ *
+ * Community bot replies often set `parentId` to a thread ancestor, not the
+ * harness trigger. When that ancestor is still within
+ * {@link MAX_RELIABLE_TURN_DURATION_SEC}, preferring prompt-order would show an
+ * inflated chip. Among non-negative spans ≤ the reliable cap, pick the
+ * shortest (true turn latency). If every candidate exceeds the cap, still
+ * return the shortest non-negative so the chip is never empty.
  */
 export function resolveTurnDurationSeconds(input: {
   replyCreatedAt: number;
@@ -89,12 +94,11 @@ export function resolveTurnDurationSeconds(input: {
   const started = normalizeUnixSeconds(input.turnStartedAtSec);
   if (started != null) candidates.push(reply - started);
 
-  // Prefer prompt, then turn_started, among reliable spans.
-  for (const delta of candidates) {
-    if (delta >= 0 && delta <= MAX_RELIABLE_TURN_DURATION_SEC) {
-      return delta;
-    }
-  }
+  const reliable = candidates.filter(
+    (delta) => delta >= 0 && delta <= MAX_RELIABLE_TURN_DURATION_SEC,
+  );
+  if (reliable.length > 0) return Math.min(...reliable);
+
   // Still show something rather than omit the chip (e.g. long tool turns).
   const usable = candidates.filter((delta) => delta >= 0);
   return usable.length > 0 ? Math.min(...usable) : null;

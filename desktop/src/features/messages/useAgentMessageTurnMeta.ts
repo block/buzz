@@ -279,16 +279,26 @@ export function useAgentMessageTurnMeta(input: {
   );
 
   const durationSeconds = React.useMemo(() => {
-    // Prefer harness trigger / turn_started; fall back to parentId timestamp so
-    // the duration chip always has a candidate when any prompt exists.
-    const promptForDuration = promptCreatedAt ?? parentCreatedAt;
+    // Prefer harness trigger event timestamp. Only fall back to message.parentId
+    // when it is the known trigger (triggering-event join) or we have no
+    // turn_started — otherwise a thread ancestor inflates the chip.
+    const parentOkForDuration =
+      joinMethod === "triggering-event" || turnStartedAtSec == null;
+    const promptForDuration =
+      promptCreatedAt ?? (parentOkForDuration ? parentCreatedAt : null);
 
     return resolveTurnDurationSeconds({
       replyCreatedAt: input.createdAt,
       turnStartedAtSec,
       promptCreatedAtSec: promptForDuration,
     });
-  }, [input.createdAt, promptCreatedAt, parentCreatedAt, turnStartedAtSec]);
+  }, [
+    input.createdAt,
+    promptCreatedAt,
+    parentCreatedAt,
+    turnStartedAtSec,
+    joinMethod,
+  ]);
 
   // Show whatever the archive returns — do not hide on matchKind.
   const metric = metricQuery.data ?? null;

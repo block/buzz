@@ -134,6 +134,15 @@ test("resolveTurnDurationSeconds prefers prompt; falls back to long spans", () =
     }),
     45,
   );
+  // Mid-range thread ancestor (still "reliable") must not beat turn_started.
+  assert.equal(
+    resolveTurnDurationSeconds({
+      replyCreatedAt: 1_000_000 + 10,
+      turnStartedAtSec: 1_000_000,
+      promptCreatedAtSec: 1_000_000 - 180,
+    }),
+    10,
+  );
 });
 
 test("collectTurnPromptContext joins prompt user + context for turn", () => {
