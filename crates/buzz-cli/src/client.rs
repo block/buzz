@@ -34,6 +34,9 @@ pub struct BlobDescriptor {
     /// Duration in seconds for video/audio (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Original filename, sent as the imeta `filename` for generic files (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
@@ -57,11 +60,14 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
     }
+    if let Some(name) = &d.filename {
+        tag.push(format!("filename {name}"));
+    }
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
+/// Previewable media types. These go through the relay's image/video pipeline.
+const MEDIA_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
@@ -69,11 +75,92 @@ const ALLOWED_MIMES: &[&str] = &[
     "video/mp4",
 ];
 
+/// Types the relay refuses on its generic file path (`BLOCKED_FILE_MIME_TYPES`
+/// in `buzz-media`). Checked locally so the upload fails before any bytes are sent.
+const BLOCKED_FILE_MIMES: &[&str] = &[
+    // Active web content — stored-XSS vectors.
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    // Native executables / installers.
+    "application/x-msdownload", // .exe / .dll
+    "application/x-executable", // ELF
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary", // Mach-O
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive", // .apk
+    "application/x-apple-diskimage",           // .dmg
+];
+
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic file uploads (100 MiB), the relay's default
+/// `BUZZ_MAX_FILE_BYTES`.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Sniff an upload's MIME type from its magic bytes and apply the relay's
+/// acceptance rules and size caps. Returns the MIME type to upload with.
+///
+/// Previewable media keeps its image/video caps. Other image, video and audio
+/// types and the relay's blocked types are refused; everything else, including
+/// unsniffable text (`application/octet-stream`), is a generic file.
+fn classify_upload(bytes: &[u8]) -> Result<String, CliError> {
+    let mime = infer::get(bytes)
+        .map(|t| t.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    let max = if MEDIA_MIMES.contains(&mime.as_str()) {
+        if mime.starts_with("video/") {
+            MAX_VIDEO_BYTES
+        } else {
+            MAX_IMAGE_BYTES
+        }
+    } else if mime.starts_with("image/")
+        || mime.starts_with("video/")
+        || mime.starts_with("audio/")
+        || BLOCKED_FILE_MIMES.contains(&mime.as_str())
+    {
+        return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+    } else {
+        MAX_FILE_BYTES
+    };
+
+    if bytes.len() as u64 > max {
+        return Err(CliError::Usage(format!(
+            "file too large: {} bytes (max {})",
+            bytes.len(),
+            max
+        )));
+    }
+    Ok(mime)
+}
+
+/// The imeta `filename` for a generic file: the path's final component without
+/// control characters or path separators, capped at 255 bytes. `None` if nothing
+/// usable is left.
+fn upload_filename(file_path: &str) -> Option<String> {
+    let name = std::path::Path::new(file_path)
+        .file_name()?
+        .to_string_lossy();
+    let mut out = String::new();
+    for c in name
+        .chars()
+        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
+    {
+        if out.len() + c.len_utf8() > 255 {
+            break;
+        }
+        out.push(c);
+    }
+    (!out.is_empty()).then_some(out)
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1215,33 +1302,18 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
+        // 2. Detect MIME from magic bytes and check type and size
+        let mime = classify_upload(&bytes)?;
+        let filename = if MEDIA_MIMES.contains(&mime.as_str()) {
+            None
         } else {
-            MAX_IMAGE_BYTES
+            upload_filename(file_path)
         };
-        if bytes.len() as u64 > max {
-            return Err(CliError::Usage(format!(
-                "file too large: {} bytes (max {})",
-                bytes.len(),
-                max
-            )));
-        }
 
-        // 4. SHA-256
+        // 3. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
 
-        // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
+        // 4. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)
@@ -1290,7 +1362,10 @@ impl BuzzClient {
         // (404 or 405), fall back to the legacy /media/upload endpoint.  The 404/405 switch
         // itself is not retried; only transient failures on the selected legacy endpoint are.
         match result {
-            Ok(desc) => return Ok(desc),
+            Ok(mut desc) => {
+                desc.filename = filename;
+                return Ok(desc);
+            }
             Err(CliError::Relay { status: s, body: _ })
                 if should_retry_legacy_upload(
                     reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),
@@ -1302,34 +1377,38 @@ impl BuzzClient {
         }
 
         let legacy_url = format!("{}/media/upload", self.relay_url);
-        self.with_retry_body(|| {
-            let upload_body = upload_body.clone();
-            let legacy_url = legacy_url.clone();
-            let mime = mime.clone();
-            let sha256 = sha256.clone();
-            async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                let resp = self
-                    .with_auth_tag(
-                        self.http
-                            .put(&legacy_url)
-                            .timeout(upload_timeout)
-                            .header("Authorization", auth_header)
-                            .header("Content-Type", &mime)
-                            .header("X-SHA-256", &sha256)
-                            .body(upload_body),
-                    )
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+        let mut desc = self
+            .with_retry_body(|| {
+                let upload_body = upload_body.clone();
+                let legacy_url = legacy_url.clone();
+                let mime = mime.clone();
+                let sha256 = sha256.clone();
+                async move {
+                    let auth_header =
+                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
+                    let resp = self
+                        .with_auth_tag(
+                            self.http
+                                .put(&legacy_url)
+                                .timeout(upload_timeout)
+                                .header("Authorization", auth_header)
+                                .header("Content-Type", &mime)
+                                .header("X-SHA-256", &sha256)
+                                .body(upload_body),
+                        )
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        let status = resp.status().as_u16();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(CliError::Relay { status, body });
+                    }
+                    resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
-                resp.json::<BlobDescriptor>().await.map_err(CliError::from)
-            }
-        })
-        .await
+            })
+            .await?;
+        desc.filename = filename;
+        Ok(desc)
     }
 
     /// Download a Blossom media blob using BUD-01 `t=get` auth.
@@ -2637,6 +2716,87 @@ mod tests {
         assert!(
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
+        );
+    }
+
+    fn blob(mime: &str, filename: Option<&str>) -> super::BlobDescriptor {
+        super::BlobDescriptor {
+            url: "https://relay.test/media/aabbcc.bin".into(),
+            sha256: "aabbcc".into(),
+            size: 12,
+            mime_type: mime.into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: filename.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn classify_upload_accepts_documents() {
+        let markdown = b"# Notes\n\nPlain text with no magic bytes.\n";
+        assert_eq!(
+            super::classify_upload(markdown).unwrap(),
+            "application/octet-stream"
+        );
+        let pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\n";
+        assert_eq!(super::classify_upload(pdf).unwrap(), "application/pdf");
+    }
+
+    #[test]
+    fn classify_upload_rejects_what_the_relay_refuses() {
+        let mach_o: &[u8] = &[0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01, 0, 0, 0, 0];
+        let err = super::classify_upload(mach_o).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported file type: application/x-mach-binary"),
+            "{err}"
+        );
+
+        let id3: &[u8] = b"ID3\x03\x00\x00\x00\x00\x00\x00\x00\x00";
+        let err = super::classify_upload(id3).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported file type: audio/"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn classify_upload_keeps_accepting_images() {
+        let jpeg_header: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+        ];
+        assert_eq!(super::classify_upload(jpeg_header).unwrap(), "image/jpeg");
+    }
+
+    #[test]
+    fn upload_filename_follows_relay_imeta_rules() {
+        assert_eq!(
+            super::upload_filename("/tmp/dir/notes.md").as_deref(),
+            Some("notes.md")
+        );
+        assert_eq!(
+            super::upload_filename("/tmp/a\u{7}b\\c.txt").as_deref(),
+            Some("abc.txt")
+        );
+        let long = format!("/tmp/{}.txt", "é".repeat(200));
+        let name = super::upload_filename(&long).unwrap();
+        assert!(name.len() <= 255, "{} bytes", name.len());
+        assert!(name.chars().all(|c| c == 'é'));
+        assert_eq!(super::upload_filename("/"), None);
+    }
+
+    #[test]
+    fn imeta_carries_filename_only_when_set() {
+        let tag = super::build_imeta_tag(&blob("application/octet-stream", Some("notes.md")));
+        assert!(tag.contains(&"filename notes.md".to_string()), "{tag:?}");
+
+        let tag = super::build_imeta_tag(&blob("image/jpeg", None));
+        assert!(
+            !tag.iter().any(|entry| entry.starts_with("filename")),
+            "{tag:?}"
         );
     }
 }
