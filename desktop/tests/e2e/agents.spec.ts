@@ -2991,3 +2991,126 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toHaveCount(0);
 });
+
+test("agents library search and status chips narrow the cards", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:scout",
+        displayName: "Scout",
+        isActive: true,
+        systemPrompt: "Research the codebase and summarize findings.",
+      },
+      {
+        id: "custom:ralph",
+        displayName: "Ralph",
+        isActive: true,
+        systemPrompt: "Review pull requests for regressions.",
+      },
+      {
+        id: "custom:reviewer",
+        displayName: "Reviewer",
+        isActive: true,
+        systemPrompt: "Never started yet.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "scout-1",
+        personaId: "custom:scout",
+        pubkey: "ab".repeat(32),
+        status: "running",
+      },
+      {
+        name: "ralph-1",
+        personaId: "custom:ralph",
+        pubkey: "cd".repeat(32),
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const scout = page.getByTestId("persona-agent-row-custom:scout");
+  const ralph = page.getByTestId("persona-agent-row-custom:ralph");
+  const reviewer = page.getByTestId("persona-agent-row-custom:reviewer");
+  await expect(scout).toBeVisible();
+  await expect(ralph).toBeVisible();
+  await expect(reviewer).toBeVisible();
+  await expect(page.getByTestId("agents-library-status-count-all")).toHaveText(
+    "3",
+  );
+  await expect(
+    page.getByTestId("agents-library-status-count-running"),
+  ).toHaveText("1");
+  await expect(
+    page.getByTestId("agents-library-status-count-stopped"),
+  ).toHaveText("1");
+  await expect(
+    page.getByTestId("agents-library-status-count-not_started"),
+  ).toHaveText("1");
+
+  // Search reaches the system prompt, not just the visible name.
+  const search = page.getByTestId("agents-library-search-input");
+  await search.fill("regressions");
+  await expect(ralph).toBeVisible();
+  await expect(scout).toHaveCount(0);
+  await expect(reviewer).toHaveCount(0);
+  await expect(page.getByTestId("agents-library-status-count-all")).toHaveText(
+    "1",
+  );
+  await page.getByTestId("agents-library-search-clear").click();
+  await expect(search).toHaveValue("");
+  await expect(search).toBeFocused();
+  await expect(scout).toBeVisible();
+
+  // A modified Escape belongs to app shortcuts (Shift+Escape marks all read)
+  // and must leave the box alone; a plain Escape clears it and keeps focus.
+  await search.fill("scout");
+  await expect(ralph).toHaveCount(0);
+  await search.press("Shift+Escape");
+  await expect(search).toHaveValue("scout");
+  await search.press("Escape");
+  await expect(search).toHaveValue("");
+  await expect(search).toBeFocused();
+  await expect(ralph).toBeVisible();
+
+  await page.getByTestId("agents-library-status-running").click();
+  await expect(scout).toBeVisible();
+  await expect(ralph).toHaveCount(0);
+  await expect(reviewer).toHaveCount(0);
+
+  await page.getByTestId("agents-library-status-stopped").click();
+  await expect(ralph).toBeVisible();
+  await expect(scout).toHaveCount(0);
+  await expect(reviewer).toHaveCount(0);
+
+  await page.getByTestId("agents-library-status-not_started").click();
+  await expect(reviewer).toBeVisible();
+  await expect(scout).toHaveCount(0);
+  await expect(ralph).toHaveCount(0);
+
+  // The New agent card stays reachable while filtering.
+  await expect(page.getByTestId("new-agent-card")).toBeVisible();
+
+  // No match: the empty state's Clear resets both the query and the chip.
+  await search.fill("nothing matches this");
+  await expect(page.getByTestId("agents-library-filter-empty")).toBeVisible();
+  await page
+    .getByTestId("agents-library-filter-empty")
+    .getByRole("button", { name: "Clear" })
+    .click();
+  await expect(page.getByTestId("agents-library-filter-empty")).toHaveCount(0);
+  await expect(search).toHaveValue("");
+  await expect(search).toBeFocused();
+  await expect(page.getByTestId("agents-library-status-all")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(scout).toBeVisible();
+  await expect(ralph).toBeVisible();
+  await expect(reviewer).toBeVisible();
+});
