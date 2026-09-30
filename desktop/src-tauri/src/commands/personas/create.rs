@@ -20,7 +20,18 @@ pub async fn create_persona(
     input: CreatePersonaRequest,
     app: AppHandle,
 ) -> Result<AgentDefinition, String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
     use tauri::Manager;
+    let state = app.state::<AppState>();
+    let _name_guard = state.agent_name_transition.clone().lock_owned().await;
+    crate::managed_agents::device_policy::unique_names::preflight(
+        &app,
+        &state,
+        &input.display_name,
+        None,
+        None,
+    )
+    .await?;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let display_name = trim_required(&input.display_name, "Display name")?;

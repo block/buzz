@@ -211,6 +211,9 @@ pub(crate) fn refresh_team_catalog_heads_for_persona<R: tauri::Runtime>(
     state: &AppState,
     persona_id: &str,
 ) {
+    if crate::managed_agents::device_policy::pauses_sync(app) {
+        return;
+    }
     pending::refresh_shared_team_catalog_heads_for_persona(app, state, persona_id);
 }
 
@@ -227,6 +230,9 @@ pub(crate) fn refresh_team_catalog_head<R: tauri::Runtime>(
     team: &TeamRecord,
     personas: &[AgentDefinition],
 ) {
+    if crate::managed_agents::device_policy::pauses_sync(app) {
+        return;
+    }
     pending::refresh_shared_team_catalog_head_resolving(app, state, team, personas);
 }
 
@@ -241,6 +247,9 @@ pub(crate) fn tombstone_team_catalog_head<R: tauri::Runtime>(
     state: &AppState,
     d_tag: &str,
 ) {
+    if crate::managed_agents::device_policy::pauses_sync(app) {
+        return;
+    }
     pending::tombstone_team_catalog_pending(app, state, d_tag);
 }
 
@@ -419,6 +428,7 @@ pub async fn list_teams(app: AppHandle) -> Result<Vec<TeamRecord>, String> {
 
 #[tauri::command]
 pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<TeamRecord, String> {
+    crate::managed_agents::device_policy::require_hosting(&app)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -433,6 +443,9 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             .map_err(|error| error.to_string())?;
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
+        for id in &input.persona_ids {
+            crate::managed_agents::device_policy::require_persona(&app, id)?;
+        }
         let mut teams = load_teams(&app)?;
         let team = TeamRecord {
             id: Uuid::new_v4().to_string(),
@@ -469,6 +482,7 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
 
 #[tauri::command]
 pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<TeamRecord, String> {
+    crate::managed_agents::device_policy::require_team(&app, &input.id)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -482,8 +496,12 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
             .map_err(|error| error.to_string())?;
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
+        for id in &input.persona_ids {
+            crate::managed_agents::device_policy::require_persona(&app, id)?;
+        }
         let mut teams = load_teams(&app)?;
         pending::project_active_team_sharing(&app, &state, &mut teams);
+        crate::managed_agents::device_policy::require_team(&app, &input.id)?;
         let updated = commit_team_update(
             &mut teams,
             &input.id,
@@ -514,6 +532,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
 
 #[tauri::command]
 pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
+    crate::managed_agents::device_policy::require_team(&app, &id)?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -521,6 +540,7 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        crate::managed_agents::device_policy::require_team(&app, &id)?;
         let cascaded_persona_d_tags = delete_team_with_cascade(&app, &id)?;
         // delete_team_with_cascade rejects built-in teams via validate_team_deletion,
         // so reaching here means this team was owner-published — tombstone it. The

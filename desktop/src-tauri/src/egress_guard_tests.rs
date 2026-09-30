@@ -273,6 +273,8 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/relay_admission.rs", 1, 0),
     ("src/native_relay_client_transport_tests.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
+    // Selective-flush loopback receiver; production uses guarded boundary 1.
+    ("src/managed_agents/persona_events.rs", 1, 0),
     ("src/relay/profile_avatar/tests.rs", 1, 0),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),
     ("src/commands/team_snapshot/tests.rs", 1, 0),

@@ -193,6 +193,7 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
+    crate::managed_agents::device_policy::require_record(app, record)?;
     if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
         return Err(err);
     }

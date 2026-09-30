@@ -90,8 +90,8 @@ pub(super) fn rollback_failed_agent_update(
     state: &AppState,
     pubkey: &str,
     rollback: AgentUpdateRollback,
-) -> Result<(), String> {
-    {
+) -> Result<Option<String>, String> {
+    let retention_error = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -103,10 +103,10 @@ pub(super) fn rollback_failed_agent_update(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found after failed rename rollback"))?;
-        super::agents::retain_managed_agent_pending(app, state, restored);
-    }
+        super::agents::retain_managed_agent_pending(app, state, restored).err()
+    };
     try_regenerate_nest(app);
-    Ok(())
+    Ok(retention_error)
 }
 
 #[cfg(test)]
