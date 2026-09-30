@@ -1162,20 +1162,78 @@ test.describe("community rail", () => {
         [COMMUNITY_B.relayUrl, "ready"],
       ]);
 
-    // Restore is invalidated while the community is still saved, and before
+    // The relay is refused while the community is still saved, and before
     // the stop sweep runs.
     const order = await page.evaluate(() => ({
-      savedAtInvalidate: window.__BUZZ_E2E_SAVED_COMMUNITIES_AT_INVALIDATE__,
+      savedAtRelayRemoval:
+        window.__BUZZ_E2E_SAVED_COMMUNITIES_AT_RELAY_REMOVAL__,
       commands: (window.__BUZZ_E2E_COMMANDS__ ?? []).filter((command) =>
-        ["invalidate_launch_restore", "stop_managed_agent_runtime"].includes(
+        ["remove_community_relay", "stop_managed_agent_runtime"].includes(
           command,
         ),
       ),
     }));
     expect(order).toEqual({
-      savedAtInvalidate: [COMMUNITY_A.id, COMMUNITY_B.id],
-      commands: ["invalidate_launch_restore", "stop_managed_agent_runtime"],
+      savedAtRelayRemoval: [COMMUNITY_A.id, COMMUNITY_B.id],
+      commands: ["remove_community_relay", "stop_managed_agent_runtime"],
     });
+  });
+
+  test("removing one of two communities on a relay leaves that relay's agents admitted", async ({
+    page,
+  }) => {
+    // Same relay as COMMUNITY_A, spelled differently so both stay saved.
+    const alias = {
+      ...COMMUNITY_B,
+      id: "ws-a-alias",
+      relayUrl: `${COMMUNITY_A.relayUrl}/`,
+    };
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembershipError: "relay info returned 404",
+        managedAgents: [{ pubkey: AGENT_PUBKEY, name: "Scout" }],
+        managedAgentRuntimes: [
+          { pubkey: AGENT_PUBKEY, relayUrl: COMMUNITY_A.relayUrl },
+        ],
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, alias], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await menu.getByRole("menuitem", { name: "Leave community" }).click();
+    await menu
+      .getByRole("menuitem", { name: "Remove from this device" })
+      .click();
+    await page
+      .getByRole("alertdialog", { name: "Remove from this device" })
+      .getByRole("button", { name: "Remove" })
+      .click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(alias.id);
+    const after = await page.evaluate(async () => ({
+      commands: (window.__BUZZ_E2E_COMMANDS__ ?? []).filter((command) =>
+        ["remove_community_relay", "stop_managed_agent_runtime"].includes(
+          command,
+        ),
+      ),
+      runtimes: (
+        await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__(
+          "list_managed_agent_runtimes",
+        )
+      ).map(({ lifecycle }) => lifecycle),
+    }));
+    expect(after).toEqual({ commands: [], runtimes: ["ready"] });
   });
 
   test("shows the quiet switch gate, not the boot splash, while switching", async ({
@@ -1220,10 +1278,16 @@ test.describe("community rail", () => {
     context,
     page,
   }) => {
-    await installMockBridge(page, undefined, {
-      autoConnectDefaultRelay: true,
-      skipCommunitySeed: true,
-    });
+    await installMockBridge(
+      page,
+      {
+        managedAgents: [{ pubkey: AGENT_PUBKEY, name: "Scout" }],
+        managedAgentRuntimes: [
+          { pubkey: AGENT_PUBKEY, relayUrl: COMMUNITY_A.relayUrl },
+        ],
+      },
+      { autoConnectDefaultRelay: true, skipCommunitySeed: true },
+    );
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
     await page.goto("/");
 
@@ -1257,6 +1321,32 @@ test.describe("community rail", () => {
         ),
       )
       .toBe("1");
+    // The relay is refused while the last community is still saved, and
+    // before its relay's agent pair is stopped.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window.__BUZZ_E2E_COMMANDS__ ?? []).includes(
+            "stop_managed_agent_runtime",
+          ),
+        ),
+      )
+      .toBe(true);
+    const order = await page.evaluate(() => {
+      const commands = window.__BUZZ_E2E_COMMANDS__ ?? [];
+      return {
+        savedAtRelayRemoval:
+          window.__BUZZ_E2E_SAVED_COMMUNITIES_AT_RELAY_REMOVAL__,
+        refusedBeforeStop:
+          commands.includes("remove_community_relay") &&
+          commands.indexOf("remove_community_relay") <
+            commands.indexOf("stop_managed_agent_runtime"),
+      };
+    });
+    expect(order).toEqual({
+      savedAtRelayRemoval: [COMMUNITY_A.id],
+      refusedBeforeStop: true,
+    });
 
     const relaunchPage = await context.newPage();
     await installMockBridge(relaunchPage, undefined, {

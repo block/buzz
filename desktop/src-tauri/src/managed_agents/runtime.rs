@@ -485,10 +485,12 @@ pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     relay_url: &str,
+    admitted: &super::Admitted<'_>,
     lazy: bool,
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    admitted.covers(relay_url)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
@@ -905,6 +907,7 @@ pub fn start_managed_agent_process(
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     owner_hex: Option<&str>,
     workspace_relay: &crate::relay::ScopedWorkspaceRelay,
+    admitted: &super::Admitted<'_>,
     replay_floor_unix: Option<u64>,
 ) -> Result<(), String> {
     let key = bound_runtime_key(record, workspace_relay)?;
@@ -929,6 +932,7 @@ pub fn start_managed_agent_process(
         app,
         record,
         &key.relay_url,
+        admitted,
         false,
         owner_hex,
         replay_floor_unix,

@@ -4,6 +4,10 @@ import {
   reconcileManagedAgentRuntimes,
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
+import {
+  readdCommunityRelay,
+  removeCommunityRelay,
+} from "@/shared/api/tauriWorkspace";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 
 type Dependencies = {
@@ -28,6 +32,28 @@ export function markRelayRemoved(relayUrl: string): void {
   const relay = canonicalRelayUrl(relayUrl);
   if (relay) relayRemovals.set(relay, (relayRemovals.get(relay) ?? 0) + 1);
 }
+
+// Writes to Rust's per-relay admission record run in order, and a reconcile
+// waits for them, so a reconcile issued after a re-add is admitted.
+let admissionWrites: Promise<void> = Promise.resolve();
+
+function queueAdmissionWrite(write: () => Promise<void>): Promise<void> {
+  admissionWrites = admissionWrites.then(write).catch((error) => {
+    console.warn(
+      "[managed-agent-runtimes] relay admission update failed:",
+      error,
+    );
+  });
+  return admissionWrites;
+}
+
+/** Refuse local pairs on a relay no saved community uses any more. */
+export const refuseRelayAdmission = (relayUrl: string) =>
+  queueAdmissionWrite(() => removeCommunityRelay(relayUrl));
+
+/** Admit local pairs on the relay of an explicitly re-added community. */
+export const readmitRelay = (relayUrl: string) =>
+  queueAdmissionWrite(() => readdCommunityRelay(relayUrl));
 
 async function stopPairs(
   pairs: readonly ManagedAgentRuntimeStatus[],
@@ -81,6 +107,7 @@ export async function reconcileConfiguredManagedAgentRuntimes(
   runtimes: ManagedAgentRuntimeStatus[];
   removedRelays: Set<string>;
 }> {
+  await admissionWrites;
   const before = new Map(relayRemovals);
   const runtimes = await dependencies.reconcile(communities);
   const removedRelays = new Set<string>();

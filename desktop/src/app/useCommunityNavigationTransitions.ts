@@ -15,9 +15,9 @@ import {
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import {
   markRelayRemoved,
+  refuseRelayAdmission,
   stopManagedAgentPairsOnRelay,
 } from "@/features/agents/managedAgentRelayCleanup";
-import { invalidateLaunchRestore } from "@/shared/api/tauriWorkspace";
 import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
 import { leaveCommunity } from "@/features/communities/leaveCommunity";
@@ -101,18 +101,16 @@ export function useCommunityNavigationTransitions({
       const stopRelayPairs = () => {
         if (!relayStillUsed) void stopManagedAgentPairsOnRelay(target.relayUrl);
       };
-      // Removing the active community invalidates any launch restore still in
-      // flight for its relay, so it spawns nothing. Restore pairs registered
-      // first are caught by the stop. Relay routing is left untouched.
-      const invalidateRestore = async () => {
-        if (relayStillUsed) return;
-        await invalidateLaunchRestore().catch((error) => {
-          console.warn("Failed to invalidate launch restore", error);
-        });
+      // Refuses every local pair start on the relay in Rust, including a
+      // launch restore or start already in flight; pairs registered first are
+      // caught by the stop. Relay routing is left untouched.
+      const refuseRelay = async () => {
+        if (!relayStillUsed) await refuseRelayAdmission(target.relayUrl);
       };
 
       if (id !== communities.activeCommunity?.id) {
         markRemoved();
+        await refuseRelay();
         communities.removeCommunity(id);
         stopRelayPairs();
         return;
@@ -128,7 +126,7 @@ export function useCommunityNavigationTransitions({
           );
         }
         markRemoved();
-        await invalidateRestore();
+        await refuseRelay();
         await goHome({ replace: true });
         communities.removeCommunity(id);
         stopRelayPairs();
@@ -136,7 +134,7 @@ export function useCommunityNavigationTransitions({
       }
 
       markRemoved();
-      await invalidateRestore();
+      await refuseRelay();
       await runCommunityViewTransition(async () => {
         saveActiveDestination();
         await goHome({ replace: true });

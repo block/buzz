@@ -95,7 +95,7 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
 pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
-    restore_ticket: u64,
+    admission: super::AdmissionSnapshot,
 ) -> Result<(), String> {
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
@@ -292,79 +292,86 @@ pub async fn restore_managed_agents_on_launch(
     // prevents this transition or waits until every child is tracked and can
     // be terminated.
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
-    let spawned = spawn_under_restore_gate(&state, shutdown_started, restore_ticket, || {
-        std::thread::scope(|scope| {
-            let owner_hex_ref = owner_hex.as_deref();
-            let handles: Vec<_> = agents_to_start
-                .iter()
-                .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-                .map(|record| {
-                    let handle = scope.spawn(move || {
-                        let relay_url = crate::relay::effective_agent_relay_url(
-                            &record.relay_url,
-                            restore_relay,
-                        );
-                        let outcome = match super::ManagedAgentRuntimeKey::new(
-                            record.pubkey.clone(),
-                            &relay_url,
-                        ) {
-                            Ok(key) => {
-                                // F2: if a concurrent startup reconcile already
-                                // tracked a live child for this exact pair during
-                                // the Phase A window, leave it alone. Mirrors the
-                                // live-child guard in `start_pair`.
-                                let already_live = app
-                                    .state::<AppState>()
-                                    .managed_agent_processes
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
+    let spawned = spawn_if_admitted(
+        &state,
+        shutdown_started,
+        &admission,
+        restore_relay,
+        |admitted| {
+            std::thread::scope(|scope| {
+                let owner_hex_ref = owner_hex.as_deref();
+                let handles: Vec<_> = agents_to_start
+                    .iter()
+                    .filter(|_| !shutdown_started.load(Ordering::SeqCst))
+                    .map(|record| {
+                        let handle = scope.spawn(move || {
+                            let relay_url = crate::relay::effective_agent_relay_url(
+                                &record.relay_url,
+                                restore_relay,
+                            );
+                            let outcome = match super::ManagedAgentRuntimeKey::new(
+                                record.pubkey.clone(),
+                                &relay_url,
+                            ) {
+                                Ok(key) => {
+                                    // F2: if a concurrent startup reconcile already
+                                    // tracked a live child for this exact pair during
+                                    // the Phase A window, leave it alone. Mirrors the
+                                    // live-child guard in `start_pair`.
+                                    let already_live = app
+                                        .state::<AppState>()
+                                        .managed_agent_processes
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut runtimes| {
+                                            runtimes.get_mut(&key).map(|runtime| {
+                                                runtime.child.try_wait().ok().flatten().is_none()
+                                            })
                                         })
-                                    })
-                                    .unwrap_or(false);
-                                if already_live {
-                                    SpawnOutcome::Skipped
-                                } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                                None,
-                                            )
-                                        }) {
-                                        Ok(process) => {
-                                            SpawnOutcome::Spawned(key, Box::new(process))
+                                        .unwrap_or(false);
+                                    if already_live {
+                                        SpawnOutcome::Skipped
+                                    } else {
+                                        match super::terminate_untracked_pair_runtime(app, &key)
+                                            .and_then(|()| {
+                                                // F1: restore spawns lazy, matching
+                                                // reconcile and manual start. Eager on
+                                                // restore buys nothing — a crashed
+                                                // mid-turn session is not resumed by an
+                                                // eager child — and silently reintroduces
+                                                // N idle brains on every launch.
+                                                spawn_agent_child(
+                                                    app,
+                                                    record,
+                                                    &key.relay_url,
+                                                    admitted,
+                                                    true,
+                                                    owner_hex_ref,
+                                                    None,
+                                                )
+                                            }) {
+                                            Ok(process) => {
+                                                SpawnOutcome::Spawned(key, Box::new(process))
+                                            }
+                                            Err(error) => SpawnOutcome::Failed(error),
                                         }
-                                        Err(error) => SpawnOutcome::Failed(error),
                                     }
                                 }
-                            }
-                            Err(error) => SpawnOutcome::Failed(error),
-                        };
-                        (record.pubkey.clone(), outcome)
-                    });
-                    handle
-                })
-                .collect();
+                                Err(error) => SpawnOutcome::Failed(error),
+                            };
+                            (record.pubkey.clone(), outcome)
+                        });
+                        handle
+                    })
+                    .collect();
 
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect::<Vec<AgentSpawnResult>>()
-        })
-    })?;
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<AgentSpawnResult>>()
+            })
+        },
+    )?;
     let Some((restore_transition, spawn_results)) = spawned else {
         return Ok(());
     };
@@ -567,37 +574,19 @@ fn persist_restore_error(
     save_managed_agents(app, &records)
 }
 
-/// Ticket for a launch restore, taken by `apply_workspace` before it hands the
-/// apply lock to the background task, so a removal that lands before restore
-/// begins still invalidates it.
-pub fn launch_restore_ticket(state: &AppState) -> u64 {
-    state.launch_restore_generation.load(Ordering::SeqCst)
-}
-
-/// Invalidate any launch restore already scheduled or running. Takes the runtime
-/// transition lock, which restore holds across its check-then-spawn.
-pub fn invalidate_launch_restore(state: &AppState) -> Result<(), String> {
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
-    state
-        .launch_restore_generation
-        .fetch_add(1, Ordering::SeqCst);
-    Ok(())
-}
-
 /// Restore's check-then-spawn step. Takes the runtime transition lock and runs
-/// `spawn` only if shutdown has not started and no community removal has
-/// invalidated `ticket`; otherwise spawns nothing and returns `None`. On
-/// success the lock is returned still held, so the caller registers the spawned
-/// children before shutdown or a removal's stop sweep can run.
-fn spawn_under_restore_gate<'a, T>(
+/// `spawn` only if shutdown has not started and `restore_relay` is still
+/// admitted under the snapshot `apply_workspace` captured when it scheduled
+/// this restore; otherwise spawns nothing and returns `None`. On success the
+/// lock is returned still held, so the caller registers the spawned children
+/// before shutdown or a removal's stop sweep can run.
+fn spawn_if_admitted<'a, T>(
     state: &'a AppState,
     shutdown_started: &AtomicBool,
-    ticket: u64,
-    spawn: impl FnOnce() -> T,
-) -> Result<Option<(std::sync::MutexGuard<'a, ()>, T)>, String> {
+    admission: &super::AdmissionSnapshot,
+    restore_relay: &str,
+    spawn: impl FnOnce(&super::Admitted<'_>) -> T,
+) -> Result<Option<(std::sync::MutexGuard<'a, super::RelayAdmissions>, T)>, String> {
     let transition = state
         .managed_agent_runtime_transition
         .lock()
@@ -605,11 +594,14 @@ fn spawn_under_restore_gate<'a, T>(
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(None);
     }
-    if state.launch_restore_generation.load(Ordering::SeqCst) != ticket {
-        eprintln!("buzz-desktop: skipping managed agent restore: a community was removed");
-        return Ok(None);
-    }
-    Ok(Some((transition, spawn())))
+    let spawned = match transition.admit(admission, restore_relay) {
+        Ok(admitted) => spawn(&admitted),
+        Err(error) => {
+            eprintln!("buzz-desktop: skipping managed agent restore: {error}");
+            return Ok(None);
+        }
+    };
+    Ok(Some((transition, spawned)))
 }
 
 #[cfg(test)]
@@ -630,45 +622,57 @@ mod profile_reconcile_tests {
 
 // `build_app_state()` pulls in native Windows DLLs unavailable on the CI runner.
 #[cfg(all(test, not(target_os = "windows")))]
-mod launch_restore_invalidation_tests {
-    use super::{invalidate_launch_restore, launch_restore_ticket, spawn_under_restore_gate};
-    use crate::app_state::build_app_state;
+mod launch_restore_admission_tests {
+    use super::spawn_if_admitted;
+    use crate::app_state::{build_app_state, AppState};
+    use crate::managed_agents::AdmissionSnapshot;
     use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
     use std::cell::Cell;
     use std::sync::atomic::AtomicBool;
 
-    /// Runs the restore spawn gate and returns how many times it spawned.
-    fn spawns(state: &crate::app_state::AppState, shutdown: &AtomicBool, ticket: u64) -> u32 {
+    const RELAY: &str = "wss://removed.example";
+
+    /// Runs restore's spawn step with `admission` and returns how many times it spawned.
+    fn spawns(state: &AppState, shutdown: &AtomicBool, admission: &AdmissionSnapshot) -> u32 {
         let count = Cell::new(0);
-        let gate = spawn_under_restore_gate(state, shutdown, ticket, || count.set(count.get() + 1));
-        assert!(gate.unwrap().is_some() == (count.get() == 1));
+        let gate = spawn_if_admitted(state, shutdown, admission, RELAY, |_| {
+            count.set(count.get() + 1)
+        });
+        assert_eq!(gate.unwrap().is_some(), count.get() == 1);
         count.get()
     }
 
+    fn remove(state: &AppState) {
+        crate::managed_agents::remove_relay(state, RELAY).unwrap();
+    }
+
     #[test]
-    fn stale_ticket_spawns_nothing_and_leaves_relay_routing_unchanged() {
+    fn restore_scheduled_before_a_removal_spawns_nothing_even_after_readd() {
         let state = build_app_state();
         let shutdown = AtomicBool::new(false);
-        *state.relay_url_override.lock().unwrap() = Some("wss://removed.example".into());
-        // Stands in for a restore scheduled before the community was removed.
-        let stale = launch_restore_ticket(&state);
+        *state.relay_url_override.lock().unwrap() = Some(RELAY.into());
+        // What `apply_workspace` captures when it schedules the restore.
+        let scheduled = AdmissionSnapshot::capture(&state);
 
-        invalidate_launch_restore(&state).unwrap();
+        remove(&state);
+        crate::managed_agents::readd_relay(&state, RELAY).unwrap();
 
-        assert_eq!(spawns(&state, &shutdown, stale), 0);
-        assert_eq!(relay_ws_url_with_override(&state), "wss://removed.example");
+        assert_eq!(spawns(&state, &shutdown, &scheduled), 0);
+        assert_eq!(relay_ws_url_with_override(&state), RELAY);
         assert_eq!(
             relay_api_base_url_with_override(&state),
             "https://removed.example"
         );
-        // A restore scheduled after the removal spawns normally.
-        assert_eq!(spawns(&state, &shutdown, launch_restore_ticket(&state)), 1);
+        // A restore scheduled after the re-add spawns normally.
+        let fresh = AdmissionSnapshot::capture(&state);
+        assert_eq!(spawns(&state, &shutdown, &fresh), 1);
     }
 
     #[test]
-    fn shutdown_spawns_nothing_even_with_a_valid_ticket() {
+    fn shutdown_spawns_nothing_even_when_admitted() {
         let state = build_app_state();
         let shutdown = AtomicBool::new(true);
-        assert_eq!(spawns(&state, &shutdown, launch_restore_ticket(&state)), 0);
+        let admission = AdmissionSnapshot::capture(&state);
+        assert_eq!(spawns(&state, &shutdown, &admission), 0);
     }
 }

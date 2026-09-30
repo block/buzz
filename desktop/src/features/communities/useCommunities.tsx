@@ -23,6 +23,7 @@ import { removeProjectSnapshotForRelay } from "@/features/projects/projectSnapsh
 import { clearChannelHeadCache } from "@/shared/api/tauriChannelHeadCache";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
+import { readmitRelay } from "@/features/agents/managedAgentRelayCleanup";
 import {
   clearCommunityDestinations,
   removeCommunityDestination,
@@ -213,6 +214,8 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       saveCommunities(next);
       return next;
     });
+    // A relay removed from this device earlier admits local agent pairs again.
+    void readmitRelay(community.relayUrl);
     return resolvedId;
   }, []);
 

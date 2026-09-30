@@ -227,9 +227,10 @@ pub async fn list_managed_agent_runtimes(
 pub(crate) fn start_managed_agent_runtime_pair_lazy(
     pubkey: String,
     relay_url: String,
+    admission: &super::AdmissionSnapshot,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, admission, app)
 }
 
 #[tauri::command]
@@ -238,7 +239,8 @@ pub fn start_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
+    start_managed_agent_runtime_pair_lazy(pubkey, relay_url, &admission, app)
 }
 
 fn start_pair(
@@ -246,16 +248,18 @@ fn start_pair(
     relay_url: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
+    admission: &super::AdmissionSnapshot,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
-    let _transition = state
+    let transition = state
         .managed_agent_runtime_transition
         .lock()
         .map_err(|e| e.to_string())?;
     if state.shutdown_started.load(Ordering::Acquire) {
         return Err("desktop shutdown has started".into());
     }
+    let admitted = transition.admit(admission, &relay_url)?;
     let _store = state
         .managed_agents_store_lock
         .lock()
@@ -288,8 +292,15 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process =
-        spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref(), None)?;
+    let mut process = spawn_agent_child(
+        &app,
+        record,
+        &key.relay_url,
+        &admitted,
+        lazy,
+        owner.as_deref(),
+        None,
+    )?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -388,8 +399,10 @@ pub fn restart_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    // Captured before the stop, so a removal landing between the two refuses the start.
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
     stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, &admission, app)
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.
@@ -469,6 +482,8 @@ pub async fn reconcile_managed_agent_runtimes(
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
     use futures_util::{stream, StreamExt};
 
+    // Captured before the probes: a community removed while they run is refused.
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
     for community in communities {
@@ -513,12 +528,15 @@ pub async fn reconcile_managed_agent_runtimes(
                         key.relay_url.clone(),
                         true,
                         Some(&record.updated_at),
+                        &admission,
                         app.clone(),
                     ) {
                         Ok(mut status) => {
                             status.requested_relay_url = Some(requested);
                             rows.push(status);
                         }
+                        // Removed mid-reconcile: nothing to start and nothing to report.
+                        Err(error) if error == super::RELAY_REMOVED_ERROR => {}
                         Err(error) => {
                             let mut status = status_for_with(
                                 &app,

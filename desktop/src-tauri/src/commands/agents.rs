@@ -76,11 +76,15 @@ async fn ensure_relay_mesh_for_record(
     Ok(())
 }
 
+/// Start `pubkey`'s pairs on `relay_urls`. Restart flows capture `admission`
+/// before they stop the pairs, so a community removed while the restart runs
+/// refuses its start; those relays are skipped quietly.
 pub(super) async fn start_local_agent_pairs_with_preflight(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
     relay_urls: &[String],
+    admission: &crate::managed_agents::AdmissionSnapshot,
 ) -> Result<ManagedAgentSummary, String> {
     let record_snapshot = {
         let _store_guard = state
@@ -131,9 +135,13 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
             pubkey.to_string(),
             relay_url.clone(),
+            admission,
             app.clone(),
         ) {
-            errors.push(format!("{relay_url}: {error}"));
+            // A relay removed since `admission` was captured has nothing to restart.
+            if error != crate::managed_agents::RELAY_REMOVED_ERROR {
+                errors.push(format!("{relay_url}: {error}"));
+            }
         }
     }
     if !errors.is_empty() {
@@ -168,6 +176,9 @@ pub(super) async fn start_local_agent_with_preflight(
     expected_signer_pubkey: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
+    // Captured before mesh preflight: a community removed while it awaits
+    // refuses this start below.
+    let admission = crate::managed_agents::AdmissionSnapshot::capture(state);
     let record_snapshot = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -220,6 +231,14 @@ pub(super) async fn start_local_agent_with_preflight(
     let workspace_owner =
         crate::relay::bind_expected_signer(expected_signer_pubkey, workspace_owner_hex(state)?)?;
 
+    // Lock order matches `start_pair`: transition, then store, then runtime
+    // map. The transition lock is held until the pair is registered, so a
+    // removal either refuses this start or waits and its stop sweep finds it.
+    let transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let admitted = transition.admit(&admission, workspace_relay_url.as_str())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -260,6 +279,7 @@ pub(super) async fn start_local_agent_with_preflight(
         &mut runtimes,
         Some(workspace_owner.as_str()),
         &workspace_relay_url,
+        &admitted,
         replay_floor_unix,
     )?;
     save_managed_agents(app, &records)?;
