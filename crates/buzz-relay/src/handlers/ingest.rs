@@ -843,8 +843,8 @@ pub(crate) async fn check_channel_write(
     state: &AppState,
     auth: &IngestAuth,
     ch_id: Uuid,
-) -> Result<(), String> {
-    check_token_channel_access(auth, ch_id)?;
+) -> Result<(), IngestError> {
+    check_token_channel_access(auth, ch_id).map_err(IngestError::Rejected)?;
     let channel = load_channel_for_write(tenant, state, ch_id).await?;
     check_channel_membership(
         tenant,
@@ -853,21 +853,23 @@ pub(crate) async fn check_channel_write(
         &auth.pubkey().to_bytes(),
         channel.as_ref(),
     )
-    .await?;
+    .await
+    .map_err(IngestError::Rejected)?;
     if channel.is_some_and(|ch| ch.archived_at.is_some()) {
-        return Err("invalid: channel is archived".into());
+        return Err(IngestError::Rejected("invalid: channel is archived".into()));
     }
     Ok(())
 }
 
 /// Load the channel row for the write gates. A missing row is `Ok(None)`, and
 /// callers keep their missing-row behavior. Any other lookup error is returned
-/// so the write is denied instead of silently skipping the archive check.
+/// as an internal error, so the write is denied instead of silently skipping
+/// the archive check.
 async fn load_channel_for_write(
     tenant: &TenantContext,
     state: &AppState,
     ch_id: Uuid,
-) -> Result<Option<buzz_db::channel::ChannelRecord>, String> {
+) -> Result<Option<buzz_db::channel::ChannelRecord>, IngestError> {
     match state
         .db
         .get_channel_for_event_write(tenant.community(), ch_id)
@@ -875,7 +877,7 @@ async fn load_channel_for_write(
     {
         Ok(channel) => Ok(Some(channel)),
         Err(buzz_db::DbError::ChannelNotFound(_)) => Ok(None),
-        Err(e) => Err(format!("error: database error: {e}")),
+        Err(e) => Err(IngestError::Internal(format!("error: database error: {e}"))),
     }
 }
 
@@ -2653,9 +2655,7 @@ async fn ingest_event_inner(
     // it later in this request); each gate keeps its existing missing-row
     // behavior.
     let channel_row = match channel_id {
-        Some(ch_id) => load_channel_for_write(tenant, state, ch_id)
-            .await
-            .map_err(IngestError::Internal)?,
+        Some(ch_id) => load_channel_for_write(tenant, state, ch_id).await?,
         None => None,
     };
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
@@ -3557,8 +3557,12 @@ mod postgres_tests {
 
         let result = check_channel_write(&tenant, &state, &auth, channel_id).await;
 
-        let err = result.expect_err("a failed channel lookup must deny the write");
-        assert!(err.starts_with("error: database error"), "{err}");
+        match result {
+            Err(IngestError::Internal(err)) => {
+                assert!(err.starts_with("error: database error"), "{err}")
+            }
+            other => panic!("a failed channel lookup must deny as internal, got {other:?}"),
+        }
     }
 
     #[test]
