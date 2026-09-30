@@ -162,6 +162,10 @@ fn unsafe_catch_all_states_require_an_operator() {
     let mut pending = repaired_audit(false);
     pending.children[1].pending_detach = true;
     refused(&pending, "not structurally safe");
+
+    let mut child_triggers = repaired_audit(false);
+    child_triggers.children[1].extra_triggers = vec!["audit_catch_all".to_string()];
+    refused(&child_triggers, "child-only triggers (audit_catch_all)");
 }
 
 #[test]
@@ -536,13 +540,26 @@ mod postgres_tests {
         seed_repaired_layout(&pool, true).await;
 
         let (first, second) = tokio::join!(maintain(&pool), maintain(&pool));
-        first.expect("first runner");
-        second.expect("second runner");
-        assert_advanced(
-            &audit_partition_catalog_at(&pool, PARTITION_MANAGER_MONTHS_AHEAD, fixed_now())
-                .await
-                .expect("audit"),
-        );
+        // A runner's catch-all NOWAIT fails fast if the other runner's audit is
+        // probing that catch-all; nothing else may go wrong.
+        for (runner, result) in [("first", first), ("second", second)] {
+            let Err(error) = result else { continue };
+            let message = error.to_string();
+            assert!(
+                message.contains("lock_timeout"),
+                "{runner} runner: {message}"
+            );
+            for table in PARTITIONED_TABLES {
+                for outcome in ["operator_required", "deadline", "error"] {
+                    assert!(
+                        !message.contains(&format!("{table} {outcome}:")),
+                        "{runner} runner: {message}"
+                    );
+                }
+            }
+        }
+        // Whatever a fail-fast loser left undone, the next pass converges.
+        assert_advanced(&maintain(&pool).await.expect("follow-up pass"));
         drop_schema(&admin, &schema).await;
     }
 
@@ -553,7 +570,11 @@ mod postgres_tests {
         seed_repaired_layout(&pool, false).await;
         let before = catalog_snapshot(&pool).await;
         // The parent lock wait (2s) outlasts the 300ms client deadline.
-        let holder = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS SHARE MODE").await;
+        let mut holder = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS SHARE MODE").await;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .expect("holder backend pid");
 
         let result = maintain_partitions_with_deadline(
             &pool,
@@ -569,25 +590,41 @@ mod postgres_tests {
             "{result:?}"
         );
 
-        // The abandoned session is closed, not pooled: its backend disappears
-        // and releases every lock before the holder commits.
-        let mut gone = false;
+        // The abandoned session is closed, not pooled: the backend that was
+        // queued behind the holder disappears and releases every lock before
+        // the holder commits. Only sessions blocked by this test's holder
+        // count, so maintenance elsewhere on the cluster cannot interfere.
+        let blocked: Vec<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(holder_pid)
+        .fetch_all(&admin)
+        .await
+        .expect("sessions blocked by the holder");
+        let mut gone = blocked.is_empty();
         for _ in 0..50 {
-            let sessions: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity \
-                 WHERE application_name = 'buzz_partition_maintenance'",
-            )
-            .fetch_one(&admin)
-            .await
-            .expect("count maintenance sessions");
-            if sessions == 0 {
-                gone = true;
+            if gone {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let alive: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = ANY($1))",
+            )
+            .bind(&blocked)
+            .fetch_one(&admin)
+            .await
+            .expect("check abandoned backend");
+            gone = !alive;
         }
         drop(holder);
-        assert!(gone, "abandoned maintenance session was not closed");
+        assert!(
+            blocked.len() <= 1,
+            "unexpected blocked sessions {blocked:?}"
+        );
+        assert!(
+            gone,
+            "abandoned maintenance session {blocked:?} was not closed"
+        );
         let after = catalog_snapshot(&pool).await;
         let events_only = |snapshot: &[(String, String, String, i64)]| {
             snapshot
@@ -597,6 +634,126 @@ mod postgres_tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(events_only(&after), events_only(&before));
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn catch_all_with_child_only_trigger_is_refused() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, false).await;
+        sqlx::query(
+            "CREATE TRIGGER catch_all_only BEFORE INSERT ON events_p_future_next \
+             FOR EACH ROW EXECUTE FUNCTION partition_test_trigger()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create child-only trigger");
+        let before = catalog_snapshot(&pool).await;
+
+        let result = maintain(&pool).await;
+        assert!(
+            matches!(result, Err(DbError::InvalidData(ref message))
+                if message.contains("events operator_required")
+                    && message.contains("child-only triggers (catch_all_only)")
+                    && !message.contains("delivery_log")),
+            "{result:?}"
+        );
+        let after = catalog_snapshot(&pool).await;
+        let events_only = |snapshot: &[(String, String, String, i64)]| {
+            snapshot
+                .iter()
+                .filter(|(name, ..)| name.starts_with("events_"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(events_only(&after), events_only(&before));
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_audit_after_a_concurrent_advance_is_a_noop() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, false).await;
+        // A runner audits, then loses the race to a runner that commits first.
+        let stale = audit_partition_catalog_at(&pool, PARTITION_MANAGER_MONTHS_AHEAD, fixed_now())
+            .await
+            .expect("stale audit");
+        assert_advanced(&maintain(&pool).await.expect("winning runner"));
+        let advanced = catalog_snapshot(&pool).await;
+
+        for table_audit in &stale.tables {
+            let result = maintain_table(
+                &pool,
+                table_audit,
+                PARTITION_MANAGER_MONTHS_AHEAD as i32,
+                ADVANCE,
+                fixed_now(),
+                std::time::Duration::from_secs(10),
+            )
+            .await;
+            assert_eq!(
+                (result.outcome, result.error.as_deref()),
+                (PartitionMaintenanceOutcome::Noop, None),
+                "{}",
+                table_audit.table
+            );
+        }
+        assert_eq!(catalog_snapshot(&pool).await, advanced);
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn audit_retries_when_a_listed_partition_is_dropped() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, false).await;
+        let mut dropper = pool.begin().await.expect("begin dropper");
+        let dropper_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *dropper)
+            .await
+            .expect("dropper backend pid");
+        sqlx::query("DROP TABLE events_p_future_next")
+            .execute(&mut *dropper)
+            .await
+            .expect("drop catch-all");
+
+        // The audit lists the catch-all, then queues behind the drop's lock.
+        let audit = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                audit_partition_catalog_at(&pool, PARTITION_MANAGER_MONTHS_AHEAD, fixed_now()).await
+            }
+        });
+        let mut queued = false;
+        for _ in 0..50 {
+            queued = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(dropper_pid)
+            .fetch_one(&admin)
+            .await
+            .expect("check audit queue");
+            if queued {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(queued, "audit never queued behind the drop");
+        dropper.commit().await.expect("commit drop");
+
+        let audit = audit.await.expect("audit task").expect("audit retried");
+        let events = audit
+            .tables
+            .iter()
+            .find(|table| table.table == "events")
+            .expect("events audit");
+        assert!(events
+            .children
+            .iter()
+            .all(|child| child.name != "events_p_future_next"));
         drop_schema(&admin, &schema).await;
     }
 

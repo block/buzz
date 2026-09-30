@@ -159,7 +159,7 @@ enum MaintenancePlan {
 }
 
 enum LockedAttempt {
-    Committed,
+    Committed(MaintenanceChange),
     SkippedLocked,
     Unchanged,
     Refused(String),
@@ -262,6 +262,15 @@ fn plan_maintenance(
                     child.name
                 ))
             }
+        }
+        // Replacements inherit only parent triggers; dropping the catch-all
+        // would silently discard child-specific behavior.
+        if !child.extra_triggers.is_empty() {
+            return MaintenancePlan::Refuse(format!(
+                "catch-all {} has child-only triggers ({}); replacing it would drop them",
+                child.name,
+                child.extra_triggers.join(", ")
+            ));
         }
         let Some(PartitionBound::Finite(lower)) = child.lower else {
             return MaintenancePlan::Refuse(format!(
@@ -389,44 +398,33 @@ async fn maintain_table(
     now: DateTime<Utc>,
     table_deadline: Duration,
 ) -> TableMaintenance {
-    let table = audit.table;
-    let plan = plan_maintenance(audit, policy);
-    let (names, replaced) = match &plan {
+    let change = match plan_maintenance(audit, policy) {
         MaintenancePlan::Noop => return TableMaintenance::done(PartitionMaintenanceOutcome::Noop),
         MaintenancePlan::Disabled => {
             return TableMaintenance::done(PartitionMaintenanceOutcome::SkippedDisabled)
         }
-        MaintenancePlan::Refuse(_) => wanted_names(audit, policy),
-        MaintenancePlan::Apply(change) => (change.target_names(table), change.replaced()),
-    };
-
-    // Reject name collisions first, and before any lock, so a misnamed
-    // relation is reported precisely and never costs a parent outage.
-    match colliding_relation(pool, names, replaced).await {
-        Ok(None) => {}
-        Ok(Some(name)) => {
-            return TableMaintenance::failed(
-                PartitionMaintenanceOutcome::OperatorRequired,
-                None,
-                collision_message(&name),
-            )
-        }
-        Err(error) => {
-            return TableMaintenance::failed(classify_error(&error), None, error.to_string())
-        }
-    }
-    let change = match plan {
-        MaintenancePlan::Apply(change) => change,
         MaintenancePlan::Refuse(reason) => {
+            // Report a name collision ahead of the structural reason it
+            // usually causes. A refusal takes no lock, so no race applies.
+            let (names, replaced) = wanted_names(audit, policy);
+            let error = match colliding_relation(pool, names, replaced).await {
+                Ok(Some(name)) => collision_message(&name),
+                Ok(None) => reason,
+                Err(error) => {
+                    return TableMaintenance::failed(
+                        classify_error(&error),
+                        None,
+                        error.to_string(),
+                    )
+                }
+            };
             return TableMaintenance::failed(
                 PartitionMaintenanceOutcome::OperatorRequired,
                 None,
-                reason,
-            )
+                error,
+            );
         }
-        MaintenancePlan::Noop | MaintenancePlan::Disabled => {
-            return TableMaintenance::done(PartitionMaintenanceOutcome::Noop)
-        }
+        MaintenancePlan::Apply(change) => change,
     };
 
     let deadline = tokio::time::Instant::now() + table_deadline;
@@ -449,7 +447,7 @@ async fn maintain_table(
     };
     let attempt = tokio::time::timeout_at(
         deadline,
-        apply_change(&mut connection, table, months_ahead, policy, now, &change),
+        apply_change(&mut connection, audit.table, months_ahead, policy, now),
     )
     .await;
     let Ok(attempt) = attempt else {
@@ -467,9 +465,9 @@ async fn maintain_table(
         );
     };
     match attempt {
-        Ok(LockedAttempt::Committed) => TableMaintenance {
-            outcome: change.outcome(),
-            change: Some(change),
+        Ok(LockedAttempt::Committed(committed)) => TableMaintenance {
+            outcome: committed.outcome(),
+            change: Some(committed),
             error: None,
         },
         Ok(LockedAttempt::SkippedLocked) => {
@@ -493,7 +491,6 @@ async fn apply_change(
     months_ahead: i32,
     policy: PartitionMaintenancePolicy,
     now: DateTime<Utc>,
-    expected: &MaintenanceChange,
 ) -> Result<LockedAttempt> {
     let mut transaction = connection.begin().await?;
     configure_maintenance_transaction(&mut transaction).await?;
@@ -511,6 +508,33 @@ async fn apply_change(
     if !acquired {
         transaction.rollback().await?;
         return Ok(LockedAttempt::SkippedLocked);
+    }
+
+    // Re-plan while serialized against other managers but before any table
+    // lock. A runner that lost a race sees the winner's committed layout here
+    // and stops, instead of mistaking the winner's monthlies for collisions.
+    let serialized = audit_table_on(&mut transaction, table, months_ahead, now).await?;
+    let expected = match plan_maintenance(&serialized, policy) {
+        MaintenancePlan::Apply(change) => change,
+        MaintenancePlan::Noop | MaintenancePlan::Disabled => {
+            transaction.rollback().await?;
+            return Ok(LockedAttempt::Unchanged);
+        }
+        MaintenancePlan::Refuse(reason) => {
+            transaction.rollback().await?;
+            return Ok(LockedAttempt::Refused(reason));
+        }
+    };
+    // Reject misnamed relations before any lock can cost a parent outage.
+    if let Some(name) = colliding_relation(
+        &mut *transaction,
+        expected.target_names(table),
+        expected.replaced(),
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Ok(LockedAttempt::Refused(collision_message(&name)));
     }
 
     let parent = maintenance_parent(&mut transaction, table).await?;
@@ -551,10 +575,10 @@ async fn apply_change(
         .await?;
     }
 
-    // The pre-lock audit may be stale; re-plan from the locked catalog.
+    // Close the window between the serialized audit and the table locks.
     let locked = audit_table_on(&mut transaction, table, months_ahead, now).await?;
     match plan_maintenance(&locked, policy) {
-        MaintenancePlan::Apply(change) if change == *expected => {}
+        MaintenancePlan::Apply(change) if change == expected => {}
         MaintenancePlan::Noop | MaintenancePlan::Disabled => {
             transaction.rollback().await?;
             return Ok(LockedAttempt::Unchanged);
@@ -569,16 +593,6 @@ async fn apply_change(
                 "partition catalog changed between the audit and the maintenance locks".to_string(),
             ));
         }
-    }
-    if let Some(name) = colliding_relation(
-        &mut *transaction,
-        expected.target_names(table),
-        expected.replaced(),
-    )
-    .await?
-    {
-        transaction.rollback().await?;
-        return Ok(LockedAttempt::Refused(collision_message(&name)));
     }
 
     let parent_relation = qualified_relation_name(&parent.schema, table);
@@ -620,7 +634,7 @@ async fn apply_change(
     }
 
     let after = audit_table_on(&mut transaction, table, months_ahead, now).await?;
-    let verified = verify_applied(&locked, &after, expected).and(
+    let verified = verify_applied(&locked, &after, &expected).and(
         verify_inheritance(&mut transaction, parent.oid, &expected.target_names(table)).await?,
     );
     if let Err(reason) = verified {
@@ -630,7 +644,7 @@ async fn apply_change(
         )));
     }
     transaction.commit().await?;
-    Ok(LockedAttempt::Committed)
+    Ok(LockedAttempt::Committed(expected))
 }
 
 async fn configure_maintenance_transaction(connection: &mut PgConnection) -> Result<()> {

@@ -35,6 +35,10 @@ const PARTITION_AUDIT_STATEMENT_TIMEOUT: &str = "5s";
 /// Maximum wall-clock duration for one complete multi-table catalog audit.
 const PARTITION_AUDIT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Fresh-snapshot retries after a partition vanishes mid-audit, such as when
+/// another relay's maintenance replaces a catch-all.
+const PARTITION_AUDIT_CONCURRENT_DROP_RETRIES: usize = 2;
+
 fn expected_partition_key(table: &str) -> Option<&'static str> {
     match table {
         "events" => Some("RANGE (created_at)"),
@@ -495,6 +499,26 @@ async fn audit_table(
     now: DateTime<Utc>,
 ) -> Result<PartitionTableAudit> {
     let months_ahead = validated_months_ahead(months_ahead)?;
+    let mut retries = 0;
+    loop {
+        match audit_table_once(pool, table, months_ahead, now).await {
+            Err(error)
+                if retries < PARTITION_AUDIT_CONCURRENT_DROP_RETRIES
+                    && is_concurrent_drop(&error) =>
+            {
+                retries += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn audit_table_once(
+    pool: &PgPool,
+    table: &'static str,
+    months_ahead: i32,
+    now: DateTime<Utc>,
+) -> Result<PartitionTableAudit> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SET TRANSACTION READ ONLY")
         .execute(&mut *transaction)
@@ -503,6 +527,20 @@ async fn audit_table(
     let audit = audit_table_on(&mut transaction, table, months_ahead, now).await?;
     transaction.commit().await?;
     Ok(audit)
+}
+
+/// Whether an audit failed only because a partition it had already listed was
+/// dropped by a concurrent transaction. A fresh snapshot sees a consistent
+/// catalog, so the audit can be retried.
+fn is_concurrent_drop(error: &DbError) -> bool {
+    match error {
+        DbError::NotFound(_) => true,
+        // `relation_contains_rows` names a leaf that no longer exists.
+        DbError::Sqlx(sqlx::Error::Database(database)) => {
+            database.code().as_deref() == Some("42P01")
+        }
+        _ => false,
+    }
 }
 
 async fn configure_audit_transaction(connection: &mut PgConnection) -> Result<()> {
@@ -678,14 +716,27 @@ async fn audit_table_on(
         let is_leaf: bool = row.try_get("is_leaf")?;
         let bound_partition_key: Option<String> = row.try_get("bound_partition_key")?;
         let detach_pending: bool = row.try_get("detach_pending")?;
-        let sibling_bounds: Vec<String> = row.try_get("sibling_bounds")?;
+        // Catalog rows come from the statement snapshot, but `pg_get_expr`
+        // renders from current catalog state and yields NULL for a relation
+        // dropped since the snapshot was taken.
+        let sibling_bounds = row
+            .try_get::<Vec<Option<String>>, _>("sibling_bounds")?
+            .into_iter()
+            .collect::<Option<Vec<String>>>()
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "a sibling of partition {name} was dropped mid-audit"
+                ))
+            })?;
         if detach_pending {
             pending_roots.insert(root_child_relation_oid);
         }
         let partition_key_compatible = partition_key_valid
             && bound_partition_key.as_deref() == Some(expected_partition_key)
             && !detach_pending;
-        let expression: String = row.try_get("bound")?;
+        let expression: String = row
+            .try_get::<Option<String>, _>("bound")?
+            .ok_or_else(|| DbError::NotFound(format!("partition {name} was dropped mid-audit")))?;
         let is_default = expression.trim() == "DEFAULT";
         let own_range = parse_range_bounds(&expression);
         let is_catch_all = own_range.as_ref().is_some_and(|(lower, upper)| {
