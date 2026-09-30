@@ -199,13 +199,22 @@ export function findTurnIdForPromptEvent(
   return null;
 }
 
+/** Clock skew allowed for turn start vs reply created_at (seconds). */
+export const TURN_START_CLOCK_SKEW_SEC = 2;
+
 /**
- * Prefer the turn that *ends* near `replyCreatedAt` and started most recently.
+ * Prefer the turn that produced this reply: started at/before the reply and
+ * ends near it, with the shortest reliable span among thinking turns.
  *
  * Scoring by nearest *any* item let a long prior turn steal the join when it
  * emitted a late tool/lifecycle frame beside the reply — chips then showed
  * that turn's ~20m duration and its 44200 token total (local Opus 19:47 /
  * 235.2k vs a 1–2m activity-feed turn).
+ *
+ * Preferring bare shortest span also let a *newer* turn that started just
+ * after an older reply (span≈0 under a 30s post-start grace) rebind every
+ * nearby chip to the latest session usage (1.1M → 243.9k on all Opus rows).
+ * Require start ≤ reply (+ small skew) so older replies stay pinned.
  *
  * Rejects turns whose latest activity is more than 10 minutes from the reply.
  */
@@ -248,9 +257,9 @@ export function findNearestTurnIdByTime(
   for (const [turnId, score] of scored) {
     const endDelta = Math.abs(score.endSec - replyCreatedAt);
     if (endDelta > 600) continue;
-    // Prefer turns that finished at/before the reply (not ones that only
-    // started long after — clock skew aside).
-    if (score.startSec - replyCreatedAt > 30) continue;
+    // Turn must have started at/before the reply (tiny skew only). A later
+    // turn's span collapses to 0 and would steal every prior reply's chips.
+    if (score.startSec - replyCreatedAt > TURN_START_CLOCK_SKEW_SEC) continue;
     const span = Math.max(0, replyCreatedAt - score.startSec);
     const betterThinking = score.hasThinking && !bestHasThinking;
     const sameThinking = score.hasThinking === bestHasThinking;
@@ -269,6 +278,109 @@ export function findNearestTurnIdByTime(
     }
   }
   return bestId;
+}
+
+/** Parse `Tokens: 81645/1000000 (...optional)` from a Usage lifecycle line. */
+export function parseUsageTokensUsedLabel(
+  text: string | null | undefined,
+): number | null {
+  if (!text) return null;
+  const match = /^Tokens:\s*(\d+)\s*\/\s*\d+/i.exec(text.trim());
+  if (!match) return null;
+  const used = Number(match[1]);
+  return Number.isFinite(used) && used >= 0 ? used : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * Latest ACP `usage_update.used` for a turn — same numerator as the channel
+ * "Usage Tokens: used/size" line. Per-turn coalesced; later turns do not rewrite it.
+ */
+export function findTurnUsageUsedTokens(
+  events: readonly TurnJoinObserverEvent[],
+  turnId: string | null,
+): number | null {
+  if (!turnId) return null;
+  let bestUsed: number | null = null;
+  let bestTs = Number.NEGATIVE_INFINITY;
+  for (const event of events) {
+    if (event.turnId !== turnId) continue;
+    const payload = asRecord(event.payload);
+    const params = asRecord(payload.params);
+    const update = asRecord(params.update);
+    const updateType =
+      typeof update.sessionUpdate === "string"
+        ? update.sessionUpdate
+        : typeof payload.sessionUpdate === "string"
+          ? payload.sessionUpdate
+          : null;
+    if (updateType !== "usage_update") continue;
+    const usedRaw = update.used ?? payload.used;
+    const used =
+      typeof usedRaw === "number"
+        ? usedRaw
+        : typeof usedRaw === "string" && usedRaw.trim() !== ""
+          ? Number(usedRaw)
+          : NaN;
+    if (!Number.isFinite(used) || used < 0) continue;
+    let ts = bestTs + 1;
+    if (event.timestamp) {
+      const parsed = Date.parse(event.timestamp);
+      if (Number.isFinite(parsed)) ts = parsed;
+    }
+    if (bestUsed == null || ts >= bestTs) {
+      bestUsed = used;
+      bestTs = ts;
+    }
+  }
+  return bestUsed;
+}
+
+/**
+ * Token count for the reply chip.
+ *
+ * Prefer this turn's `usage_update.used` (matches Usage Tokens numerator).
+ * Fall back to archived 44200 only on an exact session/turn match — never a
+ * time-near hit, which rebinds every nearby reply to the latest session total.
+ */
+export function resolveReplyChipTokenCount(input: {
+  usageUsedTokens: number | null;
+  metricMatchKind: string | null | undefined;
+  metricTurnTotalTokens: string | number | null | undefined;
+  metricTurnInputTokens?: string | number | null | undefined;
+  metricTurnOutputTokens?: string | number | null | undefined;
+}): string | number | null {
+  if (input.usageUsedTokens != null && Number.isFinite(input.usageUsedTokens)) {
+    return input.usageUsedTokens;
+  }
+  if (input.metricMatchKind !== "exact") return null;
+  if (
+    input.metricTurnTotalTokens !== null &&
+    input.metricTurnTotalTokens !== undefined &&
+    input.metricTurnTotalTokens !== ""
+  ) {
+    return input.metricTurnTotalTokens;
+  }
+  const inputTok = input.metricTurnInputTokens;
+  const outputTok = input.metricTurnOutputTokens;
+  if (
+    inputTok != null &&
+    inputTok !== "" &&
+    outputTok != null &&
+    outputTok !== ""
+  ) {
+    try {
+      return (BigInt(inputTok) + BigInt(outputTok)).toString();
+    } catch {
+      return null;
+    }
+  }
+  return inputTok ?? outputTok ?? null;
 }
 
 export function filterTranscriptItemsForTurn<T extends TurnJoinTranscriptItem>(

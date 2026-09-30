@@ -7,10 +7,13 @@ import {
   earliestContentStartedAtSec,
   findNearestTurnIdByTime,
   findTurnIdForPromptEvent,
+  findTurnUsageUsedTokens,
   formatTurnDuration,
   formatTurnTokens,
   MAX_RELIABLE_TURN_DURATION_SEC,
   normalizeUnixSeconds,
+  parseUsageTokensUsedLabel,
+  resolveReplyChipTokenCount,
   resolveTurnDurationSeconds,
   selectPromptCreatedAtForDuration,
 } from "./agentMessageTurnMeta.ts";
@@ -65,7 +68,6 @@ test("findNearestTurnIdByTime prefers turn with thinking content", () => {
   );
 });
 
-
 test("findNearestTurnIdByTime prefers short turn ending at reply over long prior turn", () => {
   // Prior long turn emits a late tool beside the reply; old nearest-item
   // scoring stole the join → 19:47 duration + wrong 44200 tokens.
@@ -101,6 +103,143 @@ test("findNearestTurnIdByTime prefers short turn ending at reply over long prior
     },
   ];
   assert.equal(findNearestTurnIdByTime(items, replySec), "turn-short");
+});
+
+test("findNearestTurnIdByTime does not let a later turn steal an older reply", () => {
+  // Newer turn starts ~15s after the older reply. Old shortest-span scoring
+  // gave it span≈0 under a 30s post-start grace and rebound every chip to the
+  // latest usage total (1.1M → 243.9k on all Opus rows).
+  const olderReplySec = Date.parse("2026-09-30T09:40:00Z") / 1000;
+  const items = [
+    {
+      id: "old-start",
+      type: "thought",
+      text: "older turn",
+      timestamp: "2026-09-30T09:39:50Z",
+      turnId: "turn-older",
+    },
+    {
+      id: "old-end",
+      type: "tool",
+      title: "reply",
+      timestamp: "2026-09-30T09:39:59Z",
+      turnId: "turn-older",
+    },
+    {
+      id: "new-start",
+      type: "thought",
+      text: "newer turn",
+      timestamp: "2026-09-30T09:40:15Z",
+      turnId: "turn-newer",
+    },
+    {
+      id: "new-usage",
+      type: "tool",
+      title: "usage",
+      timestamp: "2026-09-30T09:40:20Z",
+      turnId: "turn-newer",
+    },
+  ];
+  assert.equal(findNearestTurnIdByTime(items, olderReplySec), "turn-older");
+});
+
+test("parseUsageTokensUsedLabel reads Usage Tokens numerator", () => {
+  assert.equal(
+    parseUsageTokensUsedLabel("Tokens: 81645/1000000 ($0.9677 USD)"),
+    81645,
+  );
+  assert.equal(parseUsageTokensUsedLabel("Tokens: 1500/8192"), 1500);
+  assert.equal(parseUsageTokensUsedLabel("nope"), null);
+});
+
+test("findTurnUsageUsedTokens returns latest used for the turn only", () => {
+  const events = [
+    {
+      kind: "acp_read",
+      turnId: "turn-a",
+      timestamp: "2026-09-30T09:40:00Z",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "usage_update",
+            used: 1000,
+            size: 1_000_000,
+          },
+        },
+      },
+    },
+    {
+      kind: "acp_read",
+      turnId: "turn-a",
+      timestamp: "2026-09-30T09:40:05Z",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "usage_update",
+            used: 81645,
+            size: 1_000_000,
+          },
+        },
+      },
+    },
+    {
+      kind: "acp_read",
+      turnId: "turn-b",
+      timestamp: "2026-09-30T09:41:00Z",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "usage_update",
+            used: 243900,
+            size: 1_000_000,
+          },
+        },
+      },
+    },
+  ];
+  assert.equal(findTurnUsageUsedTokens(events, "turn-a"), 81645);
+  assert.equal(findTurnUsageUsedTokens(events, "turn-b"), 243900);
+  assert.equal(findTurnUsageUsedTokens(events, "turn-missing"), null);
+});
+
+test("resolveReplyChipTokenCount prefers usage used; ignores time-near 44200", () => {
+  assert.equal(
+    resolveReplyChipTokenCount({
+      usageUsedTokens: 81645,
+      metricMatchKind: "time",
+      metricTurnTotalTokens: "243900",
+    }),
+    81645,
+  );
+  assert.equal(
+    resolveReplyChipTokenCount({
+      usageUsedTokens: null,
+      metricMatchKind: "time",
+      metricTurnTotalTokens: "243900",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveReplyChipTokenCount({
+      usageUsedTokens: null,
+      metricMatchKind: "exact",
+      metricTurnTotalTokens: "1500",
+    }),
+    "1500",
+  );
+  assert.equal(
+    formatTurnTokens(
+      resolveReplyChipTokenCount({
+        usageUsedTokens: 81645,
+        metricMatchKind: null,
+        metricTurnTotalTokens: null,
+      }),
+    ),
+    "81.6k",
+  );
 });
 
 test("collectThinkingContentItems keeps thought/tool and orphans in window", () => {

@@ -23,9 +23,11 @@ import {
   findNearestTurnIdByTime,
   findTurnIdForPromptEvent,
   findTurnStartedEvent,
+  findTurnUsageUsedTokens,
   formatTurnDuration,
   formatTurnTokens,
   normalizeUnixSeconds,
+  resolveReplyChipTokenCount,
   resolveTurnDurationSeconds,
   selectPromptCreatedAtForDuration,
   summarizeThinkingItems,
@@ -66,9 +68,10 @@ export type AgentMessageTurnMeta = {
  * Best-available join of duration / tokens / thinking for one agent reply.
  *
  * - Duration: triggering prompt / turn_started → reply (not stale parentId)
- * - Tokens: archived 44200 via exact `(sessionId, turnId)` (or unique turnId);
- *   else a tight high-confidence time window. Ambiguous matches are hidden.
- *   Kind 44200 still has no chat message id — that is the remaining schema gap.
+ * - Tokens: prefer this turn's ACP `usage_update.used` (same numerator as the
+ *   channel Usage Tokens line). Else archived 44200 on exact session/turn only
+ *   — never a time-near hit, which rewrote every nearby reply to the latest
+ *   session total as usage frames streamed.
  * - Thinking: observer frames for agent+channel; prefer turn whose
  *   `triggeringEventIds` includes `parentId`, else nearest by time that has
  *   thought/tool content. Includes null-turnId chunks in the prompt→reply window.
@@ -311,13 +314,20 @@ export function useAgentMessageTurnMeta(input: {
     joinMethod,
   ]);
 
-  // Show whatever the archive returns — do not hide on matchKind.
   const metric = metricQuery.data ?? null;
-  const totalTokens =
-    metric?.turnTotalTokens ??
-    (metric?.turnInputTokens && metric?.turnOutputTokens
-      ? sumTokenStrings(metric.turnInputTokens, metric.turnOutputTokens)
-      : (metric?.turnOutputTokens ?? metric?.turnInputTokens ?? null));
+  // Pin to this turn's Usage numerator when present so later turns cannot
+  // rewrite older chips via a shared time-near 44200 hit.
+  const usageUsedTokens = React.useMemo(
+    () => findTurnUsageUsedTokens(combinedEvents, turnId),
+    [combinedEvents, turnId],
+  );
+  const totalTokens = resolveReplyChipTokenCount({
+    usageUsedTokens,
+    metricMatchKind: metric?.matchKind,
+    metricTurnTotalTokens: metric?.turnTotalTokens,
+    metricTurnInputTokens: metric?.turnInputTokens,
+    metricTurnOutputTokens: metric?.turnOutputTokens,
+  });
 
   // Archive still paging and we have no thinking yet → treat as loading so
   // the UI does not flash an empty Thought chip / card.
@@ -341,7 +351,7 @@ export function useAgentMessageTurnMeta(input: {
     thoughtPreview: thinkingSummary.thoughtPreview,
     hasThinkingContent,
     joinMethod,
-    metricLoading: metricQuery.isLoading,
+    metricLoading: usageUsedTokens == null && metricQuery.isLoading,
     durationLoading:
       (Boolean(promptEventId) && promptQuery.isLoading) ||
       (Boolean(input.parentId) && !promptEventId && parentQuery.isLoading),
@@ -350,12 +360,4 @@ export function useAgentMessageTurnMeta(input: {
     promptSetupItems: promptContext.setup,
     hasPromptContext: promptContext.hasContext,
   };
-}
-
-function sumTokenStrings(a: string, b: string): string | null {
-  try {
-    return (BigInt(a) + BigInt(b)).toString();
-  } catch {
-    return null;
-  }
 }
