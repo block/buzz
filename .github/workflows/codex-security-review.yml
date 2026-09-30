@@ -306,7 +306,8 @@ jobs:
           codex-version: '0.150.1'
           model: ${{ env.CODEX_MODEL }}
           codex-args: '["-c","model_reasoning_effort=${{ env.CODEX_REASONING_EFFORT }}"]'
-          # The trusted authorization job already enforced repository membership.
+          # The trusted authorization job already required repo write access for the
+          # PR author or the authorizing commenter.
           allow-users: '*'
           safety-strategy: drop-sudo
           permission-profile: ':read-only'

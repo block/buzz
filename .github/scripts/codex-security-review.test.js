@@ -52,7 +52,11 @@ function harness({
   files = [],
   labeledIssues = [],
   liveMainShas = [BASE_SHA],
-  permissions = { "block-member": "write", "outside-contributor": "read" },
+  permissions = {
+    "block-member": "write",
+    "outside-contributor": "read",
+    "renovate[bot]": "none",
+  },
 } = {}) {
   const storedComments = [...comments];
   const created = [];
@@ -273,7 +277,11 @@ test("pull request authorization uses the live author's write access", async () 
   assert.equal(member.outputs.get("authorized"), "true");
   assert.deepEqual(member.failures, []);
 
-  for (const author of ["outside-contributor", "unrelated-user"]) {
+  for (const author of [
+    "outside-contributor",
+    "nonexistent-user",
+    "renovate[bot]",
+  ]) {
     const untrusted = pullRequestTrigger({ pull: pullRequest({ author }) });
     await prepare(untrusted);
     assert.equal(untrusted.outputs.get("authorized"), undefined);
@@ -350,7 +358,7 @@ test("stale-marking proceeds when the permission lookup fails", async () => {
 });
 
 test("review commands require a commenter with write access", async () => {
-  for (const login of ["outside-contributor", "unrelated-user"]) {
+  for (const login of ["outside-contributor", "nonexistent-user"]) {
     const state = harness();
     state.context.payload.comment.user.login = login;
     await prepare(state);
@@ -358,6 +366,15 @@ test("review commands require a commenter with write access", async () => {
     assert.deepEqual(state.failures, []);
     assert.match(state.info.at(-1), /require write access/);
   }
+
+  const malformed = harness();
+  malformed.context.payload.comment = {
+    body: "@buzz-security-review foo",
+    user: { login: "outside-contributor" },
+  };
+  await prepare(malformed);
+  assert.deepEqual(malformed.failures, []);
+  assert.equal(malformed.outputs.size, 0);
 
   const trusted = harness({ permissions: { "block-member": "admin" } });
   await prepare(trusted);

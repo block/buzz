@@ -352,20 +352,20 @@ async function prepare({ github, context, core }) {
     requestedHeadSha = context.payload.pull_request?.head?.sha || "";
   } else if (context.eventName === "issue_comment") {
     prNumber = Number(context.payload.issue?.number);
-    const command = context.payload.comment?.body || "";
-    const match = /^@buzz-security-review ([0-9a-f]{40})$/.exec(command);
-    if (!match) {
-      core.setFailed(
-        `Review commands must be exactly "${REVIEW_COMMAND} <full-head-sha>".`,
-      );
-      return;
-    }
     const commenter = context.payload.comment?.user?.login;
     if (
       !(await hasWriteAccess({ github, context, core, username: commenter }))
     ) {
       core.info(
         `Review commands require write access to ${context.repo.owner}/${context.repo.repo}.`,
+      );
+      return;
+    }
+    const command = context.payload.comment?.body || "";
+    const match = /^@buzz-security-review ([0-9a-f]{40})$/.exec(command);
+    if (!match) {
+      core.setFailed(
+        `Review commands must be exactly "${REVIEW_COMMAND} <full-head-sha>".`,
       );
       return;
     }
