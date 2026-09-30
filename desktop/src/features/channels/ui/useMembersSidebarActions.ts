@@ -19,6 +19,7 @@ import {
   clearActiveTurnsForAgentOnStop,
   useManagedAgentRuntimeAction,
 } from "@/features/agents/managedAgentRuntimeHooks";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { managedAgentPairAction } from "@/features/agents/managedAgentRuntimeStatus";
 import {
   channelsQueryKey,
@@ -313,6 +314,9 @@ export function useMembersSidebarActions({
   }
 
   async function invalidateSidebarQueries() {
+    if (channelId) {
+      await invalidateChannelMembersRosters(queryClient, [channelId]);
+    }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
       channelId

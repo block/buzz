@@ -360,6 +360,7 @@ test("invalidateChannelMembersRosters dedupes and targets member keys", async ()
   );
   const invalidated = [];
   const queryClient = {
+    cancelQueries: async () => {},
     invalidateQueries: async ({ queryKey }) => {
       invalidated.push(queryKey);
     },

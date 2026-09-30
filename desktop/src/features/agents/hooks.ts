@@ -69,6 +69,7 @@ import {
   setPersonaActive,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { teamsQueryKey } from "@/features/agents/teamHooks";
 import type {
   AcpRuntime,
@@ -158,11 +159,7 @@ async function invalidateAgentQueries(
       refetchType: options.refetchChannels === false ? "none" : "active",
     }),
     ...(channelId
-      ? [
-          queryClient.invalidateQueries({
-            queryKey: ["channels", channelId, "members"],
-          }),
-        ]
+      ? [invalidateChannelMembersRosters(queryClient, [channelId])]
       : []),
   ]);
 }

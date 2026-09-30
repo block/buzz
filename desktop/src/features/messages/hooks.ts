@@ -59,6 +59,7 @@ import { getChannelWindowEvents } from "@/shared/api/channelWindow";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // Same .mjs the renderer uses, so the cache-update projection can't drift
 // from the on-render overlay.
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
   emptyChannelWindowStore,
@@ -379,9 +380,7 @@ export function useChannelSubscription(channel: Channel | null) {
           payload.type === "member_left" ||
           payload.type === "member_removed"
         ) {
-          void queryClient.invalidateQueries({
-            queryKey: ["channels", channelId, "members"],
-          });
+          void invalidateChannelMembersRosters(queryClient, [channelId]);
           void queryClient.invalidateQueries({
             queryKey: ["channels"],
             exact: true,
