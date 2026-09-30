@@ -40,7 +40,7 @@ function directErrorMessage(e: unknown): string {
     case "target_is_staff":
       return "Relay staff can't be banned or timed out. Remove their staff role first.";
     case "request_id_conflict":
-      return "This request id was already used for a different action. Discard and review again.";
+      return "This request id was already used for a different action. Review again to send it with a new id.";
     default:
       return adminErrorMessage(e);
   }

@@ -219,7 +219,10 @@ test("actions-request-id-conflict: a 409 conflict drops the intent and offers no
     await fillTimeout(c);
     await click(c, "direct-review-btn");
     await click(c, "direct-confirm-btn");
-    assert.match(q(c, "direct-error").textContent, /Discard and review again/);
+    assert.match(
+      q(c, "direct-error").textContent,
+      /Review again to send it with a new id/,
+    );
     assert.ok(!q(c, "direct-confirm-btn"), "no Retry for a spent request id");
     assert.ok(q(c, "direct-review-btn"), "the form is back to Review");
   } finally {
