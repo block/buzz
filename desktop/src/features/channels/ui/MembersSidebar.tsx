@@ -14,7 +14,6 @@ import {
   getSharedChannelIds,
   isAgentIdentityInAllowedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
-import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import {
@@ -164,8 +163,6 @@ export function MembersSidebar({
       await changeChannelMemberRole(channelId, pubkey, role);
     },
     onSettled: async () => {
-      if (!channelId) return;
-      await invalidateChannelMembersRosters(queryClient, [channelId]);
       await queryClient.invalidateQueries({
         queryKey: ["channels", channelId],
       });
@@ -580,9 +577,7 @@ export function MembersSidebar({
             agent: managedAgent,
             ensureRunning: true,
           });
-          await invalidateChannelState(queryClient, channelId, {
-            membershipChanged: true,
-          });
+          await invalidateChannelState(queryClient, channelId);
         } catch (error) {
           setInviteSubmissionErrors((prev) => [
             ...prev,

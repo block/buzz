@@ -12,6 +12,7 @@ import {
   createChannel,
   deleteChannel,
   getChannelDetails,
+  getChannelMembers,
   getChannels,
   hideDm,
   joinChannel,
@@ -49,8 +50,6 @@ import {
 import {
   CHANNEL_MEMBERS_STALE_TIME_MS,
   channelMembersQueryKey,
-  fetchChannelMembers,
-  invalidateChannelMembersRosters,
 } from "@/features/channels/rosterFreshness";
 import { dmVisibilityQueryKeyFor } from "@/features/channels/useHiddenDmIds";
 
@@ -248,14 +247,7 @@ export function reconcileRefreshedCachedChannel(
 export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
-  { membershipChanged = false }: { membershipChanged?: boolean } = {},
 ) {
-  // Mark before the broad ["channels"] invalidation, which also refetches
-  // this roster, so that refetch already reads from the writer.
-  if (channelId && membershipChanged) {
-    await invalidateChannelMembersRosters(queryClient, [channelId]);
-  }
-
   await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
 
   if (!channelId) {
@@ -655,12 +647,12 @@ export function useChannelMembersQuery(
   return useQuery({
     enabled: enabled && channelId !== null,
     queryKey: ["channels", channelId ?? "none", "members"],
-    queryFn: async ({ signal }) => {
+    queryFn: async () => {
       if (!channelId) {
         throw new Error("No channel selected.");
       }
 
-      return fetchChannelMembers(channelId, signal);
+      return getChannelMembers(channelId);
     },
     staleTime: CHANNEL_MEMBERS_STALE_TIME_MS,
   });
@@ -865,9 +857,7 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      await invalidateChannelState(queryClient, effectiveChannelId, {
-        membershipChanged: true,
-      });
+      await invalidateChannelState(queryClient, effectiveChannelId);
     },
   });
 }
@@ -885,9 +875,7 @@ export function useRemoveChannelMemberMutation(channelId: string | null) {
     },
     onSettled: async () => {
       await Promise.all([
-        invalidateChannelState(queryClient, channelId, {
-          membershipChanged: true,
-        }),
+        invalidateChannelState(queryClient, channelId),
         queryClient.invalidateQueries({ queryKey: ["managed-agents"] }),
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);
@@ -907,9 +895,7 @@ export function useJoinChannelMutation(channelId: string | null) {
       await joinChannel(channelId);
     },
     onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId, {
-        membershipChanged: true,
-      });
+      await invalidateChannelState(queryClient, channelId);
     },
   });
 }
@@ -926,9 +912,7 @@ export function useLeaveChannelMutation(channelId: string | null) {
       await leaveChannel(channelId);
     },
     onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId, {
-        membershipChanged: true,
-      });
+      await invalidateChannelState(queryClient, channelId);
     },
   });
 }

@@ -1,118 +1,155 @@
-// A roster refresh after a known membership change must read from the relay
-// writer: the replica can still return the pre-change roster, which would
-// then stay fresh for the whole roster freshness window.
+// After this client changes a channel's membership, the member list shown
+// must never settle on the list from before the change, even though the
+// relay's replica keeps returning that stale list for a while.
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
-const memberCalls = [];
-const pendingCalls = [];
+let now = 1_000_000;
+Date.now = () => now;
+
+const OWNER = "aa".repeat(32);
+const BOT = "bb".repeat(32);
+const routes = [];
+let writerMembers = [OWNER];
+const replicaMembers = [OWNER];
+const deferred = [];
+let deferNextRead = false;
+
 globalThis.window = {
   setTimeout,
   clearTimeout,
   __TAURI_INTERNALS__: {
-    invoke: (command, args) => {
-      if (command !== "get_channel_members") return Promise.resolve(undefined);
-      memberCalls.push(args);
-      return new Promise((resolve) => pendingCalls.push({ args, resolve }));
+    invoke: async (command, args) => {
+      if (command === "get_channel_members") {
+        const writer = args.readYourWrites === true;
+        routes.push(writer ? "writer" : "replica");
+        const members = writer ? writerMembers : replicaMembers;
+        const response = {
+          members: members.map((pubkey) => ({ pubkey, role: "member" })),
+        };
+        if (deferNextRead) {
+          deferNextRead = false;
+          return new Promise((resolve) =>
+            deferred.push(() => resolve(response)),
+          );
+        }
+        return response;
+      }
+      if (command === "add_channel_members") {
+        writerMembers = [...writerMembers, ...args.pubkeys];
+        return { added: args.pubkeys, errors: [] };
+      }
+      if (command === "join_channel") {
+        writerMembers = [...writerMembers, BOT];
+        return undefined;
+      }
+      return undefined;
     },
   },
 };
 
-const {
-  channelMembersQueryKey,
-  fetchChannelMembers,
-  invalidateChannelMembersRosters,
-} = await import("./rosterFreshness.ts");
+const { addChannelMembers, joinChannel, getChannelMembers } = await import(
+  "@/shared/api/tauri"
+);
+const { channelsQueryKey, invalidateChannelState } = await import("./hooks.ts");
+const { channelMembersQueryKey, refreshRostersOnMembershipChange } =
+  await import("./rosterFreshness.ts");
 
-const roster = (...pubkeys) => ({
-  members: pubkeys.map((pubkey) => ({ pubkey, role: "member" })),
-});
-
-function observeRoster(queryClient, channelId) {
+function setup(channelId) {
+  routes.length = 0;
+  writerMembers = [OWNER];
+  now += 60_000;
+  const queryClient = new QueryClient();
+  const unsubscribeRefresh = refreshRostersOnMembershipChange(queryClient);
+  // Same query function as useChannelMembersQuery.
   const observer = new QueryObserver(queryClient, {
     queryKey: channelMembersQueryKey(channelId),
-    queryFn: ({ signal }) => fetchChannelMembers(channelId, signal),
+    queryFn: () => getChannelMembers(channelId),
     staleTime: 5 * 60_000,
   });
-  const unsubscribe = observer.subscribe(() => {});
-  return { observer, unsubscribe };
+  return {
+    queryClient,
+    observer,
+    mount: () => observer.subscribe(() => {}),
+    shown: () =>
+      queryClient
+        .getQueryData(channelMembersQueryKey(channelId))
+        ?.map((member) => member.pubkey),
+    teardown: unsubscribeRefresh,
+  };
 }
-
-const rosterPubkeys = (queryClient, channelId) =>
-  queryClient
-    .getQueryData(channelMembersQueryKey(channelId))
-    ?.map((member) => member.pubkey);
 
 async function settle() {
-  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 10; i += 1) await new Promise((r) => setTimeout(r, 0));
 }
 
-test("a membership-change refresh reads from the writer and beats an in-flight replica read", async () => {
-  memberCalls.length = 0;
-  pendingCalls.length = 0;
-  const queryClient = new QueryClient();
-  // Mounting the roster starts an ordinary display fetch on the replica.
-  const { unsubscribe } = observeRoster(queryClient, "ch-a");
+test("adding a member then invalidating channel state keeps the new roster", async () => {
+  const roster = setup("ch-add");
+  const unmount = roster.mount();
   await settle();
-  assert.equal(memberCalls.length, 1);
-  assert.equal(memberCalls[0].readYourWrites, undefined);
+  assert.deepEqual(roster.shown(), [OWNER]);
 
-  // The app adds a member while that replica read is still in flight.
-  const refresh = invalidateChannelMembersRosters(queryClient, ["ch-a"]);
+  await addChannelMembers({ channelId: "ch-add", pubkeys: [BOT], role: "bot" });
+  await invalidateChannelState(roster.queryClient, "ch-add");
   await settle();
-  assert.equal(memberCalls.length, 2);
-  assert.equal(memberCalls[1].readYourWrites, true);
 
-  // The writer read lands first; the lagging replica read resolves late.
-  pendingCalls[1].resolve(roster("owner", "bot"));
-  await refresh;
-  pendingCalls[0].resolve(roster("owner"));
-  await settle();
-  assert.deepEqual(rosterPubkeys(queryClient, "ch-a"), ["owner", "bot"]);
-
-  // One completed writer read clears the mark; display reads use the replica.
-  const next = queryClient.refetchQueries({
-    queryKey: channelMembersQueryKey("ch-a"),
-  });
-  await settle();
-  assert.equal(memberCalls.at(-1).readYourWrites, undefined);
-  pendingCalls.at(-1).resolve(roster("owner", "bot"));
-  await next;
-  unsubscribe();
+  assert.deepEqual(roster.shown(), [OWNER, BOT]);
+  assert.deepEqual(
+    routes.slice(1),
+    routes.slice(1).map(() => "writer"),
+  );
+  assert.ok(routes.length > 1);
+  unmount();
+  roster.teardown();
 });
 
-test("a writer read cancelled by a broad refetch keeps the replacement on the writer", async () => {
-  memberCalls.length = 0;
-  pendingCalls.length = 0;
-  const queryClient = new QueryClient();
-  const { unsubscribe } = observeRoster(queryClient, "ch-b");
-  await settle();
-  pendingCalls[0].resolve(roster("owner"));
+test("joining from the browser then opening the channel shows the joined roster", async () => {
+  const roster = setup("ch-join");
+  // AppShell's browser join handler, then the dialog opens the channel.
+  await joinChannel("ch-join");
+  await roster.queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+  const unmount = roster.mount();
   await settle();
 
-  const refresh = invalidateChannelMembersRosters(queryClient, ["ch-b"]);
-  await settle();
-  assert.equal(memberCalls.at(-1).readYourWrites, true);
+  assert.deepEqual(roster.shown(), [OWNER, BOT]);
+  assert.deepEqual(routes, ["writer"]);
+  unmount();
+  roster.teardown();
+});
 
-  // Invalidating ["channels"] cancels the in-flight writer read and refetches.
-  const broad = queryClient.invalidateQueries({ queryKey: ["channels"] });
+test("a replica read in flight before the change cannot land over it", async () => {
+  const roster = setup("ch-race");
+  deferNextRead = true;
+  const unmount = roster.mount();
   await settle();
-  assert.equal(memberCalls.length, 3);
-  assert.equal(memberCalls[2].readYourWrites, true);
+  assert.deepEqual(routes, ["replica"]);
 
-  // The cancelled read finishing must not clear the mark: a second broad
-  // refetch that cancels the replacement still has to read from the writer.
-  pendingCalls[1].resolve(roster("owner"));
+  await addChannelMembers({
+    channelId: "ch-race",
+    pubkeys: [BOT],
+    role: "bot",
+  });
   await settle();
-  const broadAgain = queryClient.invalidateQueries({ queryKey: ["channels"] });
+  for (const resolve of deferred.splice(0)) resolve();
   await settle();
-  assert.equal(memberCalls.length, 4);
-  assert.equal(memberCalls[3].readYourWrites, true);
-  pendingCalls[2].resolve(roster("owner"));
-  pendingCalls[3].resolve(roster("owner", "bot"));
-  await Promise.all([refresh, broad, broadAgain]);
-  assert.deepEqual(rosterPubkeys(queryClient, "ch-b"), ["owner", "bot"]);
-  unsubscribe();
+
+  assert.deepEqual(roster.shown(), [OWNER, BOT]);
+  unmount();
+  roster.teardown();
+});
+
+test("ordinary reads return to the replica once the window passes", async () => {
+  const roster = setup("ch-later");
+  await addChannelMembers({
+    channelId: "ch-later",
+    pubkeys: [BOT],
+    role: "bot",
+  });
+  now += 5_001;
+  await getChannelMembers("ch-later");
+  await getChannelMembers("ch-other");
+  assert.deepEqual(routes.slice(-2), ["replica", "replica"]);
+  roster.teardown();
 });

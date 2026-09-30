@@ -33,6 +33,7 @@ import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
+import { noteChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
 import { truncateNpub } from "@/shared/lib/pubkey";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
@@ -645,6 +646,10 @@ export function HuddleBar({
                 "add_agent_to_huddle",
                 { agentPubkey: pubkey },
               );
+              // The agent may also have been added to the parent channel.
+              if (result.parent_added && barState?.parent_channel_id) {
+                noteChannelMembershipChange(barState.parent_channel_id);
+              }
               // Refresh huddle state so the participant list updates immediately.
               const s = await invoke<HuddleState>("get_huddle_state");
               setState(s);

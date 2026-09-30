@@ -2,7 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
-import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
+import { noteChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
 import { getChannelIdFromTags } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -30,7 +30,7 @@ export function useMembershipNotifications(currentPubkey?: string) {
       void queryClient.invalidateQueries({
         queryKey: ["channels", channelId, "detail"],
       });
-      void invalidateChannelMembersRosters(queryClient, [channelId]);
+      noteChannelMembershipChange(channelId);
     },
   );
 

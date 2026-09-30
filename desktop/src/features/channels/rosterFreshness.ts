@@ -6,7 +6,7 @@
 
 import type { useQueryClient } from "@tanstack/react-query";
 
-import { getChannelMembers } from "@/shared/api/tauriChannels";
+import { onChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
 
 /** Single source for the members cache key; hooks.ts imports it from here. */
 export const channelMembersQueryKey = (channelId: string) =>
@@ -22,57 +22,46 @@ export const channelMembersQueryKey = (channelId: string) =>
  * a third party joining a channel the viewer is not currently subscribed to,
  * which corrects within this window. The previous 30s window put a full
  * roster fetch (kind:39002 + a kind:0 batch over every member) on nearly
- * every channel switch.
+ * every channel switch. Refetches just after a change read from the relay
+ * writer (channelMembershipWrites), so none can cache the pre-change roster.
  */
 export const CHANNEL_MEMBERS_STALE_TIME_MS = 5 * 60_000;
 
 /**
- * Channels whose membership this client just changed. Their next roster
- * fetches read from the relay's writer (`readYourWrites`) until one completes
- * unaborted, because the replica can still return the pre-change roster, and
- * that result would then count as fresh for CHANNEL_MEMBERS_STALE_TIME_MS.
- * Clearing only on a completed strong read means a strong fetch cancelled by
- * a later refetch (e.g. a broad `["channels"]` invalidation) still leaves the
- * replacement fetch on the writer. Ordinary roster reads stay on the replica.
- */
-const channelsAwaitingWriterRead = new Set<string>();
-
-/** Query function for the channel roster; see channelsAwaitingWriterRead. */
-export async function fetchChannelMembers(
-  channelId: string,
-  signal?: AbortSignal,
-) {
-  const readYourWrites = channelsAwaitingWriterRead.has(channelId);
-  const members = await getChannelMembers(
-    channelId,
-    readYourWrites ? { readYourWrites } : undefined,
-  );
-  if (readYourWrites && !signal?.aborted) {
-    channelsAwaitingWriterRead.delete(channelId);
-  }
-  return members;
-}
-
-/**
- * Refreshes cached rosters after this client changed their membership: the
- * member mutations, template apply, live join/leave/removed events, and
- * direct `removeChannelMember` writes (moderation kick, agent deletion).
- * Marks each channel for a writer read, cancels any replica fetch already in
- * flight so it cannot land over the fresh roster, then refetches. Accepts a
- * minimal client shape so node unit tests can stub it.
+ * Invalidates cached rosters for channels whose membership was written
+ * through direct `removeChannelMember` calls that bypass the member
+ * mutations (moderation kick, agent-deletion cleanup). The roster's long
+ * freshness window (CHANNEL_MEMBERS_STALE_TIME_MS) means any direct write
+ * path that skips this leaves the removed identity visible until the window
+ * lapses. Accepts a minimal client shape so node unit tests can stub it.
  */
 export async function invalidateChannelMembersRosters(
-  queryClient: Pick<
-    ReturnType<typeof useQueryClient>,
-    "cancelQueries" | "invalidateQueries"
-  >,
+  queryClient: Pick<ReturnType<typeof useQueryClient>, "invalidateQueries">,
   channelIds: Iterable<string>,
 ) {
   const uniqueChannelIds = [...new Set(channelIds)];
   for (const channelId of uniqueChannelIds) {
-    const queryKey = channelMembersQueryKey(channelId);
-    channelsAwaitingWriterRead.add(channelId);
-    await queryClient.cancelQueries({ queryKey, exact: true });
-    await queryClient.invalidateQueries({ queryKey, exact: true });
+    await queryClient.invalidateQueries({
+      queryKey: channelMembersQueryKey(channelId),
+    });
   }
+}
+
+/**
+ * Refreshes a channel's cached roster whenever its membership changes (see
+ * channelMembershipWrites). Cancels a fetch already in flight first: it may
+ * have been routed to the lagging replica before the change was recorded.
+ */
+export function refreshRostersOnMembershipChange(
+  queryClient: Pick<
+    ReturnType<typeof useQueryClient>,
+    "cancelQueries" | "invalidateQueries"
+  >,
+) {
+  return onChannelMembershipChange((channelId) => {
+    const queryKey = channelMembersQueryKey(channelId);
+    void queryClient
+      .cancelQueries({ queryKey, exact: true })
+      .then(() => queryClient.invalidateQueries({ queryKey, exact: true }));
+  });
 }

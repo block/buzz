@@ -12,7 +12,6 @@ import {
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
-import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
 import { setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
@@ -143,7 +142,9 @@ export function useApplyTemplate() {
         );
       }
       await Promise.all([
-        invalidateChannelMembersRosters(queryClient, [channelId]),
+        queryClient.invalidateQueries({
+          queryKey: ["channels", channelId, "members"],
+        }),
         queryClient.invalidateQueries({ queryKey: ["managed-agents"] }),
         queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
       ]);

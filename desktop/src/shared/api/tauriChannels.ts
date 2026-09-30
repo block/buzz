@@ -10,6 +10,10 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
+import {
+  noteChannelMembershipChange,
+  shouldReadChannelMembersFromWriter,
+} from "@/shared/api/channelMembershipWrites";
 import { invokeTauri } from "@/shared/api/tauri";
 
 export type RawChannel = {
@@ -162,13 +166,20 @@ export async function getOpenChannelDirectory(): Promise<Channel[]> {
 export async function createChannel(
   input: CreateChannelInput,
 ): Promise<Channel> {
-  return fromRawChannel(await invokeTauri<RawChannel>("create_channel", input));
+  const channel = fromRawChannel(
+    await invokeTauri<RawChannel>("create_channel", input),
+  );
+  noteChannelMembershipChange(channel.id);
+  return channel;
 }
 
 export async function ensureStarterChannels(): Promise<Channel[]> {
-  return (await invokeTauri<RawChannel[]>("ensure_starter_channels")).map(
-    fromRawChannel,
-  );
+  // May join the caller to each starter channel.
+  const channels = (
+    await invokeTauri<RawChannel[]>("ensure_starter_channels")
+  ).map(fromRawChannel);
+  for (const channel of channels) noteChannelMembershipChange(channel.id);
+  return channels;
 }
 
 export type OpenDmInput = {
@@ -191,7 +202,11 @@ export type OpenDmInput = {
 };
 
 export async function openDm(input: OpenDmInput): Promise<Channel> {
-  return fromRawChannel(await invokeTauri<RawChannel>("open_dm", input));
+  const channel = fromRawChannel(
+    await invokeTauri<RawChannel>("open_dm", input),
+  );
+  noteChannelMembershipChange(channel.id);
+  return channel;
 }
 
 export async function hideDm(channelId: string): Promise<void> {
@@ -289,11 +304,18 @@ export async function getChannelMembers(
 ): Promise<ChannelMember[]> {
   const response = await invokeTauri<RawChannelMembersResponse>(
     "get_channel_members",
-    { channelId, readYourWrites: options?.readYourWrites },
+    {
+      channelId,
+      readYourWrites:
+        options?.readYourWrites ||
+        shouldReadChannelMembersFromWriter(channelId) ||
+        undefined,
+    },
   );
   return response.members.map(fromRawChannelMember);
 }
 
 export async function joinChannel(channelId: string): Promise<void> {
   await invokeTauri<void>("join_channel", { channelId });
+  noteChannelMembershipChange(channelId);
 }
