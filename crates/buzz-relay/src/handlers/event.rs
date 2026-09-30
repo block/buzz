@@ -3006,6 +3006,162 @@ mod tests {
     // source `test_state()` uses — no hard-coded URL).
     mod postgres_tests {
 
+        /// An authenticated WebSocket connection for `keys` in `tenant`, and
+        /// the receiver its OK frames land on.
+        fn authed_conn(
+            keys: &nostr::Keys,
+            tenant: buzz_core::tenant::TenantContext,
+        ) -> (
+            std::sync::Arc<crate::connection::ConnectionState>,
+            tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+        ) {
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+            let cancel = CancellationToken::new();
+            let (send_tx, send_rx) = mpsc::channel(8);
+            let (ctrl_tx, _) = mpsc::channel(8);
+            let (terminal_ctrl_tx, _) = mpsc::channel(1);
+            let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant,
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel),
+            });
+            (conn, send_rx)
+        }
+
+        /// Send `event` on a fresh connection for `keys` and return its OK frame.
+        async fn ok_frame(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: &buzz_core::tenant::TenantContext,
+            keys: &nostr::Keys,
+            event: nostr::Event,
+        ) -> String {
+            let (conn, mut rx) = authed_conn(keys, tenant.clone());
+            super::super::handle_event(event, conn, std::sync::Arc::clone(state)).await;
+            match rx
+                .try_recv()
+                .expect("handle_event must answer with an OK frame")
+            {
+                axum::extract::ws::Message::Text(t) => t.to_string(),
+                other => panic!("expected a Text frame, got {other:?}"),
+            }
+        }
+
+        /// Fresh community with an agent owned by a banned owner.
+        async fn banned_owner_fixture() -> (
+            std::sync::Arc<crate::state::AppState>,
+            buzz_core::tenant::TenantContext,
+            nostr::Keys,
+            nostr::Keys,
+        ) {
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-ban-gate-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+            for keys in [&owner, &agent] {
+                state
+                    .db
+                    .ensure_user(community, keys.public_key().as_bytes())
+                    .await
+                    .expect("ensure user");
+            }
+            state
+                .db
+                .set_agent_owner(
+                    community,
+                    agent.public_key().as_bytes(),
+                    owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("set agent owner");
+            let owner_bytes = owner.public_key().to_bytes();
+            state
+                .db
+                .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                .await
+                .expect("ban owner");
+            (state, tenant, owner, agent)
+        }
+
+        /// Ephemeral events return before ingest, so they carry their own ban
+        /// gate: a banned sender's ephemeral event is refused.
+        /// Mutation: drop the ephemeral/observer gate in `handle_event` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn banned_sender_ephemeral_event_is_refused() {
+            let (state, tenant, owner, _agent) = banned_owner_fixture().await;
+            let ephemeral = nostr::EventBuilder::new(nostr::Kind::Custom(20_555), "typing")
+                .sign_with_keys(&owner)
+                .expect("sign ephemeral");
+            let frame = ok_frame(&state, &tenant, &owner, ephemeral).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "banned sender's ephemeral event must be refused; got {frame}"
+            );
+        }
+
+        /// Observer frames return before ingest too: one from a banned
+        /// owner's agent is refused.
+        /// Mutation: drop the ephemeral/observer gate in `handle_event` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn banned_owners_agent_observer_frame_is_refused() {
+            let (state, tenant, owner, agent) = banned_owner_fixture().await;
+            // A well-formed telemetry frame, so only the ban gate can refuse it.
+            let encrypted = super::encrypt_observer_payload(
+                &agent,
+                &owner.public_key(),
+                &serde_json::json!({"type": "acp_read"}),
+            )
+            .expect("encrypt observer payload");
+            let observer = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+                encrypted,
+            )
+            .tags([
+                nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                nostr::Tag::parse([super::OBSERVER_AGENT_TAG, &agent.public_key().to_hex()])
+                    .expect("agent tag"),
+                nostr::Tag::parse([super::OBSERVER_FRAME_TAG, super::OBSERVER_FRAME_TELEMETRY])
+                    .expect("frame tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign observer frame");
+            let frame = ok_frame(&state, &tenant, &agent, observer).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "banned owner's agent observer frame must be refused; got {frame}"
+            );
+        }
+
         // W2 full witness: event-ingest barrier + durable absence + publication oracle.
         //
         // Extends the unit-level W2 barrier test with two Postgres-required assertions:

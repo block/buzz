@@ -909,4 +909,52 @@ mod postgres_tests {
             Some("https://example.com/closed.png")
         );
     }
+
+    /// Member removal (kind 9031) ends the removed member's live sessions,
+    /// and no one else's.
+    /// Mutation: drop the `revoke_live_access` call from the 9031 arm → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn removing_a_member_closes_their_live_connections() {
+        use crate::state::CommunityConnectionControl;
+        use tokio_util::sync::CancellationToken;
+
+        let host = format!("remove-revoke-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, member, bystander) = (Keys::generate(), Keys::generate(), Keys::generate());
+        for (keys, role) in [
+            (&owner, "owner"),
+            (&member, "member"),
+            (&bystander, "member"),
+        ] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .await
+                .expect("seed member");
+        }
+        let bound = |keys: &Keys| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            control.bind_pubkey(keys.public_key().to_bytes());
+            let guard = state.community_connections.register(
+                uuid::Uuid::new_v4(),
+                tenant.community(),
+                control.clone(),
+            );
+            (control, guard)
+        };
+        let (member_socket, _g1) = bound(&member);
+        let (bystander_socket, _g2) = bound(&bystander);
+
+        let removal = EventBuilder::new(Kind::Custom(RELAY_ADMIN_REMOVE_MEMBER as u16), "")
+            .tags(vec![Tag::public_key(member.public_key())])
+            .sign_with_keys(&owner)
+            .expect("sign 9031");
+        handle_relay_admin_event(&tenant, &state, &removal)
+            .await
+            .expect("owner removes member");
+
+        assert!(member_socket.cancellation_token().is_cancelled());
+        assert!(!bystander_socket.cancellation_token().is_cancelled());
+    }
 }
