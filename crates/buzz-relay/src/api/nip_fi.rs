@@ -48,9 +48,10 @@ use tracing::{debug, warn};
 
 use buzz_auth::{
     CommandError, CommandIssuerPolicy, CommandVerifier, IssuerCapacity, JwksFetcher, NipFiDenyMap,
-    NipFiMode, ProductionJwksSource, CLIENT_ATTACHED_HEADER,
+    NipFiMode, ProductionJwksSource,
 };
 
+use crate::nip_fi_core::{extract_bearer_token, http_denial};
 use crate::state::AppState;
 
 /// Default per-issuer deny-set capacity when `deny_set_capacity` is absent.
@@ -89,28 +90,23 @@ pub async fn disconnect(
     body: axum::body::Bytes,
 ) -> Response<Body> {
     // ── Extract the command JWT from the header ────────────────────────────
-    let token = match extract_command_jwt(&headers) {
+    // Absent → 401 with `WWW-Authenticate: Nostr`; any other malformation
+    // → 403. [NIP-FI.md §Rejection table]
+    let token = match extract_bearer_token(&headers) {
         Ok(t) => t,
-        Err(status) => {
-            return if status == StatusCode::UNAUTHORIZED {
-                // [NIP-FI.md §Rejection table]: 401 MUST carry WWW-Authenticate: Nostr.
-                auth_required_response()
-            } else {
-                plain_response(status, "evidence rejected\n")
-            };
-        }
+        Err(class) => return http_denial(class),
     };
 
     // ── Parse the JSON body ───────────────────────────────────────────────
     let req: DisconnectRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(_) => return plain_response(StatusCode::BAD_REQUEST, "bad request\n"),
+        Err(_) => return command_denial(CommandError::MalformedRequest),
     };
 
     // body.pubkey must be lowercase hex of exactly 32 bytes.
     let body_pubkey = match parse_hex_pubkey(&req.pubkey) {
         Some(k) => k,
-        None => return plain_response(StatusCode::BAD_REQUEST, "bad request\n"),
+        None => return command_denial(CommandError::MalformedRequest),
     };
 
     // ── Command verifier ──────────────────────────────────────────────────
@@ -119,10 +115,7 @@ pub async fn disconnect(
         None => {
             // Mode is Off or not yet initialized.
             debug!("nip-fi disconnect: no command verifier configured");
-            return plain_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "authorization unavailable\n",
-            );
+            return command_denial(CommandError::AuthorizationUnavailable);
         }
     };
 
@@ -170,23 +163,12 @@ pub async fn disconnect(
 
             disconnected_response()
         }
-        Err(CommandError::DenySetFull) => {
-            warn!("nip-fi disconnect: deny set full — command rejected, no sessions closed");
-            metrics::counter!("buzz_nip_fi_disconnect_capacity_rejections_total").increment(1);
-            plain_response(StatusCode::SERVICE_UNAVAILABLE, "deny set full\n")
-        }
-        Err(CommandError::UntilExceedsCeiling) | Err(CommandError::MalformedRequest) => {
-            plain_response(StatusCode::BAD_REQUEST, "bad request\n")
-        }
-        Err(CommandError::AuthorizationUnavailable) => plain_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "authorization unavailable\n",
-        ),
-        Err(CommandError::EvidenceRejected) => {
-            plain_response(StatusCode::FORBIDDEN, "evidence rejected\n")
-        }
-        Err(CommandError::AuthorizationDenied) => {
-            plain_response(StatusCode::FORBIDDEN, "authorization denied\n")
+        Err(err) => {
+            if err == CommandError::DenySetFull {
+                warn!("nip-fi disconnect: deny set full — command rejected, no sessions closed");
+                metrics::counter!("buzz_nip_fi_disconnect_capacity_rejections_total").increment(1);
+            }
+            command_denial(err)
         }
     }
 }
@@ -536,29 +518,6 @@ pub fn validate_command_issuer_config(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Extract the command JWS token from the `Nostr-Federated-Identity: Bearer`
-/// header.  Returns `Err(401)` if the header is absent, `Err(403)` otherwise.
-///
-/// The same header is used for assertion tokens at upgrade and for command
-/// tokens at the admin API — distinct roles on distinct paths, never mixed.
-fn extract_command_jwt(headers: &HeaderMap) -> Result<&str, StatusCode> {
-    let mut values = headers.get_all(CLIENT_ATTACHED_HEADER).iter();
-    let first = values.next().ok_or(StatusCode::UNAUTHORIZED)?;
-    // Repeated header → reject.
-    if values.next().is_some() {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let raw = first.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
-    if raw.contains(',') {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let token = raw.strip_prefix("Bearer ").ok_or(StatusCode::FORBIDDEN)?;
-    if token.is_empty() || token.contains(char::is_whitespace) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    Ok(token)
-}
-
 fn parse_hex_pubkey(raw: &str) -> Option<nostr::PublicKey> {
     if raw.len() != 64
         || !raw
@@ -578,15 +537,10 @@ fn plain_response(status: StatusCode, body: &'static str) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
-/// Build the `401 authentication required` response with the mandatory
-/// `WWW-Authenticate: Nostr` header. [NIP-FI.md §Rejection table]
-fn auth_required_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .header("WWW-Authenticate", "Nostr")
-        .body(Body::from("authentication required\n"))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+/// Render a command rejection with its spec-exact status and body.
+fn command_denial(err: CommandError) -> Response<Body> {
+    let status = StatusCode::from_u16(err.http_status()).expect("valid status");
+    plain_response(status, err.response_body())
 }
 
 /// Spec-exact 200 success response.
@@ -607,50 +561,6 @@ fn disconnected_response() -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
-
-    fn headers_with(value: &str) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        h.insert(
-            CLIENT_ATTACHED_HEADER,
-            HeaderValue::from_str(value).unwrap(),
-        );
-        h
-    }
-
-    // ── JWT extraction contract ────────────────────────────────────────────
-
-    #[test]
-    fn absent_header_gives_401() {
-        let h = HeaderMap::new();
-        assert_eq!(extract_command_jwt(&h), Err(StatusCode::UNAUTHORIZED));
-    }
-
-    #[test]
-    fn repeated_header_gives_403() {
-        let mut h = HeaderMap::new();
-        h.append(
-            CLIENT_ATTACHED_HEADER,
-            HeaderValue::from_static("Bearer aaa.bbb.ccc"),
-        );
-        h.append(
-            CLIENT_ATTACHED_HEADER,
-            HeaderValue::from_static("Bearer ddd.eee.fff"),
-        );
-        assert_eq!(extract_command_jwt(&h), Err(StatusCode::FORBIDDEN));
-    }
-
-    #[test]
-    fn non_bearer_gives_403() {
-        let h = headers_with("Token aaa.bbb.ccc");
-        assert_eq!(extract_command_jwt(&h), Err(StatusCode::FORBIDDEN));
-    }
-
-    #[test]
-    fn valid_bearer_extracted() {
-        let h = headers_with("Bearer aaa.bbb.ccc");
-        assert_eq!(extract_command_jwt(&h), Ok("aaa.bbb.ccc"));
-    }
 
     // ── Hex pubkey parsing ────────────────────────────────────────────────
 
@@ -694,21 +604,6 @@ mod tests {
             b"{\"disconnected\": true}",
             "success body must be byte-exact per spec"
         );
-    }
-
-    /// `401` MUST carry `WWW-Authenticate: Nostr` and the spec body.
-    #[tokio::test]
-    async fn auth_required_response_has_www_authenticate() {
-        let resp = auth_required_response();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        let www_auth = resp
-            .headers()
-            .get("WWW-Authenticate")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert_eq!(www_auth, "Nostr", "401 MUST carry WWW-Authenticate: Nostr");
-        let body_bytes = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
-        assert_eq!(body_bytes.as_ref(), b"authentication required\n");
     }
 
     /// `403` error responses MUST NOT carry `WWW-Authenticate`.
@@ -755,7 +650,7 @@ mod route_integration_tests {
     };
     use buzz_auth::{
         CommandIssuerPolicy, CommandVerifier, IssuerCapacity, IssuerRegistry, NipFiDenyMap,
-        ProductionJwksSource,
+        ProductionJwksSource, CLIENT_ATTACHED_HEADER,
     };
     use std::sync::Arc;
     use tower::ServiceExt;
