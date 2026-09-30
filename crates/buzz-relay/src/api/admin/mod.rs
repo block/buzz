@@ -7,17 +7,18 @@
 mod auth;
 mod direct;
 mod error;
+mod reads;
 
 use std::sync::Arc;
 
 use auth::{
-    admin_role_str, admin_source_str, authorize, require_mutation_principal, require_operator,
-    AdminRole, AdminSource,
+    admin_role_str, admin_source_str, authorize, authorize_read, require_mutation_principal,
+    require_operator, AdminRole, AdminSource,
 };
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, Uri},
+    http::{header, HeaderMap, HeaderValue, Method, Uri},
     middleware::{self, Next},
     response::Response,
     routing::{delete, get, patch, put},
@@ -61,6 +62,10 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/operators", get(list_operators))
         .route("/operators/{pubkey}", put(upsert_operator))
         .route("/operators/{pubkey}", delete(delete_operator))
+        .route("/communities", get(reads::communities))
+        .route("/members/search", get(reads::search_members))
+        .route("/members/{pubkey}", get(reads::lookup_member))
+        .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))
         .route("/members/{pubkey}/ban", delete(unban_member))
         .route("/members/{pubkey}/timeout", delete(untimeout_member))
@@ -158,17 +163,10 @@ struct ProbeResponse {
 async fn probe(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ProbeResponse>, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    let principal = authorize_read(&state, &headers, &method, &uri).await?;
 
     let (auth_mode, role, source, can_act, can_staff) = match &state.config.admin {
         Some(config) => match &config.auth {
@@ -204,18 +202,11 @@ async fn probe(
 async fn reports(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<ReportQuery>,
 ) -> Result<Json<Vec<buzz_db::admin_moderation::AdminReport>>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     validate(
         query.status.as_deref(),
         REPORT_STATUS_ALLOWLIST,
@@ -255,18 +246,11 @@ async fn reports(
 async fn report_detail(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminReportDetail>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_report(id)
@@ -294,17 +278,10 @@ struct FeedbackSummary {
 async fn feedback(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FeedbackSummary>>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     let items = state
         .db
         .admin_list_feedback(100)
@@ -330,18 +307,11 @@ async fn feedback(
 async fn feedback_detail(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminFeedback>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_feedback(id)
@@ -353,18 +323,11 @@ async fn feedback_detail(
 async fn feedback_attachment(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Path((id, sha256)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     if !is_sha256(&sha256) {
         return Err(ApiError::not_found());
     }
@@ -938,17 +901,10 @@ struct OperatorEntry {
 async fn list_operators(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    let principal_opt = authorize_read(&state, &headers, &method, &uri).await?;
 
     let principal = require_mutation_principal(principal_opt)?;
     require_operator(&principal)?;
@@ -1295,18 +1251,11 @@ struct RestrictionsQuery {
 async fn list_member_restrictions(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<RestrictionsQuery>,
 ) -> Result<Json<RestrictionsPage>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
 
     let page_limit = limit(Some(query.limit.unwrap_or(200)))?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
@@ -1582,7 +1531,7 @@ mod postgres_tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    fn database_url() -> String {
+    pub(super) fn database_url() -> String {
         std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| {
             "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1 -- local test-only credentials
         })
@@ -1592,7 +1541,7 @@ mod postgres_tests {
     /// Rostered as a config operator in `test_state()` so `authorized()` can
     /// mint NIP-98 credentials that resolve to an Operator principal without a
     /// DB lookup.
-    fn test_operator_keys() -> nostr::Keys {
+    pub(super) fn test_operator_keys() -> nostr::Keys {
         nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
             .expect("valid test secret key")
     }
@@ -1606,7 +1555,7 @@ mod postgres_tests {
         nip98_state(vec![test_operator_keys().public_key().to_hex()]).await
     }
 
-    async fn disabled_mode_state() -> Arc<crate::state::AppState> {
+    pub(super) async fn disabled_mode_state() -> Arc<crate::state::AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
@@ -2236,7 +2185,9 @@ mod postgres_tests {
 
     /// Build an AppState that uses a real Postgres connection pool so HTTP
     /// routes that hit the DB can commit and read back results.
-    async fn nip98_state_with_real_pool(pool: sqlx::PgPool) -> Arc<crate::state::AppState> {
+    pub(super) async fn nip98_state_with_real_pool(
+        pool: sqlx::PgPool,
+    ) -> Arc<crate::state::AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
@@ -3031,7 +2982,7 @@ mod postgres_tests {
 
     /// Build a test AppState in nip98 mode with the given operator pubkeys
     /// (populated in relay_operator_pubkeys config) and an AlwaysFreshReplayGuard.
-    async fn nip98_state(pubkeys: Vec<String>) -> Arc<crate::state::AppState> {
+    pub(super) async fn nip98_state(pubkeys: Vec<String>) -> Arc<crate::state::AppState> {
         nip98_state_with_replay(pubkeys, Arc::new(AlwaysFreshReplayGuard)).await
     }
 
@@ -3092,7 +3043,7 @@ mod postgres_tests {
     /// on `admin.example` (the test host). The path should be the handler-level
     /// path (e.g. `/reports`); this helper prefixes it with `ADMIN_API_PREFIX`
     /// to match the canonical URL the auth layer constructs in production.
-    fn make_nostr_auth(keys: &nostr::Keys, path: &str) -> String {
+    pub(super) fn make_nostr_auth(keys: &nostr::Keys, path: &str) -> String {
         use nostr::{EventBuilder, Kind, Tag};
         let url = format!("https://admin.example{ADMIN_API_PREFIX}{path}");
         let tags = vec![
@@ -3889,7 +3840,7 @@ mod postgres_tests {
     /// Build a NIP-98 `Authorization: Nostr` header from an explicit raw tag
     /// list, so a test can inject duplicate `u`/`method`/`payload` tags that the
     /// typed helpers can't express. Signs a real kind-27235 event.
-    fn make_nostr_auth_raw_tags(keys: &nostr::Keys, tags: Vec<nostr::Tag>) -> String {
+    pub(super) fn make_nostr_auth_raw_tags(keys: &nostr::Keys, tags: Vec<nostr::Tag>) -> String {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine as _;
         use nostr::{EventBuilder, Kind};

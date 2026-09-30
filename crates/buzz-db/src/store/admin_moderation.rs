@@ -424,6 +424,111 @@ fn row_to_feedback(row: sqlx::postgres::PgRow) -> Result<AdminFeedback> {
     })
 }
 
+/// Active community row in the admin community directory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminCommunity {
+    /// Community identifier.
+    pub id: Uuid,
+    /// Served host.
+    pub host: String,
+    /// Workspace icon URL, when set.
+    pub icon: Option<String>,
+}
+
+/// List active communities whose host starts with `prefix` (case-insensitive,
+/// matched literally), ordered by `(lower(host), id)` and resumed after
+/// `after`. Uses the tenant binder's liveness rule, so every row can be bound.
+pub async fn list_communities(
+    pool: &PgPool,
+    prefix: &str,
+    after: Option<(&str, Uuid)>,
+    limit: i64,
+) -> Result<Vec<AdminCommunity>> {
+    let (after_host, after_id) = after.unzip();
+    let rows = sqlx::query(
+        r#"
+        SELECT id, host, icon
+        FROM communities
+        WHERE archived_at IS NULL
+          AND deleted_at IS NULL
+          AND deletion_state = 'active'
+          AND lower(host) LIKE lower($1) || '%' ESCAPE '\'
+          AND ($2::text IS NULL OR (lower(host), id) > ($2, $3::uuid))
+        ORDER BY lower(host), id
+        LIMIT $4
+        "#,
+    )
+    .bind(crate::user::escape_like(prefix))
+    .bind(after_host)
+    .bind(after_id)
+    .bind(bounded_limit(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(AdminCommunity {
+                id: row.try_get("id")?,
+                host: row.try_get("host")?,
+                icon: row.try_get("icon")?,
+            })
+        })
+        .collect()
+}
+
+/// One stored event, read inside a single community for a delete preview.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminEventPreview {
+    /// Event id (hex).
+    pub id: String,
+    /// Author public key (hex).
+    pub author_pubkey: String,
+    /// Event kind.
+    pub kind: i32,
+    /// Event content.
+    pub content: String,
+    /// Timestamp signed into the event.
+    pub created_at: DateTime<Utc>,
+    /// Soft-deletion time, when deleted.
+    pub deleted_at: Option<DateTime<Utc>>,
+    /// Channel the event belongs to, if any.
+    pub channel_id: Option<Uuid>,
+}
+
+/// Fetch event `id` from `community` only (same lookup as the report detail).
+pub async fn get_event_preview(
+    pool: &PgPool,
+    community_id: Uuid,
+    id: &[u8],
+) -> Result<Option<AdminEventPreview>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, pubkey, kind, content, created_at, deleted_at, channel_id
+        FROM events
+        WHERE community_id = $1 AND id = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(community_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        Ok(AdminEventPreview {
+            id: hex::encode(row.try_get::<Vec<u8>, _>("id")?),
+            author_pubkey: hex::encode(row.try_get::<Vec<u8>, _>("pubkey")?),
+            kind: row.try_get("kind")?,
+            content: row.try_get("content")?,
+            created_at: row.try_get("created_at")?,
+            deleted_at: row.try_get("deleted_at")?,
+            channel_id: row.try_get("channel_id")?,
+        })
+    })
+    .transpose()
+}
+
 impl Db {
     /// List reports for the deployment-global read-only admin plane.
     #[allow(clippy::too_many_arguments)]
@@ -469,6 +574,27 @@ impl Db {
     #[datastore_span(name = "admin_get_feedback", system = "postgresql")]
     pub async fn admin_get_feedback(&self, id: Uuid) -> Result<Option<AdminFeedback>> {
         get_feedback(&self.pool, id).await
+    }
+
+    /// Page the admin community directory.
+    #[datastore_span(name = "admin_list_communities", system = "postgresql")]
+    pub async fn admin_list_communities(
+        &self,
+        prefix: &str,
+        after: Option<(&str, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<AdminCommunity>> {
+        list_communities(&self.pool, prefix, after, limit).await
+    }
+
+    /// Fetch one event inside one community for the admin delete preview.
+    #[datastore_span(name = "admin_get_event_preview", system = "postgresql")]
+    pub async fn admin_get_event_preview(
+        &self,
+        community_id: Uuid,
+        id: &[u8],
+    ) -> Result<Option<AdminEventPreview>> {
+        get_event_preview(&self.pool, community_id, id).await
     }
 }
 

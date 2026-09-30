@@ -229,7 +229,7 @@ pub async fn get_user_by_nip05(
 ///
 /// Without this, a search query of `"%"` would match every row (full table
 /// scan) and `"_"` would act as a single-character wildcard.
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
     input
         .replace('\\', "\\\\")
         .replace('%', "\\%")
