@@ -1,0 +1,8 @@
+[
+  {"kind":"turn_started","turnId":"steer-retry-0","payload":{"triggeringEventIds":["request-a","request-b"],"triggeringRootEventId":"thread-root","triggeringParentEventId":"thread-parent"}},
+  {"kind":"turn_error","turnId":"steer-retry-0","payload":{"triggeringEventIds":["request-a","request-b"],"triggeringRootEventId":"thread-root","triggeringParentEventId":"thread-parent","disposition":"retrying","attempt":1}},
+  {"kind":"turn_started","turnId":"steer-retry-1","payload":{"triggeringEventIds":["request-a","request-b"],"triggeringRootEventId":"thread-root","triggeringParentEventId":"thread-parent"}},
+  {"kind":"turn_error","turnId":"steer-retry-1","payload":{"triggeringEventIds":["request-a","request-b"],"triggeringRootEventId":"thread-root","triggeringParentEventId":"thread-parent","disposition":"retrying","attempt":2}},
+  {"kind":"turn_started","turnId":"steer-retry-2","payload":{"triggeringEventIds":["request-a","request-b"],"triggeringRootEventId":"thread-root","triggeringParentEventId":"thread-parent"}},
+  {"kind":"turn_error","turnId":"steer-retry-2","payload":{"triggeringEventIds":["request-a","request-b"],"triggeringRootEventId":"thread-root","triggeringParentEventId":"thread-parent","disposition":"dead_lettered","attempt":11}}
+]

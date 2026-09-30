@@ -3,7 +3,6 @@ import * as React from "react";
 import {
   subscribeAgentObserverStore,
   getAgentObserverSnapshot,
-  compareObserverEvents,
   type AgentObserverStoreUpdate,
 } from "@/features/agents/observerRelayStore";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -12,6 +11,10 @@ import {
   subscribeDocumentVisibility,
 } from "@/shared/lib/useDocumentVisible";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
+import {
+  advanceObserverChannelProgress,
+  type ObserverChannelProgress,
+} from "./observerChannelProgress";
 
 /** Harness emits turn_liveness every ~10s (BUZZ_ACP_TURN_LIVENESS_SECS). */
 const LIVENESS_INTERVAL_MS = 10_000;
@@ -36,9 +39,10 @@ const PRUNE_PAUSE_MAX_MS = 3 * 60_000;
 const MAX_TURNS_PER_AGENT = 32;
 /** Cap on per-agent terminal tombstones (A's resurrection guard). For
  * terminals that carry the turn's channelId (turn_completed / turn_error),
- * the (agent, channel) watermark already gates any liveness emitted before
- * the terminal — both gate on the same channel key and within-channel order
- * is preserved end-to-end — so those tombstones only matter briefly. The
+ * the ordinary (agent, channel) watermark gates earlier liveness. A shutdown
+ * terminal may be promoted ahead of ordinary frames; the persistent promotion
+ * fence blocks that turn's delayed frames even if its tombstone is evicted.
+ * Tombstones also protect earlier promoted exits across runtime restarts. The
  * tombstones doing durable work are the ones whose creation the channel
  * watermark does NOT witness: null-channel terminals (agent_panic gates on
  * the null bucket) and desktop-initiated clears (`clearActiveTurnsForAgent`).
@@ -99,14 +103,15 @@ const clockOffsetByAgent = new Map<string, number>();
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
 
-// Composite watermark per (agent, channel): the newest observer event
-// processed for that channel, by (timestamp, seq) ordering. An event is
-// processed only if it is strictly newer than its channel's watermark —
-// making full-buffer replays idempotent and post-restart streams (seq resets
-// to 1, timestamp keeps climbing) handled for free.
+// Ordinary FIFO progress and the latest shutdown-promoted terminal per
+// (agent, channel), ordered by (timestamp, seq). Promotion never advances the
+// ordinary watermark: a buffered sibling's completion/error must still drain.
+// Both progress marks reject replay independently. The persistent promotion
+// fence also consumes without applying its turn's earlier buffered frames;
+// per-turn tombstones protect earlier exits across runtime restarts.
 //
 // Keyed per channel, not per agent, because the harness's batching packer
-// preserves FIFO order only WITHIN a channel: frames for different channels
+// preserves ordinary FIFO order only WITHIN a channel: frames for different channels
 // may publish in an order that differs from arrival order. A per-agent
 // watermark would silently skip a delayed channel's events as stale. This is
 // safe because every turn-mutating path is channel-scoped by the event's own
@@ -121,10 +126,10 @@ let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
 // The other per-agent maps stay agent-keyed because they are reorder-safe:
 // `clockOffsetByAgent` is a running MINIMUM (order-insensitive by
 // construction), and `activeTurnsByAgent` / `terminalAtByAgent` are mutated
-// only through channel-scoped paths this gate serializes (see the
+// only through channel-scoped paths with monotonic terminal fences (see the
 // MAX_TERMINAL_TOMBSTONES doc for the tombstone-eviction analysis).
 const NULL_CHANNEL_KEY = "\u0000null-channel";
-const lastProcessed = new Map<string, Map<string, ObserverEvent>>();
+const lastProcessed = new Map<string, Map<string, ObserverChannelProgress>>();
 
 function watermarkChannelKey(event: ObserverEvent): string {
   return event.channelId ?? NULL_CHANNEL_KEY;
@@ -181,6 +186,11 @@ function startTurn(
   timestamp: string,
 ) {
   const key = normalizePubkey(agentPubkey);
+  const terminalAt = terminalAtByAgent.get(key)?.get(turnId);
+  const frameAt = parseTimestamp(timestamp);
+  if (terminalAt !== undefined && (frameAt === null || frameAt <= terminalAt)) {
+    return;
+  }
   let agentTurns = activeTurnsByAgent.get(key);
   if (!agentTurns) {
     agentTurns = new Map();
@@ -265,7 +275,12 @@ function recordTerminal(agentKey: string, turnId: string, terminalAt: number) {
     terminals = new Map();
     terminalAtByAgent.set(agentKey, terminals);
   }
-  terminals.set(turnId, terminalAt);
+  // A promoted exit can precede this turn's earlier buffered terminal.
+  // Never weaken the resurrection fence when that earlier terminal drains.
+  terminals.set(
+    turnId,
+    Math.max(terminals.get(turnId) ?? terminalAt, terminalAt),
+  );
   // Bound the tombstone map: only recently-completed turns can be the target of
   // a racing late liveness frame (older ones are already below the watermark).
   // Evict the oldest terminal once past the cap so the map can't grow unbounded
@@ -358,21 +373,19 @@ function pruneExpired() {
   }
 }
 
-// INVARIANT: events must be sorted by (timestamp, seq) ascending.
-// syncAgentTurnsFromEvents receives sorted arrays from observerRelayStore.
-// Calling with unsorted events will cause silent data loss.
+// Ordinary frames must be sorted by (timestamp, seq) ascending within each
+// channel. Explicit runtimeExiting terminals are the publisher's sole
+// same-channel exception, admitted without skipping buffered ordinary frames.
 function processEvent(agentPubkey: string, event: ObserverEvent) {
   const key = normalizePubkey(agentPubkey);
 
-  // Gate every event kind on its (agent, channel) watermark uniformly:
-  // process only events strictly newer than the last one seen for this
-  // agent+channel. With sorted buffers (the documented invariant), this makes
-  // full-buffer replays a complete no-op. Evictions must be gated too —
+  // Gate ordinary events on FIFO progress and promoted terminals on their
+  // separate replay fence. Evictions must be gated too —
   // replaying a stale turn_error/agent_panic (emitted with a null turnId)
   // would otherwise fall back to deleting the first turn in the channel,
   // killing the live turn; the gate is per-channel, but so is that fallback
   // (it matches the event's own channelId), so each channel's stream is
-  // serialized against exactly the mutations it can perform. Resurrection
+  // ordered against exactly the mutations it can perform. Resurrection
   // (the turn_liveness/acp case below) is gated here too: it runs only for a
   // frame that passes its channel's watermark, so replayed stale frames
   // cannot revive a pruned turn, and the per-turn terminal tombstone blocks
@@ -385,15 +398,17 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
   // this gate exists to prevent.
   const channelKey = watermarkChannelKey(event);
   let agentWatermarks = lastProcessed.get(key);
-  const last = agentWatermarks?.get(channelKey);
-  if (last && compareObserverEvents(event, last) <= 0) {
-    return;
-  }
+  const admission = advanceObserverChannelProgress(
+    agentWatermarks?.get(channelKey),
+    event,
+  );
+  if (!admission) return;
   if (!agentWatermarks) {
     agentWatermarks = new Map();
     lastProcessed.set(key, agentWatermarks);
   }
-  agentWatermarks.set(channelKey, event);
+  agentWatermarks.set(channelKey, admission.progress);
+  if (!admission.apply) return;
 
   // Refine the clock offset from every fresh event. A tighter offset shifts
   // every live anchor for this agent, so a change must reach the UI even when
@@ -721,7 +736,7 @@ export function resetActiveAgentTurnsStore() {
 type TurnsStoreSnapshot = {
   turns: Map<string, Map<string, ActiveTurn>>;
   offsets: Map<string, number>;
-  watermarks: Map<string, Map<string, ObserverEvent>>;
+  watermarks: Map<string, Map<string, ObserverChannelProgress>>;
   terminals: Map<string, Map<string, number>>;
 };
 
@@ -758,8 +773,8 @@ export function saveActiveAgentTurnsForCommunity(communityId: string): void {
   const offsets = new Map(clockOffsetByAgent);
 
   // Deep-clone the per-(agent, channel) watermark map: outer map + inner
-  // per-agent maps (ObserverEvent values are treated as immutable).
-  const watermarks = new Map<string, Map<string, ObserverEvent>>();
+  // per-agent maps (ObserverChannelProgress values are immutable).
+  const watermarks = new Map<string, Map<string, ObserverChannelProgress>>();
   for (const [agentKey, channelMarks] of lastProcessed) {
     watermarks.set(agentKey, new Map(channelMarks));
   }
