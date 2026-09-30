@@ -12882,7 +12882,7 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
-      case "clear_applied_workspace":
+      case "invalidate_launch_restore":
         return undefined;
       case "update_tray_agent_activity":
       case "clear_tray_agent_activity":

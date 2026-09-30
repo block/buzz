@@ -16,9 +16,9 @@ export async function applyCommunity(
   });
 }
 
-/** Forget the backend's applied relay when its community is removed. */
-export const clearAppliedWorkspace = () =>
-  invokeTauri<void>("clear_applied_workspace");
+/** Stop any in-flight launch restore from spawning after a community removal. */
+export const invalidateLaunchRestore = () =>
+  invokeTauri<void>("invalidate_launch_restore");
 
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });

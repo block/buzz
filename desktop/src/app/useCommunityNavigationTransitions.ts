@@ -14,7 +14,7 @@ import {
 } from "@/features/communities/communityNavigationStorage";
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import { stopManagedAgentPairsOnRelay } from "@/features/agents/managedAgentRelayCleanup";
-import { clearAppliedWorkspace } from "@/shared/api/tauriWorkspace";
+import { invalidateLaunchRestore } from "@/shared/api/tauriWorkspace";
 import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
 import { leaveCommunity } from "@/features/communities/leaveCommunity";
@@ -94,13 +94,13 @@ export function useCommunityNavigationTransitions({
       const stopRelayPairs = () => {
         if (!relayStillUsed) void stopManagedAgentPairsOnRelay(target.relayUrl);
       };
-      // Removing the active community must invalidate the backend's applied
-      // relay before the switch, so a launch restore still in flight for it
-      // spawns nothing. Restore pairs registered first are caught by the stop.
-      const releaseAppliedRelay = async () => {
+      // Removing the active community invalidates any launch restore still in
+      // flight for its relay, so it spawns nothing. Restore pairs registered
+      // first are caught by the stop. Relay routing is left untouched.
+      const invalidateRestore = async () => {
         if (relayStillUsed) return;
-        await clearAppliedWorkspace().catch((error) => {
-          console.warn("Failed to clear the applied workspace", error);
+        await invalidateLaunchRestore().catch((error) => {
+          console.warn("Failed to invalidate launch restore", error);
         });
       };
 
@@ -119,14 +119,14 @@ export function useCommunityNavigationTransitions({
             "Couldn't finish removing the community from this device because community discovery state could not be saved. Restart Buzz and try again.",
           );
         }
-        await releaseAppliedRelay();
+        await invalidateRestore();
         await goHome({ replace: true });
         communities.removeCommunity(id);
         stopRelayPairs();
         return;
       }
 
-      await releaseAppliedRelay();
+      await invalidateRestore();
       await runCommunityViewTransition(async () => {
         saveActiveDestination();
         await goHome({ replace: true });

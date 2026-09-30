@@ -47,6 +47,10 @@ pub struct AppState {
     /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
+    /// Bumped under `managed_agent_runtime_transition` when a community is
+    /// removed; a launch restore started under an older value spawns nothing.
+    /// Read only by launch restore, never by relay routing.
+    pub launch_restore_generation: AtomicU64,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
@@ -223,6 +227,7 @@ pub fn build_app_state() -> AppState {
         managed_agent_experiments: crate::managed_agents::ManagedAgentExperimentState::default(),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
+        launch_restore_generation: AtomicU64::new(0),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),

@@ -95,15 +95,15 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
 pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
+    restore_ticket: u64,
 ) -> Result<(), String> {
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
 
     let state = app.state::<AppState>();
-    // The workspace this restore was started for. Removing that community
-    // clears the applied relay, and Phase B re-checks it under the transition
-    // lock so a late restore cannot spawn pairs on a removed relay.
+    // `apply_workspace` still holds the apply lock for this task, so the relay
+    // cannot change underneath it; pin it for the spawn loop.
     let restore_relay = crate::relay::workspace_relay_override(&state);
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
@@ -297,13 +297,12 @@ pub async fn restore_managed_agents_on_launch(
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
-    let Some(restore_relay) = restore_target_still_applied(
-        restore_relay,
-        crate::relay::workspace_relay_override(&state),
-    ) else {
-        eprintln!(
-            "buzz-desktop: skipping managed agent restore: its workspace is no longer applied"
-        );
+    if !launch_restore_still_valid(&state, restore_ticket) {
+        eprintln!("buzz-desktop: skipping managed agent restore: a community was removed");
+        return Ok(());
+    }
+    let Some(restore_relay) = restore_relay else {
+        eprintln!("buzz-desktop: skipping managed agent restore: no workspace relay applied");
         return Ok(());
     };
     let restore_relay = restore_relay.as_str();
@@ -573,13 +572,30 @@ fn persist_restore_error(
     save_managed_agents(app, &records)
 }
 
-/// The relay a restore may spawn on: the workspace it started for, and only if
-/// that workspace is still applied. Call with the runtime transition lock held.
-fn restore_target_still_applied(
-    started: Option<String>,
-    current: Option<String>,
-) -> Option<String> {
-    started.filter(|relay| current.as_deref() == Some(relay.as_str()))
+/// Ticket for a launch restore, taken by `apply_workspace` before it hands the
+/// apply lock to the background task, so a removal that lands before restore
+/// begins still invalidates it.
+pub fn launch_restore_ticket(state: &AppState) -> u64 {
+    state.launch_restore_generation.load(Ordering::SeqCst)
+}
+
+/// Invalidate any launch restore already scheduled or running. Takes the runtime
+/// transition lock, which restore holds across its check-then-spawn.
+pub fn invalidate_launch_restore(state: &AppState) -> Result<(), String> {
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    state
+        .launch_restore_generation
+        .fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Whether a restore holding ticket `started` may still spawn. Call with the
+/// runtime transition lock held.
+fn launch_restore_still_valid(state: &AppState, started: u64) -> bool {
+    state.launch_restore_generation.load(Ordering::SeqCst) == started
 }
 
 #[cfg(test)]
@@ -598,19 +614,32 @@ mod profile_reconcile_tests {
     }
 }
 
-#[cfg(test)]
-mod restore_target_tests {
-    use super::restore_target_still_applied;
+// `build_app_state()` pulls in native Windows DLLs unavailable on the CI runner.
+#[cfg(all(test, not(target_os = "windows")))]
+mod launch_restore_invalidation_tests {
+    use super::{invalidate_launch_restore, launch_restore_still_valid, launch_restore_ticket};
+    use crate::app_state::build_app_state;
+    use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
 
     #[test]
-    fn restore_skips_when_its_workspace_was_cleared_or_replaced() {
-        let relay = || Some("wss://dead.example".to_string());
-        assert_eq!(restore_target_still_applied(relay(), relay()), relay());
-        assert_eq!(restore_target_still_applied(relay(), None), None);
+    fn invalidation_fails_restore_and_leaves_relay_routing_unchanged() {
+        let state = build_app_state();
+        *state.relay_url_override.lock().unwrap() = Some("wss://removed.example".into());
+        let started = launch_restore_ticket(&state);
+        assert!(launch_restore_still_valid(&state, started));
+
+        invalidate_launch_restore(&state).unwrap();
+
+        assert!(!launch_restore_still_valid(&state, started));
+        assert_eq!(relay_ws_url_with_override(&state), "wss://removed.example");
         assert_eq!(
-            restore_target_still_applied(relay(), Some("wss://other.example".into())),
-            None
+            relay_api_base_url_with_override(&state),
+            "https://removed.example"
         );
-        assert_eq!(restore_target_still_applied(None, None), None);
+        // A restore scheduled after the removal gets a fresh, valid ticket.
+        assert!(launch_restore_still_valid(
+            &state,
+            launch_restore_ticket(&state)
+        ));
     }
 }
