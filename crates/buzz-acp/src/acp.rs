@@ -580,14 +580,7 @@ impl AcpClient {
         // console-subsystem child process spawned from a GUI/non-console parent.
         configure_no_window(&mut cmd);
 
-        let standard_adapter =
-            match crate::config::normalize_agent_command_identity(command).as_str() {
-                "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
-                    Some(StandardAdapterKind::Claude)
-                }
-                "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
-                _ => None,
-            };
+        let standard_adapter = detect_standard_adapter(command, args);
         cmd.envs(launch_env.iter().cloned());
         let mut child = cmd.spawn()?;
 
@@ -1935,9 +1928,9 @@ impl AcpClient {
     /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
     /// are intentionally not mapped to token accounting.
     fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
-        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
+        let Some(adapter) = self.standard_adapter else {
             return;
-        }
+        };
         let session_id = match msg
             .pointer("/params/sessionId")
             .and_then(serde_json::Value::as_str)
@@ -1945,14 +1938,43 @@ impl AcpClient {
             Some(session_id) => session_id,
             None => return,
         };
-        let cost = match msg
-            .pointer("/params/update/cost/amount")
-            .and_then(serde_json::Value::as_f64)
-        {
-            Some(cost) => cost,
-            None => return,
-        };
-        self.standard_usage.record_cost(session_id, cost);
+        match adapter {
+            StandardAdapterKind::Claude => {
+                // Claude: cost.amount is session-cumulative USD. used/size are
+                // context occupancy and are intentionally not mapped to tokens.
+                if let Some(cost) = msg
+                    .pointer("/params/update/cost/amount")
+                    .and_then(serde_json::Value::as_f64)
+                {
+                    self.standard_usage.record_cost(session_id, cost);
+                }
+            }
+            StandardAdapterKind::OpenClaw => {
+                // OpenClaw: `used` is a session-cumulative token proxy from the
+                // Gateway session store (totalTokens). Delta → NIP-AM turn total.
+                if let Some(used) = msg
+                    .pointer("/params/update/used")
+                    .and_then(serde_json::Value::as_u64)
+                    .or_else(|| {
+                        msg.pointer("/params/update/used")
+                            .and_then(serde_json::Value::as_f64)
+                            .filter(|v| v.is_finite() && *v >= 0.0)
+                            .map(|v| v.floor() as u64)
+                    })
+                {
+                    tracing::debug!(
+                        target: "acp::usage",
+                        session_id,
+                        used,
+                        "openclaw usage_update"
+                    );
+                    self.standard_usage.record_used_tokens(session_id, used);
+                }
+            }
+            StandardAdapterKind::Codex => {
+                // Codex usage arrives via prompt response, not usage_update.
+            }
+        }
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -2270,6 +2292,30 @@ pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Val
 /// not be hardcoded in the harness — this function discovers it at session time so
 /// the spawn-scoped effort application forwards the adapter's real id. Accepts both
 /// `configId` (ACP spec) and `id` (claude-agent-acp), matching the model-switch path.
+
+/// Resolve which standard ACP usage adapter (if any) owns this spawn.
+///
+/// OpenClaw VPS last-miles commonly set `BUZZ_ACP_AGENT_COMMAND=node` with
+/// `…/openclaw/dist/index.js` in args — basename identity is therefore `node`,
+/// so we also sniff args for an OpenClaw entrypoint.
+fn detect_standard_adapter(command: &str, args: &[String]) -> Option<StandardAdapterKind> {
+    let identity = crate::config::normalize_agent_command_identity(command);
+    match identity.as_str() {
+        "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+            Some(StandardAdapterKind::Claude)
+        }
+        "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+        "openclaw" => Some(StandardAdapterKind::OpenClaw),
+        _ => {
+            let looks_like_openclaw = args.iter().any(|arg| {
+                let lower = arg.to_ascii_lowercase().replace('\\', "/");
+                lower.contains("openclaw")
+            });
+            looks_like_openclaw.then_some(StandardAdapterKind::OpenClaw)
+        }
+    }
+}
+
 pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<String> {
     let arr = result["configOptions"].as_array()?;
     for opt in arr {
@@ -4645,6 +4691,82 @@ mod tests {
         assert_eq!(usage.turn_input_tokens, None);
         assert_eq!(usage.turn_cost_usd, Some(0.125));
         assert_eq!(usage.cumulative_cost_usd, Some(0.125));
+    }
+
+    fn standard_used_update(session_id: &str, used: u64, size: u64) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": used,
+                    "size": size
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn detect_standard_adapter_sniffs_openclaw_node_spawn() {
+        assert_eq!(
+            detect_standard_adapter(
+                "node",
+                &[
+                    "/home/jm/.npm-global/lib/node_modules/openclaw/dist/index.js".into(),
+                    "acp".into(),
+                ]
+            ),
+            Some(StandardAdapterKind::OpenClaw)
+        );
+        assert_eq!(
+            detect_standard_adapter("openclaw", &[]),
+            Some(StandardAdapterKind::OpenClaw)
+        );
+        assert_eq!(
+            detect_standard_adapter("node", &["some-other-script.js".into()]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn openclaw_used_only_publishes_turn_total_tokens() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::OpenClaw);
+        client.notify_session_spawned("openclaw-session");
+        client.standard_usage.begin_turn("openclaw-session");
+        client.handle_session_update(&standard_used_update("openclaw-session", 420, 200_000));
+
+        let usage = client.take_turn_usage().expect("openclaw used-only usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, None);
+        assert_eq!(usage.turn_output_tokens, None);
+        assert_eq!(usage.turn_total_tokens, Some(420));
+        assert_eq!(usage.cumulative_total_tokens, Some(420));
+        assert_eq!(usage.turn_cost_usd, None);
+
+        // Second turn: used is cumulative → delta becomes turn total.
+        client.standard_usage.begin_turn("openclaw-session");
+        client.handle_session_update(&standard_used_update("openclaw-session", 900, 200_000));
+        let usage2 = client.take_turn_usage().expect("openclaw turn 2");
+        assert_eq!(usage2.turn_seq, 2);
+        assert_eq!(usage2.turn_total_tokens, Some(480));
+        assert_eq!(usage2.cumulative_total_tokens, Some(900));
+    }
+
+    #[tokio::test]
+    async fn openclaw_ignores_claude_cost_amount() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::OpenClaw);
+        client.notify_session_spawned("openclaw-session");
+        client.standard_usage.begin_turn("openclaw-session");
+        client.handle_session_update(&standard_cost_update("openclaw-session", 0.5));
+        assert!(
+            client.take_turn_usage().is_none(),
+            "OpenClaw must not treat Claude cost.amount as usage"
+        );
     }
 
     #[tokio::test]

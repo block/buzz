@@ -261,6 +261,10 @@ pub(crate) struct PromptResponseUsage {
 pub(crate) enum StandardAdapterKind {
     Claude,
     Codex,
+    /// OpenClaw ACP bridge (`node …/openclaw… acp`). Emits standard
+    /// `usage_update` with session-cumulative `used` (token proxy) + `size`
+    /// (context window), not Claude's cost.amount or goose's input/output.
+    OpenClaw,
 }
 
 #[derive(Debug, Default)]
@@ -268,6 +272,9 @@ struct StandardSessionState {
     published_seq: u64,
     last_cost: Option<f64>,
     cost_poisoned: bool,
+    /// OpenClaw `used` is a session-cumulative token proxy (context occupancy).
+    last_used_tokens: Option<u64>,
+    used_poisoned: bool,
 }
 
 #[derive(Debug, Default)]
@@ -275,6 +282,7 @@ pub(crate) struct StandardUsageTracker {
     sessions: HashMap<String, StandardSessionState>,
     in_flight_session: Option<String>,
     pending_cost: Option<(String, f64)>,
+    pending_used: Option<(String, u64)>,
     pending_prompt: Option<(String, PromptResponseUsage, StandardAdapterKind)>,
 }
 
@@ -286,12 +294,15 @@ impl StandardUsageTracker {
                 published_seq: 0,
                 last_cost: Some(0.0),
                 cost_poisoned: false,
+                last_used_tokens: Some(0),
+                used_poisoned: false,
             });
     }
 
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
         self.in_flight_session = Some(session_id.to_string());
         self.pending_cost = None;
+        self.pending_used = None;
         self.pending_prompt = None;
     }
 
@@ -300,6 +311,13 @@ impl StandardUsageTracker {
         if cost.is_finite() && cost >= 0.0 && self.in_flight_session.as_deref() == Some(session_id)
         {
             self.pending_cost = Some((session_id.to_string(), cost));
+        }
+    }
+
+    /// OpenClaw `usage_update.used` — session-cumulative token proxy.
+    pub(crate) fn record_used_tokens(&mut self, session_id: &str, used: u64) {
+        if self.in_flight_session.as_deref() == Some(session_id) {
+            self.pending_used = Some((session_id.to_string(), used));
         }
     }
 
@@ -318,10 +336,12 @@ impl StandardUsageTracker {
         self.in_flight_session = None;
         let prompt = self.pending_prompt.take();
         let cost = self.pending_cost.take();
+        let used = self.pending_used.take();
         let session_id = prompt
             .as_ref()
             .map(|(session_id, _, _)| session_id.clone())
-            .or_else(|| cost.as_ref().map(|(session_id, _)| session_id.clone()))?;
+            .or_else(|| cost.as_ref().map(|(session_id, _)| session_id.clone()))
+            .or_else(|| used.as_ref().map(|(session_id, _)| session_id.clone()))?;
 
         let (inclusive_input, output_tokens, total_tokens, cache_read, cache_write) = match prompt {
             Some((_, usage, adapter)) => {
@@ -352,9 +372,6 @@ impl StandardUsageTracker {
             _ => None,
         };
         if let Some(current) = cumulative_cost {
-            // A decrease means the cumulative series restarted or is corrupt.
-            // Poison the baseline rather than deriving a later delta across the
-            // discontinuity. The raw cumulative value still remains observable.
             if state.last_cost.is_some_and(|previous| current < previous) {
                 state.cost_poisoned = true;
                 state.last_cost = None;
@@ -363,10 +380,30 @@ impl StandardUsageTracker {
             }
         }
 
-        // Input overflow invalidates the standard prompt counters. Emit only if
-        // another valid signal (normally Claude cost) remains; NIP-AM forbids an
-        // otherwise all-null usage record.
-        if inclusive_input.is_none() && cumulative_cost.is_none() {
+        let cumulative_used = used.map(|(_, tokens)| tokens);
+        let turn_used = match (state.used_poisoned, state.last_used_tokens, cumulative_used) {
+            (false, Some(previous), Some(current)) if current >= previous => {
+                Some(current - previous)
+            }
+            _ => None,
+        };
+        if let Some(current) = cumulative_used {
+            if state
+                .last_used_tokens
+                .is_some_and(|previous| current < previous)
+            {
+                state.used_poisoned = true;
+                state.last_used_tokens = None;
+            } else if !state.used_poisoned {
+                state.last_used_tokens = Some(current);
+            }
+        }
+
+        // Prefer prompt counters; else OpenClaw used-delta as totalTokens.
+        let turn_total_tokens = total_tokens.or(turn_used);
+        let cumulative_total_tokens = cumulative_used;
+
+        if inclusive_input.is_none() && cumulative_cost.is_none() && cumulative_used.is_none() {
             return None;
         }
 
@@ -374,19 +411,16 @@ impl StandardUsageTracker {
         Some(TurnUsage {
             session_id,
             turn_seq: state.published_seq,
-            // Standard prompt counters are per-turn already. A cost-only record
-            // is reliable only when a seeded/previous cumulative baseline made
-            // the cost delta provable.
-            delta_reliable: inclusive_input.is_some() || turn_cost.is_some(),
+            delta_reliable: inclusive_input.is_some() || turn_cost.is_some() || turn_used.is_some(),
             turn_input_tokens: inclusive_input,
             turn_output_tokens: output_tokens,
-            turn_total_tokens: total_tokens,
+            turn_total_tokens,
             turn_cost_usd: turn_cost,
             turn_cache_read_tokens: cache_read,
             turn_cache_write_tokens: cache_write,
             cumulative_input_tokens: None,
             cumulative_output_tokens: None,
-            cumulative_total_tokens: None,
+            cumulative_total_tokens,
             cumulative_cost_usd: cumulative_cost,
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
