@@ -25,10 +25,10 @@ const DOM_HASH_COOKIE: &str = "__buzz_pg_dom";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaygroundBounds {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +331,33 @@ pub(crate) fn ensure_playground_webview_shown(
     Ok(())
 }
 
+/// Far offscreen origin for Drive background paint (must stay paint-ready while
+/// Stage is parked). Matches `viewport_gate::BACKGROUND_CAPTURE_ORIGIN`.
+const BACKGROUND_CAPTURE_ORIGIN: f64 = -20_000.0;
+
+/// Place a playground WKWebView offscreen at `width`×`height` so it can paint
+/// without covering the Stage / stealing focus. Does not update `last_bounds`.
+pub(crate) fn apply_background_capture_bounds(
+    app: &AppHandle,
+    label: &str,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview(label)
+        .ok_or_else(|| format!("webview {label} is not open"))?;
+    let sid = playground_sid_from_webview_label(label)
+        .ok_or_else(|| format!("webview {label} is not a playground label"))?;
+    let window_label = playground_parent_window_label(&webview);
+    let bounds = PlaygroundBounds {
+        x: BACKGROUND_CAPTURE_ORIGIN - width.max(0.0),
+        y: BACKGROUND_CAPTURE_ORIGIN - height.max(0.0),
+        width: width.max(64.0),
+        height: height.max(64.0),
+    };
+    apply_bounds(app, &sid, &window_label, &bounds)
+}
+
 fn playground_parent_is(
     webview: &Webview,
     window_label: &str,
@@ -530,14 +557,20 @@ fn apply_bounds(
 
 fn hide_other_playgrounds(app: &AppHandle, keep_label: &str, window_label: &str) {
     for webview in app.webviews().into_values() {
-        let label = webview.label();
+        let label = webview.label().to_string();
         if !label.starts_with(PLAYGROUND_LABEL_PREFIX) || label == keep_label {
             continue;
         }
         if playground_parent_window_label(&webview) != window_label {
             continue;
         }
-        let _ = webview.hide();
+        if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+            let _ = crate::browser_agent::viewport_gate::park_preserving_drive_paint(
+                app, &state, &label,
+            );
+        } else {
+            let _ = webview.hide();
+        }
     }
 }
 
@@ -806,11 +839,16 @@ pub async fn playground_webview_show(
         }
         if show {
             webview.show().map_err(|error| error.to_string())?;
+            if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+                crate::browser_agent::viewport_gate::clear_background_paint(&state, &live_label);
+                crate::browser_agent::set_webview_hidden(&app, &state, &live_label, false);
+            }
+        } else if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+            crate::browser_agent::viewport_gate::park_preserving_drive_paint(
+                &app, &state, &live_label,
+            )?;
         } else {
             webview.hide().map_err(|error| error.to_string())?;
-        }
-        if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-            crate::browser_agent::set_webview_hidden(&app, &state, &live_label, !show);
         }
         crate::browser_agent::ensure_instrumentation_for_label(&app, &live_label);
         emit_nav(&app, nav.clone(), &live_label);
@@ -899,11 +937,15 @@ pub async fn playground_webview_show(
             LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)),
         )
         .map_err(|error| error.to_string())?;
-    if !show {
+    if show {
+        if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+            crate::browser_agent::viewport_gate::clear_background_paint(&state, &label);
+            crate::browser_agent::set_webview_hidden(&app, &state, &label, false);
+        }
+    } else if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
+        crate::browser_agent::viewport_gate::park_preserving_drive_paint(&app, &state, &label)?;
+    } else {
         webview.hide().map_err(|error| error.to_string())?;
-    }
-    if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-        crate::browser_agent::set_webview_hidden(&app, &state, &label, !show);
     }
     sync_user_agent(
         &app,
@@ -930,9 +972,12 @@ pub async fn playground_webview_hide(
     // to another host, the abandoning stage must not blank the active view.
     if let Some((label, webview)) = find_playground_webview_for_sid(&app, &sid) {
         if playground_parent_is(&webview, &window_label) {
-            webview.hide().map_err(|error| error.to_string())?;
             if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-                crate::browser_agent::set_webview_hidden(&app, &state, &label, true);
+                crate::browser_agent::viewport_gate::park_preserving_drive_paint(
+                    &app, &state, &label,
+                )?;
+            } else {
+                webview.hide().map_err(|error| error.to_string())?;
             }
         }
     }
@@ -946,15 +991,19 @@ pub async fn playground_webview_hide_all(
 ) -> Result<(), String> {
     let window_label = normalize_window_label(window_label.as_deref());
     for webview in app.webviews().into_values() {
-        if !webview.label().starts_with(PLAYGROUND_LABEL_PREFIX) {
+        let label = webview.label().to_string();
+        if !label.starts_with(PLAYGROUND_LABEL_PREFIX) {
             continue;
         }
         if playground_parent_window_label(&webview) != window_label {
             continue;
         }
-        let _ = webview.hide();
         if let Some(state) = app.try_state::<crate::browser_agent::BrowserAgentState>() {
-            crate::browser_agent::set_webview_hidden(&app, &state, webview.label(), true);
+            let _ = crate::browser_agent::viewport_gate::park_preserving_drive_paint(
+                &app, &state, &label,
+            );
+        } else {
+            let _ = webview.hide();
         }
     }
     Ok(())

@@ -40,6 +40,8 @@ pub struct BrowserAgentState {
     pub drive_records: drive_record::DriveRecordTracker,
     /// Playground labels currently hide()d (parked).
     pub webview_hidden: Mutex<HashSet<String>>,
+    /// Labels shown offscreen for Drive paint while Stage stays parked.
+    pub background_paint: Mutex<HashSet<String>>,
 }
 
 fn ensure_data_root(app: &AppHandle, state: &BrowserAgentState) -> Result<PathBuf, String> {
@@ -254,6 +256,7 @@ pub fn clear_grants_for_surface(app: &AppHandle, surface_id: &str) {
         state.observe.clear(label);
         state.drive_screens.clear(label);
         state.drive_records.clear(label);
+        viewport_gate::clear_background_paint(&state, label);
         if let Ok(root) = ensure_data_root(app, &state) {
             mirror_grant(&root, None, label, false);
         }
@@ -269,6 +272,7 @@ pub fn clear_grant_for_label(app: &AppHandle, webview_label: &str) {
         state.observe.clear(webview_label);
         state.drive_screens.clear(webview_label);
         state.drive_records.clear(webview_label);
+        viewport_gate::clear_background_paint(&state, webview_label);
         if let Ok(root) = ensure_data_root(app, &state) {
             mirror_grant(&root, None, webview_label, false);
         }
@@ -367,7 +371,17 @@ pub async fn browser_agent_grant_set(
     mirror_grant(&root, Some(&grant), &label, webview_is_hidden(&state, &label));
     let drive = drive_lock_enabled(&grant);
     install_instrumentation(&app, &label, drive)?;
-    viewport_gate::maybe_ensure_visible_on_drive_grant(&app, &state, &grant);
+    if matches!(grant.mode, BrowserAgentMode::Drive) {
+        viewport_gate::maybe_ensure_visible_on_drive_grant(&app, &state, &grant);
+    } else if viewport_gate::is_background_paint(&state, &label) {
+        // Leaving Drive: drop offscreen paint hold; if Stage is parked, hide for real.
+        viewport_gate::clear_background_paint(&state, &label);
+        if webview_is_hidden(&state, &label) {
+            if let Some(webview) = app.get_webview(&label) {
+                let _ = webview.hide();
+            }
+        }
+    }
     state.observe.push(
         &label,
         "grant",

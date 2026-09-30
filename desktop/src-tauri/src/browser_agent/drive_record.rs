@@ -3,9 +3,10 @@
 //! Opt-in only: agents start/stop via MCP `record-request.json` when a runbook
 //! step or the user asks for a section clip. Never auto-starts on Drive grant.
 //! Desktop captures the Drive WKWebView with the same snapshot path as Drive
-//! stills, encodes H.264 MP4 (no audio) scaled into the relay ≤3840×2160
-//! envelope (Retina Stages), uploads, and posts as the grant agent into the
-//! bound channel/thread. `stop` ends early; max duration is a safety cap only.
+//! stills (offscreen background paint when Stage is parked — no focus steal),
+//! encodes H.264 MP4 (no audio) scaled into the relay ≤3840×2160 envelope
+//! (Retina Stages), uploads, and posts as the grant agent into the bound
+//! channel/thread. `stop` ends early; max duration is a safety cap only.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

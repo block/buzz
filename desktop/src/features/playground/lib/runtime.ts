@@ -188,9 +188,10 @@ function usePlaygroundNewTabListener() {
 
 
 /**
- * Drive grant / Drive tools → Desktop emits browser-agent-ensure-visible.
- * Mount the RHS/overlay Stage so the WKWebView is shown at a real size
- * (hidden/parked views lay out ~0×0 and break Drive clicks/snapshots).
+ * Optional theater unpark: Desktop may emit browser-agent-ensure-visible.
+ * Drive Record / Drive tools prefer offscreen background paint (no Stage
+ * mount). This listener still mounts RHS Stage if an explicit ensure-visible
+ * event arrives.
  */
 function usePlaygroundEnsureVisibleListener() {
   React.useEffect(() => {
