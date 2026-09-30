@@ -2628,18 +2628,86 @@ mod route_integration_tests {
             .is_denied(TEST_ISS, key, chrono::Utc::now())
     }
 
+    /// Counts cross-pod disconnect publications for one target on the Redis
+    /// channel the pods publish to.  Tests filter by target, so concurrent
+    /// tests sharing Redis do not interfere.
+    struct PublishObserver {
+        rx: tokio::sync::mpsc::UnboundedReceiver<buzz_pubsub::NipFiDisconnect>,
+        target: Vec<u8>,
+        seen: usize,
+    }
+
+    impl PublishObserver {
+        async fn subscribe(state: &AppState, target: &nostr::PublicKey) -> Self {
+            use futures::StreamExt;
+            let client = redis::Client::open(state.config.redis_url.as_str()).expect("redis url");
+            let mut conn = client.get_async_pubsub().await.expect("redis pubsub");
+            conn.subscribe(buzz_pubsub::conn_control::NIP_FI_DISCONNECT_CHANNEL)
+                .await
+                .expect("subscribe");
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let mut messages = conn.into_on_message();
+                while let Some(msg) = messages.next().await {
+                    let payload: String = msg.get_payload().expect("payload");
+                    let cmd = buzz_pubsub::decode_nip_fi_disconnect(&payload).expect("decode");
+                    if tx.send(cmd).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                rx,
+                target: target.to_bytes().to_vec(),
+                seen: 0,
+            }
+        }
+
+        /// Publications for the target so far, after letting spawned
+        /// publishes land.
+        async fn count(&mut self) -> usize {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            while let Ok(cmd) = self.rx.try_recv() {
+                if cmd.pubkey_bytes == self.target {
+                    self.seen += 1;
+                }
+            }
+            self.seen
+        }
+    }
+
+    async fn observe(
+        enabled: bool,
+        state: &AppState,
+        target: &nostr::PublicKey,
+    ) -> Option<PublishObserver> {
+        match enabled {
+            true => Some(PublishObserver::subscribe(state, target).await),
+            false => None,
+        }
+    }
+
+    async fn assert_publishes(observer: &mut Option<PublishObserver>, expected: usize, what: &str) {
+        if let Some(observer) = observer {
+            assert_eq!(observer.count().await, expected, "publications: {what}");
+        }
+    }
+
     async fn command_replayed_on_second_pod_is_denied_without_effect(
         replay_a: Arc<dyn buzz_auth::CommandReplayGuard>,
         replay_b: Arc<dyn buzz_auth::CommandReplayGuard>,
+        observe_publishes: bool,
     ) {
         let pod_a = pod(1000, replay_a).await;
         let pod_b = pod(1000, replay_b).await;
         let key = nostr::Keys::generate().public_key();
         let on_b = IssuerSessions::register(&pod_b, TEST_ISS, &key);
         let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        let mut publishes = observe(observe_publishes, &pod_a, &key).await;
 
         let (status, _) = post_command(&pod_a, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::OK, "first use is accepted on pod A");
+        assert_publishes(&mut publishes, 1, "accepted command").await;
 
         let (status, body) = post_command(&pod_b, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "replay on pod B is denied");
@@ -2649,13 +2717,104 @@ mod route_integration_tests {
             "replay must not insert a deny entry on B"
         );
         on_b.assert_open("pod B after rejected replay");
+        assert_publishes(&mut publishes, 1, "rejected replay adds none").await;
     }
 
     #[tokio::test]
     async fn command_replay_on_second_pod_is_denied() {
         let shared: Arc<dyn buzz_auth::CommandReplayGuard> =
             Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
-        command_replayed_on_second_pod_is_denied_without_effect(Arc::clone(&shared), shared).await;
+        command_replayed_on_second_pod_is_denied_without_effect(Arc::clone(&shared), shared, false)
+            .await;
+    }
+
+    /// Delegates to a real guard and counts `try_claim` calls.
+    struct CountingReplayGuard {
+        inner: buzz_auth::InMemoryCommandReplayGuard,
+        claims: std::sync::atomic::AtomicUsize,
+    }
+
+    impl buzz_auth::CommandReplayGuard for CountingReplayGuard {
+        fn try_claim<'a>(
+            &'a self,
+            issuer: &'a str,
+            jti: &'a str,
+            ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            self.claims
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.try_claim(issuer, jti, ttl_secs)
+        }
+
+        fn release<'a>(
+            &'a self,
+            issuer: &'a str,
+            jti: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            self.inner.release(issuer, jti)
+        }
+    }
+
+    /// A command whose signature does not verify but which carries a real
+    /// command's `(iss, jti)` must not consume that command's shared claim.
+    async fn forged_command_leaves_shared_claim_unconsumed(
+        replay: Arc<dyn buzz_auth::CommandReplayGuard>,
+        claims: Option<&CountingReplayGuard>,
+        observe_publishes: bool,
+    ) {
+        let pod_a = pod(1000, Arc::clone(&replay)).await;
+        let pod_b = pod(1000, replay).await;
+        let key = nostr::Keys::generate().public_key();
+        let on_a = IssuerSessions::register(&pod_a, TEST_ISS, &key);
+        let jti = serde_json::json!({ "jti": uuid::Uuid::new_v4().to_string() });
+        let legit = mint_token(&key.to_hex(), 300, jti.clone());
+        // Legitimate header and payload, with a well-formed signature over a
+        // different payload.
+        let other = mint_token(&target_hex(), 300, jti);
+        let (signed_part, _) = legit.rsplit_once('.').expect("compact JWS");
+        let (_, foreign_sig) = other.rsplit_once('.').expect("compact JWS");
+        let forged = format!("{signed_part}.{foreign_sig}");
+        let mut publishes = observe(observe_publishes, &pod_a, &key).await;
+
+        let (status, body) = post_command(&pod_a, &forged, &key.to_hex()).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "forged signature is rejected"
+        );
+        assert_eq!(body.as_ref(), b"evidence rejected\n");
+        assert!(!is_denied(&pod_a, &key), "forgery inserts no deny entry");
+        on_a.assert_open("pod A after forgery");
+        assert_publishes(&mut publishes, 0, "forgery").await;
+        if let Some(guard) = claims {
+            assert_eq!(
+                guard.claims.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "invalid evidence must never reach the shared guard"
+            );
+        }
+
+        let (status, _) = post_command(&pod_b, &legit, &key.to_hex()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the legitimate command's jti was not burned by the forgery"
+        );
+        assert!(is_denied(&pod_b, &key));
+        assert_publishes(&mut publishes, 1, "accepted command").await;
+    }
+
+    #[tokio::test]
+    async fn forged_command_does_not_consume_shared_claim() {
+        let guard = Arc::new(CountingReplayGuard {
+            inner: buzz_auth::InMemoryCommandReplayGuard::default(),
+            claims: std::sync::atomic::AtomicUsize::new(0),
+        });
+        forged_command_leaves_shared_claim_unconsumed(guard.clone(), Some(&guard), false).await;
     }
 
     struct FailingReplayGuard;
@@ -2687,18 +2846,24 @@ mod route_integration_tests {
         }
     }
 
-    #[tokio::test]
-    async fn command_replay_guard_error_fails_closed_without_effect() {
+    async fn guard_error_fails_closed_without_effect(observe_publishes: bool) {
         let state = pod(1000, Arc::new(FailingReplayGuard)).await;
         let key = nostr::Keys::generate().public_key();
         let sessions = IssuerSessions::register(&state, TEST_ISS, &key);
         let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        let mut publishes = observe(observe_publishes, &state, &key).await;
 
         let (status, body) = post_command(&state, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.as_ref(), b"authorization unavailable\n");
         assert!(!is_denied(&state, &key), "no deny entry on guard error");
         sessions.assert_open("guard error");
+        assert_publishes(&mut publishes, 0, "guard error").await;
+    }
+
+    #[tokio::test]
+    async fn command_replay_guard_error_fails_closed_without_effect() {
+        guard_error_fails_closed_without_effect(false).await;
     }
 
     async fn deny_set_full_leaves_command_retryable(
@@ -2752,8 +2917,24 @@ mod route_integration_tests {
         #[tokio::test]
         #[ignore = "requires Redis"]
         async fn redis_command_replay_on_second_pod_is_denied() {
-            command_replayed_on_second_pod_is_denied_without_effect(redis_guard(), redis_guard())
-                .await;
+            command_replayed_on_second_pod_is_denied_without_effect(
+                redis_guard(),
+                redis_guard(),
+                true,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_forged_command_does_not_consume_shared_claim() {
+            forged_command_leaves_shared_claim_unconsumed(redis_guard(), None, true).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_guard_error_publishes_nothing() {
+            guard_error_fails_closed_without_effect(true).await;
         }
 
         #[tokio::test]
