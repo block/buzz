@@ -645,6 +645,50 @@ export function AppSidebar({
 
               {!isLoading ? (
                 <>
+                  <SidebarSection
+                    action={
+                      <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                        <SectionQuickAction
+                          label="New message"
+                          onClick={onNewMessage}
+                          testId="section-actions-dms-quick-create"
+                        />
+                        <SectionActionsMenu
+                          sectionLabel="direct messages"
+                          testId="section-actions-dms"
+                          onOpenChange={setDmActionsMenuOpen}
+                          onNewMessage={onNewMessage}
+                          sortMode={sortModeFor("dms")}
+                          onSortModeChange={(mode) =>
+                            setSortModeFor("dms", mode)
+                          }
+                        />
+                      </div>
+                    }
+                    dmParticipantsByChannelId={dmParticipantsByChannelId}
+                    isCollapsed={collapsedGroups.directMessages}
+                    isActiveChannel={selectedView === "channel"}
+                    activeWorkingByChannelId={activeWorkingByChannelId}
+                    items={sortedDirectMessages}
+                    channelLabels={dmChannelLabels}
+                    onHideDm={onHideDm}
+                    onMarkChannelRead={onMarkChannelRead}
+                    onMarkChannelUnread={onMarkChannelUnread}
+                    onSelectChannel={onSelectChannel}
+                    onToggleCollapsed={() =>
+                      toggleCollapsedGroup("directMessages")
+                    }
+                    presenceByChannelId={dmPresenceByChannelId}
+                    selectedChannelId={selectedChannelId}
+                    testId="dm-list"
+                    title="Direct messages"
+                    sectionActionsOpen={dmActionsMenuOpen}
+                    unreadChannelCounts={unreadChannelCounts}
+                    unreadChannelIds={unreadChannelIds}
+                    mutedChannelIds={mutedChannelIds}
+                    onMuteChannel={onMuteChannel}
+                    onUnmuteChannel={onUnmuteChannel}
+                  />
                   {starredChannels.length > 0 ? (
                     <ChannelGroupSection
                       hasUnread={starredChannels.some((c) =>
@@ -879,50 +923,6 @@ export function AppSidebar({
                       onDeleteChannel={requestDeleteChannel}
                     />
                   </FeatureGate>
-                  <SidebarSection
-                    action={
-                      <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
-                        <SectionQuickAction
-                          label="New message"
-                          onClick={onNewMessage}
-                          testId="section-actions-dms-quick-create"
-                        />
-                        <SectionActionsMenu
-                          sectionLabel="direct messages"
-                          testId="section-actions-dms"
-                          onOpenChange={setDmActionsMenuOpen}
-                          onNewMessage={onNewMessage}
-                          sortMode={sortModeFor("dms")}
-                          onSortModeChange={(mode) =>
-                            setSortModeFor("dms", mode)
-                          }
-                        />
-                      </div>
-                    }
-                    dmParticipantsByChannelId={dmParticipantsByChannelId}
-                    isCollapsed={collapsedGroups.directMessages}
-                    isActiveChannel={selectedView === "channel"}
-                    activeWorkingByChannelId={activeWorkingByChannelId}
-                    items={sortedDirectMessages}
-                    channelLabels={dmChannelLabels}
-                    onHideDm={onHideDm}
-                    onMarkChannelRead={onMarkChannelRead}
-                    onMarkChannelUnread={onMarkChannelUnread}
-                    onSelectChannel={onSelectChannel}
-                    onToggleCollapsed={() =>
-                      toggleCollapsedGroup("directMessages")
-                    }
-                    presenceByChannelId={dmPresenceByChannelId}
-                    selectedChannelId={selectedChannelId}
-                    testId="dm-list"
-                    title="Direct messages"
-                    sectionActionsOpen={dmActionsMenuOpen}
-                    unreadChannelCounts={unreadChannelCounts}
-                    unreadChannelIds={unreadChannelIds}
-                    mutedChannelIds={mutedChannelIds}
-                    onMuteChannel={onMuteChannel}
-                    onUnmuteChannel={onUnmuteChannel}
-                  />
                   <ArchivedHuddlesSection
                     isActiveChannel={selectedView === "channel"}
                     isCollapsed={collapsedGroups.archivedHuddles}
