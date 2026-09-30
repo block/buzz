@@ -2718,29 +2718,20 @@ mod tests {
         }
 
         // Control: both verifies succeed, so the request passes NIP-FI
-        // admission with two verifies and is answered by a post-admission
-        // step (the handler's rate-limit/replay/workflow checks, whose exact
-        // result depends on Redis availability), never a NIP-FI denial body.
+        // admission with two verifies and is answered by the handler's next
+        // step, rate-limit admission, which fails closed because this
+        // fixture's Redis is unreachable.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn characterize_routed_request_passes_after_two_verifies() {
             let (status, body, calls) = routed_workflow_runs(Ok(())).await;
             assert_eq!(calls, 2);
-            let nip_fi_bodies: [&[u8]; 4] = [
-                b"authentication required\n",
-                b"evidence rejected\n",
-                b"authorization denied\n",
-                b"authorization unavailable\n",
-            ];
-            assert!(
-                !nip_fi_bodies.contains(&body.as_slice()),
-                "request must pass NIP-FI admission; got {status} {}",
-                String::from_utf8_lossy(&body)
-            );
-            assert!(
-                serde_json::from_slice::<serde_json::Value>(&body).is_ok(),
-                "post-admission handler responses are JSON; got {status} {}",
-                String::from_utf8_lossy(&body)
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("rate-limit response is JSON");
+            assert_eq!(
+                body,
+                serde_json::json!({"error": "rate-limited: shared admission unavailable"})
             );
         }
     }
