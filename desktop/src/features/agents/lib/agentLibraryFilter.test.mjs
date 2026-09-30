@@ -12,6 +12,7 @@ import {
 
 const notArchived = () => false;
 const noPresence = () => undefined;
+// Presence unknown (relay disconnected or snapshot not loaded yet).
 const offline = { isArchived: notArchived, getAvailability: noPresence };
 
 function persona(overrides = {}) {
@@ -47,7 +48,8 @@ test("status resolution covers every lifecycle combination", () => {
     { agents: [agent({ status: "stopped" })], expected: "stopped" },
     { agents: [agent({ status: "not_deployed" })], expected: "stopped" },
     { agents: [agent({ status: "running" })], expected: "running" },
-    { agents: [agent({ status: "deployed" })], expected: "running" },
+    // A deployment receipt without confirmed presence is not running.
+    { agents: [agent({ status: "deployed" })], expected: "stopped" },
     {
       agents: [agent({ status: "stopped" }), agent({ status: "running" })],
       expected: "running",
@@ -70,7 +72,7 @@ test("relay presence makes a stopped card running, as the card face shows", () =
     // `deployed` is a retained receipt: a shut-down remote agent keeps it
     // while the relay reports offline, and the card dot shows Offline.
     { status: "deployed", presence: "offline", expected: "stopped" },
-    { status: "deployed", presence: undefined, expected: "running" },
+    { status: "deployed", presence: undefined, expected: "stopped" },
     { status: "deployed", presence: "online", expected: "running" },
     { status: "deployed", presence: "away", expected: "running" },
   ];
@@ -86,26 +88,54 @@ test("relay presence makes a stopped card running, as the card face shows", () =
   }
 });
 
-test("presence is looked up by the instance's own pubkey", () => {
-  const present = "9".repeat(64);
-  const seen = [];
+test("a persona card's bucket follows the instance its face shows", () => {
+  // pickProfileAgent prefers a lifecycle-active instance, then name order.
+  // The card renders alpha's avatar and Start button, so beta's presence
+  // must not move the card onto the Running chip.
+  const alpha = agent({ pubkey: "1".repeat(64), name: "alpha" });
+  const beta = agent({ pubkey: "2".repeat(64), name: "beta" });
+  const presence = (lookup) => ({
+    isArchived: notArchived,
+    getAvailability: (pubkey) => lookup[pubkey],
+  });
   assert.equal(
     resolveAgentLibraryStatus(
-      [
-        agent({ status: "stopped" }),
-        agent({ pubkey: present, status: "stopped" }),
-      ],
-      {
-        isArchived: notArchived,
-        getAvailability: (pubkey) => {
-          seen.push(pubkey);
-          return pubkey === present ? "online" : "offline";
-        },
-      },
+      [alpha, beta],
+      presence({ [beta.pubkey]: "online", [alpha.pubkey]: "offline" }),
+    ),
+    "stopped",
+  );
+  assert.equal(
+    resolveAgentLibraryStatus(
+      [alpha, beta],
+      presence({ [beta.pubkey]: "offline", [alpha.pubkey]: "online" }),
     ),
     "running",
   );
-  assert.deepEqual(seen, [agent().pubkey, present]);
+  // Both lifecycle-active: alpha (deployed, offline) wins by name and the
+  // card shows its Offline dot, so the bucket is Stopped even though beta
+  // runs locally.
+  assert.equal(
+    resolveAgentLibraryStatus(
+      [
+        { ...alpha, status: "deployed" },
+        { ...beta, status: "running" },
+      ],
+      presence({ [alpha.pubkey]: "offline" }),
+    ),
+    "stopped",
+  );
+  // The active instance wins the pick over a stopped sibling.
+  assert.equal(
+    resolveAgentLibraryStatus(
+      [
+        { ...alpha, status: "stopped" },
+        { ...beta, status: "running" },
+      ],
+      offline,
+    ),
+    "running",
+  );
 });
 
 test("archived instances never count toward a card's status", () => {
@@ -241,8 +271,9 @@ test("search stays within what the box promises: names, descriptions, instructio
     filterAgentLibrary(cards, { query, status: "all" }, offline).groups.length;
   assert.equal(hit("release notes"), 1);
   assert.equal(hit("scout"), 1);
-  // Raw model/provider/runtime ids are not shown on the card, so they do not
-  // match; otherwise "claude" would light up every card on that runtime.
+  // Raw model/provider/runtime ids are outside what the box promises (a card
+  // without a description paints a formatted model label instead), and
+  // matching them would light up every card on a runtime for "claude".
   assert.equal(hit("claude"), 0);
   assert.equal(hit("anthropic"), 0);
 });

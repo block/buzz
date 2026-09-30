@@ -1,4 +1,5 @@
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import { pickProfileAgent } from "./pickProfileAgent";
 import type { AgentAvailabilityReader } from "./useAgentAvailability";
 
 /** Lifecycle bucket for one Agents-page card. */
@@ -40,40 +41,34 @@ export type AgentLibraryContext = {
 };
 
 /**
- * Resolve the lifecycle bucket a card belongs to, following the card face:
+ * Resolve the lifecycle bucket a card belongs to, following the card face.
+ *
+ * A persona card renders one representative instance, chosen by
+ * `pickProfileAgent`; the bucket is read from that same instance so the chip
+ * never disagrees with the dot it filters. No eligible instance means the
+ * persona was never started. For the picked instance:
  *
  * - A local `running` process is running.
  * - Relay presence (`online`/`away`) is running even when the local record
  *   says stopped, e.g. the same identity running under another supervisor.
  * - `deployed` is a retained receipt, not presence: after a remote shutdown
- *   the record keeps `deployed` while the relay reports offline, and the card
- *   dot shows Offline. It counts as running only until presence says offline.
- * - Any remaining non-archived instance makes the card "stopped"; a persona
- *   with no live instance has never been started.
- *
- * Archived instances are skipped so a relay-archived identity cannot keep a
- * card in "stopped" after its face renders in persona-only mode (see
- * `pickProfileAgent`).
+ *   the record keeps `deployed` while the relay reports offline. It is
+ *   running only while presence confirms it; an unknown read (relay
+ *   disconnected, snapshot not loaded) renders a gray "Availability unknown"
+ *   dot, not a green one, so it is not running either.
  */
 export function resolveAgentLibraryStatus(
-  agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
+  agents: readonly ManagedAgent[],
   context: AgentLibraryContext,
 ): AgentLibraryStatus {
-  let sawInstance = false;
-  for (const agent of agents) {
-    if (context.isArchived(agent.pubkey)) continue;
-    const availability = context.getAvailability(agent.pubkey);
-    if (
-      agent.status === "running" ||
-      availability === "online" ||
-      availability === "away" ||
-      (agent.status === "deployed" && availability === undefined)
-    ) {
-      return "running";
-    }
-    sawInstance = true;
-  }
-  return sawInstance ? "stopped" : "not_started";
+  const picked = pickProfileAgent(agents, context.isArchived);
+  if (!picked) return "not_started";
+  const availability = context.getAvailability(picked.pubkey);
+  return picked.status === "running" ||
+    availability === "online" ||
+    availability === "away"
+    ? "running"
+    : "stopped";
 }
 
 /** Split a search box value into lowercase terms; every term must match. */
