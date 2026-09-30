@@ -1309,6 +1309,11 @@ CREATE INDEX community_deletion_requests_owner_preparable
     WHERE request_origin = 'owner'
       AND stage = 'submitted'
       AND blocked_at IS NULL;
+CREATE INDEX community_deletion_requests_owner_quota_reservations
+    ON community_deletion_requests (owner_pubkey)
+    INCLUDE (community_id, completed_at)
+    WHERE request_origin = 'owner'
+      AND stage <> 'aborted';
 
 CREATE TABLE community_deletion_approvals (
     request_id UUID PRIMARY KEY,
@@ -1820,7 +1825,8 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
 
 CREATE TABLE relay_admin_actions (
     id              UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-    report_id       UUID NOT NULL,
+    -- NULL for a report-less direct action (migration 0055).
+    report_id       UUID,
     report_community_id UUID NOT NULL,
     -- Client-generated idempotency key (signed in NIP-98 request body).
     request_id      UUID NOT NULL,
@@ -1856,16 +1862,35 @@ CREATE TABLE relay_admin_actions (
     enforcement_target_pubkey BYTEA
         CHECK (enforcement_target_pubkey IS NULL OR length(enforcement_target_pubkey) = 32),
     enforcement_channel_id  UUID,
+    -- Direct actions (migration 0055): deleted event, and requested timeout
+    -- duration compared on idempotent retry.
+    enforcement_target_event_id BYTEA
+        CHECK (enforcement_target_event_id IS NULL OR length(enforcement_target_event_id) = 32),
+    timeout_secs    BIGINT CHECK (timeout_secs IS NULL OR timeout_secs > 0),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Report-scoped idempotency: one action per (report, request_id).
     UNIQUE (report_community_id, report_id, request_id),
+    CONSTRAINT relay_admin_actions_direct_shape CHECK (
+        report_id IS NOT NULL
+        OR (action = 'ban' AND enforcement_target_pubkey IS NOT NULL
+            AND timeout_secs IS NULL AND timeout_until IS NULL)
+        OR (action = 'timeout' AND enforcement_target_pubkey IS NOT NULL
+            AND timeout_secs IS NOT NULL AND timeout_until IS NOT NULL)
+        OR (action = 'delete' AND enforcement_target_event_id IS NOT NULL
+            AND enforcement_target_pubkey IS NOT NULL
+            AND timeout_secs IS NULL AND timeout_until IS NULL)
+    ),
     FOREIGN KEY (report_community_id, report_id)
         REFERENCES moderation_reports (community_id, id)
 );
 
 CREATE INDEX idx_relay_admin_actions_report
     ON relay_admin_actions (report_community_id, report_id);
+-- Direct-action idempotency (migration 0055): one per (community, request_id).
+CREATE UNIQUE INDEX idx_relay_admin_actions_direct_request
+    ON relay_admin_actions (report_community_id, request_id)
+    WHERE report_id IS NULL;
 CREATE INDEX idx_relay_admin_actions_state
     ON relay_admin_actions (state)
     WHERE state IN ('pending', 'enforcing');
@@ -1875,7 +1900,7 @@ CREATE INDEX idx_relay_admin_actions_lease
     WHERE state IN ('pending', 'enforcing');
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
-    ('relay_admin_actions', 'deployment-global enforcement state machine; community_id is embedded in report FK');
+    ('relay_admin_actions', 'deployment-global enforcement state machine; community deletion purges rows by report_community_id');
 
 -- ── Relay admin outbox (durable enforcement delivery) ────────────────────────
 -- Transactional outbox for durable artifact/notice delivery.
@@ -1915,7 +1940,7 @@ CREATE INDEX idx_relay_admin_outbox_pending
     WHERE state = 'pending';
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
-    ('relay_admin_outbox', 'deployment-global enforcement artifact delivery queue');
+    ('relay_admin_outbox', 'deployment-global enforcement artifact delivery queue; community deletion purges rows with their action');
 
 -- ── Operator-listener mention delivery ──────────────────────────────────────
 -- Listener registrations are deployment-global. The outbox records community

@@ -306,9 +306,14 @@ class _DmAppBarTitle extends ConsumerWidget {
                 children: [
                   Flexible(
                     child: Text(
-                      resolveDmChannelDisplayLabel(
-                        channel,
-                        currentPubkey: currentPubkey,
+                      ref.watch(
+                        identityNameSourcesProvider.select(
+                          (names) => resolveDmChannelDisplayLabel(
+                            channel,
+                            currentPubkey: currentPubkey,
+                            names: names,
+                          ),
+                        ),
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,

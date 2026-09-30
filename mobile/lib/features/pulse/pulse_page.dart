@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
@@ -169,6 +170,16 @@ class _PulseBody extends ConsumerWidget {
             child: _EmptyState(message: _emptyMessage(tab)),
           );
         }
+        // Everyone the timeline names — authors, reply targets and mentions
+        // — is one comparison context, so two same-name targets on
+        // different notes are still told apart.
+        final names = watchIdentityNames(
+          ref,
+          pulseNamedIdentities(notes),
+          agentPubkeys: tab == PulseTab.agents
+              ? {for (final note in notes) note.pubkey.toLowerCase()}
+              : agentPubkeys,
+        );
         if (tab == PulseTab.agents) {
           final groups = groupAgentNotes(notes);
           return ListView.separated(
@@ -183,6 +194,7 @@ class _PulseBody extends ConsumerWidget {
             itemBuilder: (context, index) => AgentActivityCard(
               group: groups[index],
               reactions: reactions,
+              names: names,
               onReactionChanged: onReactionChanged,
             ),
           );
@@ -207,6 +219,7 @@ class _PulseBody extends ConsumerWidget {
                     reactedByCurrentUser: false,
                   ),
               isAgent: agentPubkeys.contains(note.pubkey),
+              names: names,
               isFollowing: contactPubkeys.contains(note.pubkey),
               canFollow:
                   currentPubkey != null &&

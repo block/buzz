@@ -190,6 +190,7 @@ fn reserved_keys_include_code_execution_surface() {
         "BUZZ_ACP_AGENT_COMMAND",
         "BUZZ_ACP_AGENT_ARGS",
         "BUZZ_ACP_MCP_COMMAND",
+        "BUZZ_ACP_LAUNCH_PREFIX",
     ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
     }
@@ -511,4 +512,20 @@ fn deploy_model_precedence_none_when_both_absent() {
 
     let effective = persona_model.clone().or(record_model.clone());
     assert_eq!(effective, None);
+}
+
+#[test]
+fn launch_prefix_cannot_be_saved_or_merged_from_user_environment() {
+    for key in [
+        "BUZZ_ACP_LAUNCH_PREFIX",
+        "buzz_acp_launch_prefix",
+        "Buzz_Acp_Launch_Prefix",
+    ] {
+        let env = map(&[(key, r#"["/usr/bin/env"]"#)]);
+        assert!(validate_user_env_keys(&env)
+            .unwrap_err()
+            .contains("reserved"));
+        assert!(merged_user_env(&env, &BTreeMap::new()).is_empty());
+        assert!(merged_user_env(&BTreeMap::new(), &env).is_empty());
+    }
 }

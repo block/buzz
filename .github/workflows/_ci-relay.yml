@@ -511,6 +511,14 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and (test(/^rejection::/) or test(/^admission::/))' \
             --run-ignored all
+      - name: NIP-FI cross-pod command replay regressions
+        env:
+          BUZZ_TEST_REDIS_URL: redis://localhost:6379
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/^api::nip_fi::route_integration_tests::external_infra_redis::/)' \
+            --run-ignored ignored-only
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
         # unit job. Its ignored database cases run in the isolated PostgreSQL

@@ -30,6 +30,8 @@ pub mod error;
 /// Redis-backed NIP-98 replay seen-set.
 pub mod nip98_replay;
 pub use nip98_replay::RedisNip98ReplayGuard;
+pub mod nip_fi_command_replay;
+pub use nip_fi_command_replay::RedisCommandReplayGuard;
 /// Online/offline presence tracking in Redis.
 pub mod presence;
 /// Redis PUBLISH for channel event fan-out.

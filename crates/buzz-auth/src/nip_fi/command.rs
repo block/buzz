@@ -11,17 +11,21 @@
 //!    target_pubkey, and until ceiling.
 //! 4. Principal authorization (issuer-configured authorized `sub` list).
 //! 5. Signed-target / request-body agreement.
-//! 6. Atomic jti reservation + deny-entry insertion (both-or-neither).
+//! 6. Shared `(iss, jti)` claim ([`super::command_replay`]), then atomic local
+//!    jti reservation + deny-entry insertion (both-or-neither).
 //! 7. Return [`CommandResult`].
 //!
-//! Fail-closed: any failure returns an error without side effects.  The jti is
-//! burned and the deny entry is inserted only on success.
+//! Fail-closed: any failure inserts no deny entry, closes no session and
+//! publishes nothing.  A failure after step 6's shared claim may leave that
+//! claim in place until its TTL (a guard error whose `SET` reply was lost, or a
+//! failed release); that is fail closed, since a retry is then denied.
 
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use nostr::PublicKey;
 use serde_json::{Map, Value};
 
+use super::command_replay::CommandReplayGuard;
 use super::config::{
     IssuerPolicy, IssuerRegistry, MAX_JTI_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES,
 };
@@ -247,28 +251,67 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         &self.deny_map
     }
 
-    /// Execute `VerifyCommandJwt` at current clock time.
+    /// Execute `VerifyCommandJwt` at current clock time, fenced cluster-wide
+    /// by a shared `(iss, jti)` claim.
     ///
     /// Parameters:
     /// * `token`          — compact JWS from `Nostr-Federated-Identity: Bearer`.
     /// * `request_method` — HTTP method (expected `"POST"`).
     /// * `request_path`   — HTTP path (expected `"/api/nip-fi/disconnect"`).
     /// * `body_pubkey`    — the `pubkey` field parsed from the JSON body.
+    /// * `replay`         — the shared command replay guard.
     ///
-    /// On `Ok`, the jti is reserved and the deny entry is inserted.
-    /// On `Err`, no side effects have occurred (or, on `DenySetFull`, neither
-    /// mutation was applied, so retry is safe).
-    pub fn verify(
+    /// The shared claim is taken only after authentication, and released if
+    /// the local reservation fails for capacity, so a `DenySetFull` command
+    /// can be retried.
+    ///
+    /// A claim can nevertheless remain without a local deny entry: when Redis
+    /// applied the claim but its reply was lost (`AuthorizationUnavailable`),
+    /// when the release after a capacity failure fails (`DenySetFull`), or when
+    /// the process is interrupted between claim and insertion.  Every such
+    /// failure inserts no deny entry, closes no session and publishes nothing;
+    /// it fails closed, since a retry is denied until the claim's TTL.
+    pub async fn verify(
         &self,
         token: &str,
         request_method: &str,
         request_path: &str,
         body_pubkey: &PublicKey,
+        replay: &dyn CommandReplayGuard,
     ) -> Result<CommandResult, CommandError> {
-        self.verify_at(token, request_method, request_path, body_pubkey, Utc::now())
+        let now = Utc::now();
+        let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
+        // Cover the command's remaining validity plus this pod's skew, so a
+        // pod whose clock trails still sees the claim; the guard floors this.
+        match replay
+            .try_claim(
+                &cmd.issuer,
+                &cmd.jti,
+                claim_ttl_secs(cmd.effective_expiry, now, cmd.skew_seconds),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(CommandError::AuthorizationDenied),
+            Err(_) => return Err(CommandError::AuthorizationUnavailable),
+        }
+        let result = self.commit(&cmd, now);
+        if result == Err(CommandError::DenySetFull) {
+            if let Err(e) = replay.release(&cmd.issuer, &cmd.jti).await {
+                // The jti stays claimed until its TTL; a retry gets 403.
+                tracing::warn!("nip-fi command: replay claim release failed: {e}");
+            }
+        }
+        result
     }
 
-    /// Verify with an injectable clock for deterministic testing.
+    /// Verify against this pod's deny map only, with an injectable clock.
+    ///
+    /// On `Ok`, the jti is reserved and the deny entry is inserted locally.
+    /// On `Err`, no side effects have occurred (or, on `DenySetFull`, neither
+    /// mutation was applied, so retry is safe).  Production uses
+    /// [`Self::verify`], which adds the cross-pod replay claim.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn verify_at(
         &self,
         token: &str,
@@ -277,6 +320,19 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         body_pubkey: &PublicKey,
         now: DateTime<Utc>,
     ) -> Result<CommandResult, CommandError> {
+        let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
+        self.commit(&cmd, now)
+    }
+
+    /// Steps 1–5: authenticate and authorize the command with no side effects.
+    fn authenticate_at(
+        &self,
+        token: &str,
+        request_method: &str,
+        request_path: &str,
+        body_pubkey: &PublicKey,
+        now: DateTime<Utc>,
+    ) -> Result<AuthenticatedCommand, CommandError> {
         // ── Step 1: bounded decode + typ check ───────────────────────────────
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(CommandError::EvidenceRejected);
@@ -417,17 +473,30 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
             return Err(CommandError::AuthorizationDenied);
         }
 
-        // ── Steps 6+7: atomic jti reservation + deny-entry insertion ─────────
-        //
-        // effective_expiry = min(exp, iat + maximum_command_age).
-        let effective_expiry = exp.min(iat_plus_cmd_age);
-
-        match self.deny_map.atomic_reserve_and_insert(
-            base_policy.issuer(),
-            jti,
-            effective_expiry,
-            &target_pubkey,
+        Ok(AuthenticatedCommand {
+            target_pubkey,
+            issuer: base_policy.issuer().to_owned(),
+            sub: sub.to_owned(),
+            jti: jti.to_owned(),
+            // effective_expiry = min(exp, iat + maximum_command_age).
+            effective_expiry: exp.min(iat_plus_cmd_age),
             until,
+            skew_seconds: base_policy.skew_seconds(),
+        })
+    }
+
+    /// Steps 6+7: atomic local jti reservation + deny-entry insertion.
+    fn commit(
+        &self,
+        cmd: &AuthenticatedCommand,
+        now: DateTime<Utc>,
+    ) -> Result<CommandResult, CommandError> {
+        match self.deny_map.atomic_reserve_and_insert(
+            &cmd.issuer,
+            &cmd.jti,
+            cmd.effective_expiry,
+            &cmd.target_pubkey,
+            cmd.until,
             now,
         ) {
             Ok(()) => {}
@@ -436,15 +505,35 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         }
 
         Ok(CommandResult {
-            target_pubkey,
-            caller_iss: base_policy.issuer().to_owned(),
-            caller_sub: sub.to_owned(),
-            until,
+            target_pubkey: cmd.target_pubkey,
+            caller_iss: cmd.issuer.clone(),
+            caller_sub: cmd.sub.clone(),
+            until: cmd.until,
         })
     }
 }
 
+/// A command that passed steps 1–5 and has not yet touched any state.
+struct AuthenticatedCommand {
+    target_pubkey: PublicKey,
+    issuer: String,
+    sub: String,
+    jti: String,
+    effective_expiry: DateTime<Utc>,
+    until: DateTime<Utc>,
+    skew_seconds: u64,
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Shared-claim TTL: the command's remaining validity rounded up to whole
+/// seconds, plus skew, so the claim outlives acceptance by a verifier whose
+/// clock trails by the full skew.
+fn claim_ttl_secs(effective_expiry: DateTime<Utc>, now: DateTime<Utc>, skew_seconds: u64) -> u64 {
+    let remaining = effective_expiry - now;
+    let whole = remaining.num_seconds() + i64::from(remaining.subsec_nanos() > 0);
+    whole.max(0) as u64 + skew_seconds
+}
 
 fn claim_str<'a>(claims: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     claims.get(key)?.as_str().filter(|s| !s.is_empty())
@@ -515,6 +604,30 @@ fn verify_jwt_signature(
 mod tests {
     use super::*;
     use crate::nip_fi::deny_map::IssuerCapacity;
+
+    #[test]
+    fn claim_ttl_outlives_acceptance_by_verifier_lagging_full_skew() {
+        let expiry = DateTime::from_timestamp(1060, 0).unwrap();
+        let now = DateTime::from_timestamp(1000, 250_000_000).unwrap();
+        let skew = 300;
+        let ttl = claim_ttl_secs(expiry, now, skew);
+        assert!(
+            ttl > 120,
+            "above the guard's 120s floor, so the floor cannot mask it"
+        );
+        // A verifier trailing by `skew` accepts until this instant on our clock.
+        let last_lagging_acceptance = expiry + chrono::Duration::seconds(skew as i64);
+        let claim_expiry = now + chrono::Duration::seconds(ttl as i64);
+        assert!(
+            claim_expiry >= last_lagging_acceptance,
+            "claim expires at {claim_expiry}, lagging verifier accepts until {last_lagging_acceptance}"
+        );
+        assert_eq!(claim_ttl_secs(expiry, expiry, skew), skew);
+        assert_eq!(
+            claim_ttl_secs(expiry, expiry + chrono::Duration::milliseconds(250), skew),
+            skew
+        );
+    }
     use chrono::{Duration, Utc};
 
     // ── CommandIssuerPolicy validation ────────────────────────────────────────

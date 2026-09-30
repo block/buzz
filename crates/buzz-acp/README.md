@@ -197,6 +197,34 @@ buzz-acp --respond-to anyone
 buzz-acp --respond-to nobody --heartbeat-interval 300
 ```
 
+### Host-controlled launch wrapper
+
+On Unix, a trusted host can set `BUZZ_ACP_LAUNCH_PREFIX` to a JSON argument array, for
+example `["/absolute/launcher", "--policy", "/absolute/policy.json", "--"]`.
+Keep `BUZZ_ACP_AGENT_COMMAND` set to the real worker (such as Goose). The harness
+launches `prefix... worker normalized-args...` without a shell, preserving worker
+identity for argument defaults, environment setup, managed skills and ACP handling.
+
+Configured prefixes are rejected on non-Unix platforms, including Windows, because
+per-worker process-tree cleanup is not available there. Unset direct launches
+remain available on every platform.
+
+Hosts must reserve this key against user-supplied environment settings and apply
+the trusted prefix after merging user environment. Desktop's shared reserved-key
+filter covers saved persona/agent settings and local/remote launch environments.
+
+The first prefix element must be an absolute executable path. Unset means direct
+launch; empty, malformed or unusable prefixes fail launch with no direct fallback.
+The shared spawn path applies the prefix to every worker creation, including pool
+startup, wake, crash replacement, local tasks, model discovery and authentication.
+The variable is removed from the child's environment to avoid recursive wrapping.
+
+The wrapper must preserve ACP stdin/stdout and either exec the worker or supervise
+it within the inherited process group. This hook does not enforce a sandbox or
+verify executable contents. The host owns policy, immutable launcher staging and
+its lifetime across delayed launches/restarts. Hosts requiring this hook must pin
+a supporting runtime; older binaries do not understand the environment setting.
+
 ### Configuration Examples
 
 **Single agent, no heartbeat (default):**

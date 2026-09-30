@@ -6,6 +6,7 @@ class _HuddleCallParticipants extends StatelessWidget {
     required this.error,
     required this.profiles,
     required this.fallbackLabels,
+    required this.contextualLabels,
     required this.remotePubkeys,
     required this.localPubkey,
     required this.activeSpeakerPubkeys,
@@ -22,6 +23,9 @@ class _HuddleCallParticipants extends StatelessWidget {
   final String? error;
   final Map<String, UserProfile> profiles;
   final Map<String, String> fallbackLabels;
+
+  /// Huddle-scoped identity labels, keyed by lowercase pubkey.
+  final Map<String, String> contextualLabels;
   final List<String> remotePubkeys;
   final String? localPubkey;
   final Set<String> activeSpeakerPubkeys;
@@ -146,6 +150,7 @@ class _HuddleCallParticipants extends StatelessWidget {
                 pubkeys: remotePubkeys,
                 profiles: profiles,
                 fallbackLabels: fallbackLabels,
+                contextualLabels: contextualLabels,
                 activeSpeakerPubkeys: activeSpeakerPubkeys,
                 speakerLevels: speakerLevels,
                 workingAgentPubkeys: workingAgentPubkeys,

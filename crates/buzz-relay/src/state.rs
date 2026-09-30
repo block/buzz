@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
-use buzz_auth::{AuthService, Nip98ReplayGuard};
+use buzz_auth::{AuthService, CommandReplayGuard, Nip98ReplayGuard};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::Db;
@@ -24,7 +24,7 @@ use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::rate_limiter::RedisRateLimiter;
-use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
+use buzz_pubsub::{PubSubManager, RedisCommandReplayGuard, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
@@ -1204,6 +1204,10 @@ pub struct AppState {
     /// atomic jti-reservation + deny-entry insertion happens inside `verify()`.
     pub nip_fi_command_verifier:
         Option<Arc<buzz_auth::CommandVerifier<Arc<buzz_auth::ProductionJwksSource>>>>,
+    /// Shared NIP-FI command `(iss, jti)` replay claim — the cross-pod fence
+    /// on top of the verifier's per-pod reservation.  Redis `SET NX EX`, like
+    /// `nip98_replay`; callers fail closed on error.
+    pub nip_fi_command_replay: Arc<dyn CommandReplayGuard>,
 }
 
 impl AppState {
@@ -1289,6 +1293,8 @@ impl AppState {
         );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+        let nip_fi_command_replay: Arc<dyn CommandReplayGuard> =
+            Arc::new(RedisCommandReplayGuard::new(redis_pool.clone()));
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
@@ -1394,6 +1400,7 @@ impl AppState {
             // call: the endpoint returns 503 when the verifier is absent.
             nip_fi_deny_map: None,
             nip_fi_command_verifier: None,
+            nip_fi_command_replay,
         };
         (
             state,
