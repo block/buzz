@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
@@ -15,6 +16,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
@@ -716,6 +718,16 @@ class _PeopleSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The shown results are the comparison context.
+    final names = watchIdentityNames(
+      ref,
+      [for (final user in users) user.pubkey],
+      agentPubkeys: {
+        for (final user in users)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {for (final user in users) user.pubkey: user.label},
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -732,7 +744,7 @@ class _PeopleSection extends ConsumerWidget {
               isAgent: user.isAgent,
             ),
             title: Text(
-              user.label,
+              names.labelFor(user.pubkey),
               key: ValueKey('search-person-title-${user.pubkey}'),
               style: contentListTitleTextStyle,
             ),
@@ -824,7 +836,23 @@ class _MessageTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final authorName = authorProfile?.label ?? shortPubkey(hit.pubkey);
+    final mentionedPubkeys = mentionedPubkeysFromTags(hit.tags);
+    // A hit is labelled within its channel, as it would be there.
+    final hitChannelId = channel?.id ?? hit.channelId;
+    final labelPubkeys = {hit.pubkey.toLowerCase(), ...mentionedPubkeys};
+    final Map<String, String> labels;
+    if (hitChannelId == null) {
+      final names = watchIdentityNames(ref, labelPubkeys);
+      labels = {
+        for (final pubkey in labelPubkeys) pubkey: names.labelFor(pubkey),
+      };
+    } else {
+      labels = watchChannelIdentityLabels(ref, hitChannelId, labelPubkeys);
+    }
+    final authorName =
+        labels[hit.pubkey.toLowerCase()] ??
+        authorProfile?.label ??
+        shortPubkey(hit.pubkey);
     final timeAgo = relativeTime(hit.createdAt);
     final channelName = hit.channelName?.trim().replaceFirst(RegExp(r'^#'), '');
     final hasChannelName = channelName != null && channelName.isNotEmpty;
@@ -923,6 +951,7 @@ class _MessageTile extends ConsumerWidget {
             key: ValueKey('search-message-body-${hit.eventId}'),
             content: hit.content,
             mentionNames: mentionNames,
+            mentionLabels: labels,
             agentMentionPubkeys: agentMentionPubkeys,
             tags: hit.tags,
             maxLines: 2,

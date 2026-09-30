@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
+import 'package:buzz/shared/identity_names/identity_names_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/pulse/compose_note_page.dart';
@@ -17,6 +19,27 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   UserProfile? get(String pubkey) => _users[pubkey.toLowerCase()];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async => true;
+}
+
+class _MutableUserCache extends UserCacheNotifier {
+  _MutableUserCache(this._initial);
+
+  final Map<String, UserProfile> _initial;
+
+  @override
+  Map<String, UserProfile> build() => _initial;
+
+  @override
+  UserProfile? get(String pubkey) => state[pubkey.toLowerCase()];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async => true;
+
+  void replace(UserProfile profile) =>
+      state = {...state, profile.pubkey: profile};
 }
 
 void main() {
@@ -72,6 +95,45 @@ void main() {
     expect(find.text('Reply'), findsOneWidget); // action button label
     // Named parent: the preview avatar initial comes from the authored name.
     expect(_replyPreviewAvatarInitial(tester, 'Replying to Alice'), 'A');
+  });
+
+  testWidgets('a supplied context follows profile changes while open', (
+    tester,
+  ) async {
+    final author = 'a' * 64;
+    final cache = _MutableUserCache({
+      author: UserProfile(pubkey: author, displayName: 'Scout'),
+    });
+    final note = UserNote(
+      id: 'note-live',
+      pubkey: author,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120,
+      content: 'Original',
+      tags: const [],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [userCacheProvider.overrideWith(() => cache)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Consumer(
+            builder: (context, ref, _) {
+              // The opener's context, as NoteCard passes it to the route.
+              final IdentityNames opened = ref
+                  .read(identityNameSourcesProvider)
+                  .scope([author]);
+              return ComposeNotePage(replyTo: note, names: opened);
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Replying to Scout'), findsOneWidget);
+
+    cache.replace(UserProfile(pubkey: author, displayName: 'Renamed'));
+    await tester.pump();
+    expect(find.text('Replying to Renamed'), findsOneWidget);
   });
 
   testWidgets('reply preview constrains its timestamp at large text sizes', (

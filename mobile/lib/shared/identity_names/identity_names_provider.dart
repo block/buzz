@@ -39,11 +39,17 @@ void loadIdentityNameOwners(Ref ref, IdentityNames names) {
 /// Labels for a displayed collection with no channel context, such as search
 /// results, a Pulse timeline, or a picker's choices. [candidates] is that
 /// collection; keys outside it resolve against it plus themselves.
+///
+/// Uncached profiles are loaded for the identities in [shown] (default: all
+/// [candidates]). Pass [shown] when the context also holds identities that are
+/// only compared, such as a channel roster whose names another owner loads,
+/// so opening the view does not queue a profile read for every one of them.
 IdentityNames watchIdentityNames(
   WidgetRef ref,
   Iterable<String> candidates, {
   Set<String> agentPubkeys = const {},
   Map<String, String> fallbackNames = const {},
+  Iterable<String>? shown,
 }) {
   final sources = ref.watch(identityNameSourcesProvider);
   final names = sources.scope(
@@ -54,10 +60,16 @@ IdentityNames watchIdentityNames(
   // A displayed identity's profile carries its owner hint, so load uncached
   // candidates as well as their owners; channels load member profiles
   // elsewhere, but a displayed collection has no other loader.
+  final loadFor = shown == null
+      ? names.candidates
+      : {
+          for (final key in shown)
+            if (names.candidates.contains(key.toLowerCase())) key.toLowerCase(),
+        };
   final missing = {
-    for (final key in names.candidates)
+    for (final key in loadFor)
       if (!sources.profiles.containsKey(key)) key,
-    ...names.missingOwnerProfiles(),
+    ...names.missingOwnerProfiles(loadFor),
   };
   if (missing.isNotEmpty) {
     Future.microtask(() {

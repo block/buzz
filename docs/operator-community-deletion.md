@@ -151,6 +151,45 @@ eligible for execution. Transient preparation failures use the existing retry
 schedule; permanent or exhausted failures block durably. Owner-facing
 admission has no cancellation endpoint.
 
+Admission is idempotent on the request UUID. Resending the same UUID with the
+same host, owner, and acknowledgement version returns `202` with that request's
+current `status` at any stage, including after membership purge, and admits no
+new work. Clients recover an ambiguous submission by resending it. The same
+UUID with a different tuple returns `409 deletion_request_conflict`.
+
+The acknowledgement version is a compile-time constant
+(`OWNER_DELETION_ACKNOWLEDGEMENT_VERSION`), not operator configuration.
+Admission validates it before the UUID lookup, and the executor claims and
+leases only requests carrying the current version. Raising it therefore makes
+resends of pending requests made under the old version fail with
+`400 unsupported_acknowledgement_version`, and leaves already-admitted
+old-version requests unclaimed in `submitted`. A version bump must ship code
+that keeps admitting replays of, and executing, requests at the prior version
+until none remain in a non-terminal stage.
+
+## Owner quota
+
+The relay enforces two per-owner caps on create and on transfer-in, both as
+`limit_reached`:
+
+- **Active:** live ownership plus incomplete owner deletions
+  (`BUZZ_MAX_COMMUNITIES_PER_OWNER`, default 5). A deletion keeps its slot
+  until logical completion records `completed_at`.
+- **Lifetime:** live ownership plus every non-aborted owner deletion, including
+  completed ones, capped at an absolute 20 regardless of the active limit.
+  Deleted communities keep their hosts as permanent tombstones, so this bounds
+  create-then-delete host squatting. Aborted deletions restore the community
+  and count only through its live membership.
+
+Owner-list responses carry `quota_used` (active), `quota_limit` (active), and
+`can_create` (both caps). `can_create: false` is the only signal a client needs:
+show a generic community-limit message and do not derive a reason from the
+counts, because an owner at the lifetime cap can have `quota_used` below
+`quota_limit`. The projection is advisory: clients may use it for
+UX, but the relay's `limit_reached` is authoritative, and quota changes have no
+deployment order. Keep owner deletion off until this relay and the drain
+executor are live; on rollback, turn deletion off before rolling back the relay.
+
 The chart has no existing PrometheusRule or provider-neutral CronJob alert
 integration. Operators must alert on failed/missed Jobs and long-running active
 Jobs in their deployment platform. Adding a chart-native alert abstraction is
