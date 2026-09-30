@@ -15,8 +15,10 @@
 //!    jti reservation + deny-entry insertion (both-or-neither).
 //! 7. Return [`CommandResult`].
 //!
-//! Fail-closed: any failure returns an error without side effects.  The jti is
-//! burned and the deny entry is inserted only on success.
+//! Fail-closed: any failure inserts no deny entry, closes no session and
+//! publishes nothing.  A failure after step 6's shared claim may leave that
+//! claim in place until its TTL (a guard error whose `SET` reply was lost, or a
+//! failed release); that is fail closed, since a retry is then denied.
 
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
@@ -262,7 +264,9 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
     /// The shared claim is taken only after authentication, and released if
     /// the local reservation fails for capacity, so the jti is burned
     /// cluster-wide only when the local deny entry is inserted.  A guard error
-    /// fails closed as `AuthorizationUnavailable` with no side effects.
+    /// fails closed as `AuthorizationUnavailable`: no deny entry, no session
+    /// close, no publish.  The shared claim may still exist (the guard's reply
+    /// was lost, or a release failed), so a retry is denied until its TTL.
     pub async fn verify(
         &self,
         token: &str,
@@ -275,9 +279,12 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
         // Cover the command's remaining validity plus this pod's skew, so a
         // pod whose clock trails still sees the claim; the guard floors this.
-        let remaining = (cmd.effective_expiry - now).num_seconds().max(0) as u64;
         match replay
-            .try_claim(&cmd.issuer, &cmd.jti, remaining + cmd.skew_seconds)
+            .try_claim(
+                &cmd.issuer,
+                &cmd.jti,
+                claim_ttl_secs(cmd.effective_expiry, now, cmd.skew_seconds),
+            )
             .await
         {
             Ok(true) => {}
@@ -300,6 +307,7 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
     /// On `Err`, no side effects have occurred (or, on `DenySetFull`, neither
     /// mutation was applied, so retry is safe).  Production uses
     /// [`Self::verify`], which adds the cross-pod replay claim.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn verify_at(
         &self,
         token: &str,
@@ -514,6 +522,15 @@ struct AuthenticatedCommand {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Shared-claim TTL: the command's remaining validity rounded up to whole
+/// seconds, plus skew, so the claim outlives acceptance by a verifier whose
+/// clock trails by the full skew.
+fn claim_ttl_secs(effective_expiry: DateTime<Utc>, now: DateTime<Utc>, skew_seconds: u64) -> u64 {
+    let remaining = effective_expiry - now;
+    let whole = remaining.num_seconds() + i64::from(remaining.subsec_nanos() > 0);
+    whole.max(0) as u64 + skew_seconds
+}
+
 fn claim_str<'a>(claims: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     claims.get(key)?.as_str().filter(|s| !s.is_empty())
 }
@@ -583,6 +600,30 @@ fn verify_jwt_signature(
 mod tests {
     use super::*;
     use crate::nip_fi::deny_map::IssuerCapacity;
+
+    #[test]
+    fn claim_ttl_outlives_acceptance_by_verifier_lagging_full_skew() {
+        let expiry = DateTime::from_timestamp(1060, 0).unwrap();
+        let now = DateTime::from_timestamp(1000, 250_000_000).unwrap();
+        let skew = 300;
+        let ttl = claim_ttl_secs(expiry, now, skew);
+        assert!(
+            ttl > 120,
+            "above the guard's 120s floor, so the floor cannot mask it"
+        );
+        // A verifier trailing by `skew` accepts until this instant on our clock.
+        let last_lagging_acceptance = expiry + chrono::Duration::seconds(skew as i64);
+        let claim_expiry = now + chrono::Duration::seconds(ttl as i64);
+        assert!(
+            claim_expiry >= last_lagging_acceptance,
+            "claim expires at {claim_expiry}, lagging verifier accepts until {last_lagging_acceptance}"
+        );
+        assert_eq!(claim_ttl_secs(expiry, expiry, skew), skew);
+        assert_eq!(
+            claim_ttl_secs(expiry, expiry + chrono::Duration::milliseconds(250), skew),
+            skew
+        );
+    }
     use chrono::{Duration, Utc};
 
     // ── CommandIssuerPolicy validation ────────────────────────────────────────
