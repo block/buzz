@@ -71,37 +71,95 @@ export function normalizeUnixSeconds(
 }
 
 /**
- * Latency for THIS turn from the closest reliable start (prompt or turn_started).
+ * Choose which prompt timestamp may feed the duration chip.
+ *
+ * `message.parentId` on community replies is often a thread ancestor, not the
+ * harness trigger. Only trust it when the join already proved it via
+ * `triggeringEventIds` (`triggering-event`). Never use it as a silent fallback
+ * when `turn_started` is missing — that produces multi-hour chips like
+ * `195:37` (m:ss) for a seconds-long turn.
+ */
+export function selectPromptCreatedAtForDuration(input: {
+  joinMethod: "triggering-event" | "time-proximity" | "none";
+  promptCreatedAtSec: number | null;
+  parentCreatedAtSec: number | null;
+}): number | null {
+  if (input.promptCreatedAtSec != null) return input.promptCreatedAtSec;
+  if (input.joinMethod === "triggering-event") {
+    return input.parentCreatedAtSec;
+  }
+  return null;
+}
+
+/**
+ * Earliest thought/tool timestamp for a turn — used when `turn_started` is
+ * missing from the observer window but thinking chunks are present.
+ */
+export function earliestContentStartedAtSec(
+  items: readonly TurnJoinTranscriptItem[],
+): number | null {
+  let earliest: number | null = null;
+  for (const item of items) {
+    if (!isThinkingContentItem(item) || !item.timestamp) continue;
+    const ms = Date.parse(item.timestamp);
+    if (!Number.isFinite(ms)) continue;
+    const sec = Math.floor(ms / 1000);
+    if (earliest == null || sec < earliest) earliest = sec;
+  }
+  return earliest;
+}
+
+/**
+ * Latency for THIS turn from the closest reliable start (prompt, turn_started,
+ * or earliest thinking content).
  *
  * Community bot replies often set `parentId` to a thread ancestor, not the
  * harness trigger. When that ancestor is still within
  * {@link MAX_RELIABLE_TURN_DURATION_SEC}, preferring prompt-order would show an
  * inflated chip. Among non-negative spans ≤ the reliable cap, pick the
- * shortest (true turn latency). If every candidate exceeds the cap, still
- * return the shortest non-negative so the chip is never empty.
+ * shortest (true turn latency).
+ *
+ * If every candidate exceeds the cap, only fall back to a long span when a
+ * harness/content start exists (real long tool turns). A bare prompt/parent
+ * span outside the cap is treated as untrusted and omitted — otherwise
+ * Captain-like replies show `195:37` (~3h) for a seconds-long turn.
  */
 export function resolveTurnDurationSeconds(input: {
   replyCreatedAt: number;
   turnStartedAtSec: number | null;
   promptCreatedAtSec: number | null;
+  /** Earliest thought/tool timestamp when turn_started is unavailable. */
+  contentStartedAtSec?: number | null;
 }): number | null {
   const reply = normalizeUnixSeconds(input.replyCreatedAt);
   if (reply == null) return null;
 
-  const candidates: number[] = [];
   const prompt = normalizeUnixSeconds(input.promptCreatedAtSec);
-  if (prompt != null) candidates.push(reply - prompt);
   const started = normalizeUnixSeconds(input.turnStartedAtSec);
+  const content = normalizeUnixSeconds(input.contentStartedAtSec ?? null);
+
+  const candidates: number[] = [];
+  if (prompt != null) candidates.push(reply - prompt);
   if (started != null) candidates.push(reply - started);
+  if (content != null) candidates.push(reply - content);
 
   const reliable = candidates.filter(
     (delta) => delta >= 0 && delta <= MAX_RELIABLE_TURN_DURATION_SEC,
   );
   if (reliable.length > 0) return Math.min(...reliable);
 
-  // Still show something rather than omit the chip (e.g. long tool turns).
-  const usable = candidates.filter((delta) => delta >= 0);
-  return usable.length > 0 ? Math.min(...usable) : null;
+  // Long tool turns: trust harness / thinking starts only — never a bare
+  // parent/prompt that sat outside the reliable window (thread ancestors).
+  const trustedLong: number[] = [];
+  if (started != null) {
+    const delta = reply - started;
+    if (delta >= 0) trustedLong.push(delta);
+  }
+  if (content != null) {
+    const delta = reply - content;
+    if (delta >= 0) trustedLong.push(delta);
+  }
+  return trustedLong.length > 0 ? Math.min(...trustedLong) : null;
 }
 
 export function findTurnStartedEvent(

@@ -18,6 +18,7 @@ import {
 import {
   collectThinkingContentItems,
   collectTurnPromptContext,
+  earliestContentStartedAtSec,
   extractTriggeringEventIds,
   findNearestTurnIdByTime,
   findTurnIdForPromptEvent,
@@ -26,6 +27,7 @@ import {
   formatTurnTokens,
   normalizeUnixSeconds,
   resolveTurnDurationSeconds,
+  selectPromptCreatedAtForDuration,
   summarizeThinkingItems,
 } from "@/features/messages/lib/agentMessageTurnMeta";
 import { useShowAgentThinking } from "@/features/messages/lib/showAgentThinkingPreference";
@@ -278,25 +280,34 @@ export function useAgentMessageTurnMeta(input: {
     [transcriptItems, turnId, thinkingWindowStartSec, input.createdAt],
   );
 
+  const contentStartedAtSec = React.useMemo(
+    () => earliestContentStartedAtSec(turnItems),
+    [turnItems],
+  );
+
   const durationSeconds = React.useMemo(() => {
-    // Prefer harness trigger event timestamp. Only fall back to message.parentId
-    // when it is the known trigger (triggering-event join) or we have no
-    // turn_started — otherwise a thread ancestor inflates the chip.
-    const parentOkForDuration =
-      joinMethod === "triggering-event" || turnStartedAtSec == null;
-    const promptForDuration =
-      promptCreatedAt ?? (parentOkForDuration ? parentCreatedAt : null);
+    // Prefer harness trigger / turn_started / thinking start. Never fall back
+    // to message.parentId unless the join proved it is the trigger — community
+    // bots parent to thread ancestors and that produced multi-hour chips when
+    // turn_started was missing (#179 still allowed parent when started==null).
+    const promptForDuration = selectPromptCreatedAtForDuration({
+      joinMethod,
+      promptCreatedAtSec: promptCreatedAt,
+      parentCreatedAtSec: parentCreatedAt,
+    });
 
     return resolveTurnDurationSeconds({
       replyCreatedAt: input.createdAt,
       turnStartedAtSec,
       promptCreatedAtSec: promptForDuration,
+      contentStartedAtSec,
     });
   }, [
     input.createdAt,
     promptCreatedAt,
     parentCreatedAt,
     turnStartedAtSec,
+    contentStartedAtSec,
     joinMethod,
   ]);
 

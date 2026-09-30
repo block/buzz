@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   collectThinkingContentItems,
   collectTurnPromptContext,
+  earliestContentStartedAtSec,
   findNearestTurnIdByTime,
   findTurnIdForPromptEvent,
   formatTurnDuration,
@@ -11,6 +12,7 @@ import {
   MAX_RELIABLE_TURN_DURATION_SEC,
   normalizeUnixSeconds,
   resolveTurnDurationSeconds,
+  selectPromptCreatedAtForDuration,
 } from "./agentMessageTurnMeta.ts";
 
 test("formatTurnDuration", () => {
@@ -18,6 +20,8 @@ test("formatTurnDuration", () => {
   assert.equal(formatTurnDuration(12), "12s");
   assert.equal(formatTurnDuration(65), "1:05");
   assert.equal(formatTurnDuration(600), "10:00");
+  // m:ss with unbounded minutes — 11737s renders as the Captain bug chip.
+  assert.equal(formatTurnDuration(195 * 60 + 37), "195:37");
 });
 
 test("formatTurnTokens", () => {
@@ -116,16 +120,46 @@ test("resolveTurnDurationSeconds prefers prompt; falls back to long spans", () =
     }),
     10,
   );
-  // Long-only candidate still returns a value so the chip is never empty.
+  // Bare parent/prompt outside the reliable cap is untrusted — omit the chip
+  // rather than show multi-hour absurd durations (Captain `195:37` case).
   assert.equal(
     resolveTurnDurationSeconds({
       replyCreatedAt: 1_000_000 + 680,
       turnStartedAtSec: null,
       promptCreatedAtSec: 1_000_000,
     }),
-    680,
+    null,
   );
   assert.ok(680 > MAX_RELIABLE_TURN_DURATION_SEC);
+  // Captain-shaped: ~3h thread ancestor, no turn_started → null (not 195:37).
+  const captainSpan = 195 * 60 + 37;
+  assert.equal(
+    resolveTurnDurationSeconds({
+      replyCreatedAt: 1_000_000 + captainSpan,
+      turnStartedAtSec: null,
+      promptCreatedAtSec: 1_000_000,
+    }),
+    null,
+  );
+  // Same case with thinking content near the reply → short duration.
+  assert.equal(
+    resolveTurnDurationSeconds({
+      replyCreatedAt: 1_000_000 + captainSpan,
+      turnStartedAtSec: null,
+      promptCreatedAtSec: 1_000_000,
+      contentStartedAtSec: 1_000_000 + captainSpan - 23,
+    }),
+    23,
+  );
+  // Trusted long tool turn (turn_started present) still shows.
+  assert.equal(
+    resolveTurnDurationSeconds({
+      replyCreatedAt: 1_000_000 + 680,
+      turnStartedAtSec: 1_000_000,
+      promptCreatedAtSec: null,
+    }),
+    680,
+  );
   assert.equal(
     resolveTurnDurationSeconds({
       replyCreatedAt: 1_000_045,
@@ -142,6 +176,69 @@ test("resolveTurnDurationSeconds prefers prompt; falls back to long spans", () =
       promptCreatedAtSec: 1_000_000 - 180,
     }),
     10,
+  );
+});
+
+test("selectPromptCreatedAtForDuration ignores parent unless triggering-event", () => {
+  assert.equal(
+    selectPromptCreatedAtForDuration({
+      joinMethod: "none",
+      promptCreatedAtSec: null,
+      parentCreatedAtSec: 1_000_000,
+    }),
+    null,
+  );
+  assert.equal(
+    selectPromptCreatedAtForDuration({
+      joinMethod: "time-proximity",
+      promptCreatedAtSec: null,
+      parentCreatedAtSec: 1_000_000,
+    }),
+    null,
+  );
+  assert.equal(
+    selectPromptCreatedAtForDuration({
+      joinMethod: "triggering-event",
+      promptCreatedAtSec: null,
+      parentCreatedAtSec: 1_000_000,
+    }),
+    1_000_000,
+  );
+  assert.equal(
+    selectPromptCreatedAtForDuration({
+      joinMethod: "none",
+      promptCreatedAtSec: 1_000_050,
+      parentCreatedAtSec: 1_000_000,
+    }),
+    1_000_050,
+  );
+});
+
+test("earliestContentStartedAtSec picks first thought/tool", () => {
+  assert.equal(
+    earliestContentStartedAtSec([
+      {
+        id: "1",
+        type: "lifecycle",
+        timestamp: "2026-01-01T00:00:00Z",
+        turnId: "t1",
+      },
+      {
+        id: "2",
+        type: "thought",
+        text: "plan",
+        timestamp: "2026-01-01T00:00:10Z",
+        turnId: "t1",
+      },
+      {
+        id: "3",
+        type: "tool",
+        title: "shell",
+        timestamp: "2026-01-01T00:00:05Z",
+        turnId: "t1",
+      },
+    ]),
+    Date.parse("2026-01-01T00:00:05Z") / 1000,
   );
 });
 
