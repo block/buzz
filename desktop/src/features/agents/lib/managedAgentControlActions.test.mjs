@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
+  shouldOfferImmediateRespondToRestart,
 } from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
@@ -164,5 +165,36 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     events,
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
+  );
+});
+
+test("test_shouldOfferImmediateRespondToRestart_fires_only_when_gate_changed_and_needs_restart", () => {
+  assert.equal(
+    shouldOfferImmediateRespondToRestart({ respondTo: "anyone" }, true),
+    true,
+    "respond-to changed + backend confirms drift → offer restart",
+  );
+  assert.equal(
+    shouldOfferImmediateRespondToRestart(
+      { respondToAllowlist: ["a".repeat(64)] },
+      true,
+    ),
+    true,
+    "allowlist-only change + drift → offer restart",
+  );
+  assert.equal(
+    shouldOfferImmediateRespondToRestart({ respondTo: "anyone" }, false),
+    false,
+    "backend says no drift (e.g. agent already stopped) → never prompt",
+  );
+  assert.equal(
+    shouldOfferImmediateRespondToRestart({ name: "New Name" }, true),
+    false,
+    "unrelated field changed (name) → never prompt for a respond-to reason",
+  );
+  assert.equal(
+    shouldOfferImmediateRespondToRestart({}, true),
+    false,
+    "no fields changed at all → never prompt",
   );
 });
