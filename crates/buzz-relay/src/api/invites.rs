@@ -329,10 +329,23 @@ async fn mint_invite_checked(
         Err(resp) => return resp,
     };
     let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, _signed_created_at) = admission.into_extra();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
 
     // Replay detection runs after NIP-98+assertion admission (both proofs verified).
     if let Err(e) = bridge::check_nip98_replay(&state, &tenant, event_id_bytes).await {
+        return e.into_response();
+    }
+
+    // Membership and community ban, same step as the other NIP-98 routes.
+    if let Err(e) = super::relay_members::enforce_relay_membership(
+        &state,
+        tenant.community(),
+        pubkey.as_bytes(),
+        super::relay_members::extract_auth_tag_header(&headers),
+        signed_created_at.into(),
+    )
+    .await
+    {
         return e.into_response();
     }
 

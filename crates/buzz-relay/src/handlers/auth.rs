@@ -67,7 +67,7 @@ pub(crate) async fn community_ban_outcome(
     community: buzz_core::CommunityId,
     pubkey: nostr::PublicKey,
     auth_tag_json: Option<&str>,
-    signed_auth_created_at: u64,
+    signed_auth_created_at: Option<u64>,
 ) -> BanOutcome {
     async fn lookup(
         state: &AppState,
@@ -94,7 +94,7 @@ pub(crate) async fn community_ban_outcome(
     match crate::api::relay_members::extract_nip_oa_owner(
         pubkey.as_bytes(),
         auth_tag_json,
-        Some(signed_auth_created_at),
+        signed_auth_created_at,
     ) {
         Some(owner) => lookup(state, community, &owner).await,
         None => BanOutcome::Clear,
@@ -265,7 +265,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     conn.tenant.community(),
                     pubkey,
                     auth_tag_json.as_deref(),
-                    signed_auth_created_at,
+                    Some(signed_auth_created_at),
                 )
                 .await;
 

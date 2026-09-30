@@ -768,7 +768,7 @@ pub(crate) async fn handle_active_audio_connection(
         tenant.community(),
         pubkey,
         auth_tag_json.as_deref(),
-        signed_auth_created_at,
+        Some(signed_auth_created_at),
     )
     .await
     {

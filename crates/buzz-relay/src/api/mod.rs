@@ -206,8 +206,28 @@ pub mod relay_members {
         )
         .await
         {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
+                deny_banned(
+                    state,
+                    community,
+                    pubkey_bytes,
+                    auth_tag_header,
+                    signed_auth_created_at,
+                )
+                .await?;
+                Ok(None)
+            }
+            Ok(MembershipDecision::ViaOwner(owner)) => {
+                deny_banned(
+                    state,
+                    community,
+                    pubkey_bytes,
+                    auth_tag_header,
+                    signed_auth_created_at,
+                )
+                .await?;
+                Ok(Some(owner))
+            }
             Ok(MembershipDecision::Denied) => Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -219,6 +239,40 @@ pub mod relay_members {
                 tracing::error!("relay membership check errored: {e}");
                 Err(super::internal_error(&e))
             }
+        }
+    }
+
+    /// Refuse a community-banned principal (own ban or its agent owner's) on
+    /// HTTP. Bans only: a timeout blocks writes, and HTTP writes reach the
+    /// ingest gate, while reads stay allowed. Fails closed with 503.
+    async fn deny_banned(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
+            return Err(super::internal_error("invalid pubkey for ban check"));
+        };
+        match crate::handlers::auth::community_ban_outcome(
+            state,
+            community,
+            pubkey,
+            auth_tag_header,
+            signed_auth_created_at,
+        )
+        .await
+        {
+            crate::handlers::auth::BanOutcome::Clear => Ok(()),
+            crate::handlers::auth::BanOutcome::Banned => Err(super::api_error(
+                StatusCode::FORBIDDEN,
+                "blocked: you are banned from this community",
+            )),
+            crate::handlers::auth::BanOutcome::DbError => Err(super::api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "error: internal error checking restriction state",
+            )),
         }
     }
 

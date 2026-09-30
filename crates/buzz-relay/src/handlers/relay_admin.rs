@@ -410,6 +410,19 @@ async fn execute_relay_admin_command(
                 "relay member removed"
             );
 
+            // Removal ends access now: close the member's and their agents'
+            // live sessions (agents hold membership through their owner).
+            if let Ok(target_bytes) = hex::decode(&target_hex) {
+                state
+                    .revoke_live_access(
+                        tenant,
+                        &target_bytes,
+                        &event.id.to_hex(),
+                        "restricted: you were removed from this relay",
+                    )
+                    .await;
+            }
+
             if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
                 warn!(error = %e, "failed to publish NIP-43 member removed event");
             }

@@ -1700,12 +1700,44 @@ impl AppState {
                 .disconnect_pubkey(community, pubkey)
     }
 
+    /// Close every live session of `pubkey` and of the agents it owns
+    /// (`users.agent_owner_pubkey`), on every pod. Ban, report-action ban, and
+    /// roster removal all end access this way, because an agent's access is
+    /// derived from its owner's.
+    ///
+    /// If the owned-agent lookup fails the owner is still disconnected; the
+    /// agents are then held by the durable checks (the owner-aware restriction
+    /// state and NIP-OA membership via owner) on their next write or auth.
+    pub async fn revoke_live_access(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> usize {
+        let mut closed = self.disconnect_pubkey_clusterwide(tenant, pubkey, event_id, reason);
+        match self
+            .db
+            .list_agents_for_owner(tenant.community(), pubkey)
+            .await
+        {
+            Ok(agents) => {
+                for agent in agents {
+                    closed += self.disconnect_pubkey_clusterwide(tenant, &agent, event_id, reason);
+                }
+            }
+            Err(e) => tracing::warn!("failed to list owned agents for live revoke: {e}"),
+        }
+        closed
+    }
+
     /// Enforce a live ban cluster-wide: close this pod's sockets for `pubkey`
     /// now (fenced to `tenant`'s community) and fan the same disconnect out to
     /// every other pod over the conn-control Redis channel.
     ///
-    /// This is the single entry point for live ban enforcement (decision 4:
-    /// "a ban takes effect immediately, everywhere, including live sessions").
+    /// This is the per-pubkey primitive under [`Self::revoke_live_access`],
+    /// which ban and roster removal call (decision 4: "a ban takes effect
+    /// immediately, everywhere, including live sessions").
     /// Callers must not invoke the pod-local [`Self::disconnect_pubkey_local`]
     /// directly — doing so closes sockets only on the pod that processed the
     /// ban and silently drops the cluster-wide half. Pairing both halves here
