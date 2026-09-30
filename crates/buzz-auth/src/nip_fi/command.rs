@@ -11,7 +11,8 @@
 //!    target_pubkey, and until ceiling.
 //! 4. Principal authorization (issuer-configured authorized `sub` list).
 //! 5. Signed-target / request-body agreement.
-//! 6. Atomic jti reservation + deny-entry insertion (both-or-neither).
+//! 6. Shared `(iss, jti)` claim ([`super::command_replay`]), then atomic local
+//!    jti reservation + deny-entry insertion (both-or-neither).
 //! 7. Return [`CommandResult`].
 //!
 //! Fail-closed: any failure returns an error without side effects.  The jti is
@@ -22,6 +23,7 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use nostr::PublicKey;
 use serde_json::{Map, Value};
 
+use super::command_replay::CommandReplayGuard;
 use super::config::{
     IssuerPolicy, IssuerRegistry, MAX_JTI_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES,
 };
@@ -247,28 +249,57 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         &self.deny_map
     }
 
-    /// Execute `VerifyCommandJwt` at current clock time.
+    /// Execute `VerifyCommandJwt` at current clock time, fenced cluster-wide
+    /// by a shared `(iss, jti)` claim.
     ///
     /// Parameters:
     /// * `token`          — compact JWS from `Nostr-Federated-Identity: Bearer`.
     /// * `request_method` — HTTP method (expected `"POST"`).
     /// * `request_path`   — HTTP path (expected `"/api/nip-fi/disconnect"`).
     /// * `body_pubkey`    — the `pubkey` field parsed from the JSON body.
+    /// * `replay`         — the shared command replay guard.
     ///
-    /// On `Ok`, the jti is reserved and the deny entry is inserted.
-    /// On `Err`, no side effects have occurred (or, on `DenySetFull`, neither
-    /// mutation was applied, so retry is safe).
-    pub fn verify(
+    /// The shared claim is taken only after authentication, and released if
+    /// the local reservation fails for capacity, so the jti is burned
+    /// cluster-wide only when the local deny entry is inserted.  A guard error
+    /// fails closed as `AuthorizationUnavailable` with no side effects.
+    pub async fn verify(
         &self,
         token: &str,
         request_method: &str,
         request_path: &str,
         body_pubkey: &PublicKey,
+        replay: &dyn CommandReplayGuard,
     ) -> Result<CommandResult, CommandError> {
-        self.verify_at(token, request_method, request_path, body_pubkey, Utc::now())
+        let now = Utc::now();
+        let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
+        // Cover the command's remaining validity plus this pod's skew, so a
+        // pod whose clock trails still sees the claim; the guard floors this.
+        let remaining = (cmd.effective_expiry - now).num_seconds().max(0) as u64;
+        match replay
+            .try_claim(&cmd.issuer, &cmd.jti, remaining + cmd.skew_seconds)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(CommandError::AuthorizationDenied),
+            Err(_) => return Err(CommandError::AuthorizationUnavailable),
+        }
+        let result = self.commit(&cmd, now);
+        if result == Err(CommandError::DenySetFull) {
+            if let Err(e) = replay.release(&cmd.issuer, &cmd.jti).await {
+                // The jti stays claimed until its TTL; a retry gets 403.
+                tracing::warn!("nip-fi command: replay claim release failed: {e}");
+            }
+        }
+        result
     }
 
-    /// Verify with an injectable clock for deterministic testing.
+    /// Verify against this pod's deny map only, with an injectable clock.
+    ///
+    /// On `Ok`, the jti is reserved and the deny entry is inserted locally.
+    /// On `Err`, no side effects have occurred (or, on `DenySetFull`, neither
+    /// mutation was applied, so retry is safe).  Production uses
+    /// [`Self::verify`], which adds the cross-pod replay claim.
     pub fn verify_at(
         &self,
         token: &str,
@@ -277,6 +308,19 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         body_pubkey: &PublicKey,
         now: DateTime<Utc>,
     ) -> Result<CommandResult, CommandError> {
+        let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
+        self.commit(&cmd, now)
+    }
+
+    /// Steps 1–5: authenticate and authorize the command with no side effects.
+    fn authenticate_at(
+        &self,
+        token: &str,
+        request_method: &str,
+        request_path: &str,
+        body_pubkey: &PublicKey,
+        now: DateTime<Utc>,
+    ) -> Result<AuthenticatedCommand, CommandError> {
         // ── Step 1: bounded decode + typ check ───────────────────────────────
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(CommandError::EvidenceRejected);
@@ -417,17 +461,30 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
             return Err(CommandError::AuthorizationDenied);
         }
 
-        // ── Steps 6+7: atomic jti reservation + deny-entry insertion ─────────
-        //
-        // effective_expiry = min(exp, iat + maximum_command_age).
-        let effective_expiry = exp.min(iat_plus_cmd_age);
-
-        match self.deny_map.atomic_reserve_and_insert(
-            base_policy.issuer(),
-            jti,
-            effective_expiry,
-            &target_pubkey,
+        Ok(AuthenticatedCommand {
+            target_pubkey,
+            issuer: base_policy.issuer().to_owned(),
+            sub: sub.to_owned(),
+            jti: jti.to_owned(),
+            // effective_expiry = min(exp, iat + maximum_command_age).
+            effective_expiry: exp.min(iat_plus_cmd_age),
             until,
+            skew_seconds: base_policy.skew_seconds(),
+        })
+    }
+
+    /// Steps 6+7: atomic local jti reservation + deny-entry insertion.
+    fn commit(
+        &self,
+        cmd: &AuthenticatedCommand,
+        now: DateTime<Utc>,
+    ) -> Result<CommandResult, CommandError> {
+        match self.deny_map.atomic_reserve_and_insert(
+            &cmd.issuer,
+            &cmd.jti,
+            cmd.effective_expiry,
+            &cmd.target_pubkey,
+            cmd.until,
             now,
         ) {
             Ok(()) => {}
@@ -436,12 +493,23 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         }
 
         Ok(CommandResult {
-            target_pubkey,
-            caller_iss: base_policy.issuer().to_owned(),
-            caller_sub: sub.to_owned(),
-            until,
+            target_pubkey: cmd.target_pubkey,
+            caller_iss: cmd.issuer.clone(),
+            caller_sub: cmd.sub.clone(),
+            until: cmd.until,
         })
     }
+}
+
+/// A command that passed steps 1–5 and has not yet touched any state.
+struct AuthenticatedCommand {
+    target_pubkey: PublicKey,
+    issuer: String,
+    sub: String,
+    jti: String,
+    effective_expiry: DateTime<Utc>,
+    until: DateTime<Utc>,
+    skew_seconds: u64,
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ pub const CLIENT_ATTACHED_HEADER: &str = "Nostr-Federated-Identity";
 
 pub mod assertion;
 pub mod command;
+pub mod command_replay;
 pub mod config;
 pub mod denial;
 pub mod deny_map;
@@ -26,6 +27,9 @@ pub use command::{
     CommandError, CommandIssuerPolicy, CommandPolicyError, CommandResult, CommandVerifier,
     COMMAND_JWT_TYP, MAX_COMMAND_AGE_SECONDS,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use command_replay::InMemoryCommandReplayGuard;
+pub use command_replay::{command_replay_key, CommandReplayGuard};
 pub use config::{
     AssertionPolicyId, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerPolicyError,
     IssuerRegistry, SubjectClass, SubjectClassContract, TokenClass, TransportContractId,

@@ -126,7 +126,15 @@ pub async fn disconnect(
         }
     };
 
-    let result = verifier.verify(token, "POST", "/api/nip-fi/disconnect", &body_pubkey);
+    let result = verifier
+        .verify(
+            token,
+            "POST",
+            "/api/nip-fi/disconnect",
+            &body_pubkey,
+            state.nip_fi_command_replay.as_ref(),
+        )
+        .await;
 
     match result {
         Ok(cmd) => {
@@ -935,6 +943,7 @@ mod route_integration_tests {
 
         state.nip_fi_deny_map = Some(Arc::clone(&deny_map));
         state.nip_fi_command_verifier = Some(verifier);
+        state.nip_fi_command_replay = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
         state
     }
 
@@ -1835,7 +1844,7 @@ mod route_integration_tests {
         let target = nostr::Keys::generate().public_key();
         let token = mint_token(&target.to_hex(), 300, serde_json::json!({}));
         let verifier = state.nip_fi_command_verifier.as_ref().unwrap();
-        let result = verifier.verify(&token, "POST", TEST_PATH, &target);
+        let result = verifier.verify_at(&token, "POST", TEST_PATH, &target, chrono::Utc::now());
         assert!(
             result.is_ok(),
             "verifier must accept a valid command: {result:?}"
@@ -2010,7 +2019,8 @@ mod route_integration_tests {
         let target = nostr::Keys::generate().public_key();
         let command = mint_token(&target.to_hex(), 300, serde_json::json!({}));
         let command_verifier = state.nip_fi_command_verifier.as_ref().unwrap();
-        let result = command_verifier.verify(&command, "POST", TEST_PATH, &target);
+        let result =
+            command_verifier.verify_at(&command, "POST", TEST_PATH, &target, chrono::Utc::now());
         assert!(
             result.is_ok(),
             "command verifier must read the same warmed shared source; got: {result:?}"
@@ -2575,5 +2585,181 @@ mod route_integration_tests {
             .await
             .expect("body");
         assert_eq!(got, want, "Off-mode legacy response must be byte-identical");
+    }
+
+    // ── Cross-pod command replay fence ───────────────────────────────────────
+    //
+    // Each "pod" is its own AppState with its own deny map and sessions; the
+    // pods share only the command replay guard, as production pods share Redis.
+
+    async fn pod(capacity: usize, replay: Arc<dyn buzz_auth::CommandReplayGuard>) -> Arc<AppState> {
+        let mut state = build_test_app_state(capacity, crate::config::Config::for_test()).await;
+        state.nip_fi_command_replay = replay;
+        Arc::new(state)
+    }
+
+    async fn post_command(
+        state: &Arc<AppState>,
+        token: &str,
+        target: &str,
+    ) -> (StatusCode, axum::body::Bytes) {
+        let resp = do_request(
+            Arc::clone(state),
+            "POST",
+            vec![
+                ("Content-Type", "application/json".into()),
+                (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
+            ],
+            Some(serde_json::json!({"pubkey": target})),
+        )
+        .await;
+        let status = resp.status();
+        (
+            status,
+            axum::body::to_bytes(resp.into_body(), 64).await.unwrap(),
+        )
+    }
+
+    fn is_denied(state: &AppState, key: &nostr::PublicKey) -> bool {
+        state
+            .nip_fi_deny_map
+            .as_deref()
+            .expect("deny map")
+            .is_denied(TEST_ISS, key, chrono::Utc::now())
+    }
+
+    async fn command_replayed_on_second_pod_is_denied_without_effect(
+        replay_a: Arc<dyn buzz_auth::CommandReplayGuard>,
+        replay_b: Arc<dyn buzz_auth::CommandReplayGuard>,
+    ) {
+        let pod_a = pod(1000, replay_a).await;
+        let pod_b = pod(1000, replay_b).await;
+        let key = nostr::Keys::generate().public_key();
+        let on_b = IssuerSessions::register(&pod_b, TEST_ISS, &key);
+        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+
+        let (status, _) = post_command(&pod_a, &token, &key.to_hex()).await;
+        assert_eq!(status, StatusCode::OK, "first use is accepted on pod A");
+
+        let (status, body) = post_command(&pod_b, &token, &key.to_hex()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "replay on pod B is denied");
+        assert_eq!(body.as_ref(), b"authorization denied\n");
+        assert!(
+            !is_denied(&pod_b, &key),
+            "replay must not insert a deny entry on B"
+        );
+        on_b.assert_open("pod B after rejected replay");
+    }
+
+    #[tokio::test]
+    async fn command_replay_on_second_pod_is_denied() {
+        let shared: Arc<dyn buzz_auth::CommandReplayGuard> =
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        command_replayed_on_second_pod_is_denied_without_effect(Arc::clone(&shared), shared).await;
+    }
+
+    struct FailingReplayGuard;
+
+    impl buzz_auth::CommandReplayGuard for FailingReplayGuard {
+        fn try_claim<'a>(
+            &'a self,
+            _issuer: &'a str,
+            _jti: &'a str,
+            _ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            Box::pin(async {
+                Err(buzz_auth::AuthError::Internal(
+                    "simulated Redis outage".into(),
+                ))
+            })
+        }
+
+        fn release<'a>(
+            &'a self,
+            _issuer: &'a str,
+            _jti: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn command_replay_guard_error_fails_closed_without_effect() {
+        let state = pod(1000, Arc::new(FailingReplayGuard)).await;
+        let key = nostr::Keys::generate().public_key();
+        let sessions = IssuerSessions::register(&state, TEST_ISS, &key);
+        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+
+        let (status, body) = post_command(&state, &token, &key.to_hex()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.as_ref(), b"authorization unavailable\n");
+        assert!(!is_denied(&state, &key), "no deny entry on guard error");
+        sessions.assert_open("guard error");
+    }
+
+    async fn deny_set_full_leaves_command_retryable(
+        replay: Arc<dyn buzz_auth::CommandReplayGuard>,
+    ) {
+        let state = pod(1, replay).await;
+        let filler = target_hex();
+        let target = target_hex();
+        // The filler entry expires within two seconds and frees the only slot.
+        let filler_token = mint_token(&filler, 1, serde_json::json!({}));
+        assert_eq!(
+            post_command(&state, &filler_token, &filler).await.0,
+            StatusCode::OK
+        );
+
+        let token = mint_token(&target, 300, serde_json::json!({}));
+        let (status, body) = post_command(&state, &token, &target).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.as_ref(), b"deny set full\n");
+
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        let (status, _) = post_command(&state, &token, &target).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the 503 must not burn the shared jti claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_deny_set_full_leaves_shared_claim_retryable() {
+        deny_set_full_leaves_command_retryable(Arc::new(
+            buzz_auth::InMemoryCommandReplayGuard::default(),
+        ))
+        .await;
+    }
+
+    mod external_infra_redis {
+        use super::*;
+
+        fn redis_guard() -> Arc<dyn buzz_auth::CommandReplayGuard> {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let pool = deadpool_redis::Config::from_url(url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_command_replay_on_second_pod_is_denied() {
+            command_replayed_on_second_pod_is_denied_without_effect(redis_guard(), redis_guard())
+                .await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_deny_set_full_leaves_shared_claim_retryable() {
+            deny_set_full_leaves_command_retryable(redis_guard()).await;
+        }
     }
 }
