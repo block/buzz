@@ -162,7 +162,7 @@ test("actions-retry: an ambiguous failure keeps the intent and a manual retry re
 test("actions-errors: relay codes map to copy; a definitive 4xx unlocks the form", async () => {
   const cases = [
     ["target_is_staff", 409, /Relay staff can't be banned/, true],
-    ["request_id_conflict", 409, /already used for a different action/, true],
+    ["request_id_conflict", 409, /already used for a different action/, false],
     ["event_not_in_community", 404, /not in that community/, false],
     ["unknown_community_host", 400, /unknown host/, false],
     ["enforcement_failed", 422, /enforcement broke/, false],
@@ -188,6 +188,45 @@ test("actions-errors: relay codes map to copy; a definitive 4xx unlocks the form
   }
 });
 
+test("actions-pending-neutral: a 202 renders as a neutral notice, not an error", async () => {
+  setIpcHandler("admin_direct_action", () =>
+    Promise.resolve({ state: "pending" }),
+  );
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    const notice = q(c, "direct-pending");
+    assert.ok(notice, "pending notice must render");
+    assert.ok(!notice.className.includes("text-destructive"));
+    assert.ok(!q(c, "direct-error"), "pending must not render as an error");
+    assert.equal(q(c, "direct-confirm-btn").textContent, "Retry");
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-request-id-conflict: a 409 conflict drops the intent and offers no Retry", async () => {
+  setIpcHandler("admin_direct_action", () =>
+    mutationReject(
+      'admin API error: {"error":{"code":"request_id_conflict","message":"conflict"}}',
+      409,
+    ),
+  );
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    assert.match(q(c, "direct-error").textContent, /Discard and review again/);
+    assert.ok(!q(c, "direct-confirm-btn"), "no Retry for a spent request id");
+    assert.ok(q(c, "direct-review-btn"), "the form is back to Review");
+  } finally {
+    await unmount();
+  }
+});
+
 test("actions-pending: a 202 keeps the intent for a same-id retry", async () => {
   setIpcHandler("admin_direct_action", () =>
     Promise.resolve({ state: "pending" }),
@@ -197,7 +236,7 @@ test("actions-pending: a 202 keeps the intent for a same-id retry", async () => 
     await fillTimeout(c);
     await click(c, "direct-review-btn");
     await click(c, "direct-confirm-btn");
-    assert.match(q(c, "direct-error").textContent, /still applying/);
+    assert.match(q(c, "direct-pending").textContent, /still applying/);
     assert.ok(q(c, "direct-confirm"));
     assert.deepEqual(capturedToasts, []);
   } finally {

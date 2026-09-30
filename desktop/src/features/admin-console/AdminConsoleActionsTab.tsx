@@ -84,6 +84,7 @@ export function ActionsTab({
   const [reason, setReason] = useState("");
   const [secs, setSecs] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
   const [frozen, setFrozen] = useState<AdminDirectIntent | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const inFlight = useRef(false);
@@ -121,10 +122,11 @@ export function ActionsTab({
     inFlight.current = true;
     setSubmitting(true);
     setError(null);
+    setPending(false);
     try {
       const result = await directAdminAction(frozen);
       if (result.state === "pending") {
-        setError("Accepted; the relay is still applying it. Retry to check.");
+        setPending(true);
       } else {
         toast.success(`${ACTION_LABELS[frozen.action]}: done`);
         setFrozen(null);
@@ -133,8 +135,14 @@ export function ActionsTab({
       }
     } catch (e) {
       // Keep the frozen intent (same requestId) unless the relay definitively
-      // rejected it before committing.
-      if (!preserveRequestIdOnError(e)) setFrozen(null);
+      // rejected it before committing. A request-id conflict is final for
+      // this id, so resending it can never succeed.
+      if (
+        !preserveRequestIdOnError(e) ||
+        adminErrorCode(e) === "request_id_conflict"
+      ) {
+        setFrozen(null);
+      }
       setError(directErrorMessage(e));
     } finally {
       inFlight.current = false;
@@ -192,6 +200,14 @@ export function ActionsTab({
       >
         {reasonAudienceCopy(frozen?.action ?? action)}
       </p>
+      {pending && (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="direct-pending"
+        >
+          Accepted; the relay is still applying it. Retry to check.
+        </p>
+      )}
       {error && (
         <p className="text-xs text-destructive" data-testid="direct-error">
           {error}
@@ -219,7 +235,7 @@ export function ActionsTab({
               type="button"
               variant="destructive"
             >
-              {error ? "Retry" : "Confirm"}
+              {error || pending ? "Retry" : "Confirm"}
             </Button>
             <Button
               data-testid="direct-discard-btn"
@@ -227,6 +243,7 @@ export function ActionsTab({
               onClick={() => {
                 setFrozen(null);
                 setError(null);
+                setPending(false);
               }}
               size="sm"
               type="button"
