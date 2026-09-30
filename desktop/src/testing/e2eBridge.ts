@@ -7332,7 +7332,7 @@ async function handleCreateChannel(
   // Fetch the created channel via pure Nostr query.
   // The relay emits kind:39000 as a side effect of kind:9007.
   const metaEvents = await relayQuery(config, [
-    { kinds: [39000], "#d": [channelId], limit: 1 },
+    { kinds: [39000], "#d": [channelId], limit: 1, consistency: "strong" },
   ]);
   const ev = metaEvents[0];
   if (!ev) {
@@ -7440,7 +7440,7 @@ async function handleOpenDm(
 
   // Fetch channel metadata
   const metaEvents = await relayQuery(config, [
-    { kinds: [39000], "#d": [channelId], limit: 1 },
+    { kinds: [39000], "#d": [channelId], limit: 1, consistency: "strong" },
   ]);
   const ev = metaEvents[0];
   const evTags = (ev?.tags ?? []) as string[][];
@@ -7630,7 +7630,7 @@ async function handleUpdateChannel(
 
   // Re-fetch updated metadata
   const metaEvents = await relayQuery(config, [
-    { kinds: [39000], "#d": [args.channelId], limit: 1 },
+    { kinds: [39000], "#d": [args.channelId], limit: 1, consistency: "strong" },
   ]);
   const ev = metaEvents[0];
   const evTags = (ev?.tags ?? []) as string[][];
