@@ -7536,7 +7536,7 @@ async function handleGetChannelDetails(
 }
 
 async function handleGetChannelMembers(
-  args: { channelId: string },
+  args: { channelId: string; readYourWrites?: boolean },
   config: E2eConfig | undefined,
 ): Promise<RawChannelMembersResponse> {
   const delayMs = config?.mock?.channelMembersReadDelayMs ?? 0;
@@ -7554,7 +7554,12 @@ async function handleGetChannelMembers(
   }
 
   const memberEvents = await relayQuery(config, [
-    { kinds: [39002], "#d": [args.channelId], limit: 1 },
+    {
+      kinds: [39002],
+      "#d": [args.channelId],
+      limit: 1,
+      ...(args.readYourWrites ? { consistency: "strong" } : {}),
+    },
   ]);
   const memberTags = ((memberEvents[0]?.tags ?? []) as string[][]).filter(
     (t) => t[0] === "p",

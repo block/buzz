@@ -146,15 +146,15 @@ fn profile_join_pubkeys(members: &[crate::models::ChannelMemberInfo], limit: usi
 #[tauri::command]
 pub async fn get_channel_members(
     channel_id: String,
+    read_your_writes: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ChannelMembersResponse, String> {
     let events = query_relay(
         &state,
-        &[serde_json::json!({
-            "kinds": [39002],
-            "#d": [channel_id],
-            "limit": 1
-        })],
+        &[channel_members_filter(
+            &channel_id,
+            read_your_writes.unwrap_or(false),
+        )],
     )
     .await?;
 
@@ -269,6 +269,22 @@ async fn ensure_starter_channel_memberships(
     }
 
     Ok(())
+}
+
+/// Build the kind:39002 member-list filter. Display reads stay replica-eligible;
+/// `read_your_writes` is for callers acting on state this client just wrote.
+fn channel_members_filter(channel_id: &str, read_your_writes: bool) -> serde_json::Value {
+    let mut filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    if read_your_writes {
+        // Read-your-writes: pin to the writer so a lagging replica cannot hide
+        // the member list the relay wrote for a just-created channel.
+        filter["consistency"] = serde_json::json!("strong");
+    }
+    filter
 }
 
 /// Build the kind:39000 filter that reads back channel metadata by ID right

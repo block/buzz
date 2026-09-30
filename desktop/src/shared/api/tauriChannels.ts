@@ -285,10 +285,11 @@ export async function getChannelMessagesBefore(
 
 export async function getChannelMembers(
   channelId: string,
+  options?: { readYourWrites?: boolean },
 ): Promise<ChannelMember[]> {
   const response = await invokeTauri<RawChannelMembersResponse>(
     "get_channel_members",
-    { channelId },
+    { channelId, readYourWrites: options?.readYourWrites },
   );
   return response.members.map(fromRawChannelMember);
 }
