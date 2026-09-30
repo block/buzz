@@ -46,6 +46,8 @@ pub(crate) enum CommunityDisconnectReason {
     CommunityDeleted,
     /// NIP-FI: the connection's proven pubkey was added to the deny set.
     AuthorizationDenied,
+    /// The authenticated pubkey lost access to the community (e.g. a ban).
+    AccessRevoked,
 }
 
 impl CommunityDisconnectReason {
@@ -58,6 +60,10 @@ impl CommunityDisconnectReason {
             Self::AuthorizationDenied => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("authorization denied"),
+            })),
+            Self::AccessRevoked => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("access revoked"),
             })),
         }
     }
@@ -87,6 +93,9 @@ pub(crate) struct CommunityConnectionControl {
     /// Serializes NIP-FI denial writers across reason-win + terminal enqueue,
     /// and holds the audio terminal-frame sender (root connections leave it `None`).
     terminal_frame_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<WsMessage>>>>,
+    /// Pubkey proven by this socket's auth, set once auth succeeds. Sockets
+    /// whose pubkey is tracked by [`ConnectionManager`] leave it unset.
+    pubkey: Arc<std::sync::OnceLock<[u8; 32]>>,
 }
 
 impl CommunityConnectionControl {
@@ -97,7 +106,13 @@ impl CommunityConnectionControl {
             reason_tx,
             proven_identity: Arc::new(std::sync::RwLock::new(None)),
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
+            pubkey: Arc::default(),
         }
+    }
+
+    /// Records the authenticated pubkey so pubkey-scoped disconnects reach this socket.
+    pub(crate) fn bind_pubkey(&self, pubkey: [u8; 32]) {
+        let _ = self.pubkey.set(pubkey);
     }
 
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
@@ -202,6 +217,12 @@ impl CommunityConnectionControl {
     fn disconnect_community(&self) {
         self.reason_tx
             .send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
+        self.cancel.cancel();
+    }
+
+    fn revoke_access(&self) {
+        self.reason_tx
+            .send_replace(Some(CommunityDisconnectReason::AccessRevoked));
         self.cancel.cancel();
     }
 }
@@ -318,6 +339,21 @@ impl CommunityConnectionRegistry {
                 .unwrap_or(false);
             if matches {
                 entry.value().1.disconnect_nip_fi();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// Disconnects every socket bound to `pubkey` in `community`, attributing
+    /// the close to revoked access. Fenced to `community` like
+    /// [`ConnectionManager::disconnect_pubkey`].
+    pub fn disconnect_pubkey(&self, community_id: CommunityId, pubkey: &[u8]) -> usize {
+        let mut closed = 0;
+        for entry in self.connections.iter() {
+            let (community, control) = entry.value();
+            if *community == community_id && control.pubkey.get().map(|k| &k[..]) == Some(pubkey) {
+                control.revoke_access();
                 closed += 1;
             }
         }
@@ -1645,13 +1681,32 @@ impl AppState {
         }
     }
 
+    /// Close everything `pubkey` has open in `community` on this pod: root
+    /// sockets (with a final `OK false` carrying `reason`) and audio sockets.
+    ///
+    /// The pod-local half of [`Self::disconnect_pubkey_clusterwide`], and what
+    /// the conn-control subscriber runs for a remote pod's publish.
+    pub fn disconnect_pubkey_local(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> usize {
+        self.conn_manager
+            .disconnect_pubkey(community, pubkey, event_id, reason)
+            + self
+                .community_connections
+                .disconnect_pubkey(community, pubkey)
+    }
+
     /// Enforce a live ban cluster-wide: close this pod's sockets for `pubkey`
     /// now (fenced to `tenant`'s community) and fan the same disconnect out to
     /// every other pod over the conn-control Redis channel.
     ///
     /// This is the single entry point for live ban enforcement (decision 4:
     /// "a ban takes effect immediately, everywhere, including live sessions").
-    /// Callers must not invoke the pod-local `conn_manager.disconnect_pubkey`
+    /// Callers must not invoke the pod-local [`Self::disconnect_pubkey_local`]
     /// directly — doing so closes sockets only on the pod that processed the
     /// ban and silently drops the cluster-wide half. Pairing both halves here
     /// makes that mistake unrepresentable.
@@ -1669,9 +1724,7 @@ impl AppState {
         event_id: &str,
         reason: &str,
     ) -> usize {
-        let closed =
-            self.conn_manager
-                .disconnect_pubkey(tenant.community(), pubkey, event_id, reason);
+        let closed = self.disconnect_pubkey_local(tenant.community(), pubkey, event_id, reason);
 
         // The banning pod re-receives its own publish through the subscriber and
         // no-ops (its local sockets are already closed above) — intentional; do
@@ -2847,6 +2900,36 @@ pub(crate) mod tests {
             Some("private".to_string()),
             "A's channel deletion must not evict B's cache entries"
         );
+    }
+
+    #[test]
+    fn pubkey_disconnect_reaches_only_that_bound_pubkey_in_that_community() {
+        let registry = CommunityConnectionRegistry::new();
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xb));
+        let (target, other) = ([1u8; 32], [2u8; 32]);
+        let bound = |community, pubkey: Option<[u8; 32]>| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            if let Some(pubkey) = pubkey {
+                control.bind_pubkey(pubkey);
+            }
+            let guard = registry.register(Uuid::new_v4(), community, control.clone());
+            (control, guard)
+        };
+        let (hit, _g1) = bound(community_a, Some(target));
+        let (other_pubkey, _g2) = bound(community_a, Some(other));
+        let (other_community, _g3) = bound(community_b, Some(target));
+        let (unbound, _g4) = bound(community_a, None);
+
+        assert_eq!(registry.disconnect_pubkey(community_a, &target), 1);
+        assert!(hit.cancellation_token().is_cancelled());
+        assert_eq!(
+            *hit.disconnect_reason().borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        for untouched in [other_pubkey, other_community, unbound] {
+            assert!(!untouched.cancellation_token().is_cancelled());
+        }
     }
 
     #[test]

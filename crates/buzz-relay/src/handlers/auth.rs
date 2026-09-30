@@ -20,7 +20,7 @@ use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BanOutcome {
+pub(crate) enum BanOutcome {
     Clear,
     Banned,
     DbError,
@@ -53,6 +53,51 @@ fn classify_relay_membership(
         Ok(MembershipDecision::ViaOwner(owner)) => PolicyCheck::Allowed(Some(owner)),
         Ok(MembershipDecision::Denied) => PolicyCheck::Denied,
         Err(_) => PolicyCheck::DependencyError,
+    }
+}
+
+/// Community-ban verdict for an authenticating principal: shared by every
+/// socket auth seam (root and audio) so they cannot drift.
+///
+/// Fails closed: a DB error is `DbError`, never `Clear`. NIP-OA cascade: a ban
+/// on the principal blocks it directly; if the principal is clear, a ban on
+/// its proven owner (extracted from the self-proving auth tag) blocks it too.
+pub(crate) async fn community_ban_outcome(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    pubkey: nostr::PublicKey,
+    auth_tag_json: Option<&str>,
+    signed_auth_created_at: u64,
+) -> BanOutcome {
+    async fn lookup(
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        key: &nostr::PublicKey,
+    ) -> BanOutcome {
+        match state
+            .db
+            .moderation_restriction_state(community, key.as_bytes())
+            .await
+        {
+            Ok(restriction) if restriction.banned => BanOutcome::Banned,
+            Ok(_) => BanOutcome::Clear,
+            Err(e) => {
+                warn!(pubkey = %key.to_hex(), error = %e, "ban-state DB lookup failed, denying (fail-closed)");
+                BanOutcome::DbError
+            }
+        }
+    }
+    let outcome = lookup(state, community, &pubkey).await;
+    if outcome != BanOutcome::Clear {
+        return outcome;
+    }
+    match crate::api::relay_members::extract_nip_oa_owner(
+        pubkey.as_bytes(),
+        auth_tag_json,
+        Some(signed_auth_created_at),
+    ) {
+        Some(owner) => lookup(state, community, &owner).await,
+        None => BanOutcome::Clear,
     }
 }
 
@@ -215,44 +260,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 // pinning `Failed` for the connection's life on a false premise.
                 // `Banned` claims the ban; `DbError` denies with `error: internal`
                 // (mirrors the ingest write-path gate).
-                let mut outcome = match state
-                    .db
-                    .moderation_restriction_state(conn.tenant.community(), pubkey.as_bytes())
-                    .await
-                {
-                    Ok(state) if state.banned => BanOutcome::Banned,
-                    Ok(_) => BanOutcome::Clear,
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
-                              "ban-state DB lookup failed, denying (fail-closed)");
-                        BanOutcome::DbError
-                    }
-                };
-
-                // Cascade: check the proven NIP-OA owner only if the agent itself
-                // is clear (a DB error already denies; a direct ban already blocks
-                // — both skip the needless second DB read).
-                if matches!(outcome, BanOutcome::Clear) {
-                    if let Some(owner) = crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                        Some(signed_auth_created_at),
-                    ) {
-                        outcome = match state
-                            .db
-                            .moderation_restriction_state(conn.tenant.community(), owner.as_bytes())
-                            .await
-                        {
-                            Ok(state) if state.banned => BanOutcome::Banned,
-                            Ok(_) => BanOutcome::Clear,
-                            Err(e) => {
-                                warn!(conn_id = %conn_id, owner = %owner.to_hex(), error = %e,
-                                      "owner ban-state DB lookup failed, denying (fail-closed)");
-                                BanOutcome::DbError
-                            }
-                        };
-                    }
-                }
+                let outcome = community_ban_outcome(
+                    &state,
+                    conn.tenant.community(),
+                    pubkey,
+                    auth_tag_json.as_deref(),
+                    signed_auth_created_at,
+                )
+                .await;
 
                 if let Some((metric_reason, deny_reason, auth_outcome)) = ban_denial(outcome) {
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
