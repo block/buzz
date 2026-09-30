@@ -134,6 +134,20 @@ fn media_denial(error: MediaError, strictness: BlossomStrictness) -> MediaDenial
     MediaDenial(error, strictness)
 }
 
+/// Map a shared membership-step refusal to media's response shape: a failed
+/// lookup stays 503, a real refusal (non-member or banned) is a policy denial.
+fn membership_denial(
+    (status, _): (StatusCode, axum::Json<serde_json::Value>),
+    strictness: BlossomStrictness,
+) -> MediaDenial {
+    let error = if status.is_server_error() {
+        MediaError::ServiceUnavailable
+    } else {
+        MediaError::RelayMembershipRequired
+    };
+    media_denial(error, strictness)
+}
+
 impl From<MediaError> for MediaDenial {
     /// Default conversion uses Permissive mode — non-auth errors always fall
     /// through to `MediaError::into_response()` regardless of mode, so the
@@ -374,7 +388,7 @@ pub(crate) async fn upload_blob(
     )
     .await
     .map(|_| ())
-    .map_err(|_| media_denial(MediaError::RelayMembershipRequired, strictness))
+    .map_err(|e| membership_denial(e, strictness))
     {
         return e.into_response();
     }
@@ -690,7 +704,7 @@ async fn enforce_blossom_read_membership(
     )
     .await
     .map(|_| ())
-    .map_err(|_| media_denial(MediaError::RelayMembershipRequired, strictness))
+    .map_err(|e| membership_denial(e, strictness))
 }
 
 fn blob_cache_control() -> &'static str {

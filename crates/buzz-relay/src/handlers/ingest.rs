@@ -2797,6 +2797,17 @@ async fn ingest_event_inner(
             }
         }
 
+        // Leaving ends access now, exactly like admin removal: close the
+        // member's and their agents' live sessions on every pod.
+        let revoked = state
+            .revoke_live_access(
+                tenant,
+                &event.pubkey.to_bytes(),
+                &event_id_hex,
+                "restricted: you left this relay",
+            )
+            .await;
+
         // Publish NIP-43 announcements — fire-and-forget.
         if let Err(e) =
             crate::handlers::side_effects::publish_nip43_member_removed(tenant, state, &sender_hex)
@@ -2811,6 +2822,9 @@ async fn ingest_event_inner(
         }
 
         info!(pubkey = %sender_hex, "relay member left via NIP-43 leave request");
+        revoked.map_err(|e| {
+            IngestError::Internal(format!("left relay but live revoke incomplete: {e}"))
+        })?;
 
         return Ok(IngestResult {
             event_id: event_id_hex,
@@ -6572,7 +6586,8 @@ mod postgres_tests {
                 "test-event",
                 "blocked: you are banned from this community",
             )
-            .await;
+            .await
+            .expect("revoke");
 
         assert!(owner_socket.cancellation_token().is_cancelled());
         assert!(agent_socket.cancellation_token().is_cancelled());

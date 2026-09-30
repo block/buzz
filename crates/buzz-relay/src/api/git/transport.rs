@@ -207,7 +207,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
         let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        if crate::api::relay_members::enforce_relay_membership(
+        if let Err((status, _)) = crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
@@ -215,8 +215,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             Some(signed_auth_created_at),
         )
         .await
-        .is_err()
         {
+            // A failed lookup stays 503; only a real refusal is 403.
+            if status.is_server_error() {
+                warn!(pubkey = %pubkey.to_hex(), "git: relay membership lookup failed");
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "error: internal error checking relay membership",
+                )
+                    .into_response());
+            }
             warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }

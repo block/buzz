@@ -673,6 +673,8 @@ async fn drive_enforcement(
         // a repeated disconnect is a no-op. Timeout does not disconnect.
         if action == "ban" {
             if let Some(target) = target_pubkey.or(rec.enforcement_target_pubkey.as_deref()) {
+                // A failed revoke leaves the action non-terminal so the
+                // recovery worker re-runs it.
                 state
                     .revoke_live_access(
                         tenant,
@@ -680,7 +682,12 @@ async fn drive_enforcement(
                         &action_id.to_string(),
                         "blocked: you are banned from this community",
                     )
-                    .await;
+                    .await
+                    .map_err(|e| {
+                        ResolutionError::Internal(format!(
+                            "action {action_id}: live revoke incomplete: {e}"
+                        ))
+                    })?;
             }
         }
         // Finalize: action → succeeded, report → resolved, outbox rows created.
