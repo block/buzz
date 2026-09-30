@@ -262,11 +262,15 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
     /// * `replay`         — the shared command replay guard.
     ///
     /// The shared claim is taken only after authentication, and released if
-    /// the local reservation fails for capacity, so the jti is burned
-    /// cluster-wide only when the local deny entry is inserted.  A guard error
-    /// fails closed as `AuthorizationUnavailable`: no deny entry, no session
-    /// close, no publish.  The shared claim may still exist (the guard's reply
-    /// was lost, or a release failed), so a retry is denied until its TTL.
+    /// the local reservation fails for capacity, so a `DenySetFull` command
+    /// can be retried.
+    ///
+    /// A claim can nevertheless remain without a local deny entry: when Redis
+    /// applied the claim but its reply was lost (`AuthorizationUnavailable`),
+    /// when the release after a capacity failure fails (`DenySetFull`), or when
+    /// the process is interrupted between claim and insertion.  Every such
+    /// failure inserts no deny entry, closes no session and publishes nothing;
+    /// it fails closed, since a retry is denied until the claim's TTL.
     pub async fn verify(
         &self,
         token: &str,

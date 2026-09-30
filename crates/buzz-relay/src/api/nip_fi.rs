@@ -2642,12 +2642,14 @@ mod route_integration_tests {
             use futures::StreamExt;
             let client = redis::Client::open(state.config.redis_url.as_str()).expect("redis url");
             let mut conn = client.get_async_pubsub().await.expect("redis pubsub");
+            // Acknowledged by Redis before returning, so no later publish is missed.
             conn.subscribe(buzz_pubsub::conn_control::NIP_FI_DISCONNECT_CHANNEL)
                 .await
                 .expect("subscribe");
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             tokio::spawn(async move {
                 let mut messages = conn.into_on_message();
+                // A decode panic or stream end drops `tx`, which `count` reports.
                 while let Some(msg) = messages.next().await {
                     let payload: String = msg.get_payload().expect("payload");
                     let cmd = buzz_pubsub::decode_nip_fi_disconnect(&payload).expect("decode");
@@ -2663,16 +2665,28 @@ mod route_integration_tests {
             }
         }
 
-        /// Publications for the target so far, after letting spawned
-        /// publishes land.
-        async fn count(&mut self) -> usize {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            while let Ok(cmd) = self.rx.try_recv() {
+        /// Publications for the target so far.  First sends an accepted
+        /// sentinel command through `via` and waits for its publication, a
+        /// positive control proving the publisher and this collector both
+        /// work before the target count is read.
+        async fn count(&mut self, via: &Arc<AppState>) -> usize {
+            let sentinel = nostr::Keys::generate().public_key();
+            let token = mint_token(&sentinel.to_hex(), 300, serde_json::json!({}));
+            let (status, _) = post_command(via, &token, &sentinel.to_hex()).await;
+            assert_eq!(status, StatusCode::OK, "sentinel command must be accepted");
+            let sentinel = sentinel.to_bytes().to_vec();
+            let deadline = std::time::Duration::from_secs(10);
+            loop {
+                let cmd = tokio::time::timeout(deadline, self.rx.recv())
+                    .await
+                    .expect("sentinel publication did not arrive within 10s")
+                    .expect("publish collector stopped");
                 if cmd.pubkey_bytes == self.target {
                     self.seen += 1;
+                } else if cmd.pubkey_bytes == sentinel {
+                    return self.seen;
                 }
             }
-            self.seen
         }
     }
 
@@ -2687,9 +2701,14 @@ mod route_integration_tests {
         }
     }
 
-    async fn assert_publishes(observer: &mut Option<PublishObserver>, expected: usize, what: &str) {
+    async fn assert_publishes(
+        observer: &mut Option<PublishObserver>,
+        via: &Arc<AppState>,
+        expected: usize,
+        what: &str,
+    ) {
         if let Some(observer) = observer {
-            assert_eq!(observer.count().await, expected, "publications: {what}");
+            assert_eq!(observer.count(via).await, expected, "publications: {what}");
         }
     }
 
@@ -2707,7 +2726,7 @@ mod route_integration_tests {
 
         let (status, _) = post_command(&pod_a, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::OK, "first use is accepted on pod A");
-        assert_publishes(&mut publishes, 1, "accepted command").await;
+        assert_publishes(&mut publishes, &pod_a, 1, "accepted command").await;
 
         let (status, body) = post_command(&pod_b, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "replay on pod B is denied");
@@ -2717,7 +2736,7 @@ mod route_integration_tests {
             "replay must not insert a deny entry on B"
         );
         on_b.assert_open("pod B after rejected replay");
-        assert_publishes(&mut publishes, 1, "rejected replay adds none").await;
+        assert_publishes(&mut publishes, &pod_b, 1, "rejected replay adds none").await;
     }
 
     #[tokio::test]
@@ -2789,7 +2808,7 @@ mod route_integration_tests {
         assert_eq!(body.as_ref(), b"evidence rejected\n");
         assert!(!is_denied(&pod_a, &key), "forgery inserts no deny entry");
         on_a.assert_open("pod A after forgery");
-        assert_publishes(&mut publishes, 0, "forgery").await;
+        assert_publishes(&mut publishes, &pod_a, 0, "forgery").await;
         if let Some(guard) = claims {
             assert_eq!(
                 guard.claims.load(std::sync::atomic::Ordering::SeqCst),
@@ -2805,7 +2824,7 @@ mod route_integration_tests {
             "the legitimate command's jti was not burned by the forgery"
         );
         assert!(is_denied(&pod_b, &key));
-        assert_publishes(&mut publishes, 1, "accepted command").await;
+        assert_publishes(&mut publishes, &pod_b, 1, "accepted command").await;
     }
 
     #[tokio::test]
@@ -2858,7 +2877,14 @@ mod route_integration_tests {
         assert_eq!(body.as_ref(), b"authorization unavailable\n");
         assert!(!is_denied(&state, &key), "no deny entry on guard error");
         sessions.assert_open("guard error");
-        assert_publishes(&mut publishes, 0, "guard error").await;
+        // The failing guard accepts nothing, so the sentinel goes through a
+        // healthy pod publishing to the same Redis channel.
+        let healthy = pod(
+            1000,
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default()),
+        )
+        .await;
+        assert_publishes(&mut publishes, &healthy, 0, "guard error").await;
     }
 
     #[tokio::test]
