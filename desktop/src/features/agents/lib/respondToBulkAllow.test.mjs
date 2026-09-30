@@ -5,6 +5,7 @@ import {
   bulkAllowHelperText,
   bulkAllowPubkeys,
   communityBotAllowlistPubkeys,
+  communityBotsForBulkAllow,
   isRespondToBulkAllowOption,
   localAgentAllowlistPubkeys,
 } from "./respondToBulkAllow.ts";
@@ -14,6 +15,7 @@ const LOCAL_B = "b".repeat(64);
 const REMOTE_C = "c".repeat(64);
 const BOT_D = "d".repeat(64);
 const BOT_E = "E".repeat(64); // upper — normalize
+const RESERVED_F = "f".repeat(64);
 
 const agents = [
   { pubkey: LOCAL_A, backend: { type: "local" } },
@@ -52,8 +54,43 @@ test("communityBotAllowlistPubkeys normalizes and dedupes", () => {
   ]);
 });
 
+test("communityBotsForBulkAllow unions catalog with reserved Hula pubkeys", () => {
+  assert.deepEqual(
+    communityBotsForBulkAllow({
+      catalogBots: bots,
+      reservedPubkeys: [RESERVED_F, BOT_D],
+    }),
+    [{ pubkey: BOT_D }, { pubkey: BOT_E.toLowerCase() }, { pubkey: RESERVED_F }],
+  );
+});
+
+test("communityBotsForBulkAllow still yields reserved bots when catalog is empty", () => {
+  assert.deepEqual(
+    communityBotsForBulkAllow({
+      catalogBots: [],
+      reservedPubkeys: [RESERVED_F],
+    }),
+    [{ pubkey: RESERVED_F }],
+  );
+});
+
+test("communityBotsForBulkAllow drops archived pubkeys", () => {
+  assert.deepEqual(
+    communityBotsForBulkAllow({
+      catalogBots: bots,
+      reservedPubkeys: [RESERVED_F],
+      isArchived: (pubkey) => pubkey === BOT_D,
+    }),
+    [{ pubkey: BOT_E.toLowerCase() }, { pubkey: RESERVED_F }],
+  );
+});
+
 test("bulkAllowPubkeys covers local, community, and all", () => {
-  const input = { localAgents: agents, communityBots: bots };
+  const community = communityBotsForBulkAllow({
+    catalogBots: bots,
+    reservedPubkeys: [RESERVED_F],
+  });
+  const input = { localAgents: agents, communityBots: community };
   assert.deepEqual(bulkAllowPubkeys("all-local-agents", input), [
     LOCAL_A,
     LOCAL_B,
@@ -61,13 +98,29 @@ test("bulkAllowPubkeys covers local, community, and all", () => {
   assert.deepEqual(bulkAllowPubkeys("all-community-bots", input), [
     BOT_D,
     BOT_E.toLowerCase(),
+    RESERVED_F,
   ]);
   assert.deepEqual(bulkAllowPubkeys("all-bots", input), [
     LOCAL_A,
     LOCAL_B,
     BOT_D,
     BOT_E.toLowerCase(),
+    RESERVED_F,
   ]);
+});
+
+test("all-community-bots never includes local managed agents", () => {
+  const community = communityBotsForBulkAllow({
+    catalogBots: [],
+    reservedPubkeys: [RESERVED_F],
+  });
+  assert.deepEqual(
+    bulkAllowPubkeys("all-community-bots", {
+      localAgents: agents,
+      communityBots: community,
+    }),
+    [RESERVED_F],
+  );
 });
 
 test("bulkAllowHelperText names an empty set clearly", () => {
@@ -89,7 +142,7 @@ test("bulkAllowHelperText reports the filled count", () => {
   );
   assert.equal(
     bulkAllowHelperText("all-community-bots", 2),
-    "Allows all 2 installed community bots.",
+    "Allows all 2 community bots.",
   );
   assert.equal(
     bulkAllowHelperText("all-bots", 3),

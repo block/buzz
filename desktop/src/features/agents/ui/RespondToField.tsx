@@ -7,9 +7,11 @@ import {
 import {
   bulkAllowHelperText,
   bulkAllowPubkeys,
+  communityBotsForBulkAllow,
   isRespondToBulkAllowOption,
   type RespondToBulkAllowOption,
 } from "@/features/agents/lib/respondToBulkAllow";
+import { HULA_RESERVED_COMMUNITY_BOT_PUBKEYS } from "@/features/agents/lib/reservedCommunityMentionRouting";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
 import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
@@ -40,7 +42,9 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  *                     `--respond-to-allowlist`)
  *   - Allow All Local Agents / Allow All Community Bots / Allow All Bots
  *     (UI shortcuts that set `allowlist` and fill `--respond-to-allowlist`
- *     with the matching pubkeys; same persistence path as Selected people)
+ *     with the matching pubkeys; same persistence path as Selected people.
+ *     Community bots use the catalog + reserved Hula set that mentions and
+ *     observer ingest trust — not local managed agents.)
  *
  * `nobody` is intentionally not surfaced — it pairs with a heartbeat-only
  * setup that has no meaningful GUI use case.
@@ -140,6 +144,20 @@ export function CreateAgentRespondToField({
 
   const managedAgentsQuery = useManagedAgentsQuery();
   const communityBotsQuery = useCommunityBotsQuery();
+  const isArchivedDiscovery = useIsArchivedPredicate();
+  // Same community-bot set mentions / observer ingest trust: installed
+  // catalog plus reserved Hula Captain/Mo/Stitch/Quasar/Korg pubkeys.
+  // Official relays return empty for kind 30624, so Dev often has no
+  // catalog row while reserved bots still appear elsewhere.
+  const communityBotsForAllow = React.useMemo(
+    () =>
+      communityBotsForBulkAllow({
+        catalogBots: communityBotsQuery.data ?? [],
+        reservedPubkeys: Object.values(HULA_RESERVED_COMMUNITY_BOT_PUBKEYS),
+        isArchived: isArchivedDiscovery,
+      }),
+    [communityBotsQuery.data, isArchivedDiscovery],
+  );
 
   React.useEffect(() => {
     if (mode !== "allowlist") {
@@ -156,7 +174,6 @@ export function CreateAgentRespondToField({
     enabled: mode === "allowlist" && deferredQuery.length > 0,
     limit: 8,
   });
-  const isArchivedDiscovery = useIsArchivedPredicate();
   const searchResults = React.useMemo(
     () =>
       (userSearchQuery.data ?? []).filter(
@@ -202,7 +219,7 @@ export function CreateAgentRespondToField({
     if (isRespondToBulkAllowOption(value)) {
       const pubkeys = bulkAllowPubkeys(value, {
         localAgents: managedAgentsQuery.data ?? [],
-        communityBots: communityBotsQuery.data ?? [],
+        communityBots: communityBotsForAllow,
       });
       setBulkAllowOption(value);
       onModeChange("allowlist");

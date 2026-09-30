@@ -93,3 +93,12 @@ test("primary respond-to copy does not expose implementation jargon", () => {
     assert.doesNotMatch(primaryFieldSource, new RegExp(jargon));
   }
 });
+
+test("community bulk-allow uses catalog plus reserved Hula pubkeys", () => {
+  // Mentions / observer ingest trust catalog ∪ HULA_RESERVED when the
+  // official relay returns empty for kind 30624. Bulk-allow must use the
+  // same source or Dev only fills local agents.
+  assert.match(respondToFieldSource, /HULA_RESERVED_COMMUNITY_BOT_PUBKEYS/);
+  assert.match(respondToFieldSource, /communityBotsForBulkAllow/);
+  assert.match(collapsedSource, /communityBots: communityBotsForAllow/);
+});

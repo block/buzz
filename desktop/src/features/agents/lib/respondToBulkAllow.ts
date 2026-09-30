@@ -8,7 +8,10 @@
  * Semantics:
  * - `all-local-agents` — every managed agent on this computer
  *   (`backend.type === "local"`).
- * - `all-community-bots` — every installed community (catalog) bot.
+ * - `all-community-bots` — community bots from the same source mentions and
+ *   observer ingest use: installed catalog bots, plus the reserved Hula
+ *   Captain/Mo/Stitch/Quasar/Korg pubkeys when the catalog is empty or
+ *   incomplete (see `HULA_RESERVED_COMMUNITY_BOT_PUBKEYS`). Never locals.
  * - `all-bots` — the union of both sets (local agents and community bots).
  */
 
@@ -77,6 +80,36 @@ export function communityBotAllowlistPubkeys(
   return out;
 }
 
+/**
+ * Community-bot pubkeys for bulk-allow — same set mentions / observer ingest
+ * trust: installed catalog first, then reserved Hula fallbacks, deduped.
+ * Locals never appear here.
+ */
+export function communityBotsForBulkAllow(input: {
+  catalogBots: readonly BulkAllowBot[];
+  reservedPubkeys?: readonly string[];
+  isArchived?: (pubkey: string) => boolean;
+}): BulkAllowBot[] {
+  const isArchived = input.isArchived ?? (() => false);
+  const out: BulkAllowBot[] = [];
+  const seen = new Set<string>();
+
+  const take = (pubkeyRaw: string) => {
+    const pubkey = normalizePubkey(pubkeyRaw);
+    if (!pubkey || seen.has(pubkey) || isArchived(pubkey)) return;
+    seen.add(pubkey);
+    out.push({ pubkey });
+  };
+
+  for (const bot of input.catalogBots) {
+    take(bot.pubkey);
+  }
+  for (const pubkey of input.reservedPubkeys ?? []) {
+    take(pubkey);
+  }
+  return out;
+}
+
 /** Pubkeys for a bulk-allow dropdown choice. */
 export function bulkAllowPubkeys(
   option: RespondToBulkAllowOption,
@@ -120,8 +153,8 @@ export function bulkAllowHelperText(
         : `Allows all ${count} local agent${count === 1 ? "" : "s"} on this computer.`;
     case "all-community-bots":
       return count === 0
-        ? "No community bots are installed to allow yet."
-        : `Allows all ${count} installed community bot${count === 1 ? "" : "s"}.`;
+        ? "No community bots are available to allow yet."
+        : `Allows all ${count} community bot${count === 1 ? "" : "s"}.`;
     case "all-bots":
       return count === 0
         ? "No local agents or community bots are available to allow yet."
