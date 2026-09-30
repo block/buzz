@@ -513,14 +513,15 @@ function searchReturns(users) {
 }
 
 test("actions-host-change-drops-member: a name picked in one community can't be reviewed in another", async () => {
-  // Mutation: keep the pick across host changes (ignore picked.host) → RED.
+  // Mutation: mask the pick by host instead of clearing it → RED on A→B→A.
   searchReturns([[TARGET, "Alice"]]);
   const { container: c, unmount } = await mountActions();
   try {
     await type(c, "direct-member-input", "ali");
     await settle();
     await click(c, `direct-member-result-${TARGET}`);
-    assert.ok(q(c, "direct-member-selected"));
+    await click(c, "direct-host-change");
+    assert.ok(q(c, "direct-member-selected"), "Change alone keeps the pick");
     await setHost(c, "other.example.com");
     assert.ok(
       !q(c, "direct-member-selected"),
@@ -530,6 +531,15 @@ test("actions-host-change-drops-member: a name picked in one community can't be 
     await click(c, "direct-review-btn");
     assert.ok(!q(c, "direct-confirm"), "nothing to review");
     assert.match(q(c, "direct-error").textContent, /Choose a member/);
+    await setHost(c, "relay.test");
+    assert.ok(
+      !q(c, "direct-member-selected"),
+      "returning to the first host must not restore the old pick",
+    );
+    await click(c, "direct-review-btn");
+    assert.ok(!q(c, "direct-confirm"), "still nothing to review");
+    assert.match(q(c, "direct-error").textContent, /Choose a member/);
+    await setHost(c, "other.example.com");
     await pickKey(c, TARGET);
     assert.ok(
       q(c, "direct-member-search-hint"),

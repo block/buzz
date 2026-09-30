@@ -133,11 +133,7 @@ export function ActionsTab({
   /** Operator-typed host; null while following the active community. */
   const [hostOverride, setHostOverride] = useState<string | null>(null);
   const [target, setTarget] = useState("");
-  /** The picked member and the community host it was picked for. */
-  const [picked, setPicked] = useState<{
-    host: string;
-    user: UserSearchResult;
-  } | null>(null);
+  const [member, setMember] = useState<UserSearchResult | null>(null);
   /** Display-only name for the frozen target; never sent. */
   const [frozenName, setFrozenName] = useState<string | null>(null);
   const [reason, setReason] = useState("");
@@ -164,8 +160,11 @@ export function ActionsTab({
   const normalizedHost = normalizeCommunityHost(host);
   const onActiveCommunity =
     activeHost !== null && normalizedHost === activeHost;
-  // Profiles are per community: a pick made for another host doesn't carry.
-  const member = picked?.host === normalizedHost ? picked.user : null;
+  // Profiles are per community: a new host drops the picked member.
+  const editHost = (next: string) => {
+    if (normalizeCommunityHost(next) !== normalizedHost) setMember(null);
+    setHostOverride(next);
+  };
 
   const handleReview = async () => {
     if (frozen || inFlight.current) return;
@@ -223,7 +222,7 @@ export function ActionsTab({
         toast.success(`${ACTION_LABELS[frozen.action]}: done`);
         setFrozen(null);
         setTarget("");
-        setPicked(null);
+        setMember(null);
         setReason("");
       }
     } catch (e) {
@@ -292,12 +291,7 @@ export function ActionsTab({
         ))}
       </div>
       {editingHost ? (
-        input(
-          "host",
-          host,
-          setHostOverride,
-          "Community host (e.g. team.example.com)",
-        )
+        input("host", host, editHost, "Community host (e.g. team.example.com)")
       ) : (
         <p
           className="flex items-center gap-2 text-xs"
@@ -326,7 +320,7 @@ export function ActionsTab({
           disabled={locked}
           key={normalizedHost}
           member={member}
-          onChange={(user) => setPicked(user && { host: normalizedHost, user })}
+          onChange={setMember}
           searchEnabled={onActiveCommunity}
         />
       )}
