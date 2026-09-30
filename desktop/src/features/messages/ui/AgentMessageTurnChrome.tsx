@@ -54,8 +54,8 @@ export function AgentMessageTurnChromeRoot({
     isAgent: message.isAgent === true,
   });
 
-  // Always show Thought for agent replies when the setting is on.
-  const showThoughtChip = meta.enabled;
+  // Thought chip only when the setting is on and this turn has thought/tool content.
+  const showThoughtChip = meta.enabled && meta.hasThinkingContent;
   React.useEffect(() => {
     if (!showThoughtChip && expanded) setExpanded(false);
   }, [showThoughtChip, expanded]);
@@ -98,115 +98,128 @@ export function AgentMessageTurnFooterChrome() {
     messageId,
   } = ctx;
 
-  const durationText = meta.durationLabel ?? (meta.durationLoading ? "…" : "—");
-  const tokensText = meta.tokensLabel ?? (meta.metricLoading ? "…" : "—");
+  // Empty chips must not render (no em dash / blank pill). Loading may show "…".
+  const showDurationChip = Boolean(meta.durationLabel) || meta.durationLoading;
+  const showTokensChip = Boolean(meta.tokensLabel) || meta.metricLoading;
+  const showContextChip = meta.hasPromptContext;
+  const durationText = meta.durationLabel ?? (meta.durationLoading ? "…" : null);
+  const tokensText = meta.tokensLabel ?? (meta.metricLoading ? "…" : null);
 
   const setup = meta.promptSetupItems.filter(
     (item): item is Extract<TranscriptItem, { type: "lifecycle" }> =>
       item.type === "lifecycle",
   );
 
+  const hasAnyChip =
+    showDurationChip || showTokensChip || showContextChip || showThoughtChip;
+  if (!hasAnyChip && !expanded && !contextOpen) return null;
+
   return (
     <div
       className="mt-1.5"
       data-testid={`agent-message-turn-footer-${messageId}`}
     >
-      <span
-        className="inline-flex shrink-0 flex-wrap items-center gap-1"
-        data-testid={`agent-message-turn-chrome-${messageId}`}
-      >
+      {hasAnyChip ? (
         <span
-          className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-2xs tabular-nums text-muted-foreground"
-          data-testid={`agent-message-duration-${messageId}`}
-          title="Time from prompt to this reply"
+          className="inline-flex shrink-0 flex-wrap items-center gap-1"
+          data-testid={`agent-message-turn-chrome-${messageId}`}
         >
-          <Clock3 className="h-3 w-3" />
-          {durationText}
-        </span>
+          {showDurationChip && durationText ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-2xs tabular-nums text-muted-foreground"
+              data-testid={`agent-message-duration-${messageId}`}
+              title="Time from prompt to this reply"
+            >
+              <Clock3 className="h-3 w-3" />
+              {durationText}
+            </span>
+          ) : null}
 
-        <span
-          className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-2xs tabular-nums text-muted-foreground"
-          data-testid={`agent-message-tokens-${messageId}`}
-          title={
-            meta.metric
-              ? [
-                  meta.metric.turnInputTokens
-                    ? `in ${meta.metric.turnInputTokens}`
-                    : null,
-                  meta.metric.turnOutputTokens
-                    ? `out ${meta.metric.turnOutputTokens}`
-                    : null,
-                  meta.metric.model ? meta.metric.model : null,
-                  meta.metric.matchKind
-                    ? `match ${meta.metric.matchKind}`
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : meta.metricLoading
-                ? "Loading tokens…"
-                : "Tokens unavailable for this turn"
-          }
-        >
-          <Coins className="h-3 w-3" />
-          {tokensText}
-          {meta.tokensLabel ? " tokens" : ""}
-        </span>
+          {showTokensChip && tokensText ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-2xs tabular-nums text-muted-foreground"
+              data-testid={`agent-message-tokens-${messageId}`}
+              title={
+                meta.metric
+                  ? [
+                      meta.metric.turnInputTokens
+                        ? `in ${meta.metric.turnInputTokens}`
+                        : null,
+                      meta.metric.turnOutputTokens
+                        ? `out ${meta.metric.turnOutputTokens}`
+                        : null,
+                      meta.metric.model ? meta.metric.model : null,
+                      meta.metric.matchKind
+                        ? `match ${meta.metric.matchKind}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")
+                  : meta.metricLoading
+                    ? "Loading tokens…"
+                    : "Tokens unavailable for this turn"
+              }
+            >
+              <Coins className="h-3 w-3" />
+              {tokensText}
+              {meta.tokensLabel ? " tokens" : ""}
+            </span>
+          ) : null}
 
-        <button
-          aria-label="Context"
-          aria-pressed={contextOpen}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground",
-            contextOpen && "bg-muted/70 text-foreground",
-            !meta.hasPromptContext && "opacity-70",
-          )}
-          data-testid={`agent-message-prompt-context-${messageId}`}
-          onClick={() => setContextOpen((v) => !v)}
-          title={
-            meta.hasPromptContext
-              ? "Context"
-              : "No prompt context for this turn yet"
-          }
-          type="button"
-        >
-          <CheckCheck className="h-3 w-3" />
-          <span>Context</span>
-        </button>
-
-        {showThoughtChip ? (
-          <button
-            aria-expanded={expanded}
-            aria-label="Thought"
-            className={cn(
-              "inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground",
-              expanded && "bg-muted/70 text-foreground",
-            )}
-            data-testid={`agent-message-thinking-toggle-${messageId}`}
-            onClick={() => setExpanded((v) => !v)}
-            title="Thought"
-            type="button"
-          >
-            <Brain className="h-3 w-3" />
-            <span>Thought</span>
-            <ChevronDown
+          {showContextChip ? (
+            <button
+              aria-label="Context"
+              aria-pressed={contextOpen}
               className={cn(
-                "h-3 w-3 transition-transform",
-                expanded && "rotate-180",
+                "inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground",
+                contextOpen && "bg-muted/70 text-foreground",
               )}
-            />
-          </button>
-        ) : null}
-      </span>
+              data-testid={`agent-message-prompt-context-${messageId}`}
+              onClick={() => setContextOpen((v) => !v)}
+              title="Context"
+              type="button"
+            >
+              <CheckCheck className="h-3 w-3" />
+              <span>Context</span>
+            </button>
+          ) : null}
+
+          {showThoughtChip ? (
+            <button
+              aria-expanded={expanded}
+              aria-label="Thought"
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground",
+                expanded && "bg-muted/70 text-foreground",
+              )}
+              data-testid={`agent-message-thinking-toggle-${messageId}`}
+              onClick={() => setExpanded((v) => !v)}
+              title="Thought"
+              type="button"
+            >
+              <Brain className="h-3 w-3" />
+              <span>Thought</span>
+              <ChevronDown
+                className={cn(
+                  "h-3 w-3 transition-transform",
+                  expanded && "rotate-180",
+                )}
+              />
+            </button>
+          ) : null}
+        </span>
+      ) : null}
 
       {expanded && showThoughtChip ? <AgentMessageTurnThinkingCard /> : null}
 
-      <PromptContextDialog
-        onOpenChange={setContextOpen}
-        open={contextOpen}
-        sections={meta.promptContextSections}
-        setup={setup}
-      />
+      {showContextChip || contextOpen ? (
+        <PromptContextDialog
+          onOpenChange={setContextOpen}
+          open={contextOpen}
+          sections={meta.promptContextSections}
+          setup={setup}
+        />
+      ) : null}
     </div>
   );
 }
