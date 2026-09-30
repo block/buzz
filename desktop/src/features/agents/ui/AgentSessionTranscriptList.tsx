@@ -14,13 +14,6 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cn } from "@/shared/lib/cn";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
 import { Toggle } from "@/shared/ui/toggle";
 import { AnimatedCount } from "@/shared/ui/AnimatedCount";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";

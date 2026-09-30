@@ -1,4 +1,3 @@
-import * as React from "react";
 import { CheckCheck } from "lucide-react";
 
 import {
