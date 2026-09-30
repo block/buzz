@@ -24,12 +24,14 @@ const CURRENT_REVIEW_LABEL = "codex-security-review-current";
 
 function pullRequest({
   authorAssociation = "CONTRIBUTOR",
+  authorLogin = "pr-author",
   baseSha = OLD_BASE_SHA,
   headSha = HEAD_SHA,
   labels = [],
 } = {}) {
   return {
     author_association: authorAssociation,
+    user: { login: authorLogin },
     state: "open",
     base: {
       ref: "main",
@@ -46,6 +48,7 @@ function pullRequest({
 }
 
 function harness({
+  authorPermission = "read",
   pull = pullRequest(),
   comments = [],
   files = [],
@@ -63,6 +66,7 @@ function harness({
   const notices = [];
   const info = [];
   const warnings = [];
+  const permissionChecks = [];
   const listComments = async () => storedComments;
   const listFiles = async () => files;
   let labelExists = false;
@@ -122,6 +126,12 @@ function harness({
         get: async () => ({ data: pull }),
         listFiles,
       },
+      repos: {
+        getCollaboratorPermissionLevel: async (input) => {
+          permissionChecks.push(input);
+          return { data: { permission: authorPermission } };
+        },
+      },
     },
   };
   const core = {
@@ -150,6 +160,7 @@ function harness({
     info,
     notices,
     outputs,
+    permissionChecks,
     removeLabelCalls,
     removedLabels,
     storedComments,
@@ -231,24 +242,31 @@ test("prepare binds a member command to the named head SHA", async () => {
   );
 });
 
-test("pull request authorization uses the live author association", async () => {
-  const member = harness({
-    pull: pullRequest({ authorAssociation: "MEMBER" }),
-  });
-  member.context.eventName = "pull_request_target";
-  member.context.payload.pull_request = {
-    number: 6816,
-    head: { sha: HEAD_SHA },
-    author_association: "CONTRIBUTOR",
-  };
+test("pull request authorization uses live repository write access", async () => {
+  for (const authorPermission of ["write", "admin"]) {
+    const trusted = harness({
+      authorPermission,
+      pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
+    });
+    trusted.context.eventName = "pull_request_target";
+    trusted.context.payload.pull_request = {
+      number: 6816,
+      head: { sha: HEAD_SHA },
+      author_association: "CONTRIBUTOR",
+    };
 
-  await prepare(member);
+    await prepare(trusted);
 
-  assert.equal(member.outputs.get("authorized"), "true");
-  assert.deepEqual(member.failures, []);
+    assert.equal(trusted.outputs.get("authorized"), "true");
+    assert.deepEqual(trusted.failures, []);
+    assert.deepEqual(trusted.permissionChecks, [
+      { owner: "block", repo: "buzz", username: "pr-author" },
+    ]);
+  }
 
   const external = harness({
-    pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
+    authorPermission: "read",
+    pull: pullRequest({ authorAssociation: "MEMBER" }),
   });
   external.context.eventName = "pull_request_target";
   external.context.payload.pull_request = {
@@ -261,7 +279,7 @@ test("pull request authorization uses the live author association", async () => 
 
   assert.equal(external.outputs.get("authorized"), undefined);
   assert.deepEqual(external.failures, []);
-  assert.match(external.info.at(-1), /requires authorization/);
+  assert.match(external.info.at(-1), /does not have write access/);
 });
 
 test("PR mutation jobs use pull request write permission", () => {
@@ -498,8 +516,9 @@ test("base reconciliation does not create comments on unreviewed PRs", async () 
   assert.equal(state.updated.length, 0);
 });
 
-test("pull request updates invalidate member reviews without adding placeholders", async () => {
+test("pull request updates invalidate trusted reviews without adding placeholders", async () => {
   const reviewed = harness({
+    authorPermission: "write",
     pull: pullRequest({
       authorAssociation: "MEMBER",
       headSha: OTHER_HEAD_SHA,
@@ -529,6 +548,7 @@ test("pull request updates invalidate member reviews without adding placeholders
   assert.equal(reviewed.removedLabels.length, 1);
 
   const unreviewed = harness({
+    authorPermission: "write",
     pull: pullRequest({ authorAssociation: "OWNER" }),
   });
   unreviewed.context.eventName = "pull_request_target";
@@ -544,6 +564,7 @@ test("pull request updates invalidate member reviews without adding placeholders
   assert.equal(unreviewed.removeLabelCalls.length, 0);
 
   const external = harness({
+    authorPermission: "read",
     pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
   });
   external.context.eventName = "pull_request_target";
