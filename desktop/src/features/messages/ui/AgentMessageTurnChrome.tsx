@@ -99,10 +99,14 @@ export function AgentMessageTurnFooterChrome() {
   } = ctx;
 
   // Empty chips must not render (no em dash / blank pill). Loading may show "…".
+  // Absurd multi-hour spans are already null from resolveTurnDurationSeconds
+  // (Browser progress mid-turn / thread-ancestor joins), so missing tokens +
+  // missing duration hide both cleanly; when usage exists, tokens still show.
   const showDurationChip = Boolean(meta.durationLabel) || meta.durationLoading;
   const showTokensChip = Boolean(meta.tokensLabel) || meta.metricLoading;
   const showContextChip = meta.hasPromptContext;
-  const durationText = meta.durationLabel ?? (meta.durationLoading ? "…" : null);
+  const durationText =
+    meta.durationLabel ?? (meta.durationLoading ? "…" : null);
   const tokensText = meta.tokensLabel ?? (meta.metricLoading ? "…" : null);
 
   const setup = meta.promptSetupItems.filter(

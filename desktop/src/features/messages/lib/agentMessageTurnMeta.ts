@@ -119,10 +119,12 @@ export function earliestContentStartedAtSec(
  * inflated chip. Among non-negative spans ≤ the reliable cap, pick the
  * shortest (true turn latency).
  *
- * If every candidate exceeds the cap, only fall back to a long span when a
- * harness/content start exists (real long tool turns). A bare prompt/parent
- * span outside the cap is treated as untrusted and omitted — otherwise
- * Captain-like replies show `195:37` (~3h) for a seconds-long turn.
+ * Spans outside the cap are omitted — including trusted turn_started /
+ * content starts. Mid-turn Drive "Browser progress" posts parent to the
+ * thread root and join the multi-hour parent turn, which previously rendered
+ * absurd chips like `101:13` with no tokens (usage_update still missing).
+ * Hide the duration chip rather than show a multi-hour span; tokens still
+ * render independently when usage exists.
  */
 export function resolveTurnDurationSeconds(input: {
   replyCreatedAt: number;
@@ -148,18 +150,9 @@ export function resolveTurnDurationSeconds(input: {
   );
   if (reliable.length > 0) return Math.min(...reliable);
 
-  // Long tool turns: trust harness / thinking starts only — never a bare
-  // parent/prompt that sat outside the reliable window (thread ancestors).
-  const trustedLong: number[] = [];
-  if (started != null) {
-    const delta = reply - started;
-    if (delta >= 0) trustedLong.push(delta);
-  }
-  if (content != null) {
-    const delta = reply - content;
-    if (delta >= 0) trustedLong.push(delta);
-  }
-  return trustedLong.length > 0 ? Math.min(...trustedLong) : null;
+  // Outside the reliable window: omit rather than show unbounded m:ss
+  // (Browser progress mid-turn / Captain thread-ancestor cases).
+  return null;
 }
 
 export function findTurnStartedEvent(
@@ -348,6 +341,27 @@ export function findTurnUsageUsedTokens(
  * Fall back to archived 44200 only on an exact session/turn match — never a
  * time-near hit, which rebinds every nearby reply to the latest session total.
  */
+/**
+ * Fallback token numerator from coalesced Usage lifecycle rows when ACP
+ * `usage_update` observer frames lack turnId (or were dropped from the
+ * join window) but the transcript still shows `Tokens: used/size`.
+ */
+export function findTurnUsageUsedFromTranscript(
+  items: readonly TurnJoinTranscriptItem[],
+  turnId: string | null,
+): number | null {
+  if (!turnId) return null;
+  let best: number | null = null;
+  for (const item of items) {
+    if (item.turnId !== turnId) continue;
+    if (item.type !== "lifecycle") continue;
+    const used = parseUsageTokensUsedLabel(item.text);
+    if (used == null) continue;
+    best = used;
+  }
+  return best;
+}
+
 export function resolveReplyChipTokenCount(input: {
   usageUsedTokens: number | null;
   metricMatchKind: string | null | undefined;

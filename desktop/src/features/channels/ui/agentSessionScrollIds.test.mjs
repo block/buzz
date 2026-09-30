@@ -150,7 +150,7 @@ test("production chain: new turn in same session produces value-different id seq
 
   assert.equal(ids2.length, ids1.length + 1, "new turn adds one block id");
   assert.ok(
-    ids2.some((id) => id.startsWith("turn:turn-2")),
+    ids2.some((id) => id.startsWith("turn:") && id.includes("turn-2")),
     "new turn block key must be present",
   );
 });

@@ -7,6 +7,7 @@ import {
   earliestContentStartedAtSec,
   findNearestTurnIdByTime,
   findTurnIdForPromptEvent,
+  findTurnUsageUsedFromTranscript,
   findTurnUsageUsedTokens,
   formatTurnDuration,
   formatTurnTokens,
@@ -205,6 +206,27 @@ test("findTurnUsageUsedTokens returns latest used for the turn only", () => {
   assert.equal(findTurnUsageUsedTokens(events, "turn-missing"), null);
 });
 
+test("findTurnUsageUsedFromTranscript reads Usage lifecycle Tokens line", () => {
+  const items = [
+    {
+      id: "usage-a",
+      type: "lifecycle",
+      text: "Tokens: 132700/1000000",
+      turnId: "turn-a",
+      timestamp: "2026-09-30T09:40:00Z",
+    },
+    {
+      id: "usage-b",
+      type: "lifecycle",
+      text: "Tokens: 500/1000000",
+      turnId: "turn-b",
+      timestamp: "2026-09-30T09:41:00Z",
+    },
+  ];
+  assert.equal(findTurnUsageUsedFromTranscript(items, "turn-a"), 132700);
+  assert.equal(findTurnUsageUsedFromTranscript(items, "turn-missing"), null);
+});
+
 test("resolveReplyChipTokenCount prefers usage used; ignores time-near 44200", () => {
   assert.equal(
     resolveReplyChipTokenCount({
@@ -279,7 +301,7 @@ test("normalizeUnixSeconds coerces ms", () => {
   assert.equal(normalizeUnixSeconds(null), null);
 });
 
-test("resolveTurnDurationSeconds prefers prompt; falls back to long spans", () => {
+test("resolveTurnDurationSeconds prefers prompt; omits spans outside reliable cap", () => {
   assert.equal(
     resolveTurnDurationSeconds({
       replyCreatedAt: 1_000_100,
@@ -328,14 +350,23 @@ test("resolveTurnDurationSeconds prefers prompt; falls back to long spans", () =
     }),
     23,
   );
-  // Trusted long tool turn (turn_started present) still shows.
+  // Long tool / mid-turn Browser progress spans (>10m) omit the chip —
+  // otherwise Drive progress posts show 101:13 with no tokens.
   assert.equal(
     resolveTurnDurationSeconds({
       replyCreatedAt: 1_000_000 + 680,
       turnStartedAtSec: 1_000_000,
       promptCreatedAtSec: null,
     }),
-    680,
+    null,
+  );
+  assert.equal(
+    resolveTurnDurationSeconds({
+      replyCreatedAt: 1_000_000 + 101 * 60 + 13,
+      turnStartedAtSec: 1_000_000,
+      promptCreatedAtSec: null,
+    }),
+    null,
   );
   assert.equal(
     resolveTurnDurationSeconds({

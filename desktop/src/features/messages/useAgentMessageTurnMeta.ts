@@ -23,6 +23,7 @@ import {
   findNearestTurnIdByTime,
   findTurnIdForPromptEvent,
   findTurnStartedEvent,
+  findTurnUsageUsedFromTranscript,
   findTurnUsageUsedTokens,
   formatTurnDuration,
   formatTurnTokens,
@@ -317,10 +318,13 @@ export function useAgentMessageTurnMeta(input: {
   const metric = metricQuery.data ?? null;
   // Pin to this turn's Usage numerator when present so later turns cannot
   // rewrite older chips via a shared time-near 44200 hit.
-  const usageUsedTokens = React.useMemo(
-    () => findTurnUsageUsedTokens(combinedEvents, turnId),
-    [combinedEvents, turnId],
-  );
+  const usageUsedTokens = React.useMemo(() => {
+    const fromEvents = findTurnUsageUsedTokens(combinedEvents, turnId);
+    if (fromEvents != null) return fromEvents;
+    // Progress/mid-turn replies can miss usage_update frames in the observer
+    // window while the coalesced Usage lifecycle row still has Tokens: used/size.
+    return findTurnUsageUsedFromTranscript(transcriptItems, turnId);
+  }, [combinedEvents, turnId, transcriptItems]);
   const totalTokens = resolveReplyChipTokenCount({
     usageUsedTokens,
     metricMatchKind: metric?.matchKind,

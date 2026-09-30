@@ -15,7 +15,20 @@ export type TranscriptTurnSegment =
 
 export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
-  | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] }
+  | {
+      kind: "turn";
+      turnId: string;
+      /**
+       * Session run that owns this turn. Included in the React list key so the
+       * same turnId appearing in two non-contiguous session runs (archive
+       * hydrate + live, or Thought/24200 replay) cannot collide as `turn:<id>`
+       * and remount-storm the transcript.
+       */
+      sessionId: string | null;
+      /** First item id in the turn — disambiguates same turnId within a run. */
+      firstItemId: string;
+      segments: TranscriptTurnSegment[];
+    }
   | {
       /**
        * Session boundary divider injected between consecutive session runs.
@@ -689,6 +702,8 @@ function buildBlocksForRun(
       blocks.push({
         kind: "turn",
         turnId: entry.turnId,
+        sessionId: _sessionId,
+        firstItemId: bucket.items[0]?.id ?? entry.turnId,
         segments,
       });
     }
@@ -760,7 +775,10 @@ export function getDisplayBlockKey(block: TranscriptDisplayBlock): string {
     // older sessions are prepended, causing unnecessary boundary remounts).
     return `session-boundary:${block.sessionId}:${block.firstItemId}`;
   }
-  return `turn:${block.turnId}`;
+  // sessionId + firstItemId: bare `turn:<id>` collided when the same turnId
+  // appeared in two session runs (Thought/24200 archive + live), spamming
+  // "Encountered two children with the same key, turn:…" and remount-storming.
+  return `turn:${block.sessionId ?? "unknown"}:${block.turnId}:${block.firstItemId}`;
 }
 
 /**

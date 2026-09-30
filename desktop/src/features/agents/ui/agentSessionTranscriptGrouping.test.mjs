@@ -1711,6 +1711,44 @@ test("buildTranscriptDisplayBlocks_leadingSingleBeforeSessionNew_emittedInline",
   );
 });
 
+
+test("getDisplayBlockKey_sameTurnIdAcrossSessionRuns_uniqueKeys", () => {
+  // Thought/24200 archive + live can surface the same turnId in two session
+  // runs. Bare `turn:<id>` collided and remount-stormed the transcript.
+  const items = [
+    {
+      id: "a-thought",
+      type: "thought",
+      renderClass: "thought",
+      title: "Thinking",
+      text: "one",
+      timestamp: "2026-07-08T00:00:01.000Z",
+      turnId: "shared-turn",
+      sessionId: "sess-A",
+      channelId: "chan-1",
+    },
+    {
+      id: "b-thought",
+      type: "thought",
+      renderClass: "thought",
+      title: "Thinking",
+      text: "two",
+      timestamp: "2026-07-08T00:00:02.000Z",
+      turnId: "shared-turn",
+      sessionId: "sess-B",
+      channelId: "chan-1",
+    },
+  ];
+  const keys = buildTranscriptDisplayBlocks(items).map(getDisplayBlockKey);
+  const turnKeys = keys.filter((k) => k.startsWith("turn:"));
+  assert.equal(turnKeys.length, 2, "two turn blocks across sessions");
+  assert.equal(new Set(turnKeys).size, 2, "turn keys must be unique");
+  assert.ok(
+    turnKeys.every((k) => k.includes("shared-turn")),
+    "keys still identify the turn",
+  );
+});
+
 // ── getDisplayBlockKey ──────────────────────────────────────────────────────────
 
 test("getDisplayBlockKey_single_returnsItemId", () => {
@@ -1718,9 +1756,18 @@ test("getDisplayBlockKey_single_returnsItemId", () => {
   assert.equal(getDisplayBlockKey(block), "item-42");
 });
 
-test("getDisplayBlockKey_turn_returnsPrefixedTurnId", () => {
-  const block = { kind: "turn", turnId: "t-99", segments: [] };
-  assert.equal(getDisplayBlockKey(block), "turn:t-99");
+test("getDisplayBlockKey_turn_returnsSessionScopedTurnId", () => {
+  const block = {
+    kind: "turn",
+    turnId: "t-99",
+    sessionId: "sess-1",
+    firstItemId: "item-first",
+    segments: [],
+  };
+  assert.equal(
+    getDisplayBlockKey(block),
+    "turn:sess-1:t-99:item-first",
+  );
 });
 
 test("getDisplayBlockKey_sessionBoundary_usesFirstItemIdNotRunIndex", () => {

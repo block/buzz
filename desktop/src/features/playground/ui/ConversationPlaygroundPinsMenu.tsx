@@ -1,7 +1,12 @@
-import { Pin, X } from "lucide-react";
+import { Bot, Pin, X } from "lucide-react";
 import * as React from "react";
 import { useSyncExternalStore } from "react";
 
+import {
+  listBrowserAgentGrants,
+  subscribeBrowserAgentGrant,
+} from "@/features/browser-agent/lib/api";
+import type { BrowserAgentGrant } from "@/features/browser-agent/lib/types";
 import {
   closeLinkSidePanel,
   destroyLinkSidePanelIfPin,
@@ -15,6 +20,7 @@ import {
   unpinPlaygroundFromConversation,
   type ConversationPlaygroundPin,
 } from "@/features/playground/lib/conversationPins";
+import { findGrantForPlaygroundPin } from "@/features/playground/lib/pinAgentGrant";
 import {
   addPlaygroundSession,
   hasPlaygroundSession,
@@ -24,6 +30,7 @@ import {
   PLAYGROUND_HULA,
   PLAYGROUND_VERSION,
 } from "@/features/playground/lib/types";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -44,6 +51,25 @@ function scopeKeyForConversation(input: {
   return `channel:${input.channelId}`;
 }
 
+function useBrowserAgentGrants(): BrowserAgentGrant[] {
+  const [grants, setGrants] = React.useState<BrowserAgentGrant[]>([]);
+  const refresh = React.useCallback(() => {
+    void listBrowserAgentGrants()
+      .then(setGrants)
+      .catch(() => setGrants([]));
+  }, []);
+  React.useEffect(() => {
+    refresh();
+    const unlisten = subscribeBrowserAgentGrant(() => {
+      refresh();
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [refresh]);
+  return grants;
+}
+
 export function ConversationPlaygroundPinsMenu({
   channelId,
   threadId,
@@ -57,6 +83,7 @@ export function ConversationPlaygroundPinsMenu({
     () => listConversationPlaygroundPins(scopeKey),
     () => listConversationPlaygroundPins(scopeKey),
   );
+  const grants = useBrowserAgentGrants();
   const menuRequest = useSyncExternalStore(
     subscribeConversationPlaygroundPinsMenu,
     getConversationPlaygroundPinsMenuOpenRequest,
@@ -170,27 +197,52 @@ export function ConversationPlaygroundPinsMenu({
             Pin a playground from a card
           </DropdownMenuItem>
         ) : (
-          pins.map((pin) => (
-            <DropdownMenuItem
-              className="flex items-center gap-2"
-              data-testid={`conversation-playground-pin-${pin.sid}`}
-              key={pin.sid}
-              onSelect={(event) => handlePinSelect(pin, event)}
-            >
-              <span className="min-w-0 flex-1 truncate">{pin.name}</span>
-              <button
-                aria-label={`Unpin ${pin.name}`}
-                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                data-testid={`conversation-playground-unpin-${pin.sid}`}
-                onClick={(event) => unpin(pin, event)}
-                onPointerDown={suppressItemSelect}
-                onPointerUp={suppressItemSelect}
-                type="button"
+          pins.map((pin) => {
+            const grant = findGrantForPlaygroundPin(grants, pin.sid);
+            const agentDriven = grant != null;
+            const agentTitle =
+              grant?.mode === "drive"
+                ? "Agent Drive"
+                : grant?.mode === "observe"
+                  ? "Agent Observe"
+                  : null;
+            return (
+              <DropdownMenuItem
+                className="flex items-center gap-2"
+                data-testid={`conversation-playground-pin-${pin.sid}`}
+                key={pin.sid}
+                onSelect={(event) => handlePinSelect(pin, event)}
               >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </DropdownMenuItem>
-          ))
+                {agentDriven ? (
+                  <span
+                    className={cn(
+                      "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-orange-500/50 text-orange-700 dark:text-orange-400",
+                      grant?.mode === "drive" && "bg-orange-500/15",
+                    )}
+                    data-testid={`conversation-playground-pin-agent-${pin.sid}`}
+                    title={agentTitle ?? "Agent attached"}
+                  >
+                    <Bot aria-hidden className="h-3 w-3" />
+                    <span className="sr-only">
+                      {agentTitle ?? "Agent attached"}
+                    </span>
+                  </span>
+                ) : null}
+                <span className="min-w-0 flex-1 truncate">{pin.name}</span>
+                <button
+                  aria-label={`Unpin ${pin.name}`}
+                  className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                  data-testid={`conversation-playground-unpin-${pin.sid}`}
+                  onClick={(event) => unpin(pin, event)}
+                  onPointerDown={suppressItemSelect}
+                  onPointerUp={suppressItemSelect}
+                  type="button"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuItem>
+            );
+          })
         )}
       </DropdownMenuContent>
     </DropdownMenu>
