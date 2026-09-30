@@ -10,6 +10,7 @@ class _ChannelsBody extends StatelessWidget {
   final double topSectionHeight;
   final bool usesPinnedGradient;
   final ScrollController scrollController;
+  final Widget? workspaceHeader;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
 
@@ -23,6 +24,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.topSectionHeight,
     required this.usesPinnedGradient,
     required this.scrollController,
+    required this.workspaceHeader,
     required this.onRefresh,
     required this.onSelectChannel,
   });
@@ -33,15 +35,16 @@ class _ChannelsBody extends StatelessWidget {
     final loadedChannels = channels;
     final loading =
         showConnectionSkeleton || (loadedChannels == null && !showError);
-    final content = showError && channelsAsync.hasError
+    Widget buildContent({required double topInset}) =>
+        showError && channelsAsync.hasError
         ? Padding(
-            padding: EdgeInsets.only(top: barHeight),
+            padding: EdgeInsets.only(top: topInset),
             child: _ErrorView(error: channelsAsync.error!, onRetry: onRefresh),
           )
         : loadedChannels == null
         ? const SizedBox.shrink()
         : BeeRefreshIndicator(
-            edgeOffset: barHeight,
+            edgeOffset: topInset,
             onRefresh: onRefresh,
             child: CustomScrollView(
               controller: scrollController,
@@ -50,7 +53,7 @@ class _ChannelsBody extends StatelessWidget {
               // later and retains its community and profile controls.
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
-                SliverToBoxAdapter(child: SizedBox(height: barHeight)),
+                SliverToBoxAdapter(child: SizedBox(height: topInset)),
                 if (usesPinnedGradient)
                   _SliverChannelsList(
                     channels: loadedChannels,
@@ -75,6 +78,27 @@ class _ChannelsBody extends StatelessWidget {
             ),
           );
 
+    if (workspaceHeader != null) {
+      return Column(
+        children: [
+          SizedBox(height: barHeight),
+          workspaceHeader!,
+          Expanded(
+            child: SkeletonReveal(
+              loading: loading,
+              shimmerEnabled: sessionStatus != SessionStatus.disconnected,
+              skeleton: _ChannelsSkeleton(
+                channels: loadedChannels,
+                topInset: 0,
+                status: sessionStatus,
+              ),
+              content: buildContent(topInset: 0),
+            ),
+          ),
+        ],
+      );
+    }
+
     return SkeletonReveal(
       loading: loading,
       shimmerEnabled: sessionStatus != SessionStatus.disconnected,
@@ -83,7 +107,7 @@ class _ChannelsBody extends StatelessWidget {
         topInset: barHeight,
         status: sessionStatus,
       ),
-      content: content,
+      content: buildContent(topInset: barHeight),
     );
   }
 }

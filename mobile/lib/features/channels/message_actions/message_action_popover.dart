@@ -244,17 +244,14 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
           group: _PopoverMessageActionGroup.primary,
           onSelected: () {
             if (!context.mounted) return;
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ThreadDetailPage(
-                  threadHead: message,
-                  allMessages: messages,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                ),
-              ),
+            openThreadDetail(
+              context,
+              threadHead: message,
+              allMessages: messages,
+              channelId: channelId,
+              currentPubkey: currentPubkey,
+              isMember: isMember,
+              isArchived: isArchived,
             );
           },
         ),

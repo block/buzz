@@ -124,6 +124,7 @@ void main() {
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
     Set<String> knownAgentPubkeys = const {},
+    bool splitView = false,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -156,7 +157,10 @@ void main() {
           ).copyWith(textScaler: textScaler, padding: mediaPadding),
           child: child!,
         ),
-        home: ActivityPage(tabReselection: tabReselection),
+        home: ActivityPage(
+          tabReselection: tabReselection,
+          splitView: splitView,
+        ),
       ),
     );
   }
@@ -757,6 +761,81 @@ void main() {
     );
   });
 
+  testWidgets(
+    'retapping a grouped split-view row opens its newly unread target',
+    (tester) async {
+      final firstReply = FeedItem(
+        id: 'grouped-reply-1',
+        kind: 9,
+        pubkey: 'bob_pk',
+        content: 'First grouped reply',
+        createdAt: now,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', 'grouped-root', '', 'root'],
+          ['e', 'grouped-root', '', 'reply'],
+        ],
+        category: 'activity',
+      );
+      final secondReply = FeedItem(
+        id: 'grouped-reply-2',
+        kind: 9,
+        pubkey: 'bob_pk',
+        content: 'Second grouped reply',
+        createdAt: now + 1,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', 'grouped-root', '', 'root'],
+          ['e', 'grouped-root', '', 'reply'],
+        ],
+        category: 'activity',
+      );
+      final notifier = _MutableActivityNotifier(
+        HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [firstReply],
+          agentActivity: const [],
+        ),
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(activityNotifier: () => notifier, splitView: true),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('inbox-row-grouped-reply-1')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+            .initialMessageId,
+        'grouped-reply-1',
+      );
+      notifier.replace(
+        HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [secondReply, firstReply],
+          agentActivity: const [],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('inbox-row-grouped-reply-2')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+            .initialMessageId,
+        'grouped-reply-2',
+      );
+    },
+  );
+
   testWidgets('thread filter matches grouped thread replies', (tester) async {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
@@ -998,6 +1077,20 @@ class _FakeActivityNotifier extends ActivityNotifier {
 
   @override
   Future<HomeFeedResponse> build() async => _feed;
+}
+
+class _MutableActivityNotifier extends ActivityNotifier {
+  _MutableActivityNotifier(this._feed);
+
+  HomeFeedResponse _feed;
+
+  @override
+  Future<HomeFeedResponse> build() async => _feed;
+
+  void replace(HomeFeedResponse feed) {
+    _feed = feed;
+    state = AsyncData(feed);
+  }
 }
 
 class _PendingActivityNotifier extends ActivityNotifier {
