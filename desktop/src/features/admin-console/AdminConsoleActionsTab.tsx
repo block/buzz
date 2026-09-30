@@ -9,12 +9,26 @@
  * mints a fresh NIP-98 signature per attempt and refuses the send if the
  * active relay or signer moved. The panel remounts this tab on an identity or
  * origin change, which drops any frozen intent.
+ *
+ * The community defaults to the active relay's host (read-only, with a
+ * Change escape hatch), and members are picked by name on that relay or by a
+ * pasted npub/hex key anywhere.
  */
 
-import { useRef, useState } from "react";
+import { useDeferredValue, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/shared/ui/button";
+import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  useUserProfileQuery,
+  useUserSearchQuery,
+} from "@/features/profile/hooks";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { getRelayWsUrl } from "@/shared/api/tauri";
+import type { UserSearchResult } from "@/shared/api/types";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
+import { truncateNpub } from "@/shared/lib/pubkey";
+import { Button } from "@/shared/ui/button";
 import {
   directAdminAction,
   type AdminDirectAction,
@@ -24,6 +38,7 @@ import {
   adminErrorCode,
   adminErrorMessage,
   preserveRequestIdOnError,
+  useAsyncLoad,
 } from "./AdminConsolePanelHelpers";
 import { reasonAudienceCopy } from "./AdminConsoleReportsTab";
 
@@ -46,18 +61,52 @@ function directErrorMessage(e: unknown): string {
   }
 }
 
+/**
+ * Normalize a community host the way the relay's `normalize_host` does:
+ * lowercase, no default port, no trailing root dot.
+ */
+function normalizeCommunityHost(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/:(443|80)$/, "")
+    .replace(/\.$/, "");
+}
+
+/**
+ * The community a relay URL serves is its `Host`: the URL's authority, with
+ * the default port already dropped for `ws`/`wss`. Null when unparseable.
+ */
+export function communityHostFromRelayUrl(relayUrl: string): string | null {
+  try {
+    return normalizeCommunityHost(new URL(relayUrl).host) || null;
+  } catch {
+    return null;
+  }
+}
+
+function memberLabel(user: UserSearchResult): string {
+  return (
+    user.displayName?.trim() ||
+    user.nip05Handle?.trim() ||
+    truncateNpub(user.pubkey)
+  );
+}
+
 /** Client-side checks; the relay re-validates everything. */
 function validate(
   action: AdminDirectAction,
   host: string,
   target: string,
+  member: UserSearchResult | null,
   secs: string,
 ): string | null {
   if (!host.trim()) return "Enter the community host.";
-  if (!HEX64.test(target.trim())) {
-    return action === "delete"
-      ? "Event id must be 64 lowercase hex characters."
-      : "Member pubkey must be 64 lowercase hex characters.";
+  if (action === "delete" && !HEX64.test(target.trim())) {
+    return "Event id must be 64 lowercase hex characters.";
+  }
+  if (action !== "delete" && !member) {
+    return "Choose a member: search by name, or paste an npub or hex key.";
   }
   if (
     action === "timeout" &&
@@ -79,8 +128,13 @@ export function ActionsTab({
   pubkey: string;
 }) {
   const [action, setAction] = useState<AdminDirectAction>("ban");
-  const [host, setHost] = useState("");
+  const { activeCommunity } = useCommunities();
+  /** Operator-typed host; null while following the active community. */
+  const [hostOverride, setHostOverride] = useState<string | null>(null);
   const [target, setTarget] = useState("");
+  const [member, setMember] = useState<UserSearchResult | null>(null);
+  /** Display-only name for the frozen target; never sent. */
+  const [frozenName, setFrozenName] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [secs, setSecs] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -89,22 +143,52 @@ export function ActionsTab({
   const [submitting, setSubmitting] = useState(false);
   const inFlight = useRef(false);
 
+  // Host of the active relay: the default target community. Reloads when the
+  // desktop switches communities.
+  const activeHostState = useAsyncLoad(
+    async () => communityHostFromRelayUrl(await getRelayWsUrl()),
+    [activeCommunity?.relayUrl ?? ""],
+    0,
+  );
+  const activeHost =
+    activeHostState.status === "ok" ? activeHostState.data : null;
+
+  const editingHost = hostOverride !== null || !activeHost;
+  const host = hostOverride ?? activeHost ?? "";
+  // Name search queries the active relay, so it only finds members there.
+  const onActiveCommunity =
+    activeHost !== null && normalizeCommunityHost(host) === activeHost;
+
   const handleReview = async () => {
     if (frozen || inFlight.current) return;
-    const invalid = validate(action, host, target, secs);
+    const invalid = validate(action, host, target, member, secs);
     setError(invalid);
     if (invalid) return;
     inFlight.current = true;
     setSubmitting(true);
     try {
       const expectedRelay = await getRelayWsUrl();
+      // Following the active community: derive the host from the very relay
+      // URL being frozen, so the two can never disagree.
+      const communityHost =
+        hostOverride?.trim() ?? communityHostFromRelayUrl(expectedRelay);
+      if (!communityHost) {
+        setError("Enter the community host.");
+        return;
+      }
+      const isMember = action !== "delete" && member;
+      setFrozenName(
+        isMember && (member.displayName || member.nip05Handle)
+          ? memberLabel(member)
+          : null,
+      );
       setFrozen({
         origin,
         expectedRelay,
         expectedPubkey: pubkey,
-        communityHost: host.trim(),
+        communityHost,
         action,
-        target: target.trim(),
+        target: isMember ? member.pubkey : target.trim(),
         requestId: crypto.randomUUID(),
         reason: reason.trim() || undefined,
         expirationSecs: action === "timeout" ? Number(secs) : undefined,
@@ -131,6 +215,7 @@ export function ActionsTab({
         toast.success(`${ACTION_LABELS[frozen.action]}: done`);
         setFrozen(null);
         setTarget("");
+        setMember(null);
         setReason("");
       }
     } catch (e) {
@@ -151,8 +236,17 @@ export function ActionsTab({
   };
 
   const locked = frozen !== null || submitting || !canMutate;
-  const targetHint =
-    action === "delete" ? "Event id (hex)" : "Member pubkey (hex)";
+  // A pasted key has no name yet; look it up where search would find it.
+  const confirmProfile = useUserProfileQuery(
+    frozen &&
+      frozen.action !== "delete" &&
+      !frozenName &&
+      frozen.communityHost === activeHost
+      ? frozen.target
+      : undefined,
+  );
+  const confirmName =
+    frozenName ?? confirmProfile.data?.displayName?.trim() ?? null;
   const input = (
     name: string,
     value: string,
@@ -189,8 +283,44 @@ export function ActionsTab({
           </Button>
         ))}
       </div>
-      {input("host", host, setHost, "Community host (e.g. team.example.com)")}
-      {input("target", target, setTarget, targetHint, "font-mono")}
+      {editingHost ? (
+        input(
+          "host",
+          host,
+          setHostOverride,
+          "Community host (e.g. team.example.com)",
+        )
+      ) : (
+        <p
+          className="flex items-center gap-2 text-xs"
+          data-testid="direct-host"
+        >
+          <span>
+            Community: <code>{host}</code>
+          </span>
+          <Button
+            className="h-auto p-0 text-xs"
+            data-testid="direct-host-change"
+            disabled={locked}
+            onClick={() => setHostOverride(host)}
+            size="sm"
+            type="button"
+            variant="link"
+          >
+            Change
+          </Button>
+        </p>
+      )}
+      {action === "delete" ? (
+        input("target", target, setTarget, "Event id (hex)", "font-mono")
+      ) : (
+        <MemberPicker
+          disabled={locked}
+          member={member}
+          onChange={setMember}
+          searchEnabled={onActiveCommunity}
+        />
+      )}
       {action === "timeout" &&
         input("duration", secs, setSecs, "Duration (seconds)", "", "number")}
       {input("reason", reason, setReason, "Reason (optional)")}
@@ -219,8 +349,20 @@ export function ActionsTab({
           data-testid="direct-confirm"
         >
           <p>
-            {ACTION_LABELS[frozen.action]} <code>{frozen.target}</code> in{" "}
-            <code>{frozen.communityHost}</code>
+            {ACTION_LABELS[frozen.action]}{" "}
+            {frozen.action === "delete" ? (
+              <code>{frozen.target}</code>
+            ) : (
+              <span data-testid="direct-confirm-member">
+                {confirmName ? `${confirmName} ` : ""}
+                <code>
+                  {confirmName
+                    ? `(${truncateNpub(frozen.target)})`
+                    : truncateNpub(frozen.target)}
+                </code>
+              </span>
+            )}{" "}
+            in <code>{frozen.communityHost}</code>
             {frozen.expirationSecs ? ` for ${frozen.expirationSecs}s` : ""}?
           </p>
           <p data-testid="direct-confirm-reason">
@@ -263,6 +405,116 @@ export function ActionsTab({
         >
           Review
         </Button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Pick a ban/timeout target: search names on the active relay, or paste an
+ * npub or hex key. Mirrors the Add Member dialog's picker.
+ */
+function MemberPicker({
+  disabled,
+  member,
+  onChange,
+  searchEnabled,
+}: {
+  disabled: boolean;
+  member: UserSearchResult | null;
+  onChange: (member: UserSearchResult | null) => void;
+  /** Off when the target community is not the active relay's. */
+  searchEnabled: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const deferred = useDeferredValue(query.trim());
+  const parsed = parsePubkeyInput(deferred);
+  const search = useUserSearchQuery(deferred, {
+    enabled: searchEnabled && deferred.length > 0 && parsed === null,
+    limit: 8,
+  });
+  const results: UserSearchResult[] = parsed
+    ? [
+        {
+          pubkey: parsed,
+          displayName: null,
+          avatarUrl: null,
+          nip05Handle: null,
+          ownerPubkey: null,
+          isAgent: false,
+        },
+      ]
+    : searchEnabled
+      ? (search.data ?? [])
+      : [];
+
+  if (member) {
+    return (
+      <div data-testid="direct-member-selected">
+        <SelectedRecipientChip
+          disabled={disabled}
+          inspectable={false}
+          label={memberLabel(member)}
+          onRemove={() => onChange(null)}
+          poofOnRemove={false}
+          testIds={{ chip: "direct-member-remove" }}
+          user={member}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <input
+        className="w-full rounded-md border border-border/60 bg-background px-2 py-1 text-xs"
+        data-testid="direct-member-input"
+        disabled={disabled}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder={
+          searchEnabled
+            ? "Search by name, or paste an npub or hex key"
+            : "npub or hex key"
+        }
+        value={query}
+      />
+      {!searchEnabled && (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="direct-member-search-hint"
+        >
+          Name search only works in the community you're connected to.
+        </p>
+      )}
+      {results.length > 0 && (
+        <div className="rounded-md border border-border/60" role="listbox">
+          {results.map((user) => (
+            <button
+              className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-muted/50"
+              data-testid={`direct-member-result-${user.pubkey}`}
+              key={user.pubkey}
+              onClick={() => {
+                onChange(user);
+                setQuery("");
+              }}
+              role="option"
+              type="button"
+            >
+              <ProfileAvatar
+                avatarUrl={user.avatarUrl}
+                className="h-6 w-6 text-2xs shadow-none"
+                iconClassName="h-3 w-3"
+                label={memberLabel(user)}
+                shape={user.isAgent ? "squircle" : "circle"}
+              />
+              <span className="min-w-0 flex-1 truncate">
+                {memberLabel(user)}
+              </span>
+              {parsed && (
+                <span className="text-muted-foreground">public key</span>
+              )}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
