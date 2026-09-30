@@ -845,11 +845,7 @@ pub(crate) async fn check_channel_write(
     ch_id: Uuid,
 ) -> Result<(), String> {
     check_token_channel_access(auth, ch_id)?;
-    let channel = state
-        .db
-        .get_channel_for_event_write(tenant.community(), ch_id)
-        .await
-        .ok();
+    let channel = load_channel_for_write(tenant, state, ch_id).await?;
     check_channel_membership(
         tenant,
         state,
@@ -862,6 +858,25 @@ pub(crate) async fn check_channel_write(
         return Err("invalid: channel is archived".into());
     }
     Ok(())
+}
+
+/// Load the channel row for the write gates. A missing row is `Ok(None)`, and
+/// callers keep their missing-row behavior. Any other lookup error is returned
+/// so the write is denied instead of silently skipping the archive check.
+async fn load_channel_for_write(
+    tenant: &TenantContext,
+    state: &AppState,
+    ch_id: Uuid,
+) -> Result<Option<buzz_db::channel::ChannelRecord>, String> {
+    match state
+        .db
+        .get_channel_for_event_write(tenant.community(), ch_id)
+        .await
+    {
+        Ok(channel) => Ok(Some(channel)),
+        Err(buzz_db::DbError::ChannelNotFound(_)) => Ok(None),
+        Err(e) => Err(format!("error: database error: {e}")),
+    }
 }
 
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
@@ -2638,11 +2653,9 @@ async fn ingest_event_inner(
     // it later in this request); each gate keeps its existing missing-row
     // behavior.
     let channel_row = match channel_id {
-        Some(ch_id) => state
-            .db
-            .get_channel_for_event_write(tenant.community(), ch_id)
+        Some(ch_id) => load_channel_for_write(tenant, state, ch_id)
             .await
-            .ok(),
+            .map_err(IngestError::Internal)?,
         None => None,
     };
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
@@ -3516,6 +3529,36 @@ mod postgres_tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// A channel lookup failure must deny the write. Before, the error became
+    /// "no row", which skipped the archive check while a cached membership
+    /// still authorized the write.
+    #[tokio::test]
+    async fn check_channel_write_denies_when_channel_lookup_fails() {
+        let state = crate::state::tests::test_state_with_database_url(
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+        let tenant = TenantContext::resolved(community, "archive.test");
+        let keys = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        state.membership_cache.insert(
+            (community, channel_id, keys.public_key().to_bytes().to_vec()),
+            true,
+        );
+        let auth = IngestAuth::Nip42 {
+            pubkey: keys.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+
+        let result = check_channel_write(&tenant, &state, &auth, channel_id).await;
+
+        let err = result.expect_err("a failed channel lookup must deny the write");
+        assert!(err.starts_with("error: database error"), "{err}");
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
