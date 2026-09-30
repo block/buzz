@@ -4,6 +4,10 @@ import {
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
 } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
+import {
+  setShowAgentThinking,
+  useShowAgentThinking,
+} from "@/features/messages/lib/showAgentThinkingPreference";
 import { Switch } from "@/shared/ui/switch";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
@@ -16,6 +20,7 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 export function AgentsSettingsPanel() {
   const automaticallyMentionAgents = useKeepMentionedAgentsPinned();
+  const showAgentThinking = useShowAgentThinking();
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
@@ -50,6 +55,28 @@ export function AgentsSettingsPanel() {
               checked={automaticallyMentionAgents}
               id="settings-automatic-agent-mentions-switch"
               onCheckedChange={setKeepMentionedAgentsPinned}
+            />
+          </SettingsOptionRow>
+          <SettingsOptionRow data-testid="settings-show-agent-thinking">
+            <div className="min-w-0">
+              <label
+                className="font-medium text-foreground"
+                htmlFor="settings-show-agent-thinking-switch"
+              >
+                Show agent thinking
+              </label>
+              <p
+                className="mt-0.5 text-sm text-muted-foreground/70"
+                data-settings-subcopy
+              >
+                Duration, tokens, and thinking under each agent reply
+              </p>
+            </div>
+            <Switch
+              aria-label="Show agent thinking"
+              checked={showAgentThinking}
+              id="settings-show-agent-thinking-switch"
+              onCheckedChange={setShowAgentThinking}
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>

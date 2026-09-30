@@ -18,6 +18,7 @@ fn row(id: &str, agent: &str, session: &str, seq: u64, reported_at: i64) -> Agen
         reported_at: Some(reported_at),
         session_id: Some(session.to_string()),
         turn_seq: Some(seq),
+        turn_id: None,
         harness: None,
         model: None,
         delta_reliable: Some(true),
@@ -450,6 +451,7 @@ fn window_probe_keys_skips_rows_without_session_or_seq() {
     let r = AgentMetricIndexRow {
         session_id: None,
         turn_seq: None,
+        turn_id: None,
         ..row("e1", "agent1", "s1", 5, 0)
     };
     let keys = window_probe_keys(&[r]);

@@ -17,6 +17,7 @@ fn row(id: &str, agent: &str, session: &str, seq: u64, reported_at: i64) -> Agen
         reported_at: Some(reported_at),
         session_id: Some(session.to_string()),
         turn_seq: Some(seq),
+        turn_id: None,
         harness: None,
         model: None,
         delta_reliable: Some(true),

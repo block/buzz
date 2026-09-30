@@ -508,6 +508,53 @@ export async function readUnindexedObserverRows(): Promise<
  * validation, backfill-before-read, and the accounting ladder — this is a
  * thin typed wrapper with no client-side logic.
  */
+// ── Per-turn metric near a reply timestamp (per-message chrome) ──────────────
+
+export type AgentTurnMetricNearRequest = {
+  agentPubkey: string;
+  /** Unix seconds (reply `created_at`). */
+  aroundSec: number;
+  /**
+   * Half-window seconds for the time fallback only. Backend clamps to
+   * 15..900 (default 180). Exact session+turn / unique turn id ignores this.
+   */
+  windowSec?: number;
+  /** Observer/harness session id when known (exact join with turnId). */
+  sessionId?: string | null;
+  /** Observer/harness turn id when known. */
+  turnId?: string | null;
+};
+
+export type AgentTurnMetricNear = {
+  id: string;
+  reportedAt: number;
+  sessionId: string | null;
+  turnId: string | null;
+  turnSeq: string | null;
+  model: string | null;
+  harness: string | null;
+  turnInputTokens: string | null;
+  turnOutputTokens: string | null;
+  turnTotalTokens: string | null;
+  turnCostUsd: number | null;
+  deltaSec: number;
+  /** `exact` = session+turn / unique turn id; `time` = tight high-confidence window. */
+  matchKind: "exact" | "time" | string;
+};
+
+/**
+ * Archived NIP-AM turn metric for one agent reply.
+ * Prefers exact `(sessionId, turnId)` (or unique `turnId`); else a tight
+ * time window. Returns null when the match is ambiguous.
+ */
+export async function getAgentTurnMetricNear(
+  request: AgentTurnMetricNearRequest,
+): Promise<AgentTurnMetricNear | null> {
+  return invokeTauri<AgentTurnMetricNear | null>("get_agent_turn_metric_near", {
+    request,
+  });
+}
+
 export async function getAgentUsageSeries(
   request: AgentUsageSeriesRequest,
 ): Promise<AgentUsageSeries> {

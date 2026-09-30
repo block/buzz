@@ -46,6 +46,11 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
 import { MessageActionBar } from "./MessageActionBar";
+import {
+  AgentMessageTurnChromeRoot,
+  AgentMessageTurnFooterChrome,
+} from "./AgentMessageTurnChrome";
+import { useShowAgentThinking } from "@/features/messages/lib/showAgentThinkingPreference";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { toast } from "sonner";
@@ -53,7 +58,7 @@ import { MessageAgentOwner } from "./MessageAgentOwner";
 import {
   MessageAuthorText,
   MessageHeaderRow,
-  MessageMetaSegments,
+  MessageMetaSeparator,
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
@@ -194,6 +199,7 @@ export const MessageRow = React.memo(
             }
           }
         : undefined;
+    const showAgentThinking = useShowAgentThinking();
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
     );
@@ -558,9 +564,13 @@ export const MessageRow = React.memo(
     );
 
     const authorNode = message.pubkey ? (
-      <MessageAuthorText hoverUnderline>{message.author}</MessageAuthorText>
+      <MessageAuthorText hoverUnderline nowrap>
+        {message.author}
+      </MessageAuthorText>
     ) : (
-      <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
+      <MessageAuthorText as="h3" nowrap>
+        {message.author}
+      </MessageAuthorText>
     );
     const agentOwnerNode = message.isAgent ? (
       <MessageAgentOwner
@@ -659,27 +669,39 @@ export const MessageRow = React.memo(
     const headerNode = isDisplayedAsContinuation ? null : (
       // pe reserves the measured action-rail footprint (0px until measured) so
       // header content ends before the rail's left edge in every rail state.
+      // Clean header: Name · managed by · time (turn chips live under the body).
       <MessageHeaderRow className="pe-[var(--message-action-rail-width,0px)]">
-        {message.pubkey ? (
-          <MessageAuthorWithIndicators
-            authorName={message.author}
-            ownerPubkey={message.ownerPubkey}
-            pubkey={message.pubkey}
-            role={profilePopoverRole}
-          >
-            {authorNode}
-          </MessageAuthorWithIndicators>
-        ) : (
-          authorNode
-        )}
-        {/* Author is not a segment: "Alice 9:53 AM" needs no divider. */}
-        <MessageMetaSegments
-          segments={[
-            { key: "owner", node: agentOwnerNode },
-            { key: "timestamp", node: inlineMetadataNode },
-            { key: "persona", node: personaNode },
-          ]}
-        />
+        <span
+          className="inline-flex min-w-0 flex-nowrap items-baseline gap-x-1.5"
+          data-testid="message-header-primary"
+        >
+          {message.pubkey ? (
+            <MessageAuthorWithIndicators
+              authorName={message.author}
+              ownerPubkey={message.ownerPubkey}
+              pubkey={message.pubkey}
+              role={profilePopoverRole}
+            >
+              {authorNode}
+            </MessageAuthorWithIndicators>
+          ) : (
+            authorNode
+          )}
+          {agentOwnerNode ? (
+            <>
+              <MessageMetaSeparator />
+              {agentOwnerNode}
+            </>
+          ) : null}
+          <MessageMetaSeparator />
+          {inlineMetadataNode}
+          {personaNode ? (
+            <>
+              <MessageMetaSeparator />
+              {personaNode}
+            </>
+          ) : null}
+        </span>
       </MessageHeaderRow>
     );
     const bodyContainerClass = isDisplayedAsContinuation
@@ -690,6 +712,9 @@ export const MessageRow = React.memo(
       <>
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
+        {showAgentThinking && message.isAgent && !message.pending ? (
+          <AgentMessageTurnFooterChrome />
+        ) : null}
         {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}
@@ -921,20 +946,60 @@ export const MessageRow = React.memo(
             <>
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col">
-                {headerNode}
-                <div className={bodyContainerClass} data-testid="message-body">
-                  {messageBodyNode}
-                </div>
+                {showAgentThinking && message.isAgent && !message.pending ? (
+                  <AgentMessageTurnChromeRoot
+                    channelId={channelId}
+                    message={message}
+                  >
+                    {headerNode}
+                    <div
+                      className={bodyContainerClass}
+                      data-testid="message-body"
+                    >
+                      {messageBodyNode}
+                    </div>
+                  </AgentMessageTurnChromeRoot>
+                ) : (
+                  <>
+                    {headerNode}
+                    <div
+                      className={bodyContainerClass}
+                      data-testid="message-body"
+                    >
+                      {messageBodyNode}
+                    </div>
+                  </>
+                )}
               </div>
             </>
           ) : (
             <>
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col">
-                {headerNode}
-                <div className={bodyContainerClass} data-testid="message-body">
-                  {messageBodyNode}
-                </div>
+                {showAgentThinking && message.isAgent && !message.pending ? (
+                  <AgentMessageTurnChromeRoot
+                    channelId={channelId}
+                    message={message}
+                  >
+                    {headerNode}
+                    <div
+                      className={bodyContainerClass}
+                      data-testid="message-body"
+                    >
+                      {messageBodyNode}
+                    </div>
+                  </AgentMessageTurnChromeRoot>
+                ) : (
+                  <>
+                    {headerNode}
+                    <div
+                      className={bodyContainerClass}
+                      data-testid="message-body"
+                    >
+                      {messageBodyNode}
+                    </div>
+                  </>
+                )}
               </div>
             </>
           )}
@@ -946,6 +1011,7 @@ export const MessageRow = React.memo(
     // from parent create new refs every render — including them defeats memo.
   },
   (prev, next) =>
+    prev.channelId === next.channelId &&
     prev.message.id === next.message.id &&
     prev.message.pubkey === next.message.pubkey &&
     prev.message.body === next.message.body &&

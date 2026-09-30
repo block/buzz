@@ -588,6 +588,24 @@ export function extractContentText(value: unknown): string {
   return extractBlockText(value);
 }
 
+/**
+ * Text for ACP ContentChunk-shaped session updates.
+ * Standard shape is `content: { type, text }`. OpenClaw ledger replay emits
+ * top-level `text` (and thinking blocks may surface as `thinking`).
+ */
+export function extractSessionUpdateText(
+  update: Record<string, unknown>,
+): string {
+  const fromContent = extractContentText(update.content);
+  if (fromContent.trim()) return fromContent;
+  const topLevel =
+    asString(update.text) ??
+    asString(update.thinking) ??
+    asString(update.reasoning);
+  if (topLevel?.trim()) return topLevel;
+  return "";
+}
+
 export function extractBlockText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(extractBlockText).join("\n");

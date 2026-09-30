@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   extractPromptText,
+  extractSessionUpdateText,
   extractToolIdentity,
   parsePromptText,
   parseSystemPromptSections,
@@ -1062,4 +1063,32 @@ test("parseSystemPromptSections (modern) does NOT split on bracket [Team Instruc
       body: "Persona preamble.\n[Team Instructions]\nThis is persona text, not a real team block.",
     },
   ]);
+});
+
+test("extractSessionUpdateText prefers content.text", () => {
+  assert.equal(
+    extractSessionUpdateText({
+      content: { type: "text", text: "from-content" },
+      text: "top-level",
+    }),
+    "from-content",
+  );
+});
+
+test("extractSessionUpdateText falls back to OpenClaw replay top-level text", () => {
+  assert.equal(
+    extractSessionUpdateText({
+      sessionUpdate: "agent_thought_chunk",
+      text: "thinking-replay",
+    }),
+    "thinking-replay",
+  );
+});
+
+test("extractSessionUpdateText falls back to thinking/reasoning fields", () => {
+  assert.equal(
+    extractSessionUpdateText({ thinking: "deliberation" }),
+    "deliberation",
+  );
+  assert.equal(extractSessionUpdateText({ reasoning: "why" }), "why");
 });

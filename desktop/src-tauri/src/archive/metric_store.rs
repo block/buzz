@@ -80,6 +80,7 @@ pub(super) struct AgentMetricIndexRow {
     pub reported_at: Option<i64>,
     pub session_id: Option<String>,
     pub turn_seq: Option<u64>,
+    pub turn_id: Option<String>,
     pub harness: Option<String>,
     pub model: Option<String>,
     pub delta_reliable: Option<bool>,
@@ -143,6 +144,18 @@ impl AgentMetricIndexRow {
 
         let turn = payload.turn.as_ref();
         let cumulative = payload.cumulative.as_ref();
+        let turn_input = turn.and_then(|t| t.input_tokens);
+        let turn_output = turn.and_then(|t| t.output_tokens);
+        // Publishers (e.g. claude-agent-acp) often omit totalTokens; derive so
+        // per-message chips still show an accurate count.
+        let turn_total = turn
+            .and_then(|t| t.total_tokens)
+            .or_else(|| match (turn_input, turn_output) {
+                (Some(i), Some(o)) => Some(i.saturating_add(o)),
+                (Some(i), None) => Some(i),
+                (None, Some(o)) => Some(o),
+                (None, None) => None,
+            });
 
         Self {
             id: id.to_string(),
@@ -152,12 +165,13 @@ impl AgentMetricIndexRow {
             reported_at,
             session_id: payload.session_id,
             turn_seq: payload.turn_seq,
+            turn_id: payload.turn_id,
             harness: Some(payload.harness),
             model: payload.model,
             delta_reliable: Some(payload.delta_reliable),
-            turn_input_tokens: turn.and_then(|t| t.input_tokens),
-            turn_output_tokens: turn.and_then(|t| t.output_tokens),
-            turn_total_tokens: turn.and_then(|t| t.total_tokens),
+            turn_input_tokens: turn_input,
+            turn_output_tokens: turn_output,
+            turn_total_tokens: turn_total,
             turn_cost_usd: turn.and_then(|t| t.cost_usd),
             turn_cache_read_tokens: turn.and_then(|t| t.cache_read_tokens),
             turn_cache_write_tokens: turn.and_then(|t| t.cache_write_tokens),
@@ -189,6 +203,7 @@ impl AgentMetricIndexRow {
             reported_at: None,
             session_id: None,
             turn_seq: None,
+            turn_id: None,
             harness: None,
             model: None,
             delta_reliable: None,
@@ -245,6 +260,7 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
         reported_at: row.get("reported_at")?,
         session_id: row.get("session_id")?,
         turn_seq: turn_seq_text.as_deref().and_then(decode_u64_sortable),
+        turn_id: row.get("turn_id")?,
         harness: row.get("harness")?,
         model: row.get("model")?,
         delta_reliable: delta_reliable_int.map(|v| v != 0),
@@ -274,7 +290,7 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
 }
 
 const ROW_COLUMNS: &str = "id, agent_pubkey, event_created_at, archived_at, reported_at, \
-     session_id, turn_seq, harness, model, delta_reliable, turn_input_tokens, turn_output_tokens, \
+     session_id, turn_seq, turn_id, harness, model, delta_reliable, turn_input_tokens, turn_output_tokens, \
      turn_total_tokens, turn_cost_usd, turn_cache_read_tokens, turn_cache_write_tokens, \
      cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, \
      cumulative_cost_usd, cumulative_cache_read_tokens, cumulative_cache_write_tokens, \
@@ -313,7 +329,7 @@ pub(super) fn insert_metric_index_row(
         .execute(
             "INSERT INTO agent_metric_index
                  (identity_pubkey, relay_url, id, agent_pubkey, event_created_at,
-                  archived_at, reported_at, session_id, turn_seq, harness, model,
+                  archived_at, reported_at, session_id, turn_seq, turn_id, harness, model,
                   delta_reliable, turn_input_tokens, turn_output_tokens,
                   turn_total_tokens, turn_cost_usd, turn_cache_read_tokens,
                   turn_cache_write_tokens, cumulative_input_tokens, cumulative_output_tokens,
@@ -322,7 +338,7 @@ pub(super) fn insert_metric_index_row(
                   pricing_authority, pricing_model, pricing_cache_class, parse_status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
+                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
              ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
             params![
                 identity_pubkey,
@@ -334,6 +350,7 @@ pub(super) fn insert_metric_index_row(
                 row.reported_at,
                 row.session_id,
                 turn_seq,
+                row.turn_id,
                 row.harness,
                 row.model,
                 delta_reliable,
@@ -482,6 +499,70 @@ pub(super) fn repair_orphaned_metric_index_rows(
 /// Load all VALID rows whose `reported_at` falls in `[start, end)`, optionally
 /// filtered to one agent author. This is the exact set of rows that may ever
 /// be counted into a bucket (A11 step 1).
+
+/// Exact lookup by harness turn identity `(agent, session_id, turn_id)`.
+pub(super) fn load_by_session_turn_id(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    agent_pubkey: &str,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<AgentMetricIndexRow>, String> {
+    let sql = format!(
+        "SELECT {ROW_COLUMNS} FROM agent_metric_index
+         WHERE identity_pubkey = ?1 AND relay_url = ?2 AND parse_status = 'valid'
+           AND agent_pubkey = ?3 AND session_id = ?4 AND turn_id = ?5
+         ORDER BY reported_at DESC, id DESC
+         LIMIT 1"
+    );
+    let mut stmt = stmt_prepare(conn, &sql)?;
+    let mut rows = stmt
+        .query_map(
+            params![identity_pubkey, relay_url, agent_pubkey, session_id, turn_id],
+            row_from_sql,
+        )
+        .map_err(|e| format!("query load_by_session_turn_id: {e}"))?;
+    match rows.next() {
+        Some(Ok(row)) => Ok(Some(row)),
+        Some(Err(e)) => Err(format!("read load_by_session_turn_id row: {e}")),
+        None => Ok(None),
+    }
+}
+
+/// Unique lookup by harness `turn_id` alone when session is unknown.
+/// Returns `Some` only when exactly one VALID row matches for the agent
+/// (avoids mis-attribution across sessions that reused a turn id).
+pub(super) fn load_by_turn_id_unique(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    agent_pubkey: &str,
+    turn_id: &str,
+) -> Result<Option<AgentMetricIndexRow>, String> {
+    let sql = format!(
+        "SELECT {ROW_COLUMNS} FROM agent_metric_index
+         WHERE identity_pubkey = ?1 AND relay_url = ?2 AND parse_status = 'valid'
+           AND agent_pubkey = ?3 AND turn_id = ?4
+         ORDER BY reported_at DESC, id DESC
+         LIMIT 2"
+    );
+    let mut stmt = stmt_prepare(conn, &sql)?;
+    let rows: Vec<AgentMetricIndexRow> = stmt
+        .query_map(
+            params![identity_pubkey, relay_url, agent_pubkey, turn_id],
+            row_from_sql,
+        )
+        .map_err(|e| format!("query load_by_turn_id_unique: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read load_by_turn_id_unique row: {e}"))?;
+    if rows.len() == 1 {
+        Ok(Some(rows.into_iter().next().expect("len checked")))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(super) fn load_window_valid_rows(
     conn: &Connection,
     identity_pubkey: &str,

@@ -18,12 +18,15 @@ use rusqlite::{params, Connection};
 /// Ordering: M2 (column additions) runs before M1 (index rebuild) so that
 /// the M1 rebuild, which calls `insert_metric_index_row`, always operates
 /// against a schema that includes the cache-read columns. M4 (`archive_meta`
-/// + scope-age index) runs last; it is independent of M1–M3.
+/// + scope-age index) is independent of M1–M3. M5 (`turn_id` on the metric
+/// index + rebuild) runs last so exact per-reply joins can use harness turn
+/// identity after the other schema pieces exist.
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
     migrate_add_harness_to_metric_index(conn)?;
-    migrate_add_archive_meta(conn)
+    migrate_add_archive_meta(conn)?;
+    migrate_add_turn_id_to_metric_index(conn)
 }
 
 /// M1: add `harness TEXT` column to `agent_metric_index` and rebuild index
@@ -132,7 +135,7 @@ fn migrate_add_harness_to_metric_index(conn: &Connection) -> Result<(), String> 
 ///
 /// Unlike `metric_store::backfill_agent_metric_index`, this function runs
 /// entirely inside the caller's transaction — no nested `BEGIN`/`COMMIT`.
-/// It is used exclusively by M1 where the outer transaction provides atomicity.
+/// It is used by M1/M5 where the outer transaction provides atomicity.
 fn rebuild_metric_index_in_tx(
     conn: &Connection,
     identity_pubkey: &str,
@@ -457,3 +460,93 @@ fn archive_meta_migration_applied(conn: &Connection) -> Result<bool, String> {
         .map_err(|e| format!("migration M4: guard check: {e}"))?;
     Ok(count > 0)
 }
+
+/// M5: add `turn_id TEXT` to `agent_metric_index` and rebuild index rows so
+/// pre-existing metrics gain harness turn identity from archived 44200 JSON.
+///
+/// Exact per-reply token chips join on `(session_id, turn_id)` (or unique
+/// `turn_id`). Without this column the UI can only fuzzy-match by time and
+/// may show the wrong turn's tokens.
+///
+/// Same atomic pattern as M1: ADD COLUMN (if absent) → DELETE index → rebuild
+/// from `archived_events` → write migration marker, all in one transaction.
+fn migrate_add_turn_id_to_metric_index(conn: &Connection) -> Result<(), String> {
+    let already_run: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_turn_id_to_metric_index'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("migration M5: guard check: {e}"))?
+        > 0;
+
+    if already_run {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("migration M5: begin transaction: {e}"))?;
+
+    let turn_id_exists: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(agent_metric_index)")
+            .map_err(|e| format!("migration M5: PRAGMA table_info prepare: {e}"))?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("migration M5: PRAGMA table_info query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M5: PRAGMA table_info read: {e}"))?;
+        names.iter().any(|n| n == "turn_id")
+    };
+    if !turn_id_exists {
+        tx.execute_batch("ALTER TABLE agent_metric_index ADD COLUMN turn_id TEXT")
+            .map_err(|e| format!("migration M5: ALTER TABLE failed: {e}"))?;
+    }
+
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_agent_metric_turn_id
+         ON agent_metric_index (identity_pubkey, relay_url, agent_pubkey, session_id, turn_id, id)",
+    )
+    .map_err(|e| format!("migration M5: CREATE INDEX failed: {e}"))?;
+
+    let scopes: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT DISTINCT identity_pubkey, relay_url
+                 FROM archived_events
+                 WHERE kind = 44200",
+            )
+            .map_err(|e| format!("migration M5: prepare scope query: {e}"))?;
+        let result = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("migration M5: query scopes: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M5: read scopes: {e}"))?;
+        result
+    };
+
+    if !scopes.is_empty() {
+        tx.execute_batch("DELETE FROM agent_metric_index")
+            .map_err(|e| format!("migration M5: delete index rows: {e}"))?;
+        for (identity, relay) in &scopes {
+            rebuild_metric_index_in_tx(&tx, identity, relay)?;
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    tx.execute(
+        "INSERT OR IGNORE INTO archive_migrations (name, applied_at) \
+         VALUES ('add_turn_id_to_metric_index', ?1)",
+        params![now],
+    )
+    .map_err(|e| format!("migration M5: record marker: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("migration M5: commit: {e}"))?;
+    Ok(())
+}
+

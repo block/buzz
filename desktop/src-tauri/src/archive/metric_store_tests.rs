@@ -157,6 +157,7 @@ fn insert_metric_index_row_round_trips_u64_max() {
     let conn = in_memory();
     let row = AgentMetricIndexRow {
         turn_seq: Some(u64::MAX),
+        turn_id: None,
         turn_input_tokens: Some(u64::MAX),
         cumulative_input_tokens: Some(u64::MAX),
         ..AgentMetricIndexRow::from_payload(

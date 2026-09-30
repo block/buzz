@@ -1333,7 +1333,13 @@ fn observer_chunk_key_and_text(
         return None;
     }
 
-    let text = update.get("content")?.get("text")?.as_str()?.to_string();
+    let text = update
+        .get("content")
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .or_else(|| update.get("text").and_then(|t| t.as_str()))
+        .or_else(|| update.get("thinking").and_then(|t| t.as_str()))?
+        .to_string();
     let message_id = update
         .get("messageId")
         .and_then(|value| value.as_str())
@@ -3310,7 +3316,7 @@ async fn run_harness(
                                             .await
                                             .map(|info| info.channel_type);
                                         config::resolve_dynamic_channel_filter(
-                                            &config,
+                                            config,
                                             ch,
                                             &rules,
                                             channel_type.as_deref(),

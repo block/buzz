@@ -4,6 +4,7 @@ import { Activity, BarChart3, Loader2 } from "lucide-react";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useAgentUsageSeries } from "@/features/agents/useAgentUsageSeries";
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
   Sheet,
   SheetContent,
@@ -36,6 +37,29 @@ function formatCost(value: number | null, incomplete: boolean): string {
     return incomplete ? "unknown" : "—";
   }
   return `$${value.toFixed(value < 0.01 ? 4 : 2)}`;
+}
+
+function bucketTotalTokens(usage: {
+  totalTokens: { value: string | null; incomplete: boolean };
+  inputTokens: { value: string | null; incomplete: boolean };
+  outputTokens: { value: string | null; incomplete: boolean };
+}): string | null {
+  if (usage.totalTokens.value !== null) return usage.totalTokens.value;
+  const input = usage.inputTokens;
+  const output = usage.outputTokens;
+  if (
+    input.value === null ||
+    output.value === null ||
+    input.incomplete ||
+    output.incomplete
+  ) {
+    return null;
+  }
+  try {
+    return (BigInt(input.value) + BigInt(output.value)).toString();
+  } catch {
+    return null;
+  }
 }
 
 function bucketLabel(startSec: number): string {
@@ -80,7 +104,7 @@ export function AgentUsageActivityPanel({
   const maxTotal = React.useMemo(() => {
     let max = 0n;
     for (const bucket of buckets) {
-      const raw = bucket.usage.totalTokens.value;
+      const raw = bucketTotalTokens(bucket.usage);
       if (raw === null) continue;
       try {
         const n = BigInt(raw);
@@ -163,7 +187,7 @@ export function AgentUsageActivityPanel({
                 </div>
 
                 <div
-                  className="flex h-24 items-end gap-1 rounded-lg border border-border/60 bg-muted/20 px-2 py-2"
+                  className="flex h-24 gap-1 rounded-lg border border-border/60 bg-muted/20 px-2 py-2"
                   data-testid="agent-usage-bucket-chart"
                 >
                   {buckets.length === 0 ? (
@@ -173,7 +197,7 @@ export function AgentUsageActivityPanel({
                   ) : (
                     buckets.map((bucket) => {
                       let heightPct = 4;
-                      const raw = bucket.usage.totalTokens.value;
+                      const raw = bucketTotalTokens(bucket.usage);
                       if (raw !== null) {
                         try {
                           const n = BigInt(raw);
@@ -185,29 +209,71 @@ export function AgentUsageActivityPanel({
                           heightPct = 4;
                         }
                       }
+                      const incomplete =
+                        bucket.usage.totalTokens.incomplete ||
+                        (bucket.usage.totalTokens.value === null &&
+                          (bucket.usage.inputTokens.incomplete ||
+                            bucket.usage.outputTokens.incomplete));
+                      const tokensLabel = formatTokenField(raw, incomplete);
+                      const costLabel = formatCost(
+                        bucket.usage.estimatedCostUsd.value,
+                        bucket.usage.estimatedCostUsd.incomplete,
+                      );
+                      const dayLabel = bucketLabel(bucket.start);
                       return (
-                        <div
-                          className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1"
-                          key={`${bucket.start}-${bucket.end}`}
-                          title={`${bucketLabel(bucket.start)}: ${formatTokenField(raw, bucket.usage.totalTokens.incomplete)} tokens`}
-                        >
-                          <div
-                            className={cn(
-                              "w-full rounded-sm bg-primary/70",
-                              bucket.reportCount === 0 && "bg-muted-foreground/20",
+                        <Tooltip key={`${bucket.start}-${bucket.end}`}>
+                          <TooltipTrigger asChild>
+                            <button
+                              className="flex h-full min-w-0 flex-1 cursor-default flex-col items-center gap-1 border-0 bg-transparent p-0"
+                              data-testid={`agent-usage-bucket-${bucket.start}`}
+                              type="button"
+                            >
+                              <div className="flex w-full min-h-0 flex-1 items-end">
+                                <div
+                                  className={cn(
+                                    "w-full rounded-sm bg-primary/70",
+                                    bucket.reportCount === 0 &&
+                                      "bg-muted-foreground/20",
+                                  )}
+                                  style={{ height: `${heightPct}%` }}
+                                />
+                              </div>
+                              <span className="truncate text-3xs text-muted-foreground">
+                                {dayLabel}
+                              </span>
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent
+                            className="max-w-xs text-xs"
+                            data-testid={`agent-usage-bucket-tooltip-${bucket.start}`}
+                            side="top"
+                          >
+                            <p className="font-semibold">{dayLabel}</p>
+                            <p className="mt-1 text-secondary-foreground">
+                              {tokensLabel} tokens
+                            </p>
+                            <p className="text-secondary-foreground">
+                              Est. cost {costLabel}
+                            </p>
+                            {bucket.reportCount > 0 ? (
+                              <p className="mt-1 text-2xs text-muted-foreground">
+                                {bucket.reportCount} report
+                                {bucket.reportCount === 1 ? "" : "s"}
+                              </p>
+                            ) : (
+                              <p className="mt-1 text-2xs text-muted-foreground">
+                                No reports this day
+                              </p>
                             )}
-                            style={{ height: `${heightPct}%` }}
-                          />
-                          <span className="truncate text-3xs text-muted-foreground">
-                            {bucketLabel(bucket.start)}
-                          </span>
-                        </div>
+                          </TooltipContent>
+                        </Tooltip>
                       );
                     })
                   )}
                 </div>
 
-                {series?.coverage.hasUnknownUsage || agentRow?.hasUnknownUsage ? (
+                {series?.coverage.hasUnknownUsage ||
+                agentRow?.hasUnknownUsage ? (
                   <p className="text-2xs text-muted-foreground">
                     Some turns reported incomplete token counts — totals may
                     understate real usage.

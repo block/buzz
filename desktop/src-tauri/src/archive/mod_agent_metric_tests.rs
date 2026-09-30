@@ -409,3 +409,148 @@ fn test_agent_usage_series_backfills_unindexed_row_before_reading() {
         "backfill must index the pre-existing row before the window read"
     );
 }
+
+/// Exact `(session_id, turn_id)` join must beat a nearer-in-time wrong turn.
+#[test]
+fn test_agent_turn_metric_near_prefers_exact_session_turn() {
+    let conn = in_memory();
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let owner_pk = owner_keys.public_key().to_hex();
+    let agent_pk = agent_keys.public_key().to_hex();
+    let relay_url = "wss://relay.example";
+
+    // Wrong turn: reported closer to `around_sec`, huge token count.
+    let wrong = metric_store::AgentMetricIndexRow {
+        id: "wrong".into(),
+        agent_pubkey: agent_pk.clone(),
+        event_created_at: 1_000,
+        archived_at: 1_000,
+        reported_at: Some(1_000),
+        session_id: Some("sess-other".into()),
+        turn_seq: Some(9),
+        turn_id: Some("turn-other".into()),
+        harness: Some("test".into()),
+        model: Some("m".into()),
+        delta_reliable: Some(true),
+        turn_input_tokens: Some(200_000),
+        turn_output_tokens: Some(30_000),
+        turn_total_tokens: Some(230_000),
+        turn_cost_usd: None,
+        turn_cache_read_tokens: None,
+        turn_cache_write_tokens: None,
+        cumulative_input_tokens: None,
+        cumulative_output_tokens: None,
+        cumulative_total_tokens: None,
+        cumulative_cost_usd: None,
+        cumulative_cache_read_tokens: None,
+        cumulative_cache_write_tokens: None,
+        pricing_authority: None,
+        pricing_model: None,
+        pricing_cache_class: None,
+        parse_status: metric_store::ParseStatus::Valid,
+    };
+    // Correct turn: farther in time, exact ids.
+    let correct = metric_store::AgentMetricIndexRow {
+        id: "correct".into(),
+        reported_at: Some(1_030),
+        event_created_at: 1_030,
+        archived_at: 1_030,
+        session_id: Some("sess-1".into()),
+        turn_seq: Some(1),
+        turn_id: Some("turn-1".into()),
+        turn_input_tokens: Some(100),
+        turn_output_tokens: Some(50),
+        turn_total_tokens: Some(150),
+        ..wrong.clone()
+    };
+    metric_store::insert_metric_index_row(&conn, &owner_pk, relay_url, &wrong).unwrap();
+    metric_store::insert_metric_index_row(&conn, &owner_pk, relay_url, &correct).unwrap();
+
+    let hit = agent_turn_metric_near(
+        &conn,
+        &owner_pk,
+        relay_url,
+        &AgentTurnMetricNearRequest {
+            agent_pubkey: agent_pk.clone(),
+            around_sec: 1_000,
+            window_sec: Some(45),
+            session_id: Some("sess-1".into()),
+            turn_id: Some("turn-1".into()),
+        },
+    )
+    .unwrap()
+    .expect("exact join must hit");
+    assert_eq!(hit.id, "correct");
+    assert_eq!(hit.match_kind, "exact");
+    assert_eq!(hit.turn_total_tokens.as_deref(), Some("150"));
+}
+
+/// Ambiguous time-only candidates still return the nearest metric (show chips).
+#[test]
+fn test_agent_turn_metric_near_picks_nearest_when_ambiguous() {
+    let conn = in_memory();
+    let owner_pk = Keys::generate().public_key().to_hex();
+    let agent_pk = Keys::generate().public_key().to_hex();
+    let relay_url = "wss://relay.example";
+
+    let a = metric_store::AgentMetricIndexRow {
+        id: "a".into(),
+        agent_pubkey: agent_pk.clone(),
+        event_created_at: 1_000,
+        archived_at: 1_000,
+        reported_at: Some(1_000),
+        session_id: Some("s1".into()),
+        turn_seq: Some(1),
+        turn_id: Some("t1".into()),
+        harness: None,
+        model: None,
+        delta_reliable: Some(true),
+        turn_input_tokens: Some(10),
+        turn_output_tokens: Some(10),
+        turn_total_tokens: Some(20),
+        turn_cost_usd: None,
+        turn_cache_read_tokens: None,
+        turn_cache_write_tokens: None,
+        cumulative_input_tokens: None,
+        cumulative_output_tokens: None,
+        cumulative_total_tokens: None,
+        cumulative_cost_usd: None,
+        cumulative_cache_read_tokens: None,
+        cumulative_cache_write_tokens: None,
+        pricing_authority: None,
+        pricing_model: None,
+        pricing_cache_class: None,
+        parse_status: metric_store::ParseStatus::Valid,
+    };
+    let b = metric_store::AgentMetricIndexRow {
+        id: "b".into(),
+        reported_at: Some(1_005),
+        event_created_at: 1_005,
+        archived_at: 1_005,
+        session_id: Some("s2".into()),
+        turn_seq: Some(2),
+        turn_id: Some("t2".into()),
+        turn_total_tokens: Some(230_000),
+        ..a.clone()
+    };
+    metric_store::insert_metric_index_row(&conn, &owner_pk, relay_url, &a).unwrap();
+    metric_store::insert_metric_index_row(&conn, &owner_pk, relay_url, &b).unwrap();
+
+    let hit = agent_turn_metric_near(
+        &conn,
+        &owner_pk,
+        relay_url,
+        &AgentTurnMetricNearRequest {
+            agent_pubkey: agent_pk,
+            around_sec: 1_002,
+            window_sec: Some(45),
+            session_id: None,
+            turn_id: None,
+        },
+    )
+    .unwrap()
+    .expect("nearest metric must still show for reply chrome");
+    assert_eq!(hit.id, "a");
+    assert_eq!(hit.match_kind, "time");
+}

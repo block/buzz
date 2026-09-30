@@ -865,3 +865,112 @@ fn migration_m3_reopen_twice_is_idempotent() {
         "M3: marker must still be present after idempotent second open"
     );
 }
+
+
+/// Pre-M5 DBs lack `turn_id`. SCHEMA must not CREATE INDEX on that column
+/// before M5 runs — that used to fail `open_archive_db` and hide all token chips.
+#[test]
+fn m5_open_archive_db_upgrades_pre_turn_id_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("archive.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE archive_migrations (
+                name TEXT PRIMARY KEY NOT NULL,
+                applied_at INTEGER NOT NULL
+             );
+             CREATE TABLE agent_metric_index (
+                identity_pubkey TEXT NOT NULL,
+                relay_url TEXT NOT NULL,
+                id TEXT NOT NULL,
+                agent_pubkey TEXT NOT NULL,
+                event_created_at INTEGER NOT NULL,
+                archived_at INTEGER NOT NULL,
+                reported_at INTEGER,
+                session_id TEXT,
+                turn_seq TEXT,
+                model TEXT,
+                delta_reliable INTEGER,
+                turn_input_tokens TEXT,
+                turn_output_tokens TEXT,
+                turn_total_tokens TEXT,
+                turn_cost_usd REAL,
+                turn_cache_read_tokens TEXT,
+                turn_cache_write_tokens TEXT,
+                cumulative_input_tokens TEXT,
+                cumulative_output_tokens TEXT,
+                cumulative_total_tokens TEXT,
+                cumulative_cost_usd REAL,
+                cumulative_cache_read_tokens TEXT,
+                cumulative_cache_write_tokens TEXT,
+                pricing_authority TEXT,
+                pricing_model TEXT,
+                pricing_cache_class TEXT,
+                harness TEXT,
+                parse_status TEXT NOT NULL,
+                PRIMARY KEY (identity_pubkey, relay_url, id)
+             );
+             CREATE TABLE archived_events (
+                identity_pubkey TEXT NOT NULL,
+                relay_url TEXT NOT NULL,
+                id TEXT NOT NULL,
+                kind INTEGER NOT NULL,
+                pubkey TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                raw_json TEXT NOT NULL,
+                archived_at INTEGER NOT NULL,
+                PRIMARY KEY (identity_pubkey, relay_url, id)
+             );",
+        )
+        .unwrap();
+        // Prior migrations already applied so only M5 is pending.
+        for name in [
+            "add_cache_read_tokens",
+            "add_cache_write_and_pricing",
+            "add_harness_to_metric_index",
+            "add_archive_meta",
+        ] {
+            conn.execute(
+                "INSERT INTO archive_migrations (name, applied_at) VALUES (?1, 1)",
+                rusqlite::params![name],
+            )
+            .unwrap();
+        }
+        let payload = r#"{"harness":"test","model":null,"sessionId":"sess-a","turnId":"turn-a","turnSeq":1,"timestamp":"2026-07-01T00:00:00Z","turn":{"inputTokens":10,"outputTokens":5,"totalTokens":null},"deltaReliable":true}"#;
+        conn.execute(
+            "INSERT INTO archived_events
+             (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
+             VALUES ('id', 'relay', 'eid1', 44200, 'agent1', 100, ?1, 200)",
+            rusqlite::params![payload],
+        )
+        .unwrap();
+    }
+
+    let conn = open_archive_db(&db_path).expect("open_archive_db must succeed on pre-M5 DB");
+    let has_m5: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_turn_id_to_metric_index'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_m5, 1);
+    let turn_id: Option<String> = conn
+        .query_row(
+            "SELECT turn_id FROM agent_metric_index WHERE id = 'eid1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(turn_id.as_deref(), Some("turn-a"));
+    let total: Option<String> = conn
+        .query_row(
+            "SELECT turn_total_tokens FROM agent_metric_index WHERE id = 'eid1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // derived 10+5 encoded sortable — just assert non-null
+    assert!(total.is_some(), "total must be derived from in+out when publisher omits it");
+}

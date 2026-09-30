@@ -55,21 +55,37 @@ export function MessageMetaSeparator() {
  * slots. Each divider is grouped with the segment it precedes so the two wrap
  * together — as loose siblings in a flex-wrap row, a divider can end up alone
  * at the start of the second line.
+ *
+ * For agent replies, prefer a dedicated primary cluster (name · time · chips)
+ * with `shrink-0`, and put "managed by" in a following sibling so it wraps to
+ * a second row before time/chips do.
  */
 export function MessageMetaSegments({
   segments,
 }: {
-  segments: ReadonlyArray<{ key: string; node: React.ReactNode }>;
+  segments: ReadonlyArray<{
+    key: string;
+    node: React.ReactNode;
+    /**
+     * Keep this segment on one line and do not let flex shrink it below its
+     * content width. Used for compact chip groups that must sit beside the
+     * timestamp when space remains.
+     */
+    nowrap?: boolean;
+  }>;
 }) {
   const present = segments.filter((slot) => Boolean(slot.node));
   return (
     <>
-      {present.map(({ key, node }, index) =>
+      {present.map(({ key, node, nowrap }, index) =>
         index === 0 ? (
           <React.Fragment key={key}>{node}</React.Fragment>
         ) : (
           <span
-            className="inline-flex min-w-0 items-baseline gap-x-1.5"
+            className={cn(
+              "inline-flex items-baseline gap-x-1.5",
+              nowrap ? "shrink-0" : "min-w-0",
+            )}
             key={key}
           >
             <MessageMetaSeparator />
@@ -86,6 +102,11 @@ type MessageAuthorTextProps = {
   children: React.ReactNode;
   className?: string;
   hoverUnderline?: boolean;
+  /**
+   * Keep the full display name on one line without ellipsis. Used on the
+   * message header primary row so chips do not crush the name into "F…".
+   */
+  nowrap?: boolean;
 };
 
 export function MessageAuthorText({
@@ -93,11 +114,13 @@ export function MessageAuthorText({
   children,
   className,
   hoverUnderline = false,
+  nowrap = false,
 }: MessageAuthorTextProps) {
   return (
     <Component
       className={cn(
-        "truncate text-message font-semibold leading-message-author tracking-normal",
+        "text-message font-semibold leading-message-author tracking-normal",
+        nowrap ? "whitespace-nowrap" : "truncate",
         hoverUnderline && "hover:underline",
         className,
       )}
@@ -129,10 +152,10 @@ export function MessageAuthorIdentity({
           pubkey={pubkey}
           role={role}
           botIdenticonValue={displayName}
-          triggerClassName="min-w-0 max-w-full"
+          triggerClassName="shrink-0"
         >
           <button
-            className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className="whitespace-nowrap rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             type="button"
           >
             {children}

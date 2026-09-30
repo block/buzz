@@ -2284,6 +2284,55 @@ pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<Str
     None
 }
 
+/// Extract the `configId`/`id` for OpenClaw's `reasoning_level` option.
+///
+/// OpenClaw defaults this to `"off"`, which suppresses `agent_thought_chunk`
+/// emission even when the model produces thinking blocks. Buzz enables
+/// `"stream"` (else `"on"`) so Thought chrome receives chain-of-thought.
+pub fn extract_reasoning_level_config_id(result: &serde_json::Value) -> Option<String> {
+    for opt in result.get("configOptions")?.as_array()? {
+        let id = opt
+            .get("configId")
+            .or_else(|| opt.get("id"))
+            .and_then(|v| v.as_str());
+        if id == Some("reasoning_level") {
+            return id.map(str::to_string);
+        }
+    }
+    None
+}
+
+/// Prefer `"stream"` when advertised, else `"on"`, else `None` if the option
+/// is missing or only allows `"off"`.
+pub fn preferred_reasoning_level_value(result: &serde_json::Value) -> Option<&'static str> {
+    let opts = result.get("configOptions")?.as_array()?;
+    let option = opts.iter().find(|opt| {
+        opt.get("configId")
+            .or_else(|| opt.get("id"))
+            .and_then(|v| v.as_str())
+            == Some("reasoning_level")
+    })?;
+    let values: Vec<&str> = option
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| entry.get("value").and_then(|v| v.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if values.contains(&"stream") {
+        Some("stream")
+    } else if values.contains(&"on") {
+        Some("on")
+    } else if values.is_empty() {
+        // OpenClaw advertises off/on/stream; empty options still accept set.
+        Some("stream")
+    } else {
+        None
+    }
+}
+
 /// Match a desired model ID against a fresh `session/new` response.
 ///
 /// Returns the correct ACP method to call, or `None` if no match.
@@ -2893,6 +2942,43 @@ mod tests {
             ]
         });
         assert!(super::extract_thought_level_config_id(&result).is_none());
+    }
+
+    #[test]
+    fn extract_reasoning_level_config_id_finds_openclaw_option() {
+        let result = serde_json::json!({
+            "configOptions": [
+                {
+                    "id": "reasoning_level",
+                    "name": "Reasoning stream",
+                    "currentValue": "off",
+                    "options": [
+                        { "value": "off" },
+                        { "value": "on" },
+                        { "value": "stream" }
+                    ]
+                }
+            ]
+        });
+        assert_eq!(
+            super::extract_reasoning_level_config_id(&result).as_deref(),
+            Some("reasoning_level")
+        );
+        assert_eq!(
+            super::preferred_reasoning_level_value(&result),
+            Some("stream")
+        );
+    }
+
+    #[test]
+    fn preferred_reasoning_level_falls_back_to_on() {
+        let result = serde_json::json!({
+            "configOptions": [{
+                "configId": "reasoning_level",
+                "options": [{ "value": "off" }, { "value": "on" }]
+            }]
+        });
+        assert_eq!(super::preferred_reasoning_level_value(&result), Some("on"));
     }
 
     #[test]

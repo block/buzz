@@ -15,15 +15,19 @@ import { HULA_RESERVED_COMMUNITY_BOT_PUBKEYS } from "@/features/agents/lib/reser
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
 import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
-import { truncateNpub } from "@/shared/lib/pubkey";
+import { canonicalNpub, truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
-import { useUserSearchQuery } from "@/features/profile/hooks";
+import {
+  useUserSearchQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
 import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
   type AgentRunLocation,
   agentAccessWarningText,
@@ -189,8 +193,19 @@ export function CreateAgentRespondToField({
     [pasteText],
   );
 
+  // Remember display names for people added via search so chips keep showing
+  // the name even before / after batch profile resolution.
+  const [knownNames, setKnownNames] = React.useState<Record<string, string>>(
+    {},
+  );
+
   function handleAddSearchResult(user: UserSearchResult) {
     setBulkAllowOption(null);
+    const label = formatSearchUserName(user);
+    setKnownNames((prev) => ({
+      ...prev,
+      [user.pubkey.toLowerCase()]: label,
+    }));
     onAllowlistChange(mergeAllowlist(allowlist, [user.pubkey]));
     setQuery("");
   }
@@ -327,9 +342,12 @@ export function CreateAgentRespondToField({
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
+          communityBots={communityBotsQuery.data ?? []}
           deferredQuery={deferredQuery}
           disabled={disabled}
           isDirectEntryOpen={isDirectEntryOpen}
+          knownNames={knownNames}
+          localAgents={managedAgentsQuery.data ?? []}
           onAddFromPaste={handleAddFromPaste}
           onAddRawPubkey={handleAddRawPubkey}
           onAddSearchResult={handleAddSearchResult}
@@ -359,9 +377,12 @@ export function CreateAgentRespondToField({
 
 function AllowlistPicker({
   allowlist,
+  communityBots,
   deferredQuery,
   disabled,
   isDirectEntryOpen,
+  knownNames,
+  localAgents,
   onAddFromPaste,
   onAddRawPubkey,
   onAddSearchResult,
@@ -380,9 +401,12 @@ function AllowlistPicker({
   variant = "default",
 }: {
   allowlist: string[];
+  communityBots: Array<{ pubkey: string; name: string }>;
   deferredQuery: string;
   disabled?: boolean;
   isDirectEntryOpen: boolean;
+  knownNames: Record<string, string>;
+  localAgents: Array<{ pubkey: string; name: string }>;
   onAddFromPaste: () => void;
   onAddRawPubkey: (pubkey: string) => void;
   onAddSearchResult: (user: UserSearchResult) => void;
@@ -401,6 +425,43 @@ function AllowlistPicker({
   variant?: "default" | "persona";
 }) {
   const isPersona = variant === "persona";
+
+  const profilesQuery = useUsersBatchQuery(allowlist, {
+    enabled: allowlist.length > 0,
+  });
+
+  const labelByPubkey = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const agent of localAgents) {
+      const key = agent.pubkey.toLowerCase();
+      if (agent.name?.trim()) map.set(key, agent.name.trim());
+    }
+    for (const bot of communityBots) {
+      const key = bot.pubkey.toLowerCase();
+      if (bot.name?.trim()) map.set(key, bot.name.trim());
+    }
+    const profiles = profilesQuery.data?.profiles ?? {};
+    for (const [pk, summary] of Object.entries(profiles)) {
+      const name =
+        summary.displayName?.trim() ||
+        summary.name?.trim() ||
+        summary.nip05Handle?.trim() ||
+        null;
+      if (name) map.set(pk.toLowerCase(), name);
+    }
+    for (const [pk, name] of Object.entries(knownNames)) {
+      if (name?.trim()) map.set(pk.toLowerCase(), name.trim());
+    }
+    return map;
+  }, [localAgents, communityBots, profilesQuery.data, knownNames]);
+
+  function chipLabel(pubkey: string): string {
+    return labelByPubkey.get(pubkey.toLowerCase()) ?? truncateNpub(pubkey);
+  }
+
+  function chipTooltip(pubkey: string): string {
+    return canonicalNpub(pubkey) ?? pubkey;
+  }
 
   // Detect if the query is a pubkey (npub or hex) not already in the list;
   // direct entry offers the canonical hex for storage.
@@ -453,29 +514,46 @@ function AllowlistPicker({
         </div>
         {allowlist.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
-            {allowlist.map((pubkey) => (
-              <div
-                className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
-                data-testid={`agent-respond-to-chip-${pubkey}`}
-                key={pubkey}
-              >
-                <UserAvatar
-                  avatarUrl={null}
-                  displayName={truncateNpub(pubkey)}
-                  size="xs"
-                />
-                <PubKey pubkey={pubkey} />
-                <button
-                  aria-label={`Remove ${truncateNpub(pubkey)}`}
-                  className="text-muted-foreground transition-colors hover:text-foreground"
-                  disabled={disabled}
-                  onClick={() => onRemove(pubkey)}
-                  type="button"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
+            {allowlist.map((pubkey) => {
+              const label = chipLabel(pubkey);
+              const tip = chipTooltip(pubkey);
+              const profile =
+                profilesQuery.data?.profiles?.[pubkey.toLowerCase()] ??
+                profilesQuery.data?.profiles?.[pubkey] ??
+                null;
+              return (
+                <Tooltip key={pubkey}>
+                  <TooltipTrigger asChild>
+                    <div
+                      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
+                      data-testid={`agent-respond-to-chip-${pubkey}`}
+                    >
+                      <UserAvatar
+                        avatarUrl={profile?.avatarUrl ?? null}
+                        displayName={label}
+                        pubkey={pubkey}
+                        size="xs"
+                      />
+                      <span className="max-w-[10rem] truncate font-medium text-foreground">
+                        {label}
+                      </span>
+                      <button
+                        aria-label={`Remove ${label}`}
+                        className="text-muted-foreground transition-colors hover:text-foreground"
+                        disabled={disabled}
+                        onClick={() => onRemove(pubkey)}
+                        type="button"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs break-all font-mono text-2xs">
+                    {tip}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
           </div>
         ) : null}
         {deferredQuery.length > 0 ? (

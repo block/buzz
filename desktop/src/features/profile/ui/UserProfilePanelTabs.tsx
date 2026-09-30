@@ -20,6 +20,7 @@ import {
 } from "@/features/agents/ui/RestartDiffBadge";
 import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { UsageAndActivityButton } from "@/features/agents/ui/AgentUsageActivityPanel";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import { resolveActivityChannelId } from "@/features/profile/lib/profileActivityCarousel";
 import {
@@ -278,23 +279,36 @@ export function ProfileInfoTabContent({
   return (
     <div className="space-y-4" data-testid="user-profile-info-sections">
       {showActivityIngress ? (
-        showLiveActivityEmbed && activityAgent ? (
-          <ProfileLiveActivityEmbed
-            activeTurns={activeTurns}
-            activityAgent={activityAgent}
-            channelIdToName={channelIdToName}
-            feedScope={feedScope}
-            onOpenActivity={onOpenActivity}
-          />
-        ) : (
-          <ProfileIngressRow
-            icon={Wrench}
-            label="Usage & activity"
-            onClick={() => onOpenActivity(null)}
-            testId={`user-profile-view-activity-${pubkey}`}
-            trailing="View"
-          />
-        )
+        <div className="space-y-2">
+          {showLiveActivityEmbed && activityAgent ? (
+            <ProfileLiveActivityEmbed
+              activeTurns={activeTurns}
+              activityAgent={activityAgent}
+              channelIdToName={channelIdToName}
+              feedScope={feedScope}
+              onOpenActivity={onOpenActivity}
+            />
+          ) : (
+            <ProfileIngressRow
+              icon={Wrench}
+              label="View activity"
+              onClick={() => onOpenActivity(null)}
+              testId={`user-profile-view-activity-${pubkey}`}
+              trailing="View"
+            />
+          )}
+          {pubkey ? (
+            <UsageAndActivityButton
+              agentName={managedAgent?.name ?? activityAgent?.name ?? null}
+              agentPubkey={pubkey}
+              className="w-full justify-start gap-2 border border-border/60 px-3 py-2 text-xs font-medium"
+              label="Usage & activity"
+              size="sm"
+              testId={`user-profile-usage-activity-${pubkey}`}
+              variant="ghost"
+            />
+          ) : null}
+        </div>
       ) : null}
       {hasInfoFields || showInstructionBlock ? (
         <ProfileSectionGroup testId="user-profile-info-section" title="Info">

@@ -932,6 +932,7 @@ pub fn run() {
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             archive::get_agent_usage_series,
+            archive::get_agent_turn_metric_near,
             archive::get_observer_retention_days,
             archive::set_observer_retention_days,
             archive::archive_size_stats,

@@ -30,9 +30,10 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, extract_thought_level_config_id,
-    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
+    extract_model_config_options, extract_model_state, extract_reasoning_level_config_id,
+    extract_thought_level_config_id, model_in_catalog, preferred_reasoning_level_value,
+    resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
+    StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -1756,6 +1757,12 @@ async fn create_session_and_apply_model(
     // the cached configOptions tell the truth about the running session.
     let effort_snapshot = post_switch_snapshot.as_ref().unwrap_or(&resp.raw);
     let effort_outcome = apply_startup_effort(agent, effort_snapshot, &resp.session_id).await?;
+    // OpenClaw (and any adapter advertising `reasoning_level`) defaults the
+    // stream to "off", which yields tool-only Thought chrome. Enable stream/on
+    // so agent_thought_chunk frames carry chain-of-thought like buzz-agent/Grok.
+    let reasoning_snapshot = post_switch_snapshot.as_ref().unwrap_or(&resp.raw);
+    let reasoning_outcome =
+        apply_startup_reasoning_stream(agent, reasoning_snapshot, &resp.session_id).await?;
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
@@ -1775,6 +1782,9 @@ async fn create_session_and_apply_model(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         if let Some(StartupEffortOutcome::Applied { config_id, value }) = &effort_outcome {
+            patch_config_option_current_value(&mut opts, config_id, value);
+        }
+        if let Some(StartupEffortOutcome::Applied { config_id, value }) = &reasoning_outcome {
             patch_config_option_current_value(&mut opts, config_id, value);
         }
         opts
@@ -2079,6 +2089,72 @@ async fn apply_startup_effort(
             tracing::error!(
                 target: "pool::effort",
                 "startup effort {value} via configId={config_id} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
+            );
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
+        }
+    }
+}
+
+/// Enable OpenClaw-style `reasoning_level` so thought chunks are emitted.
+///
+/// Returns `Ok(None)` when the adapter does not advertise the option.
+async fn apply_startup_reasoning_stream(
+    agent: &mut OwnedAgent,
+    session_new_result: &serde_json::Value,
+    session_id: &str,
+) -> Result<Option<StartupEffortOutcome>, AcpError> {
+    let Some(config_id) = extract_reasoning_level_config_id(session_new_result) else {
+        return Ok(None);
+    };
+    let Some(value) = preferred_reasoning_level_value(session_new_result) else {
+        tracing::info!(
+            target: "pool::reasoning",
+            "reasoning_level advertised but no usable on/stream value — leaving agent default"
+        );
+        return Ok(None);
+    };
+
+    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
+        agent
+            .acp
+            .session_set_config_option(session_id, &config_id, value)
+            .await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            tracing::info!(
+                target: "pool::reasoning",
+                "applied reasoning_level={value} via configId={config_id} on session {session_id}"
+            );
+            Ok(Some(StartupEffortOutcome::Applied {
+                config_id,
+                value: value.to_string(),
+            }))
+        }
+        Ok(Err(e @ AcpError::Io(_)))
+        | Ok(Err(e @ AcpError::WriteTimeout(_)))
+        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Protocol(_)))
+        | Ok(Err(e @ AcpError::AgentExited)) => {
+            tracing::error!(
+                target: "pool::reasoning",
+                "fatal error applying reasoning_level={value} via configId={config_id}: {e}"
+            );
+            Err(e)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "pool::reasoning",
+                "adapter rejected reasoning_level={value} via configId={config_id}: {e} — proceeding with agent default"
+            );
+            Ok(Some(StartupEffortOutcome::Rejected))
+        }
+        Err(_) => {
+            tracing::error!(
+                target: "pool::reasoning",
+                "reasoning_level={value} via configId={config_id} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
             Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }
