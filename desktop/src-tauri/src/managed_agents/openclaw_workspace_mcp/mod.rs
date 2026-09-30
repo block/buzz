@@ -33,6 +33,8 @@ The host already injects Hula-root `CLAUDE.md` at spawn. Whenever you **navigate
 
 **Primary skills source:** call MCP tools `skills_list` then `skills_get` on `openclaw-workspace` (exact gateway tool names). Do not treat local `~/.claude/skills` as the source of truth — the skill pack is under the OpenClaw workspace (`SKILL_ROOTS`).
 
+**Remote commands:** use MCP tool `exec` on `openclaw-workspace` (argv array only). Allowlisted: `npm test`, `npm run lint`, `npm run build`, `git status`, `git diff`, `git log`. Always pass `cwd` as a workspace-relative path under `Hula/` (or the focused package). Never run local Mac shell against `~/Documents/Hula`.
+
 If a skill reports a Mac cwd under `/Users` or `~/Documents/Hula`, treat that as failure and recover by re-targeting through `openclaw-workspace` MCP.
 ";
 
@@ -726,6 +728,8 @@ mod tests {
         assert!(text.contains("subdirectory") || text.contains("navigate"));
         assert!(text.contains("skills_list"));
         assert!(text.contains("skills_get"));
+        assert!(text.contains("`exec`"));
+        assert!(text.contains("npm test"));
         assert!(text.contains("openclaw-workspace"));
         assert!(text.contains("~/Documents/Hula") || text.contains("/Users/.../Hula"));
         // Forbids treating local Mac checkout as project root.
