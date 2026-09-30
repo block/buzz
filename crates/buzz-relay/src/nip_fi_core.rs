@@ -160,11 +160,16 @@ mod tests {
 
     #[test]
     fn transport_rejection_precedes_missing_verifier() {
-        let err = evaluate_attached_assertion(&headers("junk"), None).unwrap_err();
-        assert_eq!(
-            err,
-            AssertionRejection::Transport(DenialClass::EvidenceRejected)
-        );
+        // A comma-joined value is otherwise well-formed, so only the comma
+        // check separates it from the missing-verifier outcome.
+        for value in ["junk", "Bearer a.b.c,d.e.f"] {
+            let err = evaluate_attached_assertion(&headers(value), None).unwrap_err();
+            assert_eq!(
+                err,
+                AssertionRejection::Transport(DenialClass::EvidenceRejected),
+                "{value}"
+            );
+        }
     }
 
     #[test]

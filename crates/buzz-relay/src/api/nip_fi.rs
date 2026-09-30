@@ -2556,7 +2556,7 @@ mod route_integration_tests {
             ),
             (
                 "comma-joined value",
-                vec![HeaderValue::from_static("Bearer aaa.bbb.ccc, Bearer ddd")],
+                vec![HeaderValue::from_static("Bearer aaa.bbb.ccc,ddd.eee.fff")],
             ),
             (
                 "non-Bearer scheme",
@@ -2579,8 +2579,11 @@ mod route_integration_tests {
                 vec![HeaderValue::from_bytes(b"Bearer aaa\xc2\xa0bbb").unwrap()],
             ),
         ];
+        // A malformed body makes a dropped transport check observable: it
+        // would surface as 400 from body parsing, not the same 403 the
+        // verifier would give.
         for (why, values) in rejected {
-            let resp = send_raw(Arc::clone(&state), values, valid_body()).await;
+            let resp = send_raw(Arc::clone(&state), values, b"not json").await;
             assert_plain_denial(resp, StatusCode::FORBIDDEN, "evidence rejected\n", why).await;
         }
     }
