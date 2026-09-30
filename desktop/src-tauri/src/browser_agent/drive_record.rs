@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::drive_screen;
 use super::grant::{now_ms, BrowserAgentGrant, BrowserAgentMode};
+use super::viewport_gate;
 use super::BrowserAgentState;
 
 /// Snapshot cadence while recording (~4 fps).
@@ -291,6 +292,21 @@ async fn start_recording(
                 "ok": false,
                 "requestId": request.request_id,
                 "error": "recording already active for this browser",
+            }),
+        );
+        return;
+    }
+
+    if let Err(e) = viewport_gate::ensure_drive_viewport_usable(app, state, label).await {
+        push_record_event(
+            app,
+            state,
+            label,
+            "record_error",
+            json!({
+                "ok": false,
+                "requestId": request.request_id,
+                "error": e,
             }),
         );
         return;

@@ -19,11 +19,13 @@ import {
   markPlaygroundUpdate,
   notePlaygroundCard,
   subscribePlayground,
+  showPlaygroundSession,
   switchPlaygroundTab,
 } from "./sessions.ts";
 import { isAllowedPlaygroundUrl } from "./url.ts";
 import {
   rebindBrowserAgentGrantToTab,
+  subscribeBrowserAgentEnsureVisible,
   subscribeBrowserAgentSetViewport,
   subscribeBrowserAgentSwitchTab,
   syncBrowserAgentTabs,
@@ -73,6 +75,7 @@ export function usePlaygroundRuntime() {
   usePlaygroundUpdatePolling();
   usePlaygroundNewTabListener();
   usePlaygroundTabSwitchListener();
+  usePlaygroundEnsureVisibleListener();
   usePlaygroundViewportListener();
   usePlaygroundViewportSync();
 }
@@ -183,6 +186,34 @@ function usePlaygroundNewTabListener() {
 }
 
 
+
+/**
+ * Drive grant / Drive tools → Desktop emits browser-agent-ensure-visible.
+ * Mount the RHS/overlay Stage so the WKWebView is shown at a real size
+ * (hidden/parked views lay out ~0×0 and break Drive clicks/snapshots).
+ */
+function usePlaygroundEnsureVisibleListener() {
+  React.useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void subscribeBrowserAgentEnsureVisible((payload) => {
+      if (disposed) return;
+      const sid = payload.surfaceId?.trim();
+      if (!sid) return;
+      showPlaygroundSession(sid, { preferSidePanel: true });
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      stop = unlisten;
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+}
 
 /**
  * Agent MCP browser_set_viewport → Desktop emits browser-agent-set-viewport.

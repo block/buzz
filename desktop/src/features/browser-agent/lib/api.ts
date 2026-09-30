@@ -264,6 +264,22 @@ export function subscribeBrowserAgentSwitchTab(
   );
 }
 
+/** Drive grant / tools need a live Stage — show/unpark the playground card. */
+export function subscribeBrowserAgentEnsureVisible(
+  onRequest: (payload: {
+    surfaceId: string;
+    webviewLabel?: string;
+    reason?: string;
+  }) => void,
+): Promise<() => void> {
+  if (!native()) return Promise.resolve(() => undefined);
+  return listen<{
+    surfaceId: string;
+    webviewLabel?: string;
+    reason?: string;
+  }>("browser-agent-ensure-visible", (event) => onRequest(event.payload));
+}
+
 export type BrowserAgentViewportSyncInput = {
   surfaceId: string;
   mode: "desktop" | "responsive" | "mobile";

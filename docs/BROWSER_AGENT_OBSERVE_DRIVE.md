@@ -106,6 +106,13 @@ Persisted in-memory (and mirrored under app data for local agent tool poll):
 
 Rust type: `BrowserAgentGrant` (core fields). The grant **mirror** (`grant.json`) and `browser_observe_poll` also expose runtime `webviewHidden` / `parked` (same bool) when the WKWebView is `hide()`d. Cleared on webview dispose/close for that label (and when no sibling labels remain for the same `surfaceId`).
 
+### Hidden / parked viewport (Drive vs Observe)
+
+Parking the Playground card `hide()`s the WKWebView. Even when Desktop keeps the last full stage size (so Cold stays off), a hidden view often paints blank, times out on `takeSnapshot`, and can lay out near **0×0** (mobile reflow) so Drive clicks hit the wrong targets.
+
+- **Drive:** Desktop auto-unparks — emits `browser-agent-ensure-visible` (UI mounts Stage via `showPlaygroundSession`) and best-effort `show()`s the native webview with last full bounds — when a Drive grant is set and before Drive actions / Drive snapshots / recording. If the viewport is still hidden or smaller than ~64×64, tools return a **clear error** (posted as `drive_error` / snapshot `ok:false`) so the agent can tell the user to Open the browser card.
+- **Observe:** Event poll keeps working while parked (`webviewHidden` / `parked` remain true). DOM/screenshot `browser_snapshot` **refuses** with the same clear error and does **not** auto-unpark (background Observe is intentional).
+
 ## Chrome
 
 - Playground chrome (main overlay and playground pop-outs): Agent controls sit behind a **Bot** icon toggle next to Detach/Inspect (muted when Off; orange when Observe/Drive granted). Toggle expands a second chrome row with **Off | Observe | Drive**, status chip (`Observe · {AgentName}` / orange `Drive · {AgentName}`), and **Take control** / **Release control** when Drive (does not revoke). Default collapsed on load. Agent name comes from the managed-agent roster (not pubkey). Live Drive chrome also shows a short **activity** caption (from `drive` / `drive_error` / `drive_started` / `snapshot` observe events — Clicking… / Typing… / Pressing Enter / etc.). The strip **persists for the whole Drive turn**: captions update in place between tools; only after ~12–15s sustained idle (LLM think-time) does it show **Finished**, then fade/clear. Observe/Off and the Browsers list Bot panel omit the strip. **No Dispose on chrome** — destroy sessions via Browsers left-nav **Remove** (Confirm?/Cancel → `disposeBrowserSession`); programmatic dispose paths (grant clear / webview close) still work.

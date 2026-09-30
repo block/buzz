@@ -65,6 +65,44 @@ test("findNearestTurnIdByTime prefers turn with thinking content", () => {
   );
 });
 
+
+test("findNearestTurnIdByTime prefers short turn ending at reply over long prior turn", () => {
+  // Prior long turn emits a late tool beside the reply; old nearest-item
+  // scoring stole the join → 19:47 duration + wrong 44200 tokens.
+  const replySec = Date.parse("2026-09-30T08:44:00Z") / 1000;
+  const items = [
+    {
+      id: "old-start",
+      type: "thought",
+      text: "earlier",
+      timestamp: "2026-09-30T08:24:20Z",
+      turnId: "turn-long",
+    },
+    {
+      id: "old-late",
+      type: "tool",
+      title: "shell",
+      timestamp: "2026-09-30T08:43:58Z",
+      turnId: "turn-long",
+    },
+    {
+      id: "new-start",
+      type: "thought",
+      text: "now",
+      timestamp: "2026-09-30T08:43:05Z",
+      turnId: "turn-short",
+    },
+    {
+      id: "new-end",
+      type: "tool",
+      title: "reply",
+      timestamp: "2026-09-30T08:43:55Z",
+      turnId: "turn-short",
+    },
+  ];
+  assert.equal(findNearestTurnIdByTime(items, replySec), "turn-short");
+});
+
 test("collectThinkingContentItems keeps thought/tool and orphans in window", () => {
   const items = [
     {

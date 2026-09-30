@@ -6,6 +6,7 @@ pub mod drive_record;
 pub mod drive_screen;
 pub mod grant;
 pub mod observe;
+pub mod viewport_gate;
 
 use std::collections::HashSet;
 use std::fs::{create_dir_all, File};
@@ -155,7 +156,7 @@ pub fn set_webview_hidden(app: &AppHandle, state: &BrowserAgentState, label: &st
     }
 }
 
-fn webview_is_hidden(state: &BrowserAgentState, label: &str) -> bool {
+pub(crate) fn webview_is_hidden(state: &BrowserAgentState, label: &str) -> bool {
     state
         .webview_hidden
         .lock()
@@ -180,7 +181,7 @@ fn drive_lock_enabled(grant: &BrowserAgentGrant) -> bool {
     matches!(grant.mode, BrowserAgentMode::Drive) && !grant.user_has_control
 }
 
-fn playground_surface_id_from_label(label: &str) -> Option<String> {
+pub(crate) fn playground_surface_id_from_label(label: &str) -> Option<String> {
     let rest = label.strip_prefix("playground-")?;
     if let Some((sid, _)) = rest.split_once("--") {
         Some(sid.to_string())
@@ -366,6 +367,7 @@ pub async fn browser_agent_grant_set(
     mirror_grant(&root, Some(&grant), &label, webview_is_hidden(&state, &label));
     let drive = drive_lock_enabled(&grant);
     install_instrumentation(&app, &label, drive)?;
+    viewport_gate::maybe_ensure_visible_on_drive_grant(&app, &state, &grant);
     state.observe.push(
         &label,
         "grant",
@@ -748,6 +750,14 @@ async fn eval_drive_action(
             return r;
         }
     };
+
+    // Hidden/parked WKWebView lays out ~0×0 and breaks clicks/snapshots.
+    // Auto-unpark for Drive; refuse with a clear error if still unusable.
+    if let Err(e) = viewport_gate::ensure_drive_viewport_usable(app, state, label).await {
+        let r = error_result(&id, &kind, e);
+        record_drive_result(app, state, label, &r, Some(&action));
+        return r;
+    }
 
     if kind == "navigate" {
         let url = action.url.as_deref().unwrap_or("").trim();
@@ -1343,6 +1353,27 @@ async fn process_snapshot_request(
         return 0;
     };
     install_instrumentation(app, label, drive_lock_enabled(&grant)).ok();
+
+    // Drive: auto-unpark then require usable size. Observe: refuse without
+    // surprise-unparking (background Observe is intentional while parked).
+    let viewport_ok = if matches!(grant.mode, BrowserAgentMode::Drive) {
+        viewport_gate::ensure_drive_viewport_usable(app, state, label).await
+    } else {
+        viewport_gate::require_usable_viewport(app, state, label)
+    };
+    if let Err(e) = viewport_ok {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error": e,
+            "webviewHidden": webview_is_hidden(state, label),
+            "parked": webview_is_hidden(state, label),
+        });
+        state
+            .observe
+            .push(label, "snapshot", Some(payload.clone()), now_ms());
+        emit_observe(app, label, "snapshot", Some(payload));
+        return 1;
+    }
 
     let mut payload = serde_json::json!({
         "ok": false,

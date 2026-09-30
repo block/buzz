@@ -289,6 +289,48 @@ pub(crate) fn find_playground_webview_for_sid(
     None
 }
 
+/// Last full stage bounds remembered for `sid` (never keeper 64×64).
+pub(crate) fn last_usable_bounds_for_sid(
+    app: &AppHandle,
+    sid: &str,
+) -> Option<PlaygroundBounds> {
+    let manager = app.try_state::<PlaygroundWebviewManager>()?;
+    let sessions = manager.sessions.lock().ok()?;
+    sessions
+        .get(sid)
+        .and_then(|s| s.last_bounds.clone())
+        .filter(|b| !is_keeper_park_bounds(b) && bounds_are_usable(b))
+}
+
+/// Logical CSS size of a child webview (physical ÷ scale).
+pub(crate) fn webview_logical_size(webview: &Webview) -> Option<(f64, f64)> {
+    let scale = webview.window().scale_factor().unwrap_or(1.0).max(0.5);
+    let physical = webview.size().ok()?;
+    let w = physical.width as f64 / scale;
+    let h = physical.height as f64 / scale;
+    Some((w, h))
+}
+
+/// Best-effort: heal to last full bounds and `show()` a parked playground
+/// webview so Drive snapshot/click/record get a real viewport. Frontend still
+/// mounts PlaygroundStage via `browser-agent-ensure-visible`.
+pub(crate) fn ensure_playground_webview_shown(
+    app: &AppHandle,
+    label: &str,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview(label)
+        .ok_or_else(|| format!("webview {label} is not open"))?;
+    let sid = playground_sid_from_webview_label(label)
+        .ok_or_else(|| format!("webview {label} is not a playground label"))?;
+    let window_label = playground_parent_window_label(&webview);
+    if let Some(full) = last_usable_bounds_for_sid(app, &sid) {
+        apply_bounds(app, &sid, &window_label, &full)?;
+    }
+    webview.show().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn playground_parent_is(
     webview: &Webview,
     window_label: &str,

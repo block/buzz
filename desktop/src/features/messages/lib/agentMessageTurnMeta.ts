@@ -200,46 +200,71 @@ export function findTurnIdForPromptEvent(
 }
 
 /**
- * Prefer a turn that has thought/tool items near `replyCreatedAt`. Falls back
- * to any nearest turn. Rejects joins more than 10 minutes away.
+ * Prefer the turn that *ends* near `replyCreatedAt` and started most recently.
+ *
+ * Scoring by nearest *any* item let a long prior turn steal the join when it
+ * emitted a late tool/lifecycle frame beside the reply — chips then showed
+ * that turn's ~20m duration and its 44200 token total (local Opus 19:47 /
+ * 235.2k vs a 1–2m activity-feed turn).
+ *
+ * Rejects turns whose latest activity is more than 10 minutes from the reply.
  */
 export function findNearestTurnIdByTime(
   items: readonly TurnJoinTranscriptItem[],
   replyCreatedAt: number,
 ): string | null {
-  const scored = new Map<string, { delta: number; hasThinking: boolean }>();
+  type Score = {
+    startSec: number;
+    endSec: number;
+    hasThinking: boolean;
+  };
+  const scored = new Map<string, Score>();
   for (const item of items) {
     if (!item.turnId || !item.timestamp) continue;
     const ts = Date.parse(item.timestamp);
     if (!Number.isFinite(ts)) continue;
-    const delta = Math.abs(ts / 1000 - replyCreatedAt);
+    const sec = ts / 1000;
     const prev = scored.get(item.turnId);
     const hasThinking = isThinkingContentItem(item);
-    if (!prev || delta < prev.delta) {
+    if (!prev) {
       scored.set(item.turnId, {
-        delta,
-        hasThinking: hasThinking || Boolean(prev?.hasThinking),
+        startSec: sec,
+        endSec: sec,
+        hasThinking,
       });
-    } else if (hasThinking) {
-      scored.set(item.turnId, { ...prev, hasThinking: true });
+      continue;
     }
+    scored.set(item.turnId, {
+      startSec: Math.min(prev.startSec, sec),
+      endSec: Math.max(prev.endSec, sec),
+      hasThinking: prev.hasThinking || hasThinking,
+    });
   }
 
   let bestId: string | null = null;
-  let bestDelta = Number.POSITIVE_INFINITY;
+  let bestEndDelta = Number.POSITIVE_INFINITY;
+  let bestSpan = Number.POSITIVE_INFINITY;
   let bestHasThinking = false;
   for (const [turnId, score] of scored) {
-    if (score.delta > 600) continue;
-    // Prefer turns that actually carry thinking content.
-    if (score.hasThinking && !bestHasThinking) {
+    const endDelta = Math.abs(score.endSec - replyCreatedAt);
+    if (endDelta > 600) continue;
+    // Prefer turns that finished at/before the reply (not ones that only
+    // started long after — clock skew aside).
+    if (score.startSec - replyCreatedAt > 30) continue;
+    const span = Math.max(0, replyCreatedAt - score.startSec);
+    const betterThinking = score.hasThinking && !bestHasThinking;
+    const sameThinking = score.hasThinking === bestHasThinking;
+    // Among thinking turns (else any): shortest span first (the reply's own
+    // turn), then closer end to the reply as a tie-break.
+    if (
+      betterThinking ||
+      (sameThinking &&
+        (span < bestSpan - 0.5 ||
+          (Math.abs(span - bestSpan) <= 0.5 && endDelta < bestEndDelta)))
+    ) {
       bestId = turnId;
-      bestDelta = score.delta;
-      bestHasThinking = true;
-      continue;
-    }
-    if (score.hasThinking === bestHasThinking && score.delta < bestDelta) {
-      bestId = turnId;
-      bestDelta = score.delta;
+      bestEndDelta = endDelta;
+      bestSpan = span;
       bestHasThinking = score.hasThinking;
     }
   }
