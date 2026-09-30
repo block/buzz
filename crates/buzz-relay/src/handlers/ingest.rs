@@ -3534,6 +3534,7 @@ mod postgres_tests {
     /// "no row", which skipped the archive check while a cached membership
     /// still authorized the write.
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
         let state = crate::state::tests::test_state_with_database_url(
             "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
@@ -6270,6 +6271,7 @@ mod postgres_tests {
     /// The lookup failure comes from a least-privilege role that can do
     /// everything ingest needs except `SELECT` on `channels`.
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn cluster_global_ingest_denies_post_when_channel_lookup_fails() {
         use buzz_db::channel::{ChannelType, ChannelVisibility};
         use nostr::{Keys, Tag};
@@ -6282,109 +6284,124 @@ mod postgres_tests {
             .expect("connect test Postgres");
 
         let role = format!("archive_probe_{}", Uuid::new_v4().simple());
-        for sql in [
-            format!("CREATE ROLE {role} NOLOGIN"),
-            format!("GRANT USAGE ON SCHEMA public TO {role}"),
-            format!(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
-            ),
-            format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
-            format!("REVOKE SELECT ON channels FROM {role}"),
-            format!("GRANT {role} TO CURRENT_USER"),
-        ] {
-            sqlx::query(sqlx::AssertSqlSafe(sql))
-                .execute(&admin)
-                .await
-                .expect("provision restricted role");
-        }
-        let set_role = format!("SET ROLE {role}");
-        let restricted = sqlx::postgres::PgPoolOptions::new()
-            .after_connect(move |conn, _| {
-                let set_role = set_role.clone();
-                Box::pin(async move {
-                    sqlx::query(sqlx::AssertSqlSafe(set_role))
-                        .execute(conn)
-                        .await
-                        .map(|_| ())
+        let sql = |q: String| {
+            let admin = admin.clone();
+            async move {
+                sqlx::query(sqlx::AssertSqlSafe(q))
+                    .execute(&admin)
+                    .await
+                    .map(|_| ())
+            }
+        };
+        sql(format!("CREATE ROLE {role} NOLOGIN"))
+            .await
+            .expect("create restricted role");
+
+        // Everything between creating and dropping the server-wide role is
+        // fallible, so a setup failure still reaches the cleanup below.
+        let outcome = async {
+            for q in [
+                format!("GRANT USAGE ON SCHEMA public TO {role}"),
+                format!(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
+                ),
+                format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
+                format!("REVOKE SELECT ON channels FROM {role}"),
+                format!("GRANT {role} TO CURRENT_USER"),
+            ] {
+                sql(q).await?;
+            }
+            let set_role = format!("SET ROLE {role}");
+            let restricted = sqlx::postgres::PgPoolOptions::new()
+                .after_connect(move |conn, _| {
+                    let set_role = set_role.clone();
+                    Box::pin(async move {
+                        sqlx::query(sqlx::AssertSqlSafe(set_role))
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                    })
                 })
-            })
-            .connect(&db_url)
-            .await
-            .expect("connect restricted pool");
+                .connect(&db_url)
+                .await?;
+            let healthy = build_canvas_ingest_state(&db_url, &admin).await;
+            let failing = build_canvas_ingest_state(&db_url, &restricted).await;
 
-        let healthy = build_canvas_ingest_state(&db_url, &admin).await;
-        let failing = build_canvas_ingest_state(&db_url, &restricted).await;
+            let host = format!("archive-lookup-{}.test", Uuid::new_v4().simple());
+            let community = healthy
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+                .id;
+            let tenant = TenantContext::resolved(community, &host);
+            let author = Keys::generate();
+            let channel_id = Uuid::new_v4();
+            healthy
+                .db
+                .create_channel_with_id(
+                    community,
+                    channel_id,
+                    &format!("archive-lookup-{}", channel_id.simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    author.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            healthy
+                .db
+                .archive_channel(community, channel_id)
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
-        let host = format!("archive-lookup-{}.test", Uuid::new_v4().simple());
-        let community = healthy
-            .db
-            .ensure_configured_community(&host)
-            .await
-            .expect("ensure community")
-            .id;
-        let tenant = TenantContext::resolved(community, &host);
-        let author = Keys::generate();
-        let channel_id = Uuid::new_v4();
-        healthy
-            .db
-            .create_channel_with_id(
+            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            let post = |content: &str| {
+                EventBuilder::new(Kind::Custom(9), content)
+                    .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+                    .sign_with_keys(&author)
+                    .expect("sign post")
+            };
+            let auth = || IngestAuth::Http {
+                pubkey: author.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            let member_key = (
                 community,
                 channel_id,
-                &format!("archive-lookup-{}", channel_id.simple()),
-                ChannelType::Stream,
-                ChannelVisibility::Open,
-                None,
-                author.public_key().to_bytes().as_slice(),
-                None,
-            )
-            .await
-            .expect("create channel");
-        healthy
-            .db
-            .archive_channel(community, channel_id)
-            .await
-            .expect("archive channel");
+                author.public_key().to_bytes().to_vec(),
+            );
 
-        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
-        let post = |content: &str| {
-            EventBuilder::new(Kind::Custom(9), content)
-                .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
-                .sign_with_keys(&author)
-                .expect("sign post")
-        };
-        let auth = || IngestAuth::Http {
-            pubkey: author.public_key(),
-            scopes: vec![Scope::MessagesWrite],
-            auth_method: HttpAuthMethod::Nip98,
-        };
-        let member_key = (
-            community,
-            channel_id,
-            author.public_key().to_bytes().to_vec(),
-        );
+            // Control: a working lookup reaches the archive gate.
+            healthy.membership_cache.insert(member_key.clone(), true);
+            let control =
+                ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
 
-        // Control: a working lookup reaches the archive gate.
-        healthy.membership_cache.insert(member_key.clone(), true);
-        let control = ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
-
-        // Only the channel lookup fails: the post must be denied and not stored.
-        failing.membership_cache.insert(member_key, true);
-        let event = post("lookup fails");
-        let event_id = event.id.to_bytes().to_vec();
-        let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
-        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE id = $1")
-            .bind(&event_id)
-            .fetch_one(&admin)
-            .await
-            .expect("count events");
-
-        // The role is cluster-global: drop it before asserting so a failure
-        // doesn't leak it.
-        restricted.close().await;
-        for sql in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
-            let _ = sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&admin).await;
+            // Only the channel lookup fails: the post must be denied and not stored.
+            failing.membership_cache.insert(member_key, true);
+            let event = post("lookup fails");
+            let event_id = event.id.to_bytes().to_vec();
+            let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
+            let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE id = $1")
+                .bind(&event_id)
+                .fetch_one(&admin)
+                .await?;
+            restricted.close().await;
+            Ok::<_, sqlx::Error>((control, denied, stored))
         }
+        .await;
 
+        sql(format!("DROP OWNED BY {role}"))
+            .await
+            .expect("drop restricted role grants");
+        sql(format!("DROP ROLE {role}"))
+            .await
+            .expect("drop restricted role");
+
+        let (control, denied, stored) = outcome.expect("test setup");
         match control {
             Err(IngestError::Rejected(reason)) => {
                 assert_eq!(reason, "invalid: channel is archived")
