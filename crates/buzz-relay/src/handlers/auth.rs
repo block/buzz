@@ -2251,7 +2251,8 @@ mod tests {
             let schema = format!("fi_dep_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
                 "CREATE SCHEMA {schema}; \
-                 CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL);"
+                 CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+                 CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL);"
             )))
             .execute(&admin)
             .await
