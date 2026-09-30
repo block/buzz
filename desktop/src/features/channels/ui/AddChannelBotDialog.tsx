@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Search } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -8,6 +8,7 @@ import {
   type CreateChannelManagedAgentResult,
 } from "@/features/agents/hooks";
 import { getActivePersonas } from "@/features/agents/lib/catalog";
+import { searchPersonaChooser } from "@/features/agents/lib/personaChooserSearch";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
@@ -17,6 +18,10 @@ import type { AcpRuntime } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
+import {
+  MODAL_SEARCH_INPUT_CLASS,
+  MODAL_SEARCH_SHELL_CLASS,
+} from "@/shared/ui/modalSearchStyles";
 
 type AddChannelBotDialogProps = {
   channelId: string | null;
@@ -80,6 +85,15 @@ export function AddChannelBotDialog({
   const [selectedPersonaIds, setSelectedPersonaIds] = React.useState<string[]>(
     [],
   );
+  const [searchQuery, setSearchQuery] = React.useState("");
+  // Selection is keyed on the full lists; only what is shown narrows.
+  const visible = React.useMemo(
+    () => searchPersonaChooser(personas, teams, searchQuery),
+    [personas, teams, searchQuery],
+  );
+  const isSearching = searchQuery.trim().length > 0;
+  const searchHasNoMatches =
+    isSearching && visible.personas.length === 0 && visible.teams.length === 0;
   const [submissionNotice, setSubmissionNotice] = React.useState<string | null>(
     null,
   );
@@ -104,6 +118,7 @@ export function AddChannelBotDialog({
 
   function reset() {
     setSelectedPersonaIds([]);
+    setSearchQuery("");
     setSubmissionNotice(null);
     setSubmissionError(null);
     createBotsMutation.reset();
@@ -230,7 +245,36 @@ export function AddChannelBotDialog({
         }
         footerClassName="justify-end gap-2"
         footerTestId="add-channel-bot-dialog-footer"
+        headerAccessory={
+          <label
+            className={MODAL_SEARCH_SHELL_CLASS}
+            htmlFor="add-channel-bot-search"
+          >
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
+            <span className="sr-only">Search your agents</span>
+            <input
+              autoCapitalize="none"
+              autoCorrect="off"
+              className={MODAL_SEARCH_INPUT_CLASS}
+              data-testid="add-channel-bot-search"
+              id="add-channel-bot-search"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search your agents"
+              spellCheck={false}
+              type="text"
+              value={searchQuery}
+            />
+          </label>
+        }
         headerTestId="add-channel-bot-dialog-header"
+        onEscapeKeyDown={(event) => {
+          // The dialog's dismiss listener runs on the document in the capture
+          // phase, ahead of any input handler, so Escape is intercepted here:
+          // it clears an active search first; the next one closes the dialog.
+          if (searchQuery.length === 0) return;
+          event.preventDefault();
+          setSearchQuery("");
+        }}
         scrollAreaClassName="space-y-5"
         scrollAreaTestId="add-channel-bot-dialog-scroll-area"
         title="Add agents"
@@ -245,11 +289,13 @@ export function AddChannelBotDialog({
             setSubmissionNotice(null);
             setSubmissionError(null);
           }}
-          personas={personas}
+          personas={visible.personas}
+          searchHasNoMatches={searchHasNoMatches}
+          isSearching={isSearching}
           selectedPersonaIds={selectedPersonaIds}
         />
 
-        {teams.length > 0 ? (
+        {visible.teams.length > 0 ? (
           <AddChannelBotTeamsSection
             canToggleSelections={!createBotsMutation.isPending}
             inChannelPersonaIds={inChannelPersonaIds}
@@ -257,7 +303,7 @@ export function AddChannelBotDialog({
             onToggleTeam={handleToggleTeam}
             personas={personas}
             selectedPersonaIds={selectedPersonaIds}
-            teams={teams}
+            teams={visible.teams}
           />
         ) : null}
 
