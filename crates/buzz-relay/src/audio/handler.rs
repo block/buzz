@@ -688,6 +688,9 @@ pub(crate) async fn handle_active_audio_connection(
     #[cfg(test)]
     crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
 
+    // NIP-OA owner of a delegated agent: from relay membership on a closed
+    // relay, or straight from the self-proving auth tag on an open one.
+    let mut nip_oa_owner = None;
     let relay_refusal = match crate::api::relay_members::check_relay_membership(
         &state,
         tenant.community(),
@@ -701,7 +704,17 @@ pub(crate) async fn handle_active_audio_connection(
             warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio: relay membership denied");
             Some(buzz_auth::DenialClass::AuthorizationDenied)
         }
-        Ok(_) => None,
+        Ok(decision) => {
+            nip_oa_owner = match decision {
+                crate::api::relay_members::MembershipDecision::ViaOwner(owner) => Some(owner),
+                _ => crate::api::relay_members::extract_nip_oa_owner(
+                    pubkey.as_bytes(),
+                    auth_tag_json.as_deref(),
+                    Some(signed_auth_created_at),
+                ),
+            };
+            None
+        }
         Err(e) => {
             warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e,
                 "audio: relay membership lookup failed, denying (fail-closed)");
@@ -758,12 +771,49 @@ pub(crate) async fn handle_active_audio_connection(
     };
     check_cancel!(cancel, terminal_ctrl_rx, disconnect_reason, ws_send);
 
-    // Community ban gate — the same verdict (and NIP-OA owner cascade) the root
-    // socket applies at auth. Runs after the write-free membership check and
-    // before any huddle lease or durable write. Fails closed on a DB error.
-    // Bind first, so a ban that lands while this check runs still closes us.
+    // Record a delegated agent's owner link before admission, as root AUTH
+    // does: revoking the owner finds the agent's sockets through it, so an
+    // agent whose link cannot be recorded is refused. A persistent write, so
+    // it runs under an effect permit. [nip_fi_gate contract]
+    if let Some(owner) = nip_oa_owner {
+        let linked = {
+            let _owner_permit = match audio_gate.acquire_effect().await {
+                Ok(permit) => permit,
+                Err(crate::nip_fi_gate::SessionExpired) => {
+                    cancel.cancel();
+                    if let Some(t) = _nip_fi_admission_expiry.take() {
+                        let _ = t.await;
+                    }
+                    crate::connection::send_exit_frames_bounded(
+                        &mut ws_send,
+                        std::iter::from_fn(|| terminal_ctrl_rx.try_recv().ok()),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            crate::api::relay_members::materialize_nip_oa_owner(&state, &tenant, &pubkey, &owner)
+                .await
+        };
+        if !linked {
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, nip_oa_owner = %owner.to_hex(),
+                "audio: NIP-OA owner could not be materialized, denying");
+            let deny_frame = authorization_exit_frame(
+                nip_fi_assertion.is_some(),
+                buzz_auth::DenialClass::AuthorizationUnavailable,
+                serde_json::json!({"type": "error", "message": crate::handlers::auth::OWNER_LINK_ERROR}),
+            );
+            crate::connection::send_exit_frames_bounded(&mut ws_send, [deny_frame]).await;
+            return;
+        }
+    }
+
+    // Bind, then take the final ban/membership decision the root socket
+    // applies (see `final_admission_denial`), before any huddle lease. A ban
+    // or removal whose disconnect ran before the bind is seen by these fresh
+    // reads; one that runs after it cancels this socket (`check_cancel!`).
     control.bind_pubkey(pubkey.to_bytes());
-    let ban_refusal = match crate::handlers::auth::community_ban_outcome(
+    if let Some(denial) = crate::handlers::auth::final_admission_denial(
         &state,
         tenant.community(),
         pubkey,
@@ -772,18 +822,8 @@ pub(crate) async fn handle_active_audio_connection(
     )
     .await
     {
-        crate::handlers::auth::BanOutcome::Clear => None,
-        crate::handlers::auth::BanOutcome::Banned => Some((
-            buzz_auth::DenialClass::AuthorizationDenied,
-            "blocked: you are banned from this community",
-        )),
-        crate::handlers::auth::BanOutcome::DbError => Some((
-            buzz_auth::DenialClass::AuthorizationUnavailable,
-            "error: internal error checking restriction state",
-        )),
-    };
-    if let Some((class, message)) = ban_refusal {
-        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = message, "audio: denied at ban seam");
+        let (class, message) = (denial.class, denial.reason);
+        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = message, "audio: denied at final admission check");
         exit_authorization_refusal(
             &mut ws_send,
             &control,

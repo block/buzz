@@ -1043,6 +1043,11 @@ impl Default for ConnectionManager {
     }
 }
 
+/// First and maximum delay between retries of a failed owned-agent lookup
+/// during a live revoke.
+const OWNED_AGENT_REVOKE_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+const OWNED_AGENT_REVOKE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -1702,33 +1707,69 @@ impl AppState {
 
     /// Close every live session of `pubkey` and of the agents it owns
     /// (`users.agent_owner_pubkey`), on every pod. Ban, report-action ban, and
-    /// roster removal all end access this way, because an agent's access is
-    /// derived from its owner's.
+    /// roster removal (admin or self-leave) all end access this way, because an
+    /// agent's access is derived from its owner's.
     ///
-    /// If the owned-agent lookup fails the owner is still disconnected; the
-    /// agents are then held by the durable checks (the owner-aware restriction
-    /// state and NIP-OA membership via owner) on their next write or auth.
+    /// The owner is always disconnected. If the owned-agent lookup fails, the
+    /// error is returned and a background task keeps retrying the lookup until
+    /// it succeeds and those agents are closed, so a transient DB failure
+    /// delays the agents' disconnect instead of abandoning it. Returns the
+    /// number of sockets closed on this pod.
     pub async fn revoke_live_access(
         &self,
         tenant: &TenantContext,
         pubkey: &[u8],
         event_id: &str,
         reason: &str,
-    ) -> usize {
-        let mut closed = self.disconnect_pubkey_clusterwide(tenant, pubkey, event_id, reason);
+    ) -> Result<usize, String> {
+        let closed = self.disconnect_pubkey_clusterwide(tenant, pubkey, event_id, reason);
         match self
-            .db
-            .list_agents_for_owner(tenant.community(), pubkey)
+            .disconnect_owned_agents(tenant, pubkey, event_id, reason)
             .await
         {
-            Ok(agents) => {
-                for agent in agents {
-                    closed += self.disconnect_pubkey_clusterwide(tenant, &agent, event_id, reason);
-                }
+            Ok(agents_closed) => Ok(closed + agents_closed),
+            Err(e) => {
+                tracing::error!(
+                    "owned-agent lookup failed during live revoke; retrying in background: {e}"
+                );
+                let state = self.clone();
+                let (tenant, pubkey) = (tenant.clone(), pubkey.to_vec());
+                let (event_id, reason) = (event_id.to_string(), reason.to_string());
+                tokio::spawn(async move {
+                    let mut delay = OWNED_AGENT_REVOKE_RETRY_INITIAL;
+                    loop {
+                        tokio::time::sleep(delay).await;
+                        match state
+                            .disconnect_owned_agents(&tenant, &pubkey, &event_id, &reason)
+                            .await
+                        {
+                            Ok(_) => return,
+                            Err(e) => tracing::error!("owned-agent revoke retry failed: {e}"),
+                        }
+                        delay = (delay * 2).min(OWNED_AGENT_REVOKE_RETRY_MAX);
+                    }
+                });
+                Err(format!("owned-agent lookup failed: {e}"))
             }
-            Err(e) => tracing::warn!("failed to list owned agents for live revoke: {e}"),
         }
-        closed
+    }
+
+    async fn disconnect_owned_agents(
+        &self,
+        tenant: &TenantContext,
+        owner: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> Result<usize, String> {
+        let agents = self
+            .db
+            .list_agents_for_owner(tenant.community(), owner)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(agents
+            .iter()
+            .map(|agent| self.disconnect_pubkey_clusterwide(tenant, agent, event_id, reason))
+            .sum())
     }
 
     /// Enforce a live ban cluster-wide: close this pod's sockets for `pubkey`

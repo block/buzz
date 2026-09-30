@@ -342,7 +342,7 @@ async fn mint_invite_checked(
         tenant.community(),
         pubkey.as_bytes(),
         super::relay_members::extract_auth_tag_header(&headers),
-        signed_created_at.into(),
+        signed_created_at,
     )
     .await
     {

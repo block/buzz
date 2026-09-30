@@ -117,6 +117,81 @@ fn ban_denial(outcome: BanOutcome) -> Option<(&'static str, &'static str, AuthOu
     }
 }
 
+/// Why a bound socket is refused at the final admission check.
+pub(crate) struct AdmissionDenial {
+    pub(crate) metric: &'static str,
+    pub(crate) reason: &'static str,
+    pub(crate) outcome: AuthOutcome,
+    pub(crate) class: buzz_auth::DenialClass,
+}
+
+/// Final ban and relay-membership verdict for an authenticating socket.
+///
+/// Callers bind the socket to `pubkey` first (the registry a ban's or
+/// removal's disconnect searches), then call this. Either that disconnect
+/// runs after the bind and cancels the socket, or it ran before, so its
+/// committed ban or removal is visible to these fresh reads. Checking before
+/// binding leaves a gap where both are missed. Callers must also refuse a
+/// socket whose cancellation token fired. Both reads fail closed.
+pub(crate) async fn final_admission_denial(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    pubkey: nostr::PublicKey,
+    auth_tag_json: Option<&str>,
+    signed_auth_created_at: Option<u64>,
+) -> Option<AdmissionDenial> {
+    let ban = community_ban_outcome(
+        state,
+        community,
+        pubkey,
+        auth_tag_json,
+        signed_auth_created_at,
+    )
+    .await;
+    if let Some((metric, reason, outcome)) = ban_denial(ban) {
+        let class = match ban {
+            BanOutcome::DbError => buzz_auth::DenialClass::AuthorizationUnavailable,
+            _ => buzz_auth::DenialClass::AuthorizationDenied,
+        };
+        return Some(AdmissionDenial {
+            metric,
+            reason,
+            outcome,
+            class,
+        });
+    }
+    match crate::api::relay_members::check_relay_membership(
+        state,
+        community,
+        pubkey.as_bytes(),
+        auth_tag_json,
+        signed_auth_created_at,
+    )
+    .await
+    {
+        Ok(crate::api::relay_members::MembershipDecision::Denied) => Some(AdmissionDenial {
+            metric: "not_relay_member",
+            reason: "restricted: not a relay member",
+            outcome: AuthOutcome::NotRelayMember,
+            class: buzz_auth::DenialClass::AuthorizationDenied,
+        }),
+        Ok(_) => None,
+        Err(e) => {
+            warn!(pubkey = %pubkey.to_hex(), error = %e, "relay membership recheck failed, denying (fail-closed)");
+            Some(AdmissionDenial {
+                metric: "relay_membership_check_error",
+                reason: "error: internal error checking relay membership",
+                outcome: AuthOutcome::RelayMembershipCheckError,
+                class: buzz_auth::DenialClass::AuthorizationUnavailable,
+            })
+        }
+    }
+}
+
+/// Refusal when a proven agent's owner link cannot be recorded. Without the
+/// link, revoking the owner cannot find the agent's live sockets.
+pub(crate) const OWNER_LINK_ERROR: &str = "error: internal error recording agent owner";
+
 /// NIP-FI class for a failed NIP-42 proof: a bad proof is client evidence
 /// (`evidence rejected`); only a relay-internal verifier failure is
 /// `authorization unavailable`.
@@ -147,6 +222,24 @@ fn deny_nip_fi_auth(conn: &ConnectionState, class: buzz_auth::DenialClass) {
                 class,
             ));
     }
+    conn.cancel.cancel();
+}
+
+/// Refuse a root AUTH that passed the early gates but failed admission: record
+/// the outcome, send the denial (the canonical NOTICE under NIP-FI, else an
+/// OK false on the control channel so it drains before the Close), and close.
+fn deny_admission(conn: &ConnectionState, event_id_hex: &str, denial: AdmissionDenial) {
+    metrics::counter!("buzz_auth_failures_total", "reason" => denial.metric).increment(1);
+    if !conn.reject_auth(denial.outcome) {
+        return;
+    }
+    if conn.nip_fi_assertion.is_some() {
+        deny_nip_fi_auth(conn, denial.class);
+        return;
+    }
+    let _ = conn.ctrl_tx.try_send(WsMessage::Text(
+        RelayMessage::ok(event_id_hex, false, denial.reason).into(),
+    ));
     conn.cancel.cancel();
 }
 
@@ -463,10 +556,12 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 Err(crate::nip_fi_gate::SessionExpired) => return,
             };
 
-            // Stash NIP-OA owner on the auth context only after the shared
-            // backfill confirms the first-write-wins relationship.
+            // Record the NIP-OA owner link before admission: revoking the
+            // owner finds the agent's sockets through it, so an agent whose
+            // link cannot be recorded is refused rather than admitted
+            // unrevocable.
             if let Some(owner) = nip_oa_owner {
-                if crate::api::relay_members::materialize_nip_oa_owner(
+                if !crate::api::relay_members::materialize_nip_oa_owner(
                     &state,
                     &conn.tenant,
                     &pubkey,
@@ -474,28 +569,35 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 )
                 .await
                 {
-                    auth_ctx.agent_owner_pubkey = Some(owner);
-                } else {
                     warn!(
                         conn_id = %conn_id,
                         agent = %pubkey.to_hex(),
                         nip_oa_owner = %owner.to_hex(),
-                        "NIP-OA owner could not be materialized"
+                        "NIP-OA owner could not be materialized, denying"
                     );
+                    deny_admission(
+                        &conn,
+                        &event_id_hex,
+                        AdmissionDenial {
+                            metric: "agent_owner_link_error",
+                            reason: OWNER_LINK_ERROR,
+                            outcome: AuthOutcome::RelayMembershipCheckError,
+                            class: buzz_auth::DenialClass::AuthorizationUnavailable,
+                        },
+                    );
+                    return;
                 }
+                auth_ctx.agent_owner_pubkey = Some(owner);
             }
 
-            info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
-            if !conn.authenticate(auth_ctx) {
-                return;
-            }
-            // The permit is held through identity registration, the deny-set
-            // check, and the OK send so the auth commit is atomic with respect
-            // to expiry.
+            // Bind, then take the final ban/membership decision (see
+            // `final_admission_denial`), then refuse if a disconnect already
+            // cancelled this socket. No await separates the last check from
+            // `authenticate`.
             //
-            // Register the proven key with its admitting NIP-FI issuer BEFORE
-            // the deny-set check: a concurrent disconnect either finds this
-            // session in its close scan or this check finds its deny entry.
+            // The bind carries the admitting NIP-FI issuer, so a concurrent
+            // `disconnect_nip_fi` scan that sees the pubkey also sees its
+            // issuer; the deny-set check after `authenticate` closes the rest.
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 pubkey.to_bytes().to_vec(),
@@ -503,6 +605,39 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .as_ref()
                     .map(|a| a.identity().issuer().to_owned()),
             );
+            let denial = match final_admission_denial(
+                &state,
+                conn.tenant.community(),
+                pubkey,
+                auth_tag_json.as_deref(),
+                Some(signed_auth_created_at),
+            )
+            .await
+            {
+                None if conn.cancel.is_cancelled() => Some(AdmissionDenial {
+                    metric: "revoked_during_auth",
+                    reason: "blocked: access revoked",
+                    outcome: AuthOutcome::Banned,
+                    class: buzz_auth::DenialClass::AuthorizationDenied,
+                }),
+                denial => denial,
+            };
+            if let Some(denial) = denial {
+                warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = denial.reason, "denied at final admission check");
+                deny_admission(&conn, &event_id_hex, denial);
+                return;
+            }
+
+            info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
+            if !conn.authenticate(auth_ctx) {
+                return;
+            }
+            // The permit is held through the deny-set check and the OK send so
+            // the auth commit is atomic with respect to expiry.
+            //
+            // The proven key was registered with its NIP-FI issuer before the
+            // final admission check: a concurrent disconnect either finds this
+            // session in its close scan or this check finds its deny entry.
             #[cfg(test)]
             crate::nip_fi_test_hooks::before_deny_set_check(conn.tenant.community()).await;
             // [FI-TRACE-DENY-SET]

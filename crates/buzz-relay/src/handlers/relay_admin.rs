@@ -412,16 +412,18 @@ async fn execute_relay_admin_command(
 
             // Removal ends access now: close the member's and their agents'
             // live sessions (agents hold membership through their owner).
-            if let Ok(target_bytes) = hex::decode(&target_hex) {
-                state
+            let revoked = match hex::decode(&target_hex) {
+                Ok(target_bytes) => state
                     .revoke_live_access(
                         tenant,
                         &target_bytes,
                         &event.id.to_hex(),
                         "restricted: you were removed from this relay",
                     )
-                    .await;
-            }
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(format!("invalid target pubkey: {e}")),
+            };
 
             if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
                 warn!(error = %e, "failed to publish NIP-43 member removed event");
@@ -429,6 +431,8 @@ async fn execute_relay_admin_command(
             if let Err(e) = publish_nip43_membership_list(tenant, state).await {
                 warn!(error = %e, "failed to publish NIP-43 membership list");
             }
+            revoked
+                .map_err(|e| format!("error: member removed but live revoke incomplete: {e}"))?;
         }
 
         // kind:9032 — Change relay member role

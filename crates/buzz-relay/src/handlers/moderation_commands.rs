@@ -193,7 +193,9 @@ async fn handle_ban(
     // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
     // makes "close locally but forget the Redis publish" unrepresentable, so a
     // live ban takes effect immediately, everywhere (decision 4).
-    state
+    // A failed owned-agent lookup is retried in the background; the command
+    // still reports it (after the notice below) instead of claiming success.
+    let revoked = state
         .revoke_live_access(
             tenant,
             &target,
@@ -224,7 +226,9 @@ async fn handle_ban(
     }
 
     info!(target = %hex::encode(&target), "community ban applied");
-    Ok(())
+    revoked
+        .map(|_| ())
+        .map_err(|e| format!("error: ban applied but live revoke incomplete: {e}"))
 }
 
 // ── 9041: unban ──────────────────────────────────────────────────────────────
