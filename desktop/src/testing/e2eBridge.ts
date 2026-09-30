@@ -12882,6 +12882,8 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "clear_applied_workspace":
+        return undefined;
       case "update_tray_agent_activity":
       case "clear_tray_agent_activity":
       case "requeue_tray_actions":

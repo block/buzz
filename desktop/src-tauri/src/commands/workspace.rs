@@ -150,6 +150,29 @@ pub fn set_agent_avatar_communities(
     Ok(())
 }
 
+/// Forget the applied workspace relay when its community is removed.
+///
+/// Held under the runtime transition lock so it is mutually exclusive with a
+/// launch restore's check-then-spawn: if this wins, that restore spawns
+/// nothing; if restore wins, its pairs are registered before this returns and
+/// the caller's stop sweep finds them. Never takes `workspace_apply_lock`,
+/// which restore holds while waiting on the transition lock. Readers fall back
+/// to the default relay, the same state as launch before the first apply.
+#[tauri::command]
+pub async fn clear_applied_workspace(app: AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        *state.relay_url_override.lock().map_err(|e| e.to_string())? = None;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("clear_applied_workspace task failed: {e}"))?
+}
+
 /// Apply a workspace's configuration to the backend session.
 ///
 /// Called by the frontend on app init (after reload) to configure the

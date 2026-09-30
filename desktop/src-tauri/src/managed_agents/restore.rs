@@ -101,6 +101,10 @@ pub async fn restore_managed_agents_on_launch(
     }
 
     let state = app.state::<AppState>();
+    // The workspace this restore was started for. Removing that community
+    // clears the applied relay, and Phase B re-checks it under the transition
+    // lock so a late restore cannot spawn pairs on a removed relay.
+    let restore_relay = crate::relay::workspace_relay_override(&state);
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;
@@ -293,6 +297,16 @@ pub async fn restore_managed_agents_on_launch(
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
+    let Some(restore_relay) = restore_target_still_applied(
+        restore_relay,
+        crate::relay::workspace_relay_override(&state),
+    ) else {
+        eprintln!(
+            "buzz-desktop: skipping managed agent restore: its workspace is no longer applied"
+        );
+        return Ok(());
+    };
+    let restore_relay = restore_relay.as_str();
 
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
@@ -302,12 +316,8 @@ pub async fn restore_managed_agents_on_launch(
             .filter(|_| !shutdown_started.load(Ordering::SeqCst))
             .map(|record| {
                 let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
+                    let relay_url =
+                        crate::relay::effective_agent_relay_url(&record.relay_url, restore_relay);
                     let outcome =
                         match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
                         {
@@ -563,6 +573,15 @@ fn persist_restore_error(
     save_managed_agents(app, &records)
 }
 
+/// The relay a restore may spawn on: the workspace it started for, and only if
+/// that workspace is still applied. Call with the runtime transition lock held.
+fn restore_target_still_applied(
+    started: Option<String>,
+    current: Option<String>,
+) -> Option<String> {
+    started.filter(|relay| current.as_deref() == Some(relay.as_str()))
+}
+
 #[cfg(test)]
 mod profile_reconcile_tests {
     use super::profile_reconcile_completed;
@@ -576,5 +595,22 @@ mod profile_reconcile_tests {
         assert!(!profile_reconcile_completed(
             ProfileReconcileOutcome::SkippedDisabled
         ));
+    }
+}
+
+#[cfg(test)]
+mod restore_target_tests {
+    use super::restore_target_still_applied;
+
+    #[test]
+    fn restore_skips_when_its_workspace_was_cleared_or_replaced() {
+        let relay = || Some("wss://dead.example".to_string());
+        assert_eq!(restore_target_still_applied(relay(), relay()), relay());
+        assert_eq!(restore_target_still_applied(relay(), None), None);
+        assert_eq!(
+            restore_target_still_applied(relay(), Some("wss://other.example".into())),
+            None
+        );
+        assert_eq!(restore_target_still_applied(None, None), None);
     }
 }
