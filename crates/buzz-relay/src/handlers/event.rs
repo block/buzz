@@ -2064,6 +2064,69 @@ mod tests {
             }
         }
 
+        /// Same-pod dispatch applies the owner-only gate: owner-only kinds
+        /// published on this pod reach only the `p`-tagged owner, never a
+        /// foreign kindless `ids:[…]` subscription, and no one when untagged.
+        #[tokio::test]
+        async fn dispatch_owner_only_kinds_reach_only_the_owner() {
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let state = test_state().await;
+                let tenant = buzz_core::tenant::TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                    "dispatch.test",
+                );
+                let owner = Keys::generate();
+                let stranger = Keys::generate();
+                let tagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let untagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let ids_sub = |who: &Keys| {
+                    register_global_sub(
+                        &state,
+                        "ids",
+                        Filter::new().ids([tagged.id, untagged.id]),
+                        Some(who.public_key().to_bytes().to_vec()),
+                    )
+                    .1
+                };
+                let mut owner_rx = ids_sub(&owner);
+                let mut stranger_rx = ids_sub(&stranger);
+
+                for event in [tagged.clone(), untagged] {
+                    let author = event.pubkey.to_hex();
+                    super::super::dispatch_persistent_event_inner(
+                        &tenant,
+                        &state,
+                        &buzz_core::StoredEvent::new(event, None),
+                        kind,
+                        &author,
+                        false,
+                        None,
+                    )
+                    .await;
+                }
+
+                let delivered =
+                    event_from_ws_message(owner_rx.try_recv().expect("owner delivered"));
+                assert_eq!(delivered.id, tagged.id, "kind {kind}");
+                assert!(
+                    owner_rx.try_recv().is_err(),
+                    "kind {kind}: untagged event must not deliver"
+                );
+                assert!(
+                    stranger_rx.try_recv().is_err(),
+                    "kind {kind}: stranger must not receive"
+                );
+            }
+        }
+
         #[tokio::test]
         async fn global_presence_pubsub_event_fans_out_to_local_subscribers() {
             let state = test_state().await;
