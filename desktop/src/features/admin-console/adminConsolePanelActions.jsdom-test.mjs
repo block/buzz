@@ -494,3 +494,107 @@ test("actions-foreign-host: another community's host turns name search off and s
     await unmount();
   }
 });
+
+const OTHER = "cd".repeat(32);
+
+function searchReturns(users) {
+  setIpcHandler("search_users", () =>
+    Promise.resolve({
+      users: users.map(([pubkey, name]) => ({
+        pubkey,
+        display_name: name,
+        avatar_url: null,
+        nip05_handle: null,
+        owner_pubkey: null,
+      })),
+      next_cursor: null,
+    }),
+  );
+}
+
+test("actions-host-change-drops-member: a name picked in one community can't be reviewed in another", async () => {
+  // Mutation: keep the pick across host changes (ignore picked.host) → RED.
+  searchReturns([[TARGET, "Alice"]]);
+  const { container: c, unmount } = await mountActions();
+  try {
+    await type(c, "direct-member-input", "ali");
+    await settle();
+    await click(c, `direct-member-result-${TARGET}`);
+    assert.ok(q(c, "direct-member-selected"));
+    await setHost(c, "other.example.com");
+    assert.ok(
+      !q(c, "direct-member-selected"),
+      "the pick must not survive a host change",
+    );
+    assert.equal(q(c, "direct-member-input").value, "", "query is cleared");
+    await click(c, "direct-review-btn");
+    assert.ok(!q(c, "direct-confirm"), "nothing to review");
+    assert.match(q(c, "direct-error").textContent, /Choose a member/);
+    await pickKey(c, TARGET);
+    assert.ok(
+      q(c, "direct-member-search-hint"),
+      "hint stays visible with a key selected",
+    );
+    await click(c, "direct-review-btn");
+    assert.doesNotMatch(q(c, "direct-confirm-member").textContent, /Alice/);
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-same-name: two same-name results are told apart and the chosen full key is confirmed", async () => {
+  // Mutation: drop the full PubKey from the confirm step → RED.
+  searchReturns([
+    [TARGET, "Alice"],
+    [OTHER, "Alice"],
+  ]);
+  const sent = [];
+  setIpcHandler("admin_direct_action", ({ intent }) => {
+    sent.push(intent);
+    return Promise.resolve({
+      actionId: "a1",
+      state: "succeeded",
+      replayed: false,
+    });
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await type(c, "direct-member-input", "ali");
+    await settle();
+    const a = q(c, `direct-member-result-${TARGET}`).textContent;
+    const b = q(c, `direct-member-result-${OTHER}`).textContent;
+    assert.notEqual(a, b, "same-name results must differ by key");
+    await click(c, `direct-member-result-${OTHER}`);
+    assert.ok(q(c, "direct-member-inspect"), "selected chip is inspectable");
+    await click(c, "direct-review-btn");
+    assert.ok(q(c, "direct-confirm-npub"), "confirm must show the full npub");
+    assert.match(
+      q(c, "direct-confirm-npub").textContent,
+      new RegExp(pubkeyToNpub(OTHER)),
+      "confirm shows the chosen member's full npub",
+    );
+    await click(c, "direct-confirm-btn");
+    assert.equal(sent[0].target, OTHER);
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-results-disabled: results showing when auth drops can't be selected", async () => {
+  searchReturns([[TARGET, "Alice"]]);
+  const panel = await mountActions();
+  const c = panel.container;
+  try {
+    await type(c, "direct-member-input", "ali");
+    await settle();
+    await panel.doRender({ canMutate: false });
+    await settle();
+    const result = q(c, `direct-member-result-${TARGET}`);
+    assert.ok(result, "results still shown");
+    assert.ok(result.disabled, "results must be disabled");
+    await click(c, `direct-member-result-${TARGET}`);
+    assert.ok(!q(c, "direct-member-selected"));
+  } finally {
+    await panel.unmount();
+  }
+});

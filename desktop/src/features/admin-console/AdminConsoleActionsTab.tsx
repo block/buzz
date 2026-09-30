@@ -29,6 +29,7 @@ import type { UserSearchResult } from "@/shared/api/types";
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { PubKey } from "@/shared/ui/PubKey";
 import {
   directAdminAction,
   type AdminDirectAction,
@@ -132,7 +133,11 @@ export function ActionsTab({
   /** Operator-typed host; null while following the active community. */
   const [hostOverride, setHostOverride] = useState<string | null>(null);
   const [target, setTarget] = useState("");
-  const [member, setMember] = useState<UserSearchResult | null>(null);
+  /** The picked member and the community host it was picked for. */
+  const [picked, setPicked] = useState<{
+    host: string;
+    user: UserSearchResult;
+  } | null>(null);
   /** Display-only name for the frozen target; never sent. */
   const [frozenName, setFrozenName] = useState<string | null>(null);
   const [reason, setReason] = useState("");
@@ -156,8 +161,11 @@ export function ActionsTab({
   const editingHost = hostOverride !== null || !activeHost;
   const host = hostOverride ?? activeHost ?? "";
   // Name search queries the active relay, so it only finds members there.
+  const normalizedHost = normalizeCommunityHost(host);
   const onActiveCommunity =
-    activeHost !== null && normalizeCommunityHost(host) === activeHost;
+    activeHost !== null && normalizedHost === activeHost;
+  // Profiles are per community: a pick made for another host doesn't carry.
+  const member = picked?.host === normalizedHost ? picked.user : null;
 
   const handleReview = async () => {
     if (frozen || inFlight.current) return;
@@ -215,7 +223,7 @@ export function ActionsTab({
         toast.success(`${ACTION_LABELS[frozen.action]}: done`);
         setFrozen(null);
         setTarget("");
-        setMember(null);
+        setPicked(null);
         setReason("");
       }
     } catch (e) {
@@ -316,8 +324,9 @@ export function ActionsTab({
       ) : (
         <MemberPicker
           disabled={locked}
+          key={normalizedHost}
           member={member}
-          onChange={setMember}
+          onChange={(user) => setPicked(user && { host: normalizedHost, user })}
           searchEnabled={onActiveCommunity}
         />
       )}
@@ -365,6 +374,13 @@ export function ActionsTab({
             in <code>{frozen.communityHost}</code>
             {frozen.expirationSecs ? ` for ${frozen.expirationSecs}s` : ""}?
           </p>
+          {frozen.action !== "delete" && (
+            <PubKey
+              pubkey={frozen.target}
+              testId="direct-confirm-npub"
+              variant="full"
+            />
+          )}
           <p data-testid="direct-confirm-reason">
             Reason: {frozen.reason ?? "(none)"}
           </p>
@@ -427,6 +443,7 @@ function MemberPicker({
   searchEnabled: boolean;
 }) {
   const [query, setQuery] = useState("");
+  const [inspecting, setInspecting] = useState(false);
   const deferred = useDeferredValue(query.trim());
   const parsed = parsePubkeyInput(deferred);
   const search = useUserSearchQuery(deferred, {
@@ -448,18 +465,32 @@ function MemberPicker({
       ? (search.data ?? [])
       : [];
 
+  const hint = !searchEnabled && (
+    <p
+      className="text-xs text-muted-foreground"
+      data-testid="direct-member-search-hint"
+    >
+      Name search only works in the community you're connected to.
+    </p>
+  );
   if (member) {
     return (
-      <div data-testid="direct-member-selected">
+      <div className="space-y-1" data-testid="direct-member-selected">
         <SelectedRecipientChip
           disabled={disabled}
-          inspectable={false}
+          inspectionOpen={inspecting}
           label={memberLabel(member)}
+          onInspectionOpenChange={setInspecting}
           onRemove={() => onChange(null)}
           poofOnRemove={false}
-          testIds={{ chip: "direct-member-remove" }}
+          testIds={{
+            chip: "direct-member-remove",
+            name: "direct-member-inspect",
+            pubkey: "direct-member-npub",
+          }}
           user={member}
         />
+        {hint}
       </div>
     );
   }
@@ -477,20 +508,14 @@ function MemberPicker({
         }
         value={query}
       />
-      {!searchEnabled && (
-        <p
-          className="text-xs text-muted-foreground"
-          data-testid="direct-member-search-hint"
-        >
-          Name search only works in the community you're connected to.
-        </p>
-      )}
+      {hint}
       {results.length > 0 && (
         <div className="rounded-md border border-border/60" role="listbox">
           {results.map((user) => (
             <button
               className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-muted/50"
               data-testid={`direct-member-result-${user.pubkey}`}
+              disabled={disabled}
               key={user.pubkey}
               onClick={() => {
                 onChange(user);
@@ -509,8 +534,14 @@ function MemberPicker({
               <span className="min-w-0 flex-1 truncate">
                 {memberLabel(user)}
               </span>
-              {parsed && (
+              {parsed ? (
                 <span className="text-muted-foreground">public key</span>
+              ) : (
+                <PubKey
+                  className="text-muted-foreground"
+                  interactive={false}
+                  pubkey={user.pubkey}
+                />
               )}
             </button>
           ))}
