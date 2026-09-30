@@ -30,16 +30,20 @@ const reviewCommand = (headSha) => `${REVIEW_COMMAND} ${headSha}`;
 
 // Org membership is invisible to the workflow token when a member keeps it
 // private, so trust is repo write access. `maintain` reports as `write`.
-async function hasWriteAccess({ github, context, username }) {
+async function hasWriteAccess({ github, context, core, username }) {
   if (!username) {
     return false;
   }
   try {
-    const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      username,
-    });
+    const { data } = await withGithubRetry(
+      () =>
+        github.rest.repos.getCollaboratorPermissionLevel({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          username,
+        }),
+      { core },
+    );
     return data.permission === "admin" || data.permission === "write";
   } catch (error) {
     if (error?.status === 404) {
@@ -357,8 +361,10 @@ async function prepare({ github, context, core }) {
       return;
     }
     const commenter = context.payload.comment?.user?.login;
-    if (!(await hasWriteAccess({ github, context, username: commenter }))) {
-      core.setFailed(
+    if (
+      !(await hasWriteAccess({ github, context, core, username: commenter }))
+    ) {
+      core.info(
         `Review commands require write access to ${context.repo.owner}/${context.repo.repo}.`,
       );
       return;
@@ -392,6 +398,7 @@ async function prepare({ github, context, core }) {
     !(await hasWriteAccess({
       github,
       context,
+      core,
       username: pullRequest.user?.login,
     }))
   ) {
@@ -512,6 +519,24 @@ async function invalidatePullRequestUpdate({ github, context, core }) {
   });
 }
 
+// A failed lookup must not skip stale-marking, so errors count as untrusted
+// and the conservative stale notice is posted.
+async function isTrustedForInvalidation({ github, context, core, pullRequest }) {
+  try {
+    return await hasWriteAccess({
+      github,
+      context,
+      core,
+      username: pullRequest.user?.login,
+    });
+  } catch (error) {
+    core.warning(
+      `Could not read PR author permission (status ${githubErrorStatus(error)}); treating the author as untrusted.`,
+    );
+    return false;
+  }
+}
+
 async function invalidate({
   github,
   context,
@@ -535,15 +560,12 @@ async function invalidate({
   }
 
   const existing = await findReviewComment({ github, context, prNumber });
-  const shouldOnlyUpdateExisting =
-    existingOnly ||
-    (existingOnlyForTrustedAuthors &&
-      (await hasWriteAccess({
-        github,
-        context,
-        username: pullRequest.user?.login,
-      })));
-  if (!existing && shouldOnlyUpdateExisting) {
+  if (
+    !existing &&
+    (existingOnly ||
+      (existingOnlyForTrustedAuthors &&
+        (await isTrustedForInvalidation({ github, context, core, pullRequest }))))
+  ) {
     if (existingOnly || hasCurrentReviewLabel(pullRequest)) {
       await clearCurrentReview({ github, context, prNumber });
     }

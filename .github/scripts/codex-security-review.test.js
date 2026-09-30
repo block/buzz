@@ -129,6 +129,13 @@ function harness({
           if (permission instanceof Error) {
             throw permission;
           }
+          if (Array.isArray(permission)) {
+            const next = permission.shift();
+            if (next instanceof Error) {
+              throw next;
+            }
+            return { data: { permission: next } };
+          }
           return { data: { permission } };
         },
       },
@@ -289,13 +296,67 @@ test("permission lookup errors fail closed", async () => {
   assert.equal(commenter.outputs.size, 0);
 });
 
+test("transient permission lookup errors are retried", async () => {
+  const unavailable = Object.assign(new Error("unavailable"), {
+    status: 503,
+    response: { headers: { "retry-after": "0" } },
+  });
+  const state = harness({
+    permissions: { "block-member": [unavailable, "write"] },
+  });
+  await prepare(state);
+  assert.equal(state.outputs.get("authorized"), "true");
+  assert.equal(state.warnings.length, 1);
+});
+
+test("stale-marking proceeds when the permission lookup fails", async () => {
+  const state = harness({
+    pull: pullRequest({ author: "block-member", headSha: OTHER_HEAD_SHA }),
+    permissions: {
+      "block-member": Object.assign(new Error("forbidden"), { status: 403 }),
+    },
+    comments: [
+      reviewComment(
+        `${MARKER}\n<!-- codex-security-review-range:${BASE_SHA}...${HEAD_SHA} -->\nold review`,
+      ),
+    ],
+  });
+  state.context.eventName = "pull_request_target";
+  state.context.payload.pull_request = { number: 6816 };
+  await state.github.rest.issues.addLabels({
+    issue_number: 6816,
+    labels: [CURRENT_REVIEW_LABEL],
+  });
+
+  await invalidatePullRequestUpdate(state);
+
+  assert.equal(state.updated.length, 1);
+  assert.match(state.updated[0].body, /review required for the current range/);
+  assert.equal(state.removedLabels.length, 1);
+
+  const unreviewed = harness({
+    pull: pullRequest({ author: "block-member" }),
+    permissions: {
+      "block-member": Object.assign(new Error("forbidden"), { status: 403 }),
+    },
+  });
+  unreviewed.context.eventName = "pull_request_target";
+  unreviewed.context.payload.pull_request = { number: 6816 };
+
+  await invalidatePullRequestUpdate(unreviewed);
+
+  assert.equal(unreviewed.created.length, 1);
+  assert.equal(unreviewed.warnings.length, 1);
+});
+
 test("review commands require a commenter with write access", async () => {
   for (const login of ["outside-contributor", "unrelated-user"]) {
     const state = harness();
     state.context.payload.comment.user.login = login;
     await prepare(state);
     assert.equal(state.outputs.size, 0);
-    assert.match(state.failures[0], /require write access/);
+    assert.deepEqual(state.failures, []);
+    assert.match(state.info.at(-1), /require write access/);
   }
 
   const trusted = harness({ permissions: { "block-member": "admin" } });
