@@ -27,7 +27,6 @@ import {
 } from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
-import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { UsageAndActivityButton } from "@/features/agents/ui/AgentUsageActivityPanel";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { cn } from "@/shared/lib/cn";
@@ -283,7 +282,6 @@ function UserProfilePopoverBody({
   const { status: presenceStatus } = useAgentAvailability(pubkey);
   const userStatusQuery = useUserStatusQuery([pubkey]);
 
-  const { canOpenAgentActivity } = useOpenAgentActivity();
   const relayAgent = relayAgentsQuery.data?.find((a) => a.pubkey === pubkey);
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
@@ -348,8 +346,6 @@ function UserProfilePopoverBody({
   const showAnyProfileActions =
     showHumanProfileActions || showMessageAction || showHuddleAction;
   const canShowUsageActivity = isBotProfile && viewerIsOwner;
-  const canViewActivity =
-    canShowUsageActivity && canOpenAgentActivity(pubkey);
   const userStatus = visibleUserStatus(
     userStatusQuery.data?.[pubkey.toLowerCase()],
   );

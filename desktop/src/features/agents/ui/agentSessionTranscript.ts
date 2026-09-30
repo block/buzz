@@ -17,7 +17,6 @@ import {
   describeTurnStarted,
   describeSessionResolved,
   extractBlockText,
-  extractContentText,
   extractSessionUpdateText,
   extractPlanText,
   extractPromptBlocks,
