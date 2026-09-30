@@ -632,8 +632,9 @@ struct QueuedNormalListenerEvent {
     /// Visible message that owns this event's lifecycle reactions: the
     /// original for an edit, otherwise the event itself.
     reaction_target_id: String,
-    event_for_steer: nostr::Event,
-    prompt_tag_for_steer: String,
+    /// The admitted event as a native steer would render it, including an
+    /// edit's resolved original-message routing.
+    steer_event: queue::BatchEvent,
 }
 
 impl QueuedNormalListenerEvent {
@@ -662,17 +663,12 @@ impl QueuedNormalListenerEvent {
         let Some(signal) = mode_gate_signal(handling, &self.effective_author, owner) else {
             return;
         };
-        // Edits take the universal cancel+merge path: a native steer body does
-        // not yet carry the edit's original-message routing, whereas a
-        // requeued edit is re-dispatched as its own routed batch.
         let native_attempted = matches!(signal, ControlSignal::Steer)
-            && queue::edit_target_id(&self.event_for_steer).is_none()
             && try_native_steer(
                 pool,
                 queue,
                 self.scope.clone(),
-                self.event_for_steer,
-                self.prompt_tag_for_steer,
+                self.steer_event,
                 steer_ack_tx,
             );
         if !native_attempted {
@@ -719,14 +715,19 @@ impl NormalListenerIngress {
             edit,
         } = self;
         let reaction_target_id = queue::reaction_target_id(&buzz_event.event);
-        let event_for_steer = buzz_event.event.clone();
-        let prompt_tag_for_steer = prompt_tag.clone();
+        let received_at = std::time::Instant::now();
+        let steer_event = queue::BatchEvent {
+            event: buzz_event.event.clone(),
+            prompt_tag: prompt_tag.clone(),
+            received_at,
+            edit: edit.clone(),
+        };
         let channel_id = buzz_event.channel_id;
         let accepted = queue.push(QueuedEvent {
             channel_id,
             scope: session_scope.clone(),
             event: buzz_event.event,
-            received_at: std::time::Instant::now(),
+            received_at,
             prompt_tag,
             edit,
         });
@@ -735,8 +736,7 @@ impl NormalListenerIngress {
             scope: session_scope,
             effective_author,
             reaction_target_id,
-            event_for_steer,
-            prompt_tag_for_steer,
+            steer_event,
         }
     }
 }
@@ -4326,8 +4326,7 @@ fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     scope: scope::SessionScope,
-    event: nostr::Event,
-    prompt_tag: String,
+    be: queue::BatchEvent,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
     let channel_id = scope.channel_id();
@@ -4344,22 +4343,10 @@ fn try_native_steer(
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    let (tag, closing) = queue::native_steer_framing();
-    let event_id_hex = event.id.to_hex();
-    let be = queue::BatchEvent {
-        event,
-        prompt_tag: prompt_tag.clone(),
-        received_at: std::time::Instant::now(),
-        edit: None,
-    };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let new_message = prompt_framing::semantic_section(tag, "");
-    let event_section = prompt_framing::semantic_section_with_attributes(
-        "buzz-event",
-        &[("type", prompt_tag.as_str())],
-        &event_block,
-    );
-    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
+    // An edit's block carries its resolved original-message routing, so a
+    // steered edit is anchored exactly as a dispatched one would be.
+    let event_id_hex = be.event.id.to_hex();
+    let body = native_steer_body(channel_id, &be);
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
@@ -4424,6 +4411,19 @@ fn try_native_steer(
             false
         }
     }
+}
+
+/// Render the prompt delta sent by [`try_native_steer`].
+fn native_steer_body(channel_id: Uuid, be: &queue::BatchEvent) -> String {
+    let (tag, closing) = queue::native_steer_framing();
+    let event_block = queue::format_event_block(channel_id, None, be, None);
+    let new_message = prompt_framing::semantic_section(tag, "");
+    let event_section = prompt_framing::semantic_section_with_attributes(
+        "buzz-event",
+        &[("type", be.prompt_tag.as_str())],
+        &event_block,
+    );
+    format!("{new_message}\n\n{event_section}\n\n{closing}")
 }
 
 // ── try_native_steer fallback-log tests ───────────────────────────────────────
@@ -4594,8 +4594,12 @@ mod try_native_steer_fallback_log_tests {
                 pool,
                 &mut queue,
                 busy_scope.clone(),
-                event,
-                "mention".into(),
+                queue::BatchEvent {
+                    event,
+                    prompt_tag: "mention".into(),
+                    received_at: std::time::Instant::now(),
+                    edit: None,
+                },
                 &steer_ack_tx,
             )
         });
@@ -9946,6 +9950,63 @@ mod edit_mention_admission_tests {
                 .is_none(),
             "an edit that does not mention the agent must not wake it"
         );
+    }
+}
+
+#[cfg(test)]
+mod edit_native_steer_tests {
+    use super::*;
+    use crate::edit_routing::test_support::{edit_event, message};
+
+    /// A steered edit renders its original's routing, not the edit's own
+    /// bare `e` tag, so the live turn replies in the original's thread.
+    #[test]
+    fn native_steer_body_carries_edit_original_routing() {
+        let root = "ab".repeat(32);
+        let original = message(Some(&root));
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let be = queue::BatchEvent {
+            event: edit.clone(),
+            prompt_tag: "@mention".into(),
+            received_at: std::time::Instant::now(),
+            edit: Some(queue::ResolvedEdit {
+                target_event_id: original.id.to_hex(),
+                target_thread_tags: queue::parse_thread_tags(&original),
+            }),
+        };
+        let body = native_steer_body(Uuid::new_v4(), &be);
+        assert!(
+            body.contains(&format!("Edit of: {}", original.id.to_hex())),
+            "{body}"
+        );
+        assert!(body.contains(&format!("root={root}")), "{body}");
+    }
+
+    /// The listener hands the steer path the same resolved route it queues.
+    #[test]
+    fn listener_steer_event_keeps_resolved_edit() {
+        let original = message(None);
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let channel_id = Uuid::new_v4();
+        let resolved = queue::ResolvedEdit {
+            target_event_id: original.id.to_hex(),
+            target_thread_tags: queue::parse_thread_tags(&original),
+        };
+        let ingress = NormalListenerIngress {
+            buzz_event: relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id,
+                event: edit,
+            },
+            effective_author: "author".into(),
+            prompt_tag: "@mention".into(),
+            edit: Some(resolved.clone()),
+        };
+        let scope = ingress.session_scope(scope::SessionPolicy::Channel, false);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let queued = ingress.push(&mut queue, scope);
+        assert_eq!(queued.steer_event.edit, Some(resolved));
+        assert_eq!(queued.reaction_target_id, original.id.to_hex());
     }
 }
 
