@@ -271,6 +271,19 @@ async fn ensure_starter_channel_memberships(
     Ok(())
 }
 
+/// Build the kind:39000 filter that reads back channel metadata by ID right
+/// after this client created or edited those channels.
+pub(crate) fn channel_metadata_filter(channel_ids: &[impl serde::Serialize]) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [39000],
+        "#d": channel_ids,
+        "limit": channel_ids.len(),
+        // Read-your-writes: a lagging read replica would miss the metadata the
+        // relay just wrote, so pin this read to the writer.
+        "consistency": "strong",
+    })
+}
+
 async fn fetch_starter_channel_metadata(
     state: &AppState,
     channel_ids: &[String],
@@ -279,15 +292,7 @@ async fn fetch_starter_channel_metadata(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": channel_ids,
-            "limit": channel_ids.len(),
-        })],
-    )
-    .await?;
+    let events = query_relay(state, &[channel_metadata_filter(channel_ids)]).await?;
 
     events
         .iter()
@@ -343,15 +348,7 @@ pub async fn create_channel(
     state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [channel_uuid_string],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let events = query_relay(&state, &[channel_metadata_filter(&[&channel_uuid_string])]).await?;
 
     events
         .first()
@@ -465,15 +462,7 @@ pub async fn update_channel(
     )?;
     submit_event(builder, &state).await?;
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [input.channel_id],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let events = query_relay(&state, &[channel_metadata_filter(&[&input.channel_id])]).await?;
 
     events
         .first()

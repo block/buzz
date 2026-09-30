@@ -513,3 +513,19 @@ fn profile_join_pubkeys_caps_in_roster_order() {
     assert_eq!(profile_join_pubkeys(&members, 10).len(), 3);
     assert!(profile_join_pubkeys(&[], 10).is_empty());
 }
+
+// Mutation oracle: removing `"consistency"` from `channel_metadata_filter`
+// fails this test, and create/update/starter/open-DM all read back through it.
+#[test]
+fn channel_metadata_filter_carries_strong_consistency() {
+    let ids = ["a", "b"];
+    let f = channel_metadata_filter(&ids);
+    assert_eq!(
+        f.get("consistency").and_then(|v| v.as_str()),
+        Some("strong"),
+        "channel metadata read-back must carry consistency=strong: {f}"
+    );
+    assert_eq!(f["kinds"], serde_json::json!([39000]));
+    assert_eq!(f["#d"], serde_json::json!(["a", "b"]));
+    assert_eq!(f.get("limit").and_then(|v| v.as_u64()), Some(2));
+}
