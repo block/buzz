@@ -321,10 +321,13 @@ export function UserProfilePanel({
     currentPubkey !== undefined &&
     pubkeyLower.length > 0 &&
     pubkeyLower === currentPubkey.toLowerCase();
+  // Usage & activity is pubkey-archive based (24200 timeline + optional 44200).
+  // Do not gate it on canOpenAgentActivity — community bots often lack a
+  // navigable relayAgent channelId from the Bots directory / home profile.
+  const canShowUsageActivity =
+    viewerIsOwner && isBot && Boolean(effectivePubkey);
   const canViewActivity =
-    viewerIsOwner &&
-    Boolean(effectivePubkey) &&
-    canOpenAgentActivity(effectivePubkey);
+    canShowUsageActivity && canOpenAgentActivity(effectivePubkey);
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
@@ -796,6 +799,7 @@ export function UserProfilePanel({
           canEditAgent={canEditAgent}
           canInstantiateAgent={canInstantiateAgent}
           canOpenAgentLogs={canOpenAgentLogs}
+          canShowUsageActivity={canShowUsageActivity}
           canViewActivity={canViewActivity}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}

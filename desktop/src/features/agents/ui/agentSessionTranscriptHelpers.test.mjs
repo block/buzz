@@ -1092,3 +1092,13 @@ test("extractSessionUpdateText falls back to thinking/reasoning fields", () => {
   );
   assert.equal(extractSessionUpdateText({ reasoning: "why" }), "why");
 });
+
+test("extractSessionUpdateText reads content.thinking blocks", () => {
+  assert.equal(
+    extractSessionUpdateText({
+      sessionUpdate: "agent_thought_chunk",
+      content: { type: "thinking", thinking: "chain-of-thought" },
+    }),
+    "chain-of-thought",
+  );
+});

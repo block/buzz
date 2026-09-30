@@ -1334,12 +1334,18 @@ fn observer_chunk_key_and_text(
         return None;
     }
 
+    // OpenClaw / ledger shapes vary: content.text, content.thinking,
+    // or top-level text/thinking/reasoning.
     let text = update
         .get("content")
-        .and_then(|c| c.get("text"))
-        .and_then(|t| t.as_str())
+        .and_then(|c| {
+            c.get("text")
+                .and_then(|t| t.as_str())
+                .or_else(|| c.get("thinking").and_then(|t| t.as_str()))
+        })
         .or_else(|| update.get("text").and_then(|t| t.as_str()))
-        .or_else(|| update.get("thinking").and_then(|t| t.as_str()))?
+        .or_else(|| update.get("thinking").and_then(|t| t.as_str()))
+        .or_else(|| update.get("reasoning").and_then(|t| t.as_str()))?
         .to_string();
     let message_id = update
         .get("messageId")
@@ -1360,16 +1366,53 @@ fn observer_chunk_key_and_text(
 }
 
 fn set_observer_chunk_text(payload: &mut serde_json::Value, text: String) {
-    let Some(content) = payload
+    let Some(update) = payload
         .get_mut("params")
         .and_then(|params| params.get_mut("update"))
-        .and_then(|update| update.get_mut("content"))
     else {
         return;
     };
 
-    if let Some(content_object) = content.as_object_mut() {
-        content_object.insert("text".to_string(), serde_json::Value::String(text));
+    // Prefer ACP ContentChunk (`content.text`). OpenClaw ledger replay often
+    // uses top-level `text`/`thinking` with no `content` object — writing only
+    // into content.text used to no-op, so coalesced Thought text vanished from
+    // archived 24200 while live upserts still accumulated earlier frames.
+    if let Some(content) = update.get_mut("content") {
+        if let Some(content_object) = content.as_object_mut() {
+            content_object.insert("text".to_string(), serde_json::Value::String(text.clone()));
+            // Keep thinking in sync when that was the original carrier field.
+            if content_object.contains_key("thinking") {
+                content_object.insert(
+                    "thinking".to_string(),
+                    serde_json::Value::String(text.clone()),
+                );
+            }
+        }
+    }
+
+    let Some(update_object) = update.as_object_mut() else {
+        return;
+    };
+    if update_object.contains_key("text") {
+        update_object.insert("text".to_string(), serde_json::Value::String(text.clone()));
+    }
+    if update_object.contains_key("thinking") {
+        update_object.insert(
+            "thinking".to_string(),
+            serde_json::Value::String(text.clone()),
+        );
+    }
+    if update_object.contains_key("reasoning") {
+        update_object.insert(
+            "reasoning".to_string(),
+            serde_json::Value::String(text.clone()),
+        );
+    }
+    if !update_object.contains_key("content") {
+        update_object.insert(
+            "content".to_string(),
+            serde_json::json!({ "type": "text", "text": text }),
+        );
     }
 }
 
@@ -9170,6 +9213,83 @@ mod observer_chunk_coalescer_tests {
         assert_eq!(events.len(), 2);
         assert_eq!(chunk_text(&events[0].1), "answer");
         assert_eq!(chunk_text(&events[1].1), "thinking");
+    }
+
+    fn openclaw_toplevel_thought_chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+        observer::ObserverEvent {
+            seq,
+            timestamp: format!("2026-04-29T04:00:0{seq}Z"),
+            kind: "acp_read".to_string(),
+            agent_index: Some(0),
+            channel_id: Some("channel-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            started_at: None,
+            payload: serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_thought_chunk",
+                        "messageId": message_id,
+                        "text": text,
+                    },
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn coalesces_openclaw_toplevel_thought_text_on_flush() {
+        let mut coalescer = ObserverChunkCoalescer::default();
+
+        assert!(coalescer
+            .ingest(openclaw_toplevel_thought_chunk(1, "thought-1", "step-one "))
+            .is_empty());
+        assert!(coalescer
+            .ingest(openclaw_toplevel_thought_chunk(2, "thought-1", "step-two"))
+            .is_empty());
+
+        let events = coalescer.flush();
+        assert_eq!(events.len(), 1);
+        let update = &events[0].1.payload["params"]["update"];
+        assert_eq!(update["text"].as_str(), Some("step-one step-two"));
+        assert_eq!(
+            update["content"]["text"].as_str(),
+            Some("step-one step-two"),
+            "flush must invent content.text so desktop extractSessionUpdateText keeps Thought"
+        );
+    }
+
+    #[test]
+    fn coalesces_content_thinking_carrier_field() {
+        let mut coalescer = ObserverChunkCoalescer::default();
+        let mut first = chunk_event(1, "agent_thought_chunk", "thought-1", "");
+        first.payload["params"]["update"]["content"] = serde_json::json!({
+            "type": "thinking",
+            "thinking": "alpha "
+        });
+        // Clear standard text so only content.thinking carries the chunk.
+        if let Some(obj) = first.payload["params"]["update"]["content"].as_object_mut() {
+            obj.remove("text");
+        }
+        let mut second = chunk_event(2, "agent_thought_chunk", "thought-1", "");
+        second.payload["params"]["update"]["content"] = serde_json::json!({
+            "type": "thinking",
+            "thinking": "beta"
+        });
+        if let Some(obj) = second.payload["params"]["update"]["content"].as_object_mut() {
+            obj.remove("text");
+        }
+
+        assert!(coalescer.ingest(first).is_empty());
+        assert!(coalescer.ingest(second).is_empty());
+        let events = coalescer.flush();
+        assert_eq!(events.len(), 1);
+        let content = &events[0].1.payload["params"]["update"]["content"];
+        assert_eq!(content["text"].as_str(), Some("alpha beta"));
+        assert_eq!(content["thinking"].as_str(), Some("alpha beta"));
     }
 }
 

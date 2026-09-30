@@ -347,8 +347,9 @@ function UserProfilePopoverBody({
     (!isBotProfile || viewerIsOwner);
   const showAnyProfileActions =
     showHumanProfileActions || showMessageAction || showHuddleAction;
+  const canShowUsageActivity = isBotProfile && viewerIsOwner;
   const canViewActivity =
-    isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
+    canShowUsageActivity && canOpenAgentActivity(pubkey);
   const userStatus = visibleUserStatus(
     userStatusQuery.data?.[pubkey.toLowerCase()],
   );
@@ -508,7 +509,7 @@ function UserProfilePopoverBody({
           </div>
         ) : null}
 
-        {canViewActivity ? (
+        {canShowUsageActivity ? (
           <UsageAndActivityButton
             agentPubkey={pubkey}
             className="w-full justify-start gap-2 border border-border/60 px-3 py-2 text-xs font-medium"

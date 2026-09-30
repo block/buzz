@@ -219,6 +219,7 @@ export function ProfileInfoTabContent({
   onEditInstructions,
   pubkey,
   showActivityIngress,
+  showUsageActivity = false,
   showInstructionBlock,
 }: {
   activeTurns: ActiveTurnSummary[];
@@ -242,6 +243,8 @@ export function ProfileInfoTabContent({
   onOpenActivity: (channelId?: string | null) => void;
   pubkey: string | null;
   showActivityIngress: boolean;
+  /** Owned bot: Usage drawer (24200/44200) even when activity deep-link is blocked. */
+  showUsageActivity?: boolean;
   showInstructionBlock: boolean;
 }) {
   const infoFields: ProfileField[] = isArchived
@@ -271,6 +274,7 @@ export function ProfileInfoTabContent({
     !onDuplicateAgent &&
     !onExportAgent &&
     !showActivityIngress &&
+    !showUsageActivity &&
     !showInstructionBlock
   ) {
     return null;
@@ -278,26 +282,28 @@ export function ProfileInfoTabContent({
 
   return (
     <div className="space-y-4" data-testid="user-profile-info-sections">
-      {showActivityIngress ? (
+      {showActivityIngress || showUsageActivity ? (
         <div className="space-y-2">
-          {showLiveActivityEmbed && activityAgent ? (
-            <ProfileLiveActivityEmbed
-              activeTurns={activeTurns}
-              activityAgent={activityAgent}
-              channelIdToName={channelIdToName}
-              feedScope={feedScope}
-              onOpenActivity={onOpenActivity}
-            />
-          ) : (
-            <ProfileIngressRow
-              icon={Wrench}
-              label="View activity"
-              onClick={() => onOpenActivity(null)}
-              testId={`user-profile-view-activity-${pubkey}`}
-              trailing="View"
-            />
-          )}
-          {pubkey ? (
+          {showActivityIngress ? (
+            showLiveActivityEmbed && activityAgent ? (
+              <ProfileLiveActivityEmbed
+                activeTurns={activeTurns}
+                activityAgent={activityAgent}
+                channelIdToName={channelIdToName}
+                feedScope={feedScope}
+                onOpenActivity={onOpenActivity}
+              />
+            ) : (
+              <ProfileIngressRow
+                icon={Wrench}
+                label="View activity"
+                onClick={() => onOpenActivity(null)}
+                testId={`user-profile-view-activity-${pubkey}`}
+                trailing="View"
+              />
+            )
+          ) : null}
+          {showUsageActivity && pubkey ? (
             <UsageAndActivityButton
               agentName={managedAgent?.name ?? activityAgent?.name ?? null}
               agentPubkey={pubkey}

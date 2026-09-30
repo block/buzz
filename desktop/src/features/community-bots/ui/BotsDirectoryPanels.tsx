@@ -1,5 +1,7 @@
 import { ArrowUpRight, MessageSquare } from "lucide-react";
 
+import { UsageAndActivityButton } from "@/features/agents/ui/AgentUsageActivityPanel";
+
 import { AgentIdentityCard } from "@/features/agents/ui/AgentIdentityCard";
 import { IdentityInitialsAvatar } from "@/features/agents/ui/IdentityInitialsAvatar";
 import { IDENTITY_CARD_GRID_CLASS } from "@/features/agents/ui/UnifiedAgentsSection";
@@ -156,6 +158,16 @@ export function BotDetailContent({
           </button>
         </div>
       ) : null}
+
+      <UsageAndActivityButton
+        agentName={detail.name}
+        agentPubkey={detail.hexPubkey}
+        className="w-full justify-start gap-2 border border-border/60 px-3 py-2 text-xs font-medium"
+        label="Usage & activity"
+        size="sm"
+        testId={`bot-detail-usage-activity-${detail.hexPubkey}`}
+        variant="ghost"
+      />
 
       <ProfileSectionGroup testId="bot-detail-public-key" title="Identity">
         <div className="flex min-h-16 items-center justify-between gap-4 px-4 py-3">

@@ -238,6 +238,10 @@ export function AgentMessageTurnThinkingCard() {
       <ul className="space-y-2">
         {meta.turnItems.map((item) => {
           if (item.type === "thought") {
+            const thoughtText = item.text.trim();
+            // Skip empty carriers left by pre-fix coalescer writeback gaps;
+            // tools in the same expand still render.
+            if (!thoughtText) return null;
             return (
               <li
                 className="text-xs leading-5 text-muted-foreground"
@@ -246,10 +250,7 @@ export function AgentMessageTurnThinkingCard() {
                 <p className="mb-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground/80">
                   {item.title || "Thinking"}
                 </p>
-                <Markdown
-                  className="leading-5"
-                  content={item.text.trim() || " "}
-                />
+                <Markdown className="leading-5" content={thoughtText} />
               </li>
             );
           }

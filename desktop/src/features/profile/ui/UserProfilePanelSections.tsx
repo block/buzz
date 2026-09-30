@@ -68,6 +68,7 @@ export type ProfileSummaryViewProps = {
   canDeleteAgent: boolean;
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
+  canShowUsageActivity: boolean;
   canViewActivity: boolean;
   channelCount: number;
   channelIdToName: Record<string, string>;
@@ -144,6 +145,7 @@ export function ProfileSummaryView({
   canDeleteAgent,
   canEditAgent,
   canOpenAgentLogs,
+  canShowUsageActivity,
   canViewActivity,
   channelCount,
   channelIdToName,
@@ -243,11 +245,13 @@ export function ProfileSummaryView({
     diagnosticsFields.some((field) => field.label !== "Status") ||
     canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
+  const showUsageActivity = canShowUsageActivity;
   const showInfoTab =
     agentInfoFields.length > 0 ||
     runtimeFields.length > 0 ||
     isArchived ||
     showActivityIngress ||
+    showUsageActivity ||
     showInstructionBlock ||
     managedAgent !== undefined ||
     !showRuntimeTab;
@@ -541,6 +545,7 @@ export function ProfileSummaryView({
                 onOpenActivity={onOpenActivity}
                 pubkey={pubkey}
                 showActivityIngress={showActivityIngress}
+                showUsageActivity={showUsageActivity}
                 showInstructionBlock={showInstructionBlock}
               />
             ) : null}

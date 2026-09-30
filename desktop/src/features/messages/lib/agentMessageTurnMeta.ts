@@ -257,9 +257,11 @@ export function summarizeThinkingItems(
   let thoughtPreview: string | null = null;
   for (const item of items) {
     if (item.type === "thought") {
+      const trimmed = item.text?.trim() ?? "";
+      if (!trimmed) continue;
       thoughtCount += 1;
-      if (!thoughtPreview && item.text?.trim()) {
-        thoughtPreview = item.text.trim();
+      if (!thoughtPreview) {
+        thoughtPreview = trimmed;
       }
     } else if (item.type === "tool") {
       toolCount += 1;

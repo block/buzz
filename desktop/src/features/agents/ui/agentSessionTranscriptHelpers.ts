@@ -622,7 +622,11 @@ export function extractBlockText(value: unknown): string {
       : typeof rawOutput === "string"
         ? rawOutput
         : JSON.stringify(rawOutput, null, 2);
-  const directText = asString(record.text) ?? asString(record.content);
+  const directText =
+    asString(record.text) ??
+    asString(record.thinking) ??
+    asString(record.reasoning) ??
+    asString(record.content);
   return directText || nestedText || rawOutputText || "";
 }
 
