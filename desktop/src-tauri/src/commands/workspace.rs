@@ -224,19 +224,11 @@ pub async fn apply_workspace(
         // cannot advance it until this transaction releases the guard.
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
-        // ── Apply all state changes (nothing below can fail) ──────────────────
-        {
-            let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
-            *override_guard = Some(relay_url);
-        }
+        // Acquire both locks before changing either part of the signing scope.
+        state.apply_signing_and_relay_scope(relay_url, parsed_keys)?;
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
         crate::relay_admission::reset_gate_for_workspace_change();
-
-        if let Some(keys) = parsed_keys {
-            let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
-            *keys_guard = keys;
-        }
 
         // Keep the backend-side reconcile guard aligned with the frontend
         // experiment before launch-time restore can spawn any agents. Missing
