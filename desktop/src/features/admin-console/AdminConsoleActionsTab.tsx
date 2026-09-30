@@ -39,6 +39,7 @@ import {
 import {
   adminErrorCode,
   adminErrorMessage,
+  adminMutationBodyComplete,
   adminMutationNotSent,
   adminMutationRelayStatus,
   preserveRequestIdOnError,
@@ -61,9 +62,14 @@ function directErrorMessage(e: unknown): string {
     case "request_id_conflict":
       return "This request id was already used for a different action. Review again to send it with a new id.";
     case null: {
-      // A relay from before direct actions answers these routes bodyless.
+      // A relay from before direct actions answers these routes with an empty
+      // 404/405; any other uncoded body keeps its own text.
       const status = adminMutationRelayStatus(e);
-      if (status === 404 || status === 405) {
+      if (
+        (status === 404 || status === 405) &&
+        adminMutationBodyComplete(e) &&
+        adminErrorMessage(e).trim() === "admin API error:"
+      ) {
         return "This relay doesn't support direct actions yet.";
       }
       return adminErrorMessage(e);

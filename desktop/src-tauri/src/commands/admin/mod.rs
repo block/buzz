@@ -955,7 +955,7 @@ pub async fn admin_direct_action(
     intent: AdminDirectIntent,
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<serde_json::Value, AdminMutationError> {
-    let keys = state.signing_keys()?;
+    let keys = state.signing_keys().map_err(AdminMutationError::not_sent)?;
     send_direct_action(&intent, keys, &state).await
 }
 

@@ -123,6 +123,10 @@ async fn direct_action_refuses_key_backup_reason_before_any_request() {
             .await
             .unwrap_err();
         assert!(format!("{err:?}").contains("key-backup"), "{err:?}");
+        assert!(
+            err.not_sent,
+            "a pre-send key-backup refusal must be notSent"
+        );
     }
     assert_eq!(
         hits.load(Ordering::SeqCst),

@@ -752,11 +752,27 @@ test("actions-not-sent: a refusal before sending drops the intent and offers no 
   }
 });
 
-test("actions-old-relay: a bodyless 404 or 405 says the relay lacks direct actions", async () => {
-  for (const status of [404, 405]) {
-    setIpcHandler("admin_direct_action", () =>
-      mutationReject("admin API error: ", status),
-    );
+test("actions-old-relay: only an empty 404 or 405 says the relay lacks direct actions", async () => {
+  // Mutation: drop the empty-body condition from directErrorMessage → RED.
+  for (const [status, message, expected] of [
+    [
+      404,
+      "admin API error: ",
+      "This relay doesn't support direct actions yet.",
+    ],
+    [
+      405,
+      "admin API error: ",
+      "This relay doesn't support direct actions yet.",
+    ],
+    [404, "admin API error: Not Found", "admin API error: Not Found"],
+    [
+      405,
+      "admin API error: Method Not Allowed",
+      "admin API error: Method Not Allowed",
+    ],
+  ]) {
+    setIpcHandler("admin_direct_action", () => mutationReject(message, status));
     const { container: c, unmount } = await mountActions();
     try {
       await pickKey(c, TARGET);
@@ -764,10 +780,44 @@ test("actions-old-relay: a bodyless 404 or 405 says the relay lacks direct actio
       await click(c, "direct-confirm-btn");
       assert.equal(
         q(c, "direct-error").textContent,
-        "This relay doesn't support direct actions yet.",
+        expected,
+        `${status} ${message}`,
       );
     } finally {
       await unmount();
     }
+  }
+});
+
+test("actions-backup-reason-not-sent: a key-backup reason refusal returns to editable Review", async () => {
+  // Mirrors the native backup-guard refusal (Rust asserts notSent there).
+  // Mutation: return notSent: false, as before the fix → RED.
+  const backup = "see " + "ncrypt" + "sec1qgg9947";
+  let calls = 0;
+  setIpcHandler("admin_direct_action", () => {
+    calls += 1;
+    return Promise.reject({
+      message: "admin API mutation: refused to send key-backup material",
+      relayStatus: null,
+      bodyComplete: false,
+      notSent: true,
+    });
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await pickKey(c, TARGET);
+    await type(c, "direct-reason-input", backup);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    assert.equal(calls, 1);
+    assert.ok(!q(c, "direct-confirm"), "no Retry after a pre-send refusal");
+    assert.ok(q(c, "direct-review-btn"), "back to Review");
+    assert.equal(
+      q(c, "direct-reason-input").disabled,
+      false,
+      "Reason is editable again",
+    );
+  } finally {
+    await unmount();
   }
 });

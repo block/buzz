@@ -123,14 +123,18 @@ pub(super) async fn send_admin_mutation(
     body: Option<&[u8]>,
     cap: u64,
 ) -> Result<Vec<u8>, AdminMutationError> {
+    // Every refusal before the first `.send()` is `not_sent`: nothing reached
+    // the relay, so resending the same intent can never succeed.
     if let Some(bytes) = body {
-        crate::egress_guard::assert_no_key_backup_bytes(bytes, "admin API mutation")?;
+        crate::egress_guard::assert_no_key_backup_bytes(bytes, "admin API mutation")
+            .map_err(AdminMutationError::not_sent)?;
     }
     let http_client = client::ADMIN_CLIENT
         .get()
-        .ok_or_else(|| "admin client not initialised".to_string())?;
+        .ok_or_else(|| AdminMutationError::not_sent("admin client not initialised".to_string()))?;
 
-    let resp = build_admin_mutation_request(http_client, keys, &method, url, body)?
+    let resp = build_admin_mutation_request(http_client, keys, &method, url, body)
+        .map_err(AdminMutationError::not_sent)?
         .send()
         .await
         .map_err(|e| crate::relay::classify_request_error(&e))?;
