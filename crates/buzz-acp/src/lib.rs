@@ -10008,6 +10008,89 @@ mod edit_native_steer_tests {
         assert_eq!(queued.steer_event.edit, Some(resolved));
         assert_eq!(queued.reaction_target_id, original.id.to_hex());
     }
+
+    /// End to end through the listener's steer decision: a routed edit that
+    /// arrives during a running turn goes out as a native steer carrying the
+    /// original's route, and the running turn is not cancelled.
+    #[tokio::test]
+    async fn routed_edit_steers_running_turn_with_original_route() {
+        let root = "ab".repeat(32);
+        let original = message(Some(&root));
+        let channel_id = Uuid::new_v4();
+        let ingress =
+            |event: nostr::Event, edit: Option<queue::ResolvedEdit>| NormalListenerIngress {
+                buzz_event: relay::BuzzEvent {
+                    connection_generation: 0,
+                    channel_id,
+                    event,
+                },
+                effective_author: "author".into(),
+                prompt_tag: "@mention".into(),
+                edit,
+            };
+
+        // A turn is already running in the scope.
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let running = ingress(message(None), None);
+        let scope = running.session_scope(scope::SessionPolicy::Channel, false);
+        running.push(&mut queue, scope.clone());
+        queue.flush_next().expect("running turn");
+        assert!(queue.is_scope_in_flight(&scope));
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (control_tx, mut control_rx) = tokio::sync::oneshot::channel();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope.clone()),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let resolved = queue::ResolvedEdit {
+            target_event_id: original.id.to_hex(),
+            target_thread_tags: queue::parse_thread_tags(&original),
+        };
+        let edit_ingress = ingress(edit, Some(resolved));
+        assert_eq!(
+            edit_ingress.session_scope(scope::SessionPolicy::Channel, false),
+            scope
+        );
+        let (ack_tx, _ack_rx) = mpsc::unbounded_channel();
+        edit_ingress
+            .push(&mut queue, scope.clone())
+            .steer_or_interrupt(
+                MultipleEventHandling::Steer,
+                None,
+                &mut pool,
+                &mut queue,
+                &ack_tx,
+            );
+
+        let request = steer_rx.try_recv().expect("edit is sent as a native steer");
+        let body = request.prompt_blocks.join("\n");
+        assert!(
+            body.contains(&format!("Edit of: {}", original.id.to_hex())),
+            "{body}"
+        );
+        assert!(body.contains(&format!("root={root}")), "{body}");
+        assert!(
+            matches!(
+                control_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "native steer must not cancel the running turn"
+        );
+    }
 }
 
 #[cfg(test)]
