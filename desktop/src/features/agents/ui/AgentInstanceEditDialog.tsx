@@ -1090,8 +1090,7 @@ export function AgentInstanceEditDialog({
                   />
                 </div>
               ) : null}
-              {modelDiscoveryLoadingMessage ||
-              modelDiscoveryStatus !== null ? (
+              {modelDiscoveryLoadingMessage || modelDiscoveryStatus !== null ? (
                 <ModelDiscoveryStatusLine
                   disabled={updateMutation.isPending}
                   loading={modelDiscoveryLoading}

@@ -494,7 +494,9 @@ export function AgentModelField({
       selectedLabel={controlSelectedLabel}
       testId={testId ?? id}
       value={
-        controlShowsLoading && trimmedModel.length === 0 && !isCustomModelEditing
+        controlShowsLoading &&
+        trimmedModel.length === 0 &&
+        !isCustomModelEditing
           ? MODEL_DISCOVERY_LOADING_VALUE
           : modelSelectValue
       }
@@ -511,7 +513,9 @@ export function AgentModelField({
       id={id}
       onChange={(event) => handleModelSelectChange(event.target.value)}
       value={
-        controlShowsLoading && trimmedModel.length === 0 && !isCustomModelEditing
+        controlShowsLoading &&
+        trimmedModel.length === 0 &&
+        !isCustomModelEditing
           ? MODEL_DISCOVERY_LOADING_VALUE
           : modelSelectValue
       }

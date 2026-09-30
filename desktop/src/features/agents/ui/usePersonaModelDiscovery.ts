@@ -221,6 +221,7 @@ export function usePersonaModelDiscovery({
     trimmedProvider,
   ]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry must re-run discovery for an unchanged cache key.
   React.useEffect(() => {
     if (modelDiscoveryKey === null || discoveryAgentCommand === null) {
       modelDiscoveryRequestRef.current += 1;
@@ -345,6 +346,7 @@ export function usePersonaModelDiscovery({
 
   // One-shot slow-phase flip for status-line copy (#2261). Prefer a single
   // timeout over a 500ms elapsed ticker that re-renders the tree for no gain.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A new key or retry restarts the slow-loading timer even when loading stays true.
   React.useEffect(() => {
     if (!modelDiscoveryLoading) {
       setDiscoveryLoadingSlow(false);
