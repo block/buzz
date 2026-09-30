@@ -1,17 +1,92 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [PresenceCacheNotifier] in the pure-Nostr world.
 ///
-/// The cache is now purely WS-driven: the notifier subscribes to kind:20001
-/// (presence updates) over the relay session and only mutates state for
-/// pubkeys that have been registered via [PresenceCacheNotifier.track].
-/// There is no longer a REST backstop — the previous test seeded state via
-/// a `GET /api/presence` call which has been removed.
+/// The cache hydrates tracked users from relay-generated snapshots, then keeps
+/// them current through live kind:20001 presence updates.
 void main() {
+  test('hydrates tracked pubkeys from a batched presence snapshot', () async {
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryResult = [
+        _snapshot('relay', 'alice', 'online'),
+        _snapshot('relay', 'bob', 'away'),
+      ];
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['Alice']);
+    container.read(presenceCacheProvider.notifier).track(['BOB']);
+    await _waitForSnapshot();
+
+    expect(relaySession.queries, hasLength(1));
+    final filter = relaySession.queries.single.single;
+    expect(filter.kinds, [EventKind.presenceSnapshot]);
+    expect(filter.authors, containsAll(<String>['alice', 'bob']));
+    expect(filter.limit, 2);
+    expect(container.read(presenceCacheProvider), {
+      'alice': 'online',
+      'bob': 'away',
+    });
+  });
+
+  test('marks a tracked pubkey offline when no snapshot exists', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitForSnapshot();
+
+    expect(container.read(presenceCacheProvider)['alice'], 'offline');
+  });
+
+  test('live update wins over an in-flight presence snapshot', () async {
+    final snapshotCompleter = Completer<List<NostrEvent>>();
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryHandler = (_) => snapshotCompleter.future;
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitForSnapshotStart();
+    relaySession.emit(_presence('alice', 'online'));
+    snapshotCompleter.complete(const []);
+    await _pumpEventQueue();
+
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
+
+  test('snapshot failure leaves presence unknown for a live update', () async {
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryHandler = (_) => Future.error(Exception('snapshot unavailable'));
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitForSnapshot();
+
+    expect(container.read(presenceCacheProvider).containsKey('alice'), isFalse);
+  });
+
   test('WS presence event updates cache for tracked pubkey', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
@@ -148,20 +223,41 @@ Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
 }
 
+Future<void> _waitForSnapshotStart() async {
+  await Future<void>.delayed(const Duration(milliseconds: 75));
+}
+
+Future<void> _waitForSnapshot() async {
+  await _waitForSnapshotStart();
+  await _pumpEventQueue();
+}
+
 ProviderContainer _buildContainer({
   required _RecordingRelaySessionNotifier relaySession,
 }) {
   return ProviderContainer(
     overrides: [
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
+      relayConfigProvider.overrideWith(_AuthenticatedRelayConfigNotifier.new),
       relaySessionProvider.overrideWith(() => relaySession),
     ],
   );
 }
 
+class _AuthenticatedRelayConfigNotifier extends RelayConfigNotifier {
+  final String _nsec = nostr.Keys.generate().nsec;
+
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://relay.example', nsec: _nsec);
+}
+
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> filters = [];
+  final List<List<NostrFilter>> queries = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  List<NostrEvent> queryResult = const [];
+  Future<List<NostrEvent>> Function(List<NostrFilter>)? queryHandler;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -180,6 +276,15 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     };
   }
 
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    queries.add(filters);
+    return queryHandler?.call(filters) ?? Future.value(queryResult);
+  }
+
   /// Emit an event synchronously to all live subscribers.
   void emit(NostrEvent event) {
     for (final listener in List.of(_listeners)) {
@@ -187,6 +292,19 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     }
   }
 }
+
+NostrEvent _snapshot(String relayPubkey, String subjectPubkey, String status) =>
+    NostrEvent(
+      id: 'snapshot-$subjectPubkey-$status',
+      pubkey: relayPubkey,
+      createdAt: 1000,
+      kind: EventKind.presenceUpdate,
+      tags: [
+        ['p', subjectPubkey],
+      ],
+      content: status,
+      sig: 'sig',
+    );
 
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {
   @override
