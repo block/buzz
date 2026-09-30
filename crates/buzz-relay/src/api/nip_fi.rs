@@ -547,7 +547,8 @@ fn plain_response(status: StatusCode, body: &'static str) -> Response<Body> {
 
 /// Render a command rejection with its spec-exact status and body.
 fn command_denial(err: CommandError) -> Response<Body> {
-    let status = StatusCode::from_u16(err.http_status()).expect("valid status");
+    let status =
+        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     plain_response(status, err.response_body())
 }
 
