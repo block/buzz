@@ -2576,4 +2576,283 @@ mod route_integration_tests {
             .expect("body");
         assert_eq!(got, want, "Off-mode legacy response must be byte-identical");
     }
+
+    // ── Characterization: exact disconnect-route rejection contract ──────────
+    //
+    // Pin status, Content-Type, WWW-Authenticate and body bytes for every
+    // pre-success rejection, plus the observable check order
+    // (header → JSON body → pubkey → verifier present → verify).
+
+    const PLAIN: &str = "text/plain; charset=utf-8";
+
+    async fn send_raw(
+        state: Arc<crate::state::AppState>,
+        header_values: Vec<axum::http::HeaderValue>,
+        body: &[u8],
+    ) -> axum::response::Response {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(TEST_PATH)
+            .header("Content-Type", "application/json");
+        for v in header_values {
+            req = req.header(CLIENT_ATTACHED_HEADER, v);
+        }
+        crate::router::build_router(state)
+            .oneshot(req.body(Body::from(body.to_vec())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn assert_plain_denial(
+        resp: axum::response::Response,
+        status: StatusCode,
+        body: &str,
+        why: &str,
+    ) {
+        // Only the 401 carries a challenge. [NIP-FI.md §Rejection table]
+        let challenge = (status == StatusCode::UNAUTHORIZED).then_some("Nostr");
+        assert_eq!(resp.status(), status, "{why}");
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .map(|v: &axum::http::HeaderValue| v.to_str().unwrap().to_owned())
+        };
+        assert_eq!(header("Content-Type").as_deref(), Some(PLAIN), "{why}");
+        assert_eq!(header("WWW-Authenticate").as_deref(), challenge, "{why}");
+        let got = axum::body::to_bytes(resp.into_body(), 256).await.unwrap();
+        assert_eq!(got.as_ref(), body.as_bytes(), "{why}");
+    }
+
+    fn valid_body() -> &'static [u8] {
+        // A syntactically valid body: the pubkey is well-formed lowercase hex.
+        br#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}"#
+    }
+
+    #[tokio::test]
+    async fn characterize_route_header_transport_rejections() {
+        use axum::http::HeaderValue;
+        let state = build_test_state(1000).await;
+        let missing = send_raw(Arc::clone(&state), vec![], valid_body()).await;
+        assert_plain_denial(
+            missing,
+            StatusCode::UNAUTHORIZED,
+            "authentication required\n",
+            "missing header",
+        )
+        .await;
+
+        let rejected: Vec<(&str, Vec<HeaderValue>)> = vec![
+            (
+                "repeated header",
+                vec![
+                    HeaderValue::from_static("Bearer aaa.bbb.ccc"),
+                    HeaderValue::from_static("Bearer ddd.eee.fff"),
+                ],
+            ),
+            (
+                "comma-joined value",
+                vec![HeaderValue::from_static("Bearer aaa.bbb.ccc, Bearer ddd")],
+            ),
+            (
+                "non-Bearer scheme",
+                vec![HeaderValue::from_static("Token aaa.bbb.ccc")],
+            ),
+            ("empty token", vec![HeaderValue::from_static("Bearer ")]),
+            (
+                "space in token",
+                vec![HeaderValue::from_static("Bearer aaa bbb")],
+            ),
+            (
+                "tab in token",
+                vec![HeaderValue::from_static("Bearer aaa\tbbb")],
+            ),
+            // U+00A0 is `char::is_whitespace` but not ASCII whitespace; the
+            // obs-text bytes fail `HeaderValue::to_str`, so it rejects before
+            // any whitespace predicate runs.
+            (
+                "non-ASCII whitespace in token",
+                vec![HeaderValue::from_bytes(b"Bearer aaa\xc2\xa0bbb").unwrap()],
+            ),
+        ];
+        for (why, values) in rejected {
+            let resp = send_raw(Arc::clone(&state), values, valid_body()).await;
+            assert_plain_denial(resp, StatusCode::FORBIDDEN, "evidence rejected\n", why).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn characterize_route_check_order_before_verify() {
+        use axum::http::HeaderValue;
+        let state = build_test_state(1000).await;
+        let bearer = || vec![HeaderValue::from_static("Bearer aaa.bbb.ccc")];
+
+        // Header is checked before the JSON body.
+        let resp = send_raw(Arc::clone(&state), vec![], b"not json").await;
+        assert_plain_denial(
+            resp,
+            StatusCode::UNAUTHORIZED,
+            "authentication required\n",
+            "missing header + malformed JSON",
+        )
+        .await;
+        let resp = send_raw(
+            Arc::clone(&state),
+            vec![HeaderValue::from_static("Token x")],
+            br#"{"pubkey":"NOT-HEX"}"#,
+        )
+        .await;
+        assert_plain_denial(
+            resp,
+            StatusCode::FORBIDDEN,
+            "evidence rejected\n",
+            "bad scheme + bad pubkey",
+        )
+        .await;
+
+        // Body shape is checked before the (garbage) token is verified.
+        for (why, body) in [
+            ("malformed JSON", b"not json".as_slice()),
+            ("missing pubkey field", br#"{}"#.as_slice()),
+            (
+                "uppercase pubkey",
+                br#"{"pubkey":"79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"}"#
+                    .as_slice(),
+            ),
+            ("short pubkey", br#"{"pubkey":"abcd"}"#.as_slice()),
+        ] {
+            let resp = send_raw(Arc::clone(&state), bearer(), body).await;
+            assert_plain_denial(resp, StatusCode::BAD_REQUEST, "bad request\n", why).await;
+        }
+
+        // No verifier: body/pubkey still precede the verifier check, and the
+        // verifier check precedes verification (the token is garbage).
+        let mut no_verifier = build_test_app_state(1000, crate::config::Config::for_test()).await;
+        no_verifier.nip_fi_command_verifier = None;
+        let no_verifier = Arc::new(no_verifier);
+        let resp = send_raw(Arc::clone(&no_verifier), bearer(), br#"{"pubkey":"abcd"}"#).await;
+        assert_plain_denial(
+            resp,
+            StatusCode::BAD_REQUEST,
+            "bad request\n",
+            "bad pubkey precedes verifier presence",
+        )
+        .await;
+        let resp = send_raw(no_verifier, bearer(), valid_body()).await;
+        assert_plain_denial(
+            resp,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization unavailable\n",
+            "no command verifier configured",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn characterize_route_command_error_arms() {
+        let post = |state: Arc<crate::state::AppState>, token: String, target: String| async move {
+            do_request(
+                state,
+                "POST",
+                vec![
+                    ("Content-Type", "application/json".into()),
+                    (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
+                ],
+                Some(serde_json::json!({ "pubkey": target })),
+            )
+            .await
+        };
+        let state = build_test_state(1).await;
+
+        let t = target_hex();
+        let tampered = format!("{}X", mint_token(&t, 300, serde_json::json!({})));
+        let resp = post(Arc::clone(&state), tampered, t).await;
+        assert_plain_denial(
+            resp,
+            StatusCode::FORBIDDEN,
+            "evidence rejected\n",
+            "EvidenceRejected",
+        )
+        .await;
+
+        let t = target_hex();
+        let token = mint_token(&t, 300, serde_json::json!({"sub": "intruder@example.com"}));
+        let resp = post(Arc::clone(&state), token, t).await;
+        assert_plain_denial(
+            resp,
+            StatusCode::FORBIDDEN,
+            "authorization denied\n",
+            "AuthorizationDenied",
+        )
+        .await;
+
+        let t = target_hex();
+        let token = mint_token(&t, 10 * 365 * 24 * 3600, serde_json::json!({}));
+        let resp = post(Arc::clone(&state), token, t).await;
+        assert_plain_denial(
+            resp,
+            StatusCode::BAD_REQUEST,
+            "bad request\n",
+            "UntilExceedsCeiling",
+        )
+        .await;
+
+        // Fill the capacity-1 deny set, then the next distinct target is full.
+        let t = target_hex();
+        let resp = post(
+            Arc::clone(&state),
+            mint_token(&t, 300, serde_json::json!({})),
+            t,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "control: slot filled");
+        let t = target_hex();
+        let resp = post(
+            Arc::clone(&state),
+            mint_token(&t, 300, serde_json::json!({})),
+            t,
+        )
+        .await;
+        assert_plain_denial(
+            resp,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "deny set full\n",
+            "DenySetFull",
+        )
+        .await;
+
+        // An unseeded key source has no key set for the issuer.
+        let mut unseeded = build_test_app_state(1000, crate::config::Config::for_test()).await;
+        let key_source = Arc::new(
+            ProductionJwksSource::new(vec![test_jwks_config()], buzz_auth::HttpJwksFetcher::new())
+                .expect("key source"),
+        );
+        let mut registry = IssuerRegistry::new();
+        registry.insert(test_issuer_policy());
+        let deny_map = NipFiDenyMap::new(
+            1000,
+            vec![IssuerCapacity {
+                issuer: TEST_ISS.to_owned(),
+                capacity: 1000,
+            }],
+        );
+        let policy =
+            CommandIssuerPolicy::new(TEST_ISS.to_owned(), 30, vec![TEST_SUB.to_owned()], 1000)
+                .expect("command policy");
+        unseeded.nip_fi_command_verifier = Some(Arc::new(CommandVerifier::new(
+            registry,
+            key_source,
+            vec![policy],
+            deny_map,
+        )));
+        let t = target_hex();
+        let token = mint_token(&t, 300, serde_json::json!({}));
+        let resp = post(Arc::new(unseeded), token, t).await;
+        assert_plain_denial(
+            resp,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization unavailable\n",
+            "AuthorizationUnavailable",
+        )
+        .await;
+    }
 }
