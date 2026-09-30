@@ -6262,6 +6262,147 @@ mod postgres_tests {
         Arc::new(state)
     }
 
+    /// Main ingest wiring for the archive gate: when only the channel lookup
+    /// fails, a kind-9 post by a (cached) member of an archived channel is
+    /// denied and not stored. The control run, with a working lookup, is denied
+    /// for the archive reason, proving the post reaches that gate.
+    ///
+    /// The lookup failure comes from a least-privilege role that can do
+    /// everything ingest needs except `SELECT` on `channels`.
+    #[tokio::test]
+    async fn cluster_global_ingest_denies_post_when_channel_lookup_fails() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Tag};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let admin = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+
+        let role = format!("archive_probe_{}", Uuid::new_v4().simple());
+        for sql in [
+            format!("CREATE ROLE {role} NOLOGIN"),
+            format!("GRANT USAGE ON SCHEMA public TO {role}"),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
+            ),
+            format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
+            format!("REVOKE SELECT ON channels FROM {role}"),
+            format!("GRANT {role} TO CURRENT_USER"),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&admin)
+                .await
+                .expect("provision restricted role");
+        }
+        let set_role = format!("SET ROLE {role}");
+        let restricted = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(move |conn, _| {
+                let set_role = set_role.clone();
+                Box::pin(async move {
+                    sqlx::query(sqlx::AssertSqlSafe(set_role))
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .connect(&db_url)
+            .await
+            .expect("connect restricted pool");
+
+        let healthy = build_canvas_ingest_state(&db_url, &admin).await;
+        let failing = build_canvas_ingest_state(&db_url, &restricted).await;
+
+        let host = format!("archive-lookup-{}.test", Uuid::new_v4().simple());
+        let community = healthy
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let author = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        healthy
+            .db
+            .create_channel_with_id(
+                community,
+                channel_id,
+                &format!("archive-lookup-{}", channel_id.simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        healthy
+            .db
+            .archive_channel(community, channel_id)
+            .await
+            .expect("archive channel");
+
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+        let post = |content: &str| {
+            EventBuilder::new(Kind::Custom(9), content)
+                .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+                .sign_with_keys(&author)
+                .expect("sign post")
+        };
+        let auth = || IngestAuth::Http {
+            pubkey: author.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let member_key = (
+            community,
+            channel_id,
+            author.public_key().to_bytes().to_vec(),
+        );
+
+        // Control: a working lookup reaches the archive gate.
+        healthy.membership_cache.insert(member_key.clone(), true);
+        let control = ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
+
+        // Only the channel lookup fails: the post must be denied and not stored.
+        failing.membership_cache.insert(member_key, true);
+        let event = post("lookup fails");
+        let event_id = event.id.to_bytes().to_vec();
+        let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE id = $1")
+            .bind(&event_id)
+            .fetch_one(&admin)
+            .await
+            .expect("count events");
+
+        // The role is cluster-global: drop it before asserting so a failure
+        // doesn't leak it.
+        restricted.close().await;
+        for sql in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
+            let _ = sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&admin).await;
+        }
+
+        match control {
+            Err(IngestError::Rejected(reason)) => {
+                assert_eq!(reason, "invalid: channel is archived")
+            }
+            Err(other) => panic!("control must be denied as archived, got {other:?}"),
+            Ok(_) => panic!("control must be denied as archived, got accepted"),
+        }
+        match denied {
+            Err(IngestError::Internal(reason)) => assert!(
+                reason.starts_with("error: database error") && reason.contains("channels"),
+                "{reason}"
+            ),
+            Err(other) => panic!("a failed channel lookup must deny the post, got {other:?}"),
+            Ok(_) => panic!("a failed channel lookup must deny the post, got accepted"),
+        }
+        assert_eq!(stored, 0, "denied post must not be stored");
+    }
+
     /// End-to-end CAS dispatch wiring: a tagged write inserts, a stale same-head
     /// competitor returns the exact conflict: rejection, the loser is absent from
     /// the DB, and an untagged write still appends unconditionally.
