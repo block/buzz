@@ -1,5 +1,4 @@
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
-import { loadCommunities } from "@/features/communities/communityStorage";
 import {
   listManagedAgentRuntimes,
   reconcileManagedAgentRuntimes,
@@ -11,27 +10,29 @@ type Dependencies = {
   list: () => Promise<ManagedAgentRuntimeStatus[]>;
   reconcile: typeof reconcileManagedAgentRuntimes;
   stop: (pubkey: string, relayUrl: string) => Promise<unknown>;
-  configuredRelayUrls: () => string[];
 };
 
 const defaultDependencies: Dependencies = {
   list: listManagedAgentRuntimes,
   reconcile: reconcileManagedAgentRuntimes,
   stop: stopManagedAgentRuntime,
-  configuredRelayUrls: () =>
-    loadCommunities().map((community) => community.relayUrl),
 };
 
-async function stopLivePairs(
-  runtimes: readonly ManagedAgentRuntimeStatus[],
-  shouldStop: (canonicalRelay: string | null) => boolean,
+// Per canonical relay URL, how many times its community was removed from this
+// device this session. A reconcile compares these before and after its call,
+// so only a positive removal — never a storage read — fences its result.
+const relayRemovals = new Map<string, number>();
+
+/** Record that the last community on `relayUrl` was removed from this device. */
+export function markRelayRemoved(relayUrl: string): void {
+  const relay = canonicalRelayUrl(relayUrl);
+  if (relay) relayRemovals.set(relay, (relayRemovals.get(relay) ?? 0) + 1);
+}
+
+async function stopPairs(
+  pairs: readonly ManagedAgentRuntimeStatus[],
   stop: Dependencies["stop"],
 ): Promise<void> {
-  const pairs = runtimes.filter(
-    (runtime) =>
-      runtime.lifecycle !== "stopped" &&
-      shouldStop(canonicalRelayUrl(runtime.relayUrl)),
-  );
   const results = await Promise.allSettled(
     pairs.map((pair) => stop(pair.pubkey, pair.relayUrl)),
   );
@@ -53,9 +54,13 @@ export async function stopManagedAgentPairsOnRelay(
   const relay = canonicalRelayUrl(relayUrl);
   if (!relay) return;
   try {
-    await stopLivePairs(
-      await dependencies.list(),
-      (candidate) => candidate === relay,
+    const runtimes = await dependencies.list();
+    await stopPairs(
+      runtimes.filter(
+        (runtime) =>
+          runtime.lifecycle !== "stopped" &&
+          canonicalRelayUrl(runtime.relayUrl) === relay,
+      ),
       dependencies.stop,
     );
   } catch (error) {
@@ -65,21 +70,39 @@ export async function stopManagedAgentPairsOnRelay(
 
 /**
  * Reconcile auto-start pairs, then stop any pair the reconcile started on a
- * relay whose community was removed while it was in flight. Rust cannot be
- * cancelled mid-reconcile, so the result is fenced against the saved list.
+ * relay whose community was removed while the call was in flight. Rust cannot
+ * be cancelled mid-reconcile, so the result is fenced instead. Returns the
+ * relays the fence stopped; they must not be treated as reconciled.
  */
 export async function reconcileConfiguredManagedAgentRuntimes(
   communities: readonly { relayUrl: string }[],
   dependencies: Dependencies = defaultDependencies,
-): Promise<ManagedAgentRuntimeStatus[]> {
+): Promise<{
+  runtimes: ManagedAgentRuntimeStatus[];
+  removedRelays: Set<string>;
+}> {
+  const before = new Map(relayRemovals);
   const runtimes = await dependencies.reconcile(communities);
-  const configured = new Set(
-    dependencies.configuredRelayUrls().map(canonicalRelayUrl),
-  );
-  await stopLivePairs(
-    runtimes,
-    (relay) => !configured.has(relay),
+  const removedRelays = new Set<string>();
+  for (const { relayUrl } of communities) {
+    const relay = canonicalRelayUrl(relayUrl);
+    if (relay && relayRemovals.get(relay) !== before.get(relay)) {
+      removedRelays.add(relay);
+    }
+  }
+  await stopPairs(
+    runtimes.filter((runtime) => {
+      const relay = canonicalRelayUrl(runtime.relayUrl);
+      // `failed` rows have no live child; stopping one only rewrites its
+      // record and can fail a concurrent reconcile's `expected_updated_at`.
+      return (
+        relay !== null &&
+        removedRelays.has(relay) &&
+        runtime.lifecycle !== "stopped" &&
+        runtime.lifecycle !== "failed"
+      );
+    }),
     dependencies.stop,
   );
-  return runtimes;
+  return { runtimes, removedRelays };
 }

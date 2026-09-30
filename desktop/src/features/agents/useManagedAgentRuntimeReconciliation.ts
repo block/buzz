@@ -107,9 +107,16 @@ export function useManagedAgentRuntimeReconciliation(
       );
 
       void reconcileConfiguredManagedAgentRuntimes(targets)
-        .then((runtimes) => {
+        .then(({ runtimes, removedRelays }) => {
           cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
-          return classifyReconcileResult(pending, runtimes, canonicalRelayUrl);
+          // A relay fenced mid-call is not marked reconciled, so re-adding
+          // its community reconciles it afresh.
+          return classifyReconcileResult(
+            pending,
+            runtimes,
+            canonicalRelayUrl,
+            removedRelays,
+          );
         })
         .catch((error) => {
           console.warn("[managed-agent-runtimes] reconcile failed:", error);

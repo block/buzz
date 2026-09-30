@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
 import {
+  markRelayRemoved,
   reconcileConfiguredManagedAgentRuntimes,
   stopManagedAgentPairsOnRelay,
 } from "./managedAgentRelayCleanup.ts";
@@ -57,20 +58,74 @@ test("a failed runtime listing is logged and does not throw", async () => {
   warn.mock.restore();
 });
 
-test("reconcile stops pairs it started on a relay removed mid-flight", async () => {
+test("reconcile stops live pairs on a relay removed mid-flight and reports it", async () => {
   const stopped = [];
-  const runtimes = await reconcileConfiguredManagedAgentRuntimes(
-    [{ relayUrl: "wss://dead.example" }, { relayUrl: "wss://alive.example" }],
+  const { runtimes, removedRelays } =
+    await reconcileConfiguredManagedAgentRuntimes(
+      [
+        { relayUrl: "wss://Dead.example/" },
+        { relayUrl: "wss://alive.example" },
+      ],
+      {
+        reconcile: async () => {
+          // The community is removed while the reconcile is in flight.
+          markRelayRemoved("wss://dead.example");
+          return [
+            pair("a", "wss://dead.example"),
+            pair("b", "wss://dead.example", "failed"),
+            pair("c", "wss://alive.example"),
+          ];
+        },
+        stop: async (pubkey, relayUrl) => stopped.push([pubkey, relayUrl]),
+      },
+    );
+  // The failed row has no live child, so it is left alone.
+  assert.deepEqual(stopped, [["a", "wss://dead.example"]]);
+  assert.deepEqual([...removedRelays], ["wss://dead.example"]);
+  assert.equal(runtimes.length, 3);
+});
+
+test("reconcile stops nothing without a removal, whatever storage holds", async () => {
+  // A storage failure used to look like "every relay removed". The fence now
+  // needs a removal recorded during the call, so it stops nothing here, even
+  // for a relay removed before the call started.
+  markRelayRemoved("wss://earlier.example");
+  const stopped = [];
+  const { removedRelays } = await reconcileConfiguredManagedAgentRuntimes(
+    [
+      { relayUrl: "wss://earlier.example" },
+      { relayUrl: "wss://alive.example" },
+    ],
     {
       reconcile: async () => [
-        pair("a", "wss://dead.example"),
+        pair("a", "wss://earlier.example"),
         pair("b", "wss://alive.example"),
       ],
-      // The removal saved the list before the reconcile resolved.
-      configuredRelayUrls: () => ["wss://Alive.example/"],
-      stop: async (pubkey, relayUrl) => stopped.push([pubkey, relayUrl]),
+      stop: async (pubkey) => stopped.push(pubkey),
     },
   );
-  assert.deepEqual(stopped, [["a", "wss://dead.example"]]);
-  assert.equal(runtimes.length, 2);
+  assert.deepEqual(stopped, []);
+  assert.equal(removedRelays.size, 0);
+});
+
+test("removing a 127.* hostname does not fence the real loopback relay", async () => {
+  const stopped = [];
+  const { removedRelays } = await reconcileConfiguredManagedAgentRuntimes(
+    [
+      { relayUrl: "wss://127.preview.example" },
+      { relayUrl: "ws://127.0.0.1:3000" },
+    ],
+    {
+      reconcile: async () => {
+        markRelayRemoved("wss://127.preview.example");
+        return [
+          pair("a", "wss://127.preview.example"),
+          pair("b", "ws://127.0.0.1:3000"),
+        ];
+      },
+      stop: async (pubkey) => stopped.push(pubkey),
+    },
+  );
+  assert.deepEqual(stopped, ["a"]);
+  assert.deepEqual([...removedRelays], ["wss://127.preview.example"]);
 });

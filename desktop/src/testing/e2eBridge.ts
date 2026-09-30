@@ -1261,6 +1261,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Community ids still saved when `invalidate_launch_restore` ran. */
+    __BUZZ_E2E_SAVED_COMMUNITIES_AT_INVALIDATE__?: string[];
     /** Release a mock media proxy held at port 0 and return its ready port. */
     __BUZZ_E2E_RELEASE_MEDIA_PROXY__?: () => number;
     /** Release mock send events that were stored but withheld from live subscribers. */
@@ -12883,6 +12885,11 @@ export function maybeInstallE2eTauriMocks() {
         return;
       }
       case "invalidate_launch_restore":
+        window.__BUZZ_E2E_SAVED_COMMUNITIES_AT_INVALIDATE__ = (
+          JSON.parse(
+            window.localStorage.getItem("buzz-communities") ?? "[]",
+          ) as Array<{ id: string }>
+        ).map((community) => community.id);
         return undefined;
       case "update_tray_agent_activity":
       case "clear_tray_agent_activity":

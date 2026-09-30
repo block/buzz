@@ -86,7 +86,7 @@ export function bootstrapManagedAgentRuntimePairs(
     relayUrl: community.relayUrl,
   }));
   void reconcileConfiguredManagedAgentRuntimes(communities)
-    .then((runtimes) => {
+    .then(({ runtimes }) => {
       cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
     })
     .catch((error) => {

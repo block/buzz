@@ -1161,6 +1161,21 @@ test.describe("community rail", () => {
         [COMMUNITY_A.relayUrl, "stopped"],
         [COMMUNITY_B.relayUrl, "ready"],
       ]);
+
+    // Restore is invalidated while the community is still saved, and before
+    // the stop sweep runs.
+    const order = await page.evaluate(() => ({
+      savedAtInvalidate: window.__BUZZ_E2E_SAVED_COMMUNITIES_AT_INVALIDATE__,
+      commands: (window.__BUZZ_E2E_COMMANDS__ ?? []).filter((command) =>
+        ["invalidate_launch_restore", "stop_managed_agent_runtime"].includes(
+          command,
+        ),
+      ),
+    }));
+    expect(order).toEqual({
+      savedAtInvalidate: [COMMUNITY_A.id, COMMUNITY_B.id],
+      commands: ["invalidate_launch_restore", "stop_managed_agent_runtime"],
+    });
   });
 
   test("shows the quiet switch gate, not the boot splash, while switching", async ({

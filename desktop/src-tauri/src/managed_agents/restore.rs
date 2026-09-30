@@ -104,7 +104,8 @@ pub async fn restore_managed_agents_on_launch(
     let state = app.state::<AppState>();
     // `apply_workspace` still holds the apply lock for this task, so the relay
     // cannot change underneath it; pin it for the spawn loop.
-    let restore_relay = crate::relay::workspace_relay_override(&state);
+    let restore_relay = crate::relay::relay_ws_url_with_override(&state);
+    let restore_relay = restore_relay.as_str();
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;
@@ -290,36 +291,23 @@ pub async fn restore_managed_agents_on_launch(
     // shutdown flag is rechecked after taking the lock so shutdown either
     // prevents this transition or waits until every child is tracked and can
     // be terminated.
-    let restore_transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|error| error.to_string())?;
-    if shutdown_started.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    if !launch_restore_still_valid(&state, restore_ticket) {
-        eprintln!("buzz-desktop: skipping managed agent restore: a community was removed");
-        return Ok(());
-    }
-    let Some(restore_relay) = restore_relay else {
-        eprintln!("buzz-desktop: skipping managed agent restore: no workspace relay applied");
-        return Ok(());
-    };
-    let restore_relay = restore_relay.as_str();
-
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
-    let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
-        let owner_hex_ref = owner_hex.as_deref();
-        let handles: Vec<_> = agents_to_start
-            .iter()
-            .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-            .map(|record| {
-                let handle = scope.spawn(move || {
-                    let relay_url =
-                        crate::relay::effective_agent_relay_url(&record.relay_url, restore_relay);
-                    let outcome =
-                        match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
-                        {
+    let spawned = spawn_under_restore_gate(&state, shutdown_started, restore_ticket, || {
+        std::thread::scope(|scope| {
+            let owner_hex_ref = owner_hex.as_deref();
+            let handles: Vec<_> = agents_to_start
+                .iter()
+                .filter(|_| !shutdown_started.load(Ordering::SeqCst))
+                .map(|record| {
+                    let handle = scope.spawn(move || {
+                        let relay_url = crate::relay::effective_agent_relay_url(
+                            &record.relay_url,
+                            restore_relay,
+                        );
+                        let outcome = match super::ManagedAgentRuntimeKey::new(
+                            record.pubkey.clone(),
+                            &relay_url,
+                        ) {
                             Ok(key) => {
                                 // F2: if a concurrent startup reconcile already
                                 // tracked a live child for this exact pair during
@@ -365,14 +353,21 @@ pub async fn restore_managed_agents_on_launch(
                             }
                             Err(error) => SpawnOutcome::Failed(error),
                         };
-                    (record.pubkey.clone(), outcome)
-                });
-                handle
-            })
-            .collect();
+                        (record.pubkey.clone(), outcome)
+                    });
+                    handle
+                })
+                .collect();
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<AgentSpawnResult>>()
+        })
+    })?;
+    let Some((restore_transition, spawn_results)) = spawned else {
+        return Ok(());
+    };
 
     if spawn_results.is_empty() {
         return Ok(());
@@ -592,10 +587,29 @@ pub fn invalidate_launch_restore(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether a restore holding ticket `started` may still spawn. Call with the
-/// runtime transition lock held.
-fn launch_restore_still_valid(state: &AppState, started: u64) -> bool {
-    state.launch_restore_generation.load(Ordering::SeqCst) == started
+/// Restore's check-then-spawn step. Takes the runtime transition lock and runs
+/// `spawn` only if shutdown has not started and no community removal has
+/// invalidated `ticket`; otherwise spawns nothing and returns `None`. On
+/// success the lock is returned still held, so the caller registers the spawned
+/// children before shutdown or a removal's stop sweep can run.
+fn spawn_under_restore_gate<'a, T>(
+    state: &'a AppState,
+    shutdown_started: &AtomicBool,
+    ticket: u64,
+    spawn: impl FnOnce() -> T,
+) -> Result<Option<(std::sync::MutexGuard<'a, ()>, T)>, String> {
+    let transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if shutdown_started.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    if state.launch_restore_generation.load(Ordering::SeqCst) != ticket {
+        eprintln!("buzz-desktop: skipping managed agent restore: a community was removed");
+        return Ok(None);
+    }
+    Ok(Some((transition, spawn())))
 }
 
 #[cfg(test)]
@@ -617,29 +631,44 @@ mod profile_reconcile_tests {
 // `build_app_state()` pulls in native Windows DLLs unavailable on the CI runner.
 #[cfg(all(test, not(target_os = "windows")))]
 mod launch_restore_invalidation_tests {
-    use super::{invalidate_launch_restore, launch_restore_still_valid, launch_restore_ticket};
+    use super::{invalidate_launch_restore, launch_restore_ticket, spawn_under_restore_gate};
     use crate::app_state::build_app_state;
     use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
+    use std::cell::Cell;
+    use std::sync::atomic::AtomicBool;
+
+    /// Runs the restore spawn gate and returns how many times it spawned.
+    fn spawns(state: &crate::app_state::AppState, shutdown: &AtomicBool, ticket: u64) -> u32 {
+        let count = Cell::new(0);
+        let gate = spawn_under_restore_gate(state, shutdown, ticket, || count.set(count.get() + 1));
+        assert!(gate.unwrap().is_some() == (count.get() == 1));
+        count.get()
+    }
 
     #[test]
-    fn invalidation_fails_restore_and_leaves_relay_routing_unchanged() {
+    fn stale_ticket_spawns_nothing_and_leaves_relay_routing_unchanged() {
         let state = build_app_state();
+        let shutdown = AtomicBool::new(false);
         *state.relay_url_override.lock().unwrap() = Some("wss://removed.example".into());
-        let started = launch_restore_ticket(&state);
-        assert!(launch_restore_still_valid(&state, started));
+        // Stands in for a restore scheduled before the community was removed.
+        let stale = launch_restore_ticket(&state);
 
         invalidate_launch_restore(&state).unwrap();
 
-        assert!(!launch_restore_still_valid(&state, started));
+        assert_eq!(spawns(&state, &shutdown, stale), 0);
         assert_eq!(relay_ws_url_with_override(&state), "wss://removed.example");
         assert_eq!(
             relay_api_base_url_with_override(&state),
             "https://removed.example"
         );
-        // A restore scheduled after the removal gets a fresh, valid ticket.
-        assert!(launch_restore_still_valid(
-            &state,
-            launch_restore_ticket(&state)
-        ));
+        // A restore scheduled after the removal spawns normally.
+        assert_eq!(spawns(&state, &shutdown, launch_restore_ticket(&state)), 1);
+    }
+
+    #[test]
+    fn shutdown_spawns_nothing_even_with_a_valid_ticket() {
+        let state = build_app_state();
+        let shutdown = AtomicBool::new(true);
+        assert_eq!(spawns(&state, &shutdown, launch_restore_ticket(&state)), 0);
     }
 }

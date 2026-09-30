@@ -13,7 +13,10 @@ import {
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
-import { stopManagedAgentPairsOnRelay } from "@/features/agents/managedAgentRelayCleanup";
+import {
+  markRelayRemoved,
+  stopManagedAgentPairsOnRelay,
+} from "@/features/agents/managedAgentRelayCleanup";
 import { invalidateLaunchRestore } from "@/shared/api/tauriWorkspace";
 import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
@@ -91,6 +94,10 @@ export function useCommunityNavigationTransitions({
           canonicalRelayUrl(community.relayUrl) ===
             canonicalRelayUrl(target.relayUrl),
       );
+      // Fences any reconcile in flight for this relay; see markRelayRemoved.
+      const markRemoved = () => {
+        if (!relayStillUsed) markRelayRemoved(target.relayUrl);
+      };
       const stopRelayPairs = () => {
         if (!relayStillUsed) void stopManagedAgentPairsOnRelay(target.relayUrl);
       };
@@ -105,6 +112,7 @@ export function useCommunityNavigationTransitions({
       };
 
       if (id !== communities.activeCommunity?.id) {
+        markRemoved();
         communities.removeCommunity(id);
         stopRelayPairs();
         return;
@@ -119,6 +127,7 @@ export function useCommunityNavigationTransitions({
             "Couldn't finish removing the community from this device because community discovery state could not be saved. Restart Buzz and try again.",
           );
         }
+        markRemoved();
         await invalidateRestore();
         await goHome({ replace: true });
         communities.removeCommunity(id);
@@ -126,6 +135,7 @@ export function useCommunityNavigationTransitions({
         return;
       }
 
+      markRemoved();
       await invalidateRestore();
       await runCommunityViewTransition(async () => {
         saveActiveDestination();
