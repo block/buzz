@@ -508,6 +508,8 @@ type E2eConfig = {
     oaOwnerIsMe?: boolean;
     /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
     relayRequiresMembership?: boolean;
+    /** Reject the membership probe, as an unreachable relay's `/info` does. */
+    relayRequiresMembershipError?: string;
     /** Delay EOSE for membership snapshots after delivering the event. */
     relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
@@ -13564,6 +13566,9 @@ export function maybeInstallE2eTauriMocks() {
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
+        if (activeConfig?.mock?.relayRequiresMembershipError) {
+          throw new Error(activeConfig.mock.relayRequiresMembershipError);
+        }
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);

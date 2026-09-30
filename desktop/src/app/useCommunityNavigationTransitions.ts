@@ -71,39 +71,31 @@ export function useCommunityNavigationTransitions({
     [communities, goHome, router.history, saveActiveDestination],
   );
 
-  const removeCommunity = React.useCallback(
+  // Local-only cleanup shared by Leave and "Remove from this device". It never
+  // contacts the relay, so it still works when the relay is gone.
+  const removeCommunityFromDevice = React.useCallback(
     async (id: string) => {
-      const target = communities.communities.find(
-        (community) => community.id === id,
-      );
-      if (!target) return;
+      if (!communities.communities.some((community) => community.id === id)) {
+        return;
+      }
+
+      if (id !== communities.activeCommunity?.id) {
+        communities.removeCommunity(id);
+        return;
+      }
 
       const fallback = communities.communities.find(
         (community) => community.id !== id,
       );
-
-      // Do not touch local state until this relay has explicitly accepted the
-      // signed NIP-43 leave request. Rejections and timeouts bubble back to the
-      // dialog so the person can retry without losing their community config.
-      const leaveResult = await leaveCommunity(
-        target.relayUrl,
-        communities.activeCommunity?.relayUrl,
-      );
-
-      if (id !== communities.activeCommunity?.id) {
-        communities.removeCommunity(id);
-        return leaveResult;
-      }
-
       if (!fallback) {
         if (!markCommunityDiscoveryAfterLeave()) {
           throw new Error(
-            "Membership was removed, but community discovery state could not be saved. Restart Buzz and try again.",
+            "Couldn't finish removing the community from this device because community discovery state could not be saved. Restart Buzz and try again.",
           );
         }
         await goHome({ replace: true });
         communities.removeCommunity(id);
-        return leaveResult;
+        return;
       }
 
       await runCommunityViewTransition(async () => {
@@ -119,10 +111,33 @@ export function useCommunityNavigationTransitions({
         }
         communities.removeCommunity(id);
       });
-      return leaveResult;
     },
     [communities, goHome, router.history, saveActiveDestination],
   );
 
-  return { removeCommunity, switchCommunity };
+  const leaveAndRemoveCommunity = React.useCallback(
+    async (id: string) => {
+      const target = communities.communities.find(
+        (community) => community.id === id,
+      );
+      if (!target) return;
+
+      // Do not touch local state until this relay has explicitly accepted the
+      // signed NIP-43 leave request. Rejections and timeouts bubble back to the
+      // menu so the person can retry without losing their community config.
+      const leaveResult = await leaveCommunity(
+        target.relayUrl,
+        communities.activeCommunity?.relayUrl,
+      );
+      await removeCommunityFromDevice(id);
+      return leaveResult;
+    },
+    [communities, removeCommunityFromDevice],
+  );
+
+  return {
+    leaveAndRemoveCommunity,
+    removeCommunityFromDevice,
+    switchCommunity,
+  };
 }

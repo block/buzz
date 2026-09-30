@@ -1094,6 +1094,52 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("removes an unreachable community from this device when Leave cannot", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      { relayRequiresMembershipError: "relay info returned 404" },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await menu.getByRole("menuitem", { name: "Leave community" }).click();
+    await expect(menu.getByRole("alert")).toContainText(
+      "relay info returned 404 If the community no longer exists, use Remove from this device.",
+    );
+    await expect(
+      page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`),
+    ).toBeVisible();
+
+    await menu
+      .getByRole("menuitem", { name: "Remove from this device" })
+      .click();
+    const dialog = page.getByRole("alertdialog", {
+      name: "Remove from this device",
+    });
+    await expect(dialog).toContainText("your membership isn't revoked");
+    await dialog.getByRole("button", { name: "Remove" }).click();
+
+    await expect(
+      page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`),
+    ).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          active: window.localStorage.getItem("buzz-active-community-id"),
+          ids: JSON.parse(
+            window.localStorage.getItem("buzz-communities") ?? "[]",
+          ).map((community) => community.id),
+        })),
+      )
+      .toEqual({ active: COMMUNITY_B.id, ids: [COMMUNITY_B.id] });
+  });
+
   test("shows the quiet switch gate, not the boot splash, while switching", async ({
     page,
   }) => {
