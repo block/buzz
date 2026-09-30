@@ -12,6 +12,8 @@ import {
   markPendingCommunityRestore,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
+import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
+import { stopManagedAgentPairsOnRelay } from "@/features/agents/stopManagedAgentPairsOnRelay";
 import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
 import { leaveCommunity } from "@/features/communities/leaveCommunity";
@@ -72,15 +74,29 @@ export function useCommunityNavigationTransitions({
   );
 
   // Local-only cleanup shared by Leave and "Remove from this device". It never
-  // contacts the relay, so it still works when the relay is gone.
+  // contacts the relay, so it still works when the relay is gone. Once the
+  // community is gone, its relay's agent pairs are stopped so none keep
+  // reconnecting to it.
   const removeCommunityFromDevice = React.useCallback(
     async (id: string) => {
-      if (!communities.communities.some((community) => community.id === id)) {
-        return;
-      }
+      const target = communities.communities.find(
+        (community) => community.id === id,
+      );
+      if (!target) return;
+      // Another community can point at the same relay; its pairs stay up.
+      const relayStillUsed = communities.communities.some(
+        (community) =>
+          community.id !== id &&
+          canonicalRelayUrl(community.relayUrl) ===
+            canonicalRelayUrl(target.relayUrl),
+      );
+      const stopRelayPairs = () => {
+        if (!relayStillUsed) void stopManagedAgentPairsOnRelay(target.relayUrl);
+      };
 
       if (id !== communities.activeCommunity?.id) {
         communities.removeCommunity(id);
+        stopRelayPairs();
         return;
       }
 
@@ -95,6 +111,7 @@ export function useCommunityNavigationTransitions({
         }
         await goHome({ replace: true });
         communities.removeCommunity(id);
+        stopRelayPairs();
         return;
       }
 
@@ -111,6 +128,7 @@ export function useCommunityNavigationTransitions({
         }
         communities.removeCommunity(id);
       });
+      stopRelayPairs();
     },
     [communities, goHome, router.history, saveActiveDestination],
   );

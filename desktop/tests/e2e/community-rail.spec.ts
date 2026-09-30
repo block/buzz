@@ -11,6 +11,7 @@ function snapshotKey(relayUrl: string) {
   return `buzz-channels.v1:${relayUrl}:${OWNER_PUBKEY.toLowerCase()}`;
 }
 
+const AGENT_PUBKEY = "c".repeat(64);
 const COMMUNITY_A = {
   id: "ws-a",
   name: "Alpha",
@@ -1099,7 +1100,14 @@ test.describe("community rail", () => {
   }) => {
     await installMockBridge(
       page,
-      { relayRequiresMembershipError: "relay info returned 404" },
+      {
+        relayRequiresMembershipError: "relay info returned 404",
+        managedAgents: [{ pubkey: AGENT_PUBKEY, name: "Scout" }],
+        managedAgentRuntimes: [
+          { pubkey: AGENT_PUBKEY, relayUrl: COMMUNITY_A.relayUrl },
+          { pubkey: AGENT_PUBKEY, relayUrl: COMMUNITY_B.relayUrl },
+        ],
+      },
       { skipCommunitySeed: true },
     );
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
@@ -1138,6 +1146,21 @@ test.describe("community rail", () => {
         })),
       )
       .toEqual({ active: COMMUNITY_B.id, ids: [COMMUNITY_B.id] });
+    // Removal stops the agent pair on the removed relay, and only that one.
+    await expect
+      .poll(() =>
+        page.evaluate(async () =>
+          (
+            await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__(
+              "list_managed_agent_runtimes",
+            )
+          ).map(({ relayUrl, lifecycle }) => [relayUrl, lifecycle]),
+        ),
+      )
+      .toEqual([
+        [COMMUNITY_A.relayUrl, "stopped"],
+        [COMMUNITY_B.relayUrl, "ready"],
+      ]);
   });
 
   test("shows the quiet switch gate, not the boot splash, while switching", async ({
