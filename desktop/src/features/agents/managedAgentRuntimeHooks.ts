@@ -12,11 +12,11 @@ import {
 } from "@/features/communities/communityStorage";
 import {
   listManagedAgentRuntimes,
-  reconcileManagedAgentRuntimes,
   startManagedAgentRuntime,
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
+import { reconcileConfiguredManagedAgentRuntimes } from "./managedAgentRelayCleanup";
 import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
 
 export const managedAgentRuntimesQueryKey = ["managed-agent-runtimes"] as const;
@@ -85,7 +85,7 @@ export function bootstrapManagedAgentRuntimePairs(
   const communities = loadCommunities().map((community) => ({
     relayUrl: community.relayUrl,
   }));
-  void reconcileManagedAgentRuntimes(communities)
+  void reconcileConfiguredManagedAgentRuntimes(communities)
     .then((runtimes) => {
       cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
     })

@@ -13,7 +13,7 @@ import {
 } from "@/features/agents/managedAgentRuntimeHooks";
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
-import { reconcileManagedAgentRuntimes } from "@/shared/api/tauriManagedAgents";
+import { reconcileConfiguredManagedAgentRuntimes } from "@/features/agents/managedAgentRelayCleanup";
 
 /**
  * Bootstrap a lazy harness pair for every auto-start local agent in every
@@ -106,7 +106,7 @@ export function useManagedAgentRuntimeReconciliation(
         managedAgentRuntimesQueryKey,
       );
 
-      void reconcileManagedAgentRuntimes(targets)
+      void reconcileConfiguredManagedAgentRuntimes(targets)
         .then((runtimes) => {
           cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
           return classifyReconcileResult(pending, runtimes, canonicalRelayUrl);

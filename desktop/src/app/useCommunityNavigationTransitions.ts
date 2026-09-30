@@ -13,7 +13,7 @@ import {
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
-import { stopManagedAgentPairsOnRelay } from "@/features/agents/stopManagedAgentPairsOnRelay";
+import { stopManagedAgentPairsOnRelay } from "@/features/agents/managedAgentRelayCleanup";
 import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
 import { leaveCommunity } from "@/features/communities/leaveCommunity";
