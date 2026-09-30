@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_TURN_METRIC,
     KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
     SHARED_GATED_KINDS,
 };
@@ -1330,15 +1330,18 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         // safe for kinds whose id is author-bound or whose content is encrypted.
         // KIND_DM_VISIBILITY is relay-signed (id not author-bound) and exposes
         // plaintext private hide choices, so its `#p` owner check MUST hold even
-        // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
-        // and their cleartext envelope (pubkey, agent tag, created_at) leaks
-        // turn-activity metadata — knowing an event id is NOT authorization
-        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
-        // lose the exemption — a kindless `ids` lookup is unaffected.
+        // when `ids` is present. KIND_AGENT_TURN_METRIC and KIND_AGENT_OBSERVER_FRAME
+        // events are long-lived and their cleartext envelope (pubkey, agent tag,
+        // created_at) leaks activity metadata — knowing an event id is NOT
+        // authorization (NIP-AM / NIP-AO §Relay Behavior). Only filters that
+        // explicitly name the kind lose the exemption — a kindless `ids`
+        // lookup is unaffected.
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
             ks.iter().any(|kind| {
                 let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
+                k == KIND_DM_VISIBILITY
+                    || k == KIND_AGENT_TURN_METRIC
+                    || k == KIND_AGENT_OBSERVER_FRAME
             })
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {

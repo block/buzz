@@ -7,8 +7,8 @@ import { relayClient } from "./relayClient";
 // session/prompt is the first frame emitted at turn start, so it can arrive
 // before the desktop subscribes when the agent was already running. A 5-minute
 // lookback covers long-running active turns (coding/review turns routinely
-// exceed 60s). The archive backfill deduplicates any frames already in the
-// local Tauri archive, so there is no double-processing risk.
+// exceed 60s). Deeper history is served by relay REQ (NIP-AO durable 24200) and
+// the local archive backfill; appendAgentEvent dedups on (seq, timestamp).
 const OBSERVER_LIVE_LOOKBACK_SECS = 300;
 
 export function subscribeToAgentObserverFrames(
@@ -24,8 +24,8 @@ export function subscribeToAgentObserverFrames(
       // during a drop. `since` provides a short lookback window so session/prompt
       // frames from recently-started turns are not silently dropped when the
       // subscription starts after the agent has already emitted them. Older
-      // history is served by the archive path (ingestArchivedObserverEvents).
-      // The appendAgentEvent dedup on (seq, timestamp) prevents double-processing.
+      // history comes from durable relay REQ (owner `#p`) and/or the local
+      // archive path (ingestArchivedObserverEvents). Dedup prevents doubles.
       limit: 1000,
       since: Math.floor(Date.now() / 1_000) - OBSERVER_LIVE_LOOKBACK_SECS,
     },

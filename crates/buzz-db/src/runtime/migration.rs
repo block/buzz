@@ -703,8 +703,9 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations.len(), 50);
         assert_eq!(migrations[48].version, 49);
+        assert_eq!(migrations[49].version, 50);
         assert!(migrations[48]
             .sql
             .as_str()
@@ -917,7 +918,14 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql")
-            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+            .contains("kind IN (1059, 24200, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+
+        // NIP-AO kind:24200 FTS exclusion (0050): wrap-the-existing-expression
+        // so brownfield databases stop tokenizing observer ciphertext.
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49].sql.as_str().contains("kind = 24200"));
+        assert!(migrations[49].sql.as_str().contains("search_tsv"));
+        assert!(!migrations[0].sql.as_str().contains("24200"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be

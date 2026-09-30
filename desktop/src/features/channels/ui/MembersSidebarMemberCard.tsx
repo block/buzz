@@ -1,6 +1,9 @@
+import * as React from "react";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
+import { AgentUsageActivityPanel } from "@/features/agents/ui/AgentUsageActivityPanel";
 import {
   Activity,
+  BarChart3,
   Ban,
   Bot,
   CircleSlash,
@@ -353,6 +356,7 @@ function MemberActionsMenu({
   onViewActivity?: (pubkey: string) => void;
   pairAction?: ManagedAgentPairAction;
 }) {
+  const [usageOpen, setUsageOpen] = React.useState(false);
   const showChangeRole =
     canChangeRole && !memberIsBot && member.role !== "owner";
   const isBanned = moderationState?.banned ?? false;
@@ -366,6 +370,7 @@ function MemberActionsMenu({
     : undefined;
 
   return (
+    <>
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <button
@@ -381,13 +386,22 @@ function MemberActionsMenu({
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
         {canViewActivity ? (
-          <DropdownMenuItem
-            data-testid={`sidebar-view-activity-${member.pubkey}`}
-            onClick={() => onViewActivity?.(member.pubkey)}
-          >
-            <Activity className="h-4 w-4" />
-            View activity
-          </DropdownMenuItem>
+          <>
+            <DropdownMenuItem
+              data-testid={`sidebar-view-activity-${member.pubkey}`}
+              onClick={() => onViewActivity?.(member.pubkey)}
+            >
+              <Activity className="h-4 w-4" />
+              View activity
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              data-testid={`sidebar-usage-activity-${member.pubkey}`}
+              onClick={() => setUsageOpen(true)}
+            >
+              <BarChart3 className="h-4 w-4" />
+              Usage & activity
+            </DropdownMenuItem>
+          </>
         ) : null}
         {memberIsBot && managedAgent ? (
           <>
@@ -527,6 +541,14 @@ function MemberActionsMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+    {canViewActivity ? (
+      <AgentUsageActivityPanel
+        agentPubkey={member.pubkey}
+        onOpenChange={setUsageOpen}
+        open={usageOpen}
+      />
+    ) : null}
+    </>
   );
 }
 

@@ -18,14 +18,12 @@ AI agent harnesses consume model tokens on every turn. Owners running fleets
 of agents need durable, harness-independent usage accounting — the equivalent
 of a metered bill — for cost attribution, budgeting, and capacity planning.
 
-[NIP-AO](NIP-AO.md) (kind 24200) already streams encrypted session telemetry
-between agent and owner, but it is deliberately ephemeral: relays MUST NOT
-persist it, so it cannot answer "how many tokens did my agents use last
-week?". Transcript-grade durable telemetry is explicitly out of scope — the
-persistence-averse reasoning behind NIP-AO's ephemerality contract applies to
-conversation content, not to a small usage record. Kind 44200 stores only the
-metric: token counts, an estimated cost, and correlation identifiers, all
-encrypted to the owner.
+[NIP-AO](NIP-AO.md) (kind 24200) streams and retains encrypted session
+telemetry (thinking, tool calls, session boundaries) between agent and owner.
+That transcript-grade plane is complementary but distinct from usage
+accounting: kind 44200 stores only the metric — token counts, an estimated
+cost, and correlation identifiers — all encrypted to the owner, without the
+ACP payload volume of observer frames.
 
 ## Definitions
 

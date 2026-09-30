@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Activity, Headphones, MessageSquare } from "lucide-react";
+import { Headphones, MessageSquare } from "lucide-react";
 
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 
@@ -28,6 +28,7 @@ import {
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
+import { UsageAndActivityButton } from "@/features/agents/ui/AgentUsageActivityPanel";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
@@ -282,7 +283,7 @@ function UserProfilePopoverBody({
   const { status: presenceStatus } = useAgentAvailability(pubkey);
   const userStatusQuery = useUserStatusQuery([pubkey]);
 
-  const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
+  const { canOpenAgentActivity } = useOpenAgentActivity();
   const relayAgent = relayAgentsQuery.data?.find((a) => a.pubkey === pubkey);
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
@@ -508,18 +509,14 @@ function UserProfilePopoverBody({
         ) : null}
 
         {canViewActivity ? (
-          <button
-            className="flex w-full items-center gap-2 rounded-lg border border-border/60 px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/50"
-            data-testid={`user-profile-view-activity-${pubkey}`}
-            onClick={() => {
-              setOpen(false);
-              openAgentActivity(pubkey);
-            }}
-            type="button"
-          >
-            <Activity className="h-4 w-4 text-muted-foreground" />
-            View activity log
-          </button>
+          <UsageAndActivityButton
+            agentPubkey={pubkey}
+            className="w-full justify-start gap-2 border border-border/60 px-3 py-2 text-xs font-medium"
+            label="Usage & activity"
+            size="sm"
+            testId={`user-profile-usage-activity-${pubkey}`}
+            variant="ghost"
+          />
         ) : null}
 
         {hasUserStatus || showAnyProfileActions ? (

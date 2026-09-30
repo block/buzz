@@ -139,7 +139,13 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    // NIP-AO: durable observer frames leak agent activity metadata via the
+    // cleartext envelope; knowing an event id is NOT authorization.
+    KIND_AGENT_OBSERVER_FRAME,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -153,9 +159,10 @@ pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_MET
 /// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
 /// `crates/buzz-search/tests/fts_integration.rs`).
 ///
-/// Ephemeral kinds (20000–29999, e.g. [`KIND_AGENT_OBSERVER_FRAME`]) are
-/// included for filter-layer enforcement but are never stored, so the
-/// storage-layer search defense does not apply to them.
+/// [`KIND_AGENT_OBSERVER_FRAME`] (kind 24200) is in the NIP-01 ephemeral
+/// numeric range but is a Hula special-case durable kind — see
+/// [`is_ephemeral`]. It is stored and therefore covered by the storage-layer
+/// FTS NULL-tsvector defense (migration 0050).
 pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
     KIND_MEMBER_ADDED_NOTIFICATION,
@@ -486,7 +493,11 @@ pub const KIND_PRESENCE_UPDATE: u32 = 20001;
 pub const KIND_PAIRING: u32 = 24134;
 /// Ephemeral: typing indicator for a channel.
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
-/// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
+/// NIP-AO: owner-scoped encrypted agent observer telemetry and control frame.
+///
+/// Kind number 24200 sits in the NIP-01 ephemeral range (20000–29999), but Buzz
+/// special-cases it as **durable** (persisted, p-gated, FTS-excluded) so owners
+/// can REQ historical activity. See [`is_ephemeral`] and `docs/nips/NIP-AO.md`.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
@@ -796,8 +807,17 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PROJECT,
 ];
 
-/// Returns `true` if `kind` is in the ephemeral range (20000–29999).
+/// Returns `true` if `kind` is treated as ephemeral (fan-out only, never stored).
+///
+/// Numerically this is the NIP-01 ephemeral range (20000–29999), **except**
+/// [`KIND_AGENT_OBSERVER_FRAME`] (24200). That kind keeps its historical kind
+/// number for wire compatibility but is durable on Buzz relays (NIP-AO Option C):
+/// stored, `#p`-gated, and excluded from FTS — same ownership/ACL shape as
+/// [`KIND_AGENT_TURN_METRIC`].
 pub const fn is_ephemeral(kind: u32) -> bool {
+    if kind == KIND_AGENT_OBSERVER_FRAME {
+        return false;
+    }
     kind >= EPHEMERAL_KIND_MIN && kind <= EPHEMERAL_KIND_MAX
 }
 
@@ -920,6 +940,15 @@ const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Compile-time: KIND_AGENT_OBSERVER_FRAME is durable despite the 20xxx kind number.
+const _: () = assert!(!is_ephemeral(KIND_AGENT_OBSERVER_FRAME));
+const _: () = assert!(!is_replaceable(KIND_AGENT_OBSERVER_FRAME));
+const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_OBSERVER_FRAME));
+const _: () = assert!(KIND_AGENT_OBSERVER_FRAME <= u16::MAX as u32);
+const _: () = assert!(
+    KIND_AGENT_OBSERVER_FRAME >= EPHEMERAL_KIND_MIN
+        && KIND_AGENT_OBSERVER_FRAME <= EPHEMERAL_KIND_MAX
+);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
 // 9040–9044 are direct commands (executed, never stored).

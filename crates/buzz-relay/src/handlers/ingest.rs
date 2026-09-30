@@ -12,7 +12,7 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_COMMUNITY_BOTS, KIND_COMMUNITY_PINNED_SITES, KIND_COMMUNITY_SECTIONS, KIND_CONTACT_LIST,
     KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET,
@@ -599,6 +599,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-AO: durable observer frames (kind 24200 special-cased out of ephemeral).
+        KIND_AGENT_OBSERVER_FRAME => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -868,6 +870,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            // NIP-AO: durable observer frames are owner-scoped global events.
+            // Optional `h` tags are ignored for channel_id routing; channelId
+            // lives inside the encrypted payload.
+            | KIND_AGENT_OBSERVER_FRAME
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
     )
@@ -2051,6 +2057,111 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentObserverDirection {
+    Telemetry,
+    Control,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentObserverRoute {
+    agent: nostr::PublicKey,
+    owner: nostr::PublicKey,
+    direction: AgentObserverDirection,
+}
+
+/// Per-agent sliding-window rate limiter for durable observer telemetry (20/sec).
+fn observer_frame_rate_limited(
+    state: &AppState,
+    community_id: buzz_core::CommunityId,
+    agent_key: [u8; 32],
+) -> bool {
+    let now = std::time::Instant::now();
+    let mut entry = state
+        .observer_rate_limiter
+        .entry((community_id, agent_key))
+        .or_insert((0, now));
+    let (count, window_start) = entry.value_mut();
+    if now.duration_since(*window_start).as_secs() >= 1 {
+        *count = 1;
+        *window_start = now;
+        false
+    } else {
+        *count += 1;
+        *count > 20
+    }
+}
+
+/// Validate NIP-AO kind 24200 routing tags. `Ok(None)` = unrecognized frame (drop OK).
+fn validate_agent_observer_route(
+    event: &nostr::Event,
+) -> Result<Option<AgentObserverRoute>, String> {
+    use buzz_core::observer::{
+        content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
+        OBSERVER_FRAME_TELEMETRY,
+    };
+
+    if !content_looks_like_nip44(&event.content) {
+        return Err("invalid: observer content must be NIP-44 encrypted".into());
+    }
+
+    let recipient = parse_observer_pubkey_tag(event, "p")?;
+    let agent = parse_observer_pubkey_tag(event, OBSERVER_AGENT_TAG)?;
+    let frame = single_observer_tag_content(event, OBSERVER_FRAME_TAG)?;
+
+    let (owner, direction, expected_frame) = if event.pubkey == agent && recipient != agent {
+        (
+            recipient,
+            AgentObserverDirection::Telemetry,
+            OBSERVER_FRAME_TELEMETRY,
+        )
+    } else if recipient == agent && event.pubkey != agent {
+        (
+            event.pubkey,
+            AgentObserverDirection::Control,
+            OBSERVER_FRAME_CONTROL,
+        )
+    } else {
+        return Err(
+            "invalid: observer frame must be agent-to-owner telemetry or owner-to-agent control"
+                .into(),
+        );
+    };
+
+    if frame != expected_frame {
+        return Ok(None);
+    }
+
+    Ok(Some(AgentObserverRoute {
+        agent,
+        owner,
+        direction,
+    }))
+}
+
+fn parse_observer_pubkey_tag(event: &nostr::Event, tag_name: &str) -> Result<nostr::PublicKey, String> {
+    let value = single_observer_tag_content(event, tag_name)?;
+    nostr::PublicKey::from_hex(value)
+        .map_err(|_| format!("invalid: observer {tag_name} tag must be a hex pubkey"))
+}
+
+fn single_observer_tag_content<'a>(event: &'a nostr::Event, tag_name: &str) -> Result<&'a str, String> {
+    let mut values = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == tag_name)
+        .filter_map(|tag| tag.content());
+    let Some(value) = values.next() else {
+        return Err(format!("invalid: observer frame missing {tag_name} tag"));
+    };
+    if values.next().is_some() {
+        return Err(format!(
+            "invalid: observer frame has multiple {tag_name} tags"
+        ));
+    }
+    Ok(value)
+}
+
 /// Validate the public envelope of a NIP-AM `kind:44200` event.
 ///
 /// Enforces (without touching the encrypted payload):
@@ -2977,6 +3088,69 @@ async fn ingest_event_inner(
                 "restricted: agent-turn-metric `p` tag must be the registered owner of this agent"
                     .into(),
             ));
+        }
+    }
+
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
+        // Freshness: reject stale/future publish (historical REQ still serves stored rows).
+        let now = Utc::now().timestamp();
+        let event_ts = event.created_at.as_secs() as i64;
+        if (event_ts - now).unsigned_abs() > 300 {
+            return Err(IngestError::Rejected(
+                "invalid: observer frame timestamp outside ±5 minute freshness window".into(),
+            ));
+        }
+
+        let route = match validate_agent_observer_route(&event) {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                // Unknown frame value — silently accept without storing (NIP-AO).
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: String::new(),
+                });
+            }
+            Err(message) => return Err(IngestError::Rejected(message)),
+        };
+
+        let agent_bytes = route.agent.to_bytes().to_vec();
+        let owner_bytes = route.owner.to_bytes().to_vec();
+        let cache_key = (
+            tenant.community(),
+            agent_bytes.clone(),
+            owner_bytes.clone(),
+        );
+        let is_owner = match state.observer_owner_cache.get(&cache_key) {
+            Some(cached) => cached,
+            None => {
+                let result = state
+                    .db
+                    .is_agent_owner(tenant.community(), &agent_bytes, &owner_bytes)
+                    .await
+                    .map_err(|e| {
+                        IngestError::Internal(format!(
+                            "error: db error checking observer ownership: {e}"
+                        ))
+                    })?;
+                state.observer_owner_cache.insert(cache_key, result);
+                result
+            }
+        };
+        if !is_owner {
+            return Err(IngestError::AuthFailed(
+                "restricted: observer frame is not authorized for this agent owner".into(),
+            ));
+        }
+
+        // Rate limit telemetry only (20/sec per agent) — durable write budget.
+        if matches!(route.direction, AgentObserverDirection::Telemetry) {
+            let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
+            if observer_frame_rate_limited(state, tenant.community(), agent_key) {
+                return Err(IngestError::Rejected(
+                    "rate-limited: observer frame rate exceeded (20/sec per agent)".into(),
+                ));
+            }
         }
     }
 
@@ -4179,6 +4353,7 @@ mod postgres_tests {
             KIND_TEAM,
             KIND_MANAGED_AGENT,
             KIND_AGENT_TURN_METRIC,
+            KIND_AGENT_OBSERVER_FRAME,
         ];
         for kind in migrated {
             assert!(
@@ -4222,6 +4397,28 @@ mod postgres_tests {
             required_scope_for_kind(KIND_AGENT_TURN_METRIC, &dummy).unwrap(),
             Scope::MessagesWrite,
             "kind:44200 requires MessagesWrite scope"
+        );
+    }
+
+    #[test]
+    fn agent_observer_frame_is_global_only_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert!(
+            is_global_only_kind(KIND_AGENT_OBSERVER_FRAME),
+            "kind:24200 must be global-only"
+        );
+        assert!(
+            !requires_h_channel_scope(KIND_AGENT_OBSERVER_FRAME),
+            "kind:24200 must not require an h-tag"
+        );
+        assert_eq!(
+            required_scope_for_kind(KIND_AGENT_OBSERVER_FRAME, &dummy).unwrap(),
+            Scope::MessagesWrite,
+            "kind:24200 requires MessagesWrite scope"
+        );
+        assert!(
+            !buzz_core::kind::is_ephemeral(KIND_AGENT_OBSERVER_FRAME),
+            "kind:24200 is durable despite the 20xxx kind number"
         );
     }
 

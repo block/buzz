@@ -34,8 +34,8 @@ function archiveSyncEpoch(): Promise<number> {
  * unmount.
  *
  * The `ready` gate is load-bearing and cannot move into the backend: kind
- * 24200 is relay-ephemeral, so frames emitted before the listener opens are
- * permanently lost. Observer reconciliation must have seeded kind 24200 into
+ * Kind 24200 is durable on NIP-AO relays; local archive still seeds kind 24200
+ * so offline / non-implementing relays keep a personal copy. Observer reconciliation must have seeded kind 24200 into
  * the saved subscription before any listener opens, and only the renderer
  * knows when that finished. The backend task is therefore not self-starting.
  *

@@ -739,7 +739,7 @@ pub struct AppState {
     /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
     pub admission_rate_limiter: Arc<RedisRateLimiter>,
 
-    /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
+    /// Per-agent sliding-window rate limiter for durable observer frames (kind 24200, 20/sec).
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
     /// 100 events/sec per agent — prevents relay/DB pressure from bursty telemetry.
     pub observer_rate_limiter: Arc<ScopedRateLimiter>,

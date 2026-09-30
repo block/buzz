@@ -971,11 +971,11 @@ struct AgentObserverRoute {
     direction: AgentObserverDirection,
 }
 
-/// Check + bump the per-agent observer telemetry limit (100/sec window).
+/// Check + bump the per-agent observer telemetry limit (20/sec window).
 ///
-/// Observer frames are ephemeral, but the rejection is visible to the sender.
-/// Scope the counter by community so an agent key active in one tenant does not
-/// consume another tenant's logical rate budget.
+/// Production ingest uses the twin in `ingest.rs`. This copy exists for unit
+/// tests of community-scoped limiter isolation.
+#[cfg(test)]
 fn observer_frame_rate_limited(
     state: &AppState,
     community_id: CommunityId,
@@ -993,15 +993,16 @@ fn observer_frame_rate_limited(
         false
     } else {
         *count += 1;
-        *count > 100
+        *count > 20
     }
 }
 
 /// Handle encrypted agent observer frames (kind 24200).
 ///
-/// These frames bypass storage and are routed as global ephemeral events. The
-/// relay gates publication by the existing `agent_owner_pubkey` mapping and
-/// gates subscription in the REQ handler via the cleartext `p` tag.
+/// Frames are validated here (signature, freshness, route, ownership, rate
+/// limit) then persisted through the shared ingest path (durable, community-
+/// global, p-gated). Live fan-out is performed by ingest. Subscription history
+/// is served by REQ like any other stored kind.
 async fn handle_agent_observer_event(
     event: Event,
     conn_id: uuid::Uuid,
@@ -1112,44 +1113,63 @@ async fn handle_agent_observer_event(
         return;
     }
 
-    // Rate limit telemetry frames only (100/sec per agent).
-    // Control frames (owner → agent) bypass the limiter — they are rare and must not
-    // be starved by bursty telemetry from the agent.
-    if matches!(route.direction, AgentObserverDirection::Telemetry) {
-        let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
-        if observer_frame_rate_limited(&state, conn.tenant.community(), agent_key) {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "rate-limited: observer frame rate exceeded (100/sec per agent)",
-            ));
-            return;
-        }
-    }
+    // Rate limit lives in ingest (shared WS/HTTP). Pre-checks above reject
+    // unauthorized frames before the durable write path runs.
 
-    state.mark_local_event(conn.tenant.community(), &event.id);
-    if let Err(e) = state
-        .pubsub
-        .publish_event(&conn.tenant, EventTopic::Global, &event)
-        .await
-    {
-        state
-            .local_event_ids
-            .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-        warn!(conn_id = %conn_id, event_id = %event_id_hex, "Agent observer publish failed: {e}");
-    }
-
-    let stored_event = StoredEvent::new(event.clone(), None);
     debug!(
         event_id = %event_id_hex,
         agent = %route.agent.to_hex(),
         owner = %route.owner.to_hex(),
         direction = ?route.direction,
-        "Agent observer fan-out"
+        "Agent observer ingest"
     );
-    fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    // Persist + fan-out via the shared ingest seam (same ownership/ACL as 44200).
+    let (auth_pubkey, scopes, channel_ids) = match conn.auth_state_snapshot() {
+        AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.scopes, ctx.channel_ids),
+        _ => {
+            reject("auth");
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "auth-required: must AUTH before publishing observer frames",
+            ));
+            return;
+        }
+    };
+    let ingest_auth = IngestAuth::Nip42 {
+        pubkey: auth_pubkey,
+        scopes,
+        channel_ids,
+        conn_id,
+    };
+    match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
+        Ok(result) => {
+            if result.accepted {
+                info!(
+                    event_id = %result.event_id,
+                    kind = KIND_AGENT_OBSERVER_FRAME,
+                    conn_id = %conn_id,
+                    "Observer frame ingested"
+                );
+            }
+            conn.send(RelayMessage::ok(
+                &result.event_id,
+                result.accepted,
+                &result.message,
+            ));
+        }
+        Err(e) => {
+            let (message, reason) = match e {
+                IngestError::Rejected(message) => (message, "invalid"),
+                IngestError::CanvasConflict(message) => (message, "invalid"),
+                IngestError::AuthFailed(message) => (message, "auth"),
+                IngestError::Internal(message) => (message, "error"),
+            };
+            reject(reason);
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+        }
+    }
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
@@ -1380,7 +1400,7 @@ mod tests {
         let community_a = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(0xAAAA));
         let community_b = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(0xBBBB));
 
-        for _ in 0..100 {
+        for _ in 0..20 {
             assert!(!super::observer_frame_rate_limited(
                 &state,
                 community_a,

@@ -123,9 +123,10 @@ async fn ephemeral_events_leave_human_and_agent_message_budgets_untouched() {
     let state = state_with_limits(2, 3, 100).await;
     let recorder = DebuggingRecorder::new();
     let _guard = metrics::set_default_local_recorder(&recorder);
-    // Both range boundaries, typing, presence, and observer frames. Adjacent
+    // Both range boundaries, typing, and presence. Adjacent
     // non-ephemeral kinds below must still consume the message allowance.
-    let ephemeral_kinds = [20000, 20001, 20002, 24200, 29999];
+    // Kind 24200 is durable (NIP-AO) and is intentionally omitted here.
+    let ephemeral_kinds = [20000, 20001, 20002, 29999];
     for (agent, limit) in [(false, 2), (true, 3)] {
         for stored_kind in [0, 1, 9, 19999, 30000, 40002] {
             let (conn, mut rx) = connection(agent);
@@ -133,7 +134,7 @@ async fn ephemeral_events_leave_human_and_agent_message_budgets_untouched() {
                 assert!(enforce_ws_admission(&event(kind), &conn, &state).await);
             }
             assert_eq!(counter(&state, &conn, LimitType::Messages).await, None);
-            assert_eq!(counter(&state, &conn, LimitType::WsEvents).await, Some(5));
+            assert_eq!(counter(&state, &conn, LimitType::WsEvents).await, Some(4));
             for expected in 1..=limit {
                 assert!(enforce_ws_admission(&event(stored_kind), &conn, &state).await);
                 assert_eq!(

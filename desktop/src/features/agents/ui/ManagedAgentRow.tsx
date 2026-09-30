@@ -25,6 +25,7 @@ import { SubsectionLabel } from "@/shared/ui/PageHeader";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { RestartDiffBadge } from "./RestartDiffBadge";
 import { OpenClawWorkspaceBadge } from "./OpenClawWorkspaceBadge";
+import { UsageAndActivityButton } from "./AgentUsageActivityPanel";
 
 export function ManagedAgentRow({
   agent,
@@ -166,6 +167,11 @@ export function ManagedAgentRow({
               restartDiff={agent.restartDiff}
             />
           ) : null}
+          <UsageAndActivityButton
+            agentName={agent.name}
+            agentPubkey={agent.pubkey}
+            testId={`managed-agent-usage-activity-${agent.pubkey}`}
+          />
           <Button
             onClick={() => onOpenProfile(agent.pubkey)}
             size="sm"
