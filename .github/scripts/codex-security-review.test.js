@@ -23,13 +23,14 @@ const MARKER = "<!-- codex-security-review -->";
 const CURRENT_REVIEW_LABEL = "codex-security-review-current";
 
 function pullRequest({
-  authorAssociation = "CONTRIBUTOR",
+  author = "outside-contributor",
   baseSha = OLD_BASE_SHA,
   headSha = HEAD_SHA,
   labels = [],
 } = {}) {
   return {
-    author_association: authorAssociation,
+    author_association: "CONTRIBUTOR",
+    user: { login: author },
     state: "open",
     base: {
       ref: "main",
@@ -51,6 +52,7 @@ function harness({
   files = [],
   labeledIssues = [],
   liveMainShas = [BASE_SHA],
+  permissions = { "block-member": "write", "outside-contributor": "read" },
 } = {}) {
   const storedComments = [...comments];
   const created = [];
@@ -118,6 +120,18 @@ function harness({
           }
         },
       },
+      repos: {
+        getCollaboratorPermissionLevel: async ({ username }) => {
+          const permission = permissions[username];
+          if (permission === undefined) {
+            throw Object.assign(new Error("not found"), { status: 404 });
+          }
+          if (permission instanceof Error) {
+            throw permission;
+          }
+          return { data: { permission } };
+        },
+      },
       pulls: {
         get: async () => ({ data: pull }),
         listFiles,
@@ -135,7 +149,10 @@ function harness({
     actor: "block-member",
     eventName: "issue_comment",
     payload: {
-      comment: { body: `@buzz-security-review ${HEAD_SHA}` },
+      comment: {
+        body: `@buzz-security-review ${HEAD_SHA}`,
+        user: { login: "block-member" },
+      },
       issue: { number: 6816 },
     },
     repo: { owner: "block", repo: "buzz" },
@@ -231,37 +248,67 @@ test("prepare binds a member command to the named head SHA", async () => {
   );
 });
 
-test("pull request authorization uses the live author association", async () => {
-  const member = harness({
-    pull: pullRequest({ authorAssociation: "MEMBER" }),
-  });
-  member.context.eventName = "pull_request_target";
-  member.context.payload.pull_request = {
-    number: 6816,
-    head: { sha: HEAD_SHA },
-    author_association: "CONTRIBUTOR",
-  };
-
-  await prepare(member);
-
-  assert.equal(member.outputs.get("authorized"), "true");
-  assert.deepEqual(member.failures, []);
-
-  const external = harness({
-    pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
-  });
-  external.context.eventName = "pull_request_target";
-  external.context.payload.pull_request = {
+function pullRequestTrigger(options) {
+  const state = harness(options);
+  state.context.eventName = "pull_request_target";
+  state.context.payload.pull_request = {
     number: 6816,
     head: { sha: HEAD_SHA },
     author_association: "MEMBER",
   };
+  return state;
+}
 
-  await prepare(external);
+test("pull request authorization uses the live author's write access", async () => {
+  // Private org members report CONTRIBUTOR; write access still authorizes.
+  const member = pullRequestTrigger({ pull: pullRequest({ author: "block-member" }) });
+  await prepare(member);
+  assert.equal(member.outputs.get("authorized"), "true");
+  assert.deepEqual(member.failures, []);
 
-  assert.equal(external.outputs.get("authorized"), undefined);
-  assert.deepEqual(external.failures, []);
-  assert.match(external.info.at(-1), /requires authorization/);
+  for (const author of ["outside-contributor", "unrelated-user"]) {
+    const untrusted = pullRequestTrigger({ pull: pullRequest({ author }) });
+    await prepare(untrusted);
+    assert.equal(untrusted.outputs.get("authorized"), undefined);
+    assert.deepEqual(untrusted.failures, []);
+    assert.match(untrusted.info.at(-1), /requires authorization/);
+  }
+});
+
+test("permission lookup errors fail closed", async () => {
+  const failure = Object.assign(new Error("forbidden"), { status: 403 });
+  const author = pullRequestTrigger({
+    pull: pullRequest({ author: "block-member" }),
+    permissions: { "block-member": failure },
+  });
+  await assert.rejects(prepare(author), /forbidden/);
+  assert.equal(author.outputs.size, 0);
+
+  const commenter = harness({ permissions: { "block-member": failure } });
+  await assert.rejects(prepare(commenter), /forbidden/);
+  assert.equal(commenter.outputs.size, 0);
+});
+
+test("review commands require a commenter with write access", async () => {
+  for (const login of ["outside-contributor", "unrelated-user"]) {
+    const state = harness();
+    state.context.payload.comment.user.login = login;
+    await prepare(state);
+    assert.equal(state.outputs.size, 0);
+    assert.match(state.failures[0], /require write access/);
+  }
+
+  const trusted = harness({ permissions: { "block-member": "admin" } });
+  await prepare(trusted);
+  assert.equal(trusted.outputs.get("authorized"), "true");
+});
+
+test("workflow leaves comment authorization to the trusted prepare step", () => {
+  const workflow = readFileSync(
+    path.join(__dirname, "../workflows/codex-security-review.yml"),
+    "utf8",
+  );
+  assert.doesNotMatch(workflow, /comment\.author_association/);
 });
 
 test("PR mutation jobs use pull request write permission", () => {
@@ -501,7 +548,7 @@ test("base reconciliation does not create comments on unreviewed PRs", async () 
 test("pull request updates invalidate member reviews without adding placeholders", async () => {
   const reviewed = harness({
     pull: pullRequest({
-      authorAssociation: "MEMBER",
+      author: "block-member",
       headSha: OTHER_HEAD_SHA,
     }),
     comments: [
@@ -529,7 +576,7 @@ test("pull request updates invalidate member reviews without adding placeholders
   assert.equal(reviewed.removedLabels.length, 1);
 
   const unreviewed = harness({
-    pull: pullRequest({ authorAssociation: "OWNER" }),
+    pull: pullRequest({ author: "block-member" }),
   });
   unreviewed.context.eventName = "pull_request_target";
   unreviewed.context.payload.pull_request = {
@@ -544,7 +591,7 @@ test("pull request updates invalidate member reviews without adding placeholders
   assert.equal(unreviewed.removeLabelCalls.length, 0);
 
   const external = harness({
-    pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
+    pull: pullRequest({ author: "outside-contributor" }),
   });
   external.context.eventName = "pull_request_target";
   external.context.payload.pull_request = {

@@ -28,8 +28,26 @@ const completedMarker = (baseSha, headSha) =>
 
 const reviewCommand = (headSha) => `${REVIEW_COMMAND} ${headSha}`;
 
-const isOrganizationMember = (association) =>
-  association === "MEMBER" || association === "OWNER";
+// Org membership is invisible to the workflow token when a member keeps it
+// private, so trust is repo write access. `maintain` reports as `write`.
+async function hasWriteAccess({ github, context, username }) {
+  if (!username) {
+    return false;
+  }
+  try {
+    const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      username,
+    });
+    return data.permission === "admin" || data.permission === "write";
+  } catch (error) {
+    if (error?.status === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
 
 const hasCurrentReviewLabel = (pullRequest) =>
   pullRequest.labels?.some(
@@ -338,6 +356,13 @@ async function prepare({ github, context, core }) {
       );
       return;
     }
+    const commenter = context.payload.comment?.user?.login;
+    if (!(await hasWriteAccess({ github, context, username: commenter }))) {
+      core.setFailed(
+        `Review commands require write access to ${context.repo.owner}/${context.repo.repo}.`,
+      );
+      return;
+    }
     requestedHeadSha = match[1];
   } else {
     core.setFailed(`Unsupported review trigger: ${context.eventName}.`);
@@ -364,10 +389,14 @@ async function prepare({ github, context, core }) {
   }
   if (
     context.eventName === "pull_request_target" &&
-    !isOrganizationMember(pullRequest.author_association)
+    !(await hasWriteAccess({
+      github,
+      context,
+      username: pullRequest.user?.login,
+    }))
   ) {
     core.info(
-      `Pull request #${prNumber} requires authorization from a Block organization member.`,
+      `Pull request #${prNumber} requires authorization from a user with write access.`,
     );
     return;
   }
@@ -479,7 +508,7 @@ async function invalidatePullRequestUpdate({ github, context, core }) {
     github,
     context,
     core,
-    existingOnlyForOrganizationMembers: true,
+    existingOnlyForTrustedAuthors: true,
   });
 }
 
@@ -489,7 +518,7 @@ async function invalidate({
   core,
   prNumber: requestedPrNumber,
   existingOnly = false,
-  existingOnlyForOrganizationMembers = false,
+  existingOnlyForTrustedAuthors = false,
 }) {
   const prNumber = Number(
     requestedPrNumber ?? context.payload.pull_request?.number,
@@ -508,8 +537,12 @@ async function invalidate({
   const existing = await findReviewComment({ github, context, prNumber });
   const shouldOnlyUpdateExisting =
     existingOnly ||
-    (existingOnlyForOrganizationMembers &&
-      isOrganizationMember(pullRequest.author_association));
+    (existingOnlyForTrustedAuthors &&
+      (await hasWriteAccess({
+        github,
+        context,
+        username: pullRequest.user?.login,
+      })));
   if (!existing && shouldOnlyUpdateExisting) {
     if (existingOnly || hasCurrentReviewLabel(pullRequest)) {
       await clearCurrentReview({ github, context, prNumber });
@@ -535,7 +568,7 @@ ${STALE_MARKER}
 >
 > The current range is \`${liveMainSha}...${pullRequest.head.sha}\`.
 > A new review must complete for this exact range. When manual authorization
-> is required, a Block organization member must comment exactly
+> is required, a user with write access must comment exactly
 > \`${reviewCommand(pullRequest.head.sha)}\` to authorize a new review.
 > Any previous review applies only to its recorded range.
 `;
