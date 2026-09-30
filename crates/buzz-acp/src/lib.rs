@@ -11,6 +11,7 @@ mod filter;
 mod isolated_execution;
 mod last_mile;
 mod observer;
+mod openclaw_session_store;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;

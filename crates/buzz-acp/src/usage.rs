@@ -321,6 +321,16 @@ impl StandardUsageTracker {
         }
     }
 
+    /// ACP session id for the in-flight turn, if `begin_turn` ran.
+    pub(crate) fn in_flight_session_id(&self) -> Option<&str> {
+        self.in_flight_session.as_deref()
+    }
+
+    /// Whether a `usage_update.used` (or store fallback) is already pending.
+    pub(crate) fn has_pending_used(&self) -> bool {
+        self.pending_used.is_some()
+    }
+
     pub(crate) fn record_prompt_usage(
         &mut self,
         session_id: &str,

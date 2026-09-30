@@ -14,7 +14,7 @@ token proxy + context window), not Claude `cost.amount` and not goose
 input/output. Older buzz-acp only mapped Claude cost → `take_turn_usage()` often
 returned `None` → `publish_agent_turn_metric` no-op → **0 × 44200** in archives.
 
-## Fix (this PR)
+## Fix (this PR / follow-up)
 
 In `buzz-acp`:
 
@@ -24,10 +24,28 @@ In `buzz-acp`:
    `TurnUsage.turn_total_tokens` / `cumulative_total_tokens`.
 3. Existing `publish_agent_turn_metric` path encrypts 44200 to the registered
    owner (`#p`), same as local buzz-acp.
+4. **Session-store fallback (follow-up):** OpenClaw only emits ACP
+   `usage_update` when the Gateway snapshot is already
+   `totalTokensFresh === true` at emit time
+   (`buildSessionUsageSnapshot` in OpenClaw `translator.presentation.ts`).
+   A persistence race can leave the wire silent while
+   `~/.openclaw/agents/<id>/sessions/sessions.json` already has fresh totals
+   (Captain on dohula: no `usage_update`; store had `totalTokens=131246`,
+   `totalTokensFresh=true`). After `end_turn`, if `take_turn_usage()` would be
+   `None` and the adapter is OpenClaw, buzz-acp reads that JSON by the
+   `_meta.sessionKey` from `session/new` and seeds the same `used` path.
+   No Gateway RPC / password — filesystem only (same host as last-mile).
 
 Desktop chrome (PR #177) already renders token chips from archived 44200 when
 “Show agent thinking” is on. No desktop change required for hosted bots once
 VPS `buzz-acp` is rebuilt.
+
+### Upstream OpenClaw (still desirable)
+
+Preferred long-term fix is OpenClaw emitting `usage_update` after the store is
+fresh (see openclaw/openclaw#128634 — closed unmerged as of 2026-09). The
+buzz-acp store read is a community-bot workaround JM can ship without waiting
+on that.
 
 ## Deploy on dohula (prod last-miles)
 

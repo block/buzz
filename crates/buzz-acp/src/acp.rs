@@ -217,6 +217,13 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// OpenClaw Gateway `_meta.sessionKey` from the most recent `session/new`.
+    /// Used to look up `totalTokens` in the on-disk session store when ACP
+    /// `usage_update` is missing (OpenClaw emit race / stale snapshot).
+    openclaw_gateway_session_key: Option<String>,
+    /// Test-only: force `sessions.json` path for the store fallback.
+    #[cfg(test)]
+    openclaw_sessions_json_override: Option<std::path::PathBuf>,
     /// Concatenated `agent_message_chunk` text for the in-flight turn.
     /// Cleared at the start of each `session/prompt`; taken after the turn
     /// so last-mile can publish the assistant reply without a CLI send.
@@ -611,6 +618,9 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            openclaw_gateway_session_key: None,
+            #[cfg(test)]
+            openclaw_sessions_json_override: None,
             assistant_text: String::new(),
         })
     }
@@ -732,6 +742,9 @@ impl AcpClient {
         }
         if let Some(key) = session_key {
             params["_meta"]["sessionKey"] = serde_json::Value::String(key.to_owned());
+            self.openclaw_gateway_session_key = Some(key.to_owned());
+        } else {
+            self.openclaw_gateway_session_key = None;
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -946,10 +959,58 @@ impl AcpClient {
     /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
     /// exclusive cumulative path; standard ACP prompt usage is used only when
     /// goose emitted nothing for this turn.
+    ///
+    /// For OpenClaw, when no `usage_update` arrived on the wire, attempts a
+    /// best-effort read of the Gateway session store (`sessions.json`) using
+    /// the `_meta.sessionKey` from `session/new`. See
+    /// [`crate::openclaw_session_store`].
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
+        self.fill_openclaw_usage_from_session_store_if_needed();
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
         goose_usage.or(standard_usage)
+    }
+
+    /// When OpenClaw omitted `usage_update` but the on-disk session store has
+    /// fresh `totalTokens`, seed `standard_usage` so `take()` can publish 44200.
+    fn fill_openclaw_usage_from_session_store_if_needed(&mut self) {
+        if self.standard_adapter != Some(StandardAdapterKind::OpenClaw) {
+            return;
+        }
+        if self.standard_usage.has_pending_used() {
+            return;
+        }
+        let Some(gateway_key) = self.openclaw_gateway_session_key.as_deref() else {
+            return;
+        };
+        let Some(acp_session_id) = self.standard_usage.in_flight_session_id().map(str::to_owned) else {
+            return;
+        };
+        #[cfg(test)]
+        let store_usage = if let Some(path) = self.openclaw_sessions_json_override.as_deref() {
+            crate::openclaw_session_store::lookup_fresh_used_tokens_in_store(path, gateway_key)
+        } else {
+            crate::openclaw_session_store::lookup_fresh_used_tokens(gateway_key)
+        };
+        #[cfg(not(test))]
+        let store_usage = crate::openclaw_session_store::lookup_fresh_used_tokens(gateway_key);
+        let Some(store_usage) = store_usage else {
+            tracing::debug!(
+                target: "acp::usage",
+                gateway_key,
+                "openclaw session-store fallback: no fresh totalTokens"
+            );
+            return;
+        };
+        tracing::info!(
+            target: "acp::usage",
+            gateway_key,
+            used = store_usage.used,
+            size = ?store_usage.size,
+            "openclaw session-store fallback: seeding used from sessions.json"
+        );
+        self.standard_usage
+            .record_used_tokens(&acp_session_id, store_usage.used);
     }
 
     /// Consume concatenated `agent_message_chunk` text for this turn.
@@ -4766,6 +4827,76 @@ mod tests {
         assert!(
             client.take_turn_usage().is_none(),
             "OpenClaw must not treat Claude cost.amount as usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn openclaw_session_store_fallback_when_usage_update_missing() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::OpenClaw);
+        let key = "agent:captain:buzz:ch:7cce05ee-cd4b-4f67-a2e4-58ac63f97dae";
+        client.openclaw_gateway_session_key = Some(key.to_string());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("sessions.json");
+        std::fs::write(
+            &store,
+            format!(
+                r#"{{"{key}":{{"totalTokens":131246,"totalTokensFresh":true,"contextTokens":1000000}}}}"#
+            ),
+        )
+        .unwrap();
+        client.openclaw_sessions_json_override = Some(store);
+
+        client.notify_session_spawned("acp-sess");
+        client.standard_usage.begin_turn("acp-sess");
+        // No usage_update on the wire — store fallback must seed used.
+        let usage = client
+            .take_turn_usage()
+            .expect("store fallback should produce TurnUsage");
+        assert_eq!(usage.turn_total_tokens, Some(131246));
+        assert_eq!(usage.cumulative_total_tokens, Some(131246));
+        assert!(usage.delta_reliable);
+
+        // Second turn: absolute used grows; delta is turn total.
+        client.standard_usage.begin_turn("acp-sess");
+        std::fs::write(
+            client.openclaw_sessions_json_override.as_ref().unwrap(),
+            format!(
+                r#"{{"{key}":{{"totalTokens":140000,"totalTokensFresh":true,"contextTokens":1000000}}}}"#
+            ),
+        )
+        .unwrap();
+        let usage2 = client.take_turn_usage().expect("turn 2 store fallback");
+        assert_eq!(usage2.turn_total_tokens, Some(140000 - 131246));
+        assert_eq!(usage2.cumulative_total_tokens, Some(140000));
+    }
+
+    #[tokio::test]
+    async fn openclaw_wire_usage_update_prefers_over_store() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::OpenClaw);
+        let key = "agent:captain:buzz:ch:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        client.openclaw_gateway_session_key = Some(key.to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("sessions.json");
+        std::fs::write(
+            &store,
+            format!(
+                r#"{{"{key}":{{"totalTokens":999999,"totalTokensFresh":true,"contextTokens":1000000}}}}"#
+            ),
+        )
+        .unwrap();
+        client.openclaw_sessions_json_override = Some(store);
+
+        client.notify_session_spawned("acp-sess");
+        client.standard_usage.begin_turn("acp-sess");
+        client.handle_session_update(&standard_used_update("acp-sess", 420, 200_000));
+        let usage = client.take_turn_usage().expect("wire used");
+        assert_eq!(
+            usage.turn_total_tokens,
+            Some(420),
+            "wire usage_update must win over store"
         );
     }
 
