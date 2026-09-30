@@ -2711,6 +2711,17 @@ async fn authorize_moderation_read(
         .map_err(|e| e.into_response())?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
+    // Membership and community ban, same step as the other NIP-98 routes.
+    super::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        &pubkey_bytes,
+        super::relay_members::extract_auth_tag_header(headers),
+        None,
+    )
+    .await
+    .map_err(|e| e.into_response())?;
+
     crate::handlers::moderation_authz::authorize_moderation_action(
         &tenant,
         state,

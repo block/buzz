@@ -2183,6 +2183,67 @@ async fn author_type_label(
     }
 }
 
+/// Kinds a timed-out principal may still write: reports (so abuse can be
+/// signalled during a write-block) and the moderation commands that lift a
+/// restriction. Bans exempt nothing.
+fn allowed_while_timed_out(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_REPORT
+            | buzz_core::kind::KIND_MODERATION_UNBAN
+            | buzz_core::kind::KIND_MODERATION_UNTIMEOUT
+    )
+}
+
+/// The write-path verdict for a restriction snapshot, or `None` to admit.
+fn write_restriction_denial(
+    kind: u32,
+    restriction: &buzz_db::moderation::RestrictionState,
+    now: chrono::DateTime<Utc>,
+) -> Option<IngestError> {
+    if restriction.banned {
+        return Some(IngestError::AuthFailed(
+            "blocked: you are banned from this community".to_string(),
+        ));
+    }
+    match restriction.muted_until {
+        Some(until) if until > now && !allowed_while_timed_out(kind) => {
+            Some(IngestError::AuthFailed(format!(
+                "restricted: you are timed out until {}",
+                until.timestamp()
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// Community ban / timeout write-block (COMMUNITY_MODERATION_PLAN.md §0
+/// decision 4), shared by ingest and the WebSocket ephemeral and observer
+/// paths that never reach ingest.
+///
+/// The restriction state is effective: an agent is blocked by its own row and
+/// by its owner's (`users.agent_owner_pubkey`). A ban is normally enforced by
+/// the auth seam and the live disconnect; this gate is the durable backstop
+/// for a missed disconnect and for HTTP writes. A timeout has no auth-seam
+/// presence, so this is where it is enforced. Fails closed on a DB error.
+pub(crate) async fn enforce_write_restriction(
+    state: &AppState,
+    tenant: &TenantContext,
+    kind: u32,
+    pubkey: &nostr::PublicKey,
+) -> Result<(), IngestError> {
+    let restriction = state
+        .db
+        .moderation_restriction_state(tenant.community(), pubkey.as_bytes())
+        .await
+        .map_err(|e| {
+            IngestError::Internal(format!(
+                "error: internal error checking restriction state: {e}"
+            ))
+        })?;
+    write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -2428,6 +2489,10 @@ async fn ingest_event_inner(
         )));
     }
 
+    // Ban / timeout write-block. Runs before every kind-specific branch below
+    // (commands, feedback, reports, moderation) so no write returns ahead of it.
+    enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -2484,63 +2549,6 @@ async fn ingest_event_inner(
             accepted: true,
             message: String::new(),
         });
-    }
-
-    // Community ban / timeout write-block (COMMUNITY_MODERATION_PLAN.md §0
-    // decision 4). A timeout is a write-block only — the connection stays open,
-    // content writes are refused with `restricted: you are timed out until <ts>`
-    // so the desktop can render a countdown. A ban is normally enforced at the
-    // auth seam, but an already-authenticated connection never re-auths: if the
-    // live-disconnect fan-out is missed (fire-and-forget publish, broadcast lag,
-    // subscriber reconnect window), a banned member's open socket would keep
-    // writing indefinitely. So the ban is re-checked here — this write-path gate
-    // is the durable backstop the fan-out's best-effort delivery relies on.
-    // Moderation commands enforce bans inside their handler and remain exempt
-    // here only so timeouts do not disarm the tool used to lift them. Relay-admin
-    // commands (9030–9033) are exempt for the same reason — a timed-out admin
-    // must still be able to administer the roster — and likewise enforce the
-    // durable ban inside `relay_admin::handle_relay_admin_event`. Any kind added
-    // to this exemption owes the same handler-local ban check.
-    //
-    // Scope: this gate checks the *authoring* pubkey only, with no NIP-OA
-    // owner→agent cascade. That cascade lives at the auth seam for bans, where
-    // it is structural: an agent whose owner is banned can never authenticate,
-    // so its socket never exists to reach ingest. Timeout has no auth-seam
-    // presence (it is write-block-only), so an owner-timeout does not cascade to
-    // the owner's agents — a deliberate Phase-1 asymmetry. `IngestAuth` does not
-    // carry the self-proving auth tag, so resolving the owner here would mean
-    // plumbing it through the whole transport boundary; the follow-up shape is
-    // the restriction-state cache (see should-fix), which can fold in owner
-    // resolution without a per-write DB round-trip.
-    if !buzz_core::kind::is_moderation_command_kind(kind_u32) && !is_relay_admin_kind(kind_u32) {
-        match state
-            .db
-            .moderation_restriction_state(tenant.community(), auth.pubkey().as_bytes())
-            .await
-        {
-            Ok(r) => {
-                if r.banned {
-                    return Err(IngestError::AuthFailed(
-                        "blocked: you are banned from this community".to_string(),
-                    ));
-                }
-                if let Some(until) = r.muted_until {
-                    if until > chrono::Utc::now() {
-                        return Err(IngestError::AuthFailed(format!(
-                            "restricted: you are timed out until {}",
-                            until.timestamp()
-                        )));
-                    }
-                }
-            }
-            Err(e) => {
-                // Fail closed: a DB error must not let a banned/timed-out actor
-                // write.
-                return Err(IngestError::Internal(format!(
-                    "error: internal error checking restriction state: {e}"
-                )));
-            }
-        }
     }
 
     let mut channel_id = if kind_u32 == KIND_REACTION {
@@ -6352,5 +6360,222 @@ mod postgres_tests {
         ingest_event_inner(&state, &tracer, &tenant, untagged, make_auth(&author))
             .await
             .expect("untagged canvas write must append unconditionally");
+    }
+
+    // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
+
+    /// Fresh community plus an agent owned by `owner` (users.agent_owner_pubkey).
+    async fn owned_agent_fixture(
+        state: &crate::state::AppState,
+        label: &str,
+    ) -> (TenantContext, nostr::Keys, nostr::Keys) {
+        let host = format!("{label}-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+        for keys in [&owner, &agent] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("set agent owner"));
+        (TenantContext::resolved(community, &host), owner, agent)
+    }
+
+    async fn ingest_state() -> Arc<crate::state::AppState> {
+        let db_url = crate::test_support::database_url();
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        build_canvas_ingest_state(&db_url, &pool).await
+    }
+
+    /// An owner's timeout reaches its agent, and it is enforced before command
+    /// routing: a DM open (a command kind) is refused, while a report and the
+    /// restriction-lifting commands stay admitted.
+    /// Mutations: gate after command routing, or no owner fold → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_timeout_blocks_agent_dm_open_but_admits_report_and_lift() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = owned_agent_fixture(&state, "owner-timeout").await;
+        state
+            .db
+            .timeout_community_member(
+                tenant.community(),
+                owner.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                Utc::now() + chrono::Duration::hours(1),
+                None,
+            )
+            .await
+            .expect("timeout owner");
+
+        let dm_open = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_OPEN as u16), "")
+            .tags([nostr::Tag::public_key(owner.public_key())])
+            .sign_with_keys(&agent)
+            .expect("sign dm open");
+        let auth = IngestAuth::Http {
+            pubkey: agent.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        match ingest_event(&state, &tenant, dm_open, auth).await {
+            Err(IngestError::AuthFailed(msg)) => assert!(
+                msg.starts_with("restricted: you are timed out until "),
+                "got {msg:?}"
+            ),
+            Err(other) => panic!("timed-out owner's agent must not open a DM, got {other:?}"),
+            Ok(_) => panic!("timed-out owner's agent must not open a DM, but it was accepted"),
+        }
+
+        for kind in [
+            KIND_REPORT,
+            buzz_core::kind::KIND_MODERATION_UNBAN,
+            buzz_core::kind::KIND_MODERATION_UNTIMEOUT,
+        ] {
+            enforce_write_restriction(&state, &tenant, kind, &agent.public_key())
+                .await
+                .unwrap_or_else(|e| panic!("kind {kind} must stay open under timeout: {e:?}"));
+        }
+        assert!(
+            enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
+                .await
+                .is_err(),
+            "ordinary writes stay blocked for the timed-out owner's agent"
+        );
+    }
+
+    /// A ban exempts nothing — not even a report — and an owner's ban reaches
+    /// its agent until the owner is unbanned.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_ban_blocks_every_agent_write_until_unban() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = owned_agent_fixture(&state, "owner-ban").await;
+        let owner_bytes = owner.public_key().to_bytes();
+        state
+            .db
+            .ban_community_member(tenant.community(), &owner_bytes, &owner_bytes, None, None)
+            .await
+            .expect("ban owner");
+
+        match enforce_write_restriction(&state, &tenant, KIND_REPORT, &agent.public_key()).await {
+            Err(IngestError::AuthFailed(msg)) => {
+                assert_eq!(msg, "blocked: you are banned from this community")
+            }
+            other => panic!("banned owner's agent must not report, got {other:?}"),
+        }
+
+        state
+            .db
+            .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
+            .await
+            .expect("unban owner");
+        enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
+            .await
+            .expect("unbanning the owner restores the agent");
+    }
+
+    /// HTTP routes that call `enforce_relay_membership` refuse a banned member
+    /// with 403 `blocked:` even on an open relay, and admit once unbanned.
+    /// Mutation: drop the ban step from `enforce_relay_membership` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn relay_membership_step_refuses_banned_member_on_http() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = owned_agent_fixture(&state, "http-ban").await;
+        let owner_bytes = owner.public_key().to_bytes();
+        state
+            .db
+            .ban_community_member(tenant.community(), &owner_bytes, &owner_bytes, None, None)
+            .await
+            .expect("ban owner");
+
+        for keys in [&owner, &agent] {
+            let (status, body) = crate::api::relay_members::enforce_relay_membership(
+                &state,
+                tenant.community(),
+                keys.public_key().as_bytes(),
+                None,
+                None,
+            )
+            .await
+            .expect_err("banned principal (or its agent) must be refused");
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+            assert_eq!(
+                body.0["error"],
+                "blocked: you are banned from this community"
+            );
+        }
+
+        state
+            .db
+            .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
+            .await
+            .expect("unban owner");
+        crate::api::relay_members::enforce_relay_membership(
+            &state,
+            tenant.community(),
+            owner.public_key().as_bytes(),
+            None,
+            None,
+        )
+        .await
+        .expect("unbanned member is admitted");
+    }
+
+    /// Revoking a member's live access also closes their agents' sockets, and
+    /// no one else's.
+    /// Mutation: disconnect only the target pubkey → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revoke_live_access_closes_owned_agent_sockets() {
+        use crate::state::CommunityConnectionControl;
+        use tokio_util::sync::CancellationToken;
+
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = owned_agent_fixture(&state, "revoke").await;
+        let bystander = nostr::Keys::generate();
+        let bound = |keys: &nostr::Keys| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            control.bind_pubkey(keys.public_key().to_bytes());
+            let guard = state.community_connections.register(
+                Uuid::new_v4(),
+                tenant.community(),
+                control.clone(),
+            );
+            (control, guard)
+        };
+        let (owner_socket, _g1) = bound(&owner);
+        let (agent_socket, _g2) = bound(&agent);
+        let (bystander_socket, _g3) = bound(&bystander);
+
+        state
+            .revoke_live_access(
+                &tenant,
+                owner.public_key().as_bytes(),
+                "test-event",
+                "blocked: you are banned from this community",
+            )
+            .await;
+
+        assert!(owner_socket.cancellation_token().is_cancelled());
+        assert!(agent_socket.cancellation_token().is_cancelled());
+        assert!(!bystander_socket.cancellation_token().is_cancelled());
     }
 }

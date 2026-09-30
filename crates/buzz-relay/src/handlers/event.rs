@@ -678,6 +678,28 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // Observer frames and ephemeral kinds return before ingest, so they take
+    // the ban / timeout write-block here. Persistent kinds get it in ingest.
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME || is_ephemeral(kind_u32) {
+        if let Err(e) =
+            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
+                .await
+        {
+            let (message, reason) = match e {
+                IngestError::Internal(_) => (
+                    "error: internal error checking restriction state".to_string(),
+                    "error",
+                ),
+                IngestError::AuthFailed(m)
+                | IngestError::Rejected(m)
+                | IngestError::CanvasConflict(m) => (m, "auth"),
+            };
+            reject(reason);
+            conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            return;
+        }
+    }
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
