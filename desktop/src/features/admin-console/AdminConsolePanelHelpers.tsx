@@ -143,6 +143,22 @@ export function adminMutationBodyComplete(e: unknown): boolean {
 }
 
 /**
+ * Whether the desktop refused the mutation before sending anything
+ * (`AdminMutationError.notSent`), so resending the same request can't work.
+ */
+export function adminMutationNotSent(e: unknown): boolean {
+  if (e && typeof e === "object" && "payload" in e) {
+    const payload = (e as { payload: unknown }).payload;
+    return (
+      !!payload &&
+      typeof payload === "object" &&
+      (payload as { notSent?: unknown }).notSent === true
+    );
+  }
+  return false;
+}
+
+/**
  * Whether a failed mutation must reuse its idempotency `requestId` on retry.
  *
  * The id is preserved UNLESS the relay definitively rejected the request before

@@ -655,7 +655,7 @@ pub async fn admin_put_operator(
 ) -> Result<serde_json::Value, AdminMutationError> {
     let origin = origin::AdminOrigin::parse(&origin)?;
     let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
+        routes::Hex64::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
     let url = origin.route_url(
         &routes::AdminRoute::OperatorPut { pubkey },
         &routes::AdminQuery::default(),
@@ -677,7 +677,7 @@ pub async fn admin_delete_operator(
 ) -> Result<serde_json::Value, AdminMutationError> {
     let origin = origin::AdminOrigin::parse(&origin)?;
     let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
+        routes::Hex64::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
     let url = origin.route_url(
         &routes::AdminRoute::OperatorDelete { pubkey },
         &routes::AdminQuery::default(),
@@ -825,7 +825,7 @@ pub async fn admin_lift_ban(
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), AdminMutationError> {
     let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid member pubkey: {e}"))?;
+        routes::Hex64::parse(&pubkey).map_err(|e| format!("invalid member pubkey: {e}"))?;
     let url = restrictions_url(
         &origin,
         &routes::AdminRoute::MemberBanDelete { pubkey },
@@ -850,7 +850,7 @@ pub async fn admin_lift_timeout(
     state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), AdminMutationError> {
     let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid member pubkey: {e}"))?;
+        routes::Hex64::parse(&pubkey).map_err(|e| format!("invalid member pubkey: {e}"))?;
     let url = restrictions_url(
         &origin,
         &routes::AdminRoute::MemberTimeoutDelete { pubkey },
@@ -905,7 +905,9 @@ fn direct_action_request(
         || crate::relay::assert_expected_relay_scope(Some(&intent.expected_relay), relay_base)
             .is_err()
     {
-        return Err(RELAY_SCOPE_CHANGED.to_string());
+        return Err(
+            "active relay changed since the action was confirmed; nothing was sent".to_string(),
+        );
     }
     if intent.expected_pubkey.trim().is_empty()
         || crate::relay::assert_expected_signer(Some(&intent.expected_pubkey), signer_hex).is_err()
@@ -917,7 +919,7 @@ fn direct_action_request(
     let host = buzz_core_pkg::tenant::validate_community_host(intent.community_host.trim())
         .map_err(|e| format!("invalid community host: {e}"))?;
     let target =
-        routes::HexPubkey::parse(&intent.target).map_err(|e| format!("invalid target: {e}"))?;
+        routes::Hex64::parse(&intent.target).map_err(|e| format!("invalid target: {e}"))?;
     let route = match intent.action {
         DirectAction::Ban => routes::AdminRoute::MemberBan { pubkey: target },
         DirectAction::Timeout => routes::AdminRoute::MemberTimeout { pubkey: target },
@@ -966,7 +968,8 @@ async fn send_direct_action(
     state: &crate::app_state::AppState,
 ) -> Result<serde_json::Value, AdminMutationError> {
     let relay_base = crate::relay::relay_api_base_url_with_override(state);
-    let (url, body) = direct_action_request(intent, &relay_base, &keys.public_key().to_hex())?;
+    let (url, body) = direct_action_request(intent, &relay_base, &keys.public_key().to_hex())
+        .map_err(AdminMutationError::not_sent)?;
     let bytes = helpers::send_admin_mutation(
         &keys,
         reqwest::Method::POST,

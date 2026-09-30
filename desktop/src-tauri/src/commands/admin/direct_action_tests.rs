@@ -181,3 +181,22 @@ async fn direct_action_signs_only_with_the_validated_snapshot() {
         .expect("A-confirmed action sends as A");
     assert_eq!(*auths.lock().unwrap(), vec![a.public_key().to_hex(); 2]);
 }
+
+/// A refusal before any request is typed `notSent`, so the UI can drop the
+/// intent instead of offering a Retry that can never succeed.
+///
+/// Mutation evidence: mapping the refusal through `AdminMutationError::from`
+/// (plain `?`) leaves `not_sent` false and flips this RED.
+#[tokio::test]
+async fn direct_action_marks_a_pre_send_refusal_not_sent() {
+    let keys = nostr::Keys::generate();
+    let addr = serve_sequence_inspect(vec![], None).await;
+    let (state, mut intent) = direct_state_and_intent(&keys, addr, "spam");
+    intent.community_host = "team.example.com/".to_string();
+    let err = send_direct_action(&intent, keys, &state).await.unwrap_err();
+    assert!(err.not_sent, "{err:?}");
+    assert_eq!(
+        serde_json::to_value(&err).unwrap()["notSent"],
+        serde_json::json!(true)
+    );
+}

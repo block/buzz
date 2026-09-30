@@ -178,14 +178,16 @@ export function AdminConsolePanel({
           generation={generation}
         />
       )}
-      {activeTab === "actions" && (
+      {/* Stays mounted across tab switches so a frozen, pending or in-flight
+          action (and its requestId) survives a trip to another tab. */}
+      <div hidden={activeTab !== "actions"}>
         <ActionsTab
           canMutate={canMutate}
           key={`${pubkey}\n${origin}`}
           origin={origin}
           pubkey={pubkey}
         />
-      )}
+      </div>
       {activeTab === "staffing" && isOperator && (
         <StaffingTab
           canMutate={canMutate}

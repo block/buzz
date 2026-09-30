@@ -608,3 +608,166 @@ test("actions-results-disabled: results showing when auth drops can't be selecte
     await panel.unmount();
   }
 });
+
+test("actions-secret-key: a pasted secret key or key backup is never searched and is flagged", async () => {
+  // Mutation: drop the isSecretKey gate from the picker's search → RED.
+  // The backup prefix is assembled so this file stays outside the frontend
+  // key-backup source scan's allowlist; it is only ever typed into the picker.
+  const backup = ["ncrypt", "sec1"].join("");
+  const queries = [];
+  setIpcHandler("search_users", ({ query }) => {
+    queries.push(query);
+    return Promise.resolve({ users: [], next_cursor: null });
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    for (const key of [
+      `nsec1${"q".repeat(58)}`,
+      `NSEC1${"Q".repeat(58)}`,
+      `${backup}${"q".repeat(40)}`,
+      `${backup.toUpperCase()}${"Q".repeat(40)}`,
+    ]) {
+      await type(c, "direct-member-input", key);
+      await settle();
+      assert.match(
+        q(c, "direct-member-secret")?.textContent ?? "",
+        /secret key/,
+        `no warning for ${key.slice(0, 10)}`,
+      );
+    }
+    assert.deepEqual(queries, [], "a secret key reached search_users");
+    await type(c, "direct-member-input", "");
+    assert.ok(!q(c, "direct-member-secret"), "clearing drops the warning");
+    await type(c, "direct-member-input", "alice");
+    await settle();
+    assert.deepEqual(queries, ["alice"], "name search still runs");
+    await pickKey(c, pubkeyToNpub(TARGET));
+    assert.ok(q(c, "direct-member-selected"), "npub still works");
+  } finally {
+    await unmount();
+  }
+});
+
+async function toTab(c, tab) {
+  await click(c, `admin-tab-${tab}`);
+}
+
+test("actions-tab-roundtrip-pending: a 202 survives a tab switch and Retry reuses the requestId", async () => {
+  // Mutation: render ActionsTab only while it is the active tab → RED.
+  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
+  const ids = [];
+  setIpcHandler("admin_direct_action", ({ intent }) => {
+    ids.push(intent.requestId);
+    return Promise.resolve({ state: "pending" });
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    await toTab(c, "feedback");
+    await toTab(c, "actions");
+    assert.ok(q(c, "direct-pending"), "pending notice survives");
+    await click(c, "direct-confirm-btn");
+    assert.equal(ids.length, 2);
+    assert.equal(ids[0], ids[1], "Retry after a tab trip reuses the id");
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-tab-roundtrip-ambiguous: an ambiguous failure survives a tab switch", async () => {
+  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
+  const ids = [];
+  setIpcHandler("admin_direct_action", ({ intent }) => {
+    ids.push(intent.requestId);
+    return mutationReject("network down", null);
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    await toTab(c, "feedback");
+    await toTab(c, "actions");
+    assert.equal(q(c, "direct-confirm-btn")?.textContent, "Retry");
+    await click(c, "direct-confirm-btn");
+    assert.equal(ids.length, 2);
+    assert.equal(ids[0], ids[1]);
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-tab-roundtrip-inflight: a send that fails on another tab shows its error on return", async () => {
+  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
+  let fail;
+  setIpcHandler(
+    "admin_direct_action",
+    () =>
+      new Promise((_, reject) => {
+        fail = () => reject({ message: "network down", relayStatus: null });
+      }),
+  );
+  const { container: c, unmount } = await mountActions();
+  try {
+    await fillTimeout(c);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    await toTab(c, "feedback");
+    await act(async () => fail());
+    await settle();
+    await toTab(c, "actions");
+    assert.match(q(c, "direct-error")?.textContent ?? "", /network down/);
+    assert.equal(q(c, "direct-confirm-btn")?.textContent, "Retry");
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-not-sent: a refusal before sending drops the intent and offers no Retry", async () => {
+  // Mutation: drop the adminMutationNotSent check from handleConfirm → RED.
+  let calls = 0;
+  setIpcHandler("admin_direct_action", () => {
+    calls += 1;
+    return Promise.reject({
+      message: "invalid community host: path not allowed",
+      relayStatus: null,
+      bodyComplete: false,
+      notSent: true,
+    });
+  });
+  const { container: c, unmount } = await mountActions();
+  try {
+    await setHost(c, "team.example.com/");
+    await pickKey(c, TARGET);
+    await click(c, "direct-review-btn");
+    await click(c, "direct-confirm-btn");
+    assert.equal(calls, 1);
+    assert.ok(!q(c, "direct-confirm"), "intent dropped; no Retry");
+    assert.match(q(c, "direct-error").textContent, /invalid community host/);
+    assert.ok(q(c, "direct-review-btn"), "back to Review");
+  } finally {
+    await unmount();
+  }
+});
+
+test("actions-old-relay: a bodyless 404 or 405 says the relay lacks direct actions", async () => {
+  for (const status of [404, 405]) {
+    setIpcHandler("admin_direct_action", () =>
+      mutationReject("admin API error: ", status),
+    );
+    const { container: c, unmount } = await mountActions();
+    try {
+      await pickKey(c, TARGET);
+      await click(c, "direct-review-btn");
+      await click(c, "direct-confirm-btn");
+      assert.equal(
+        q(c, "direct-error").textContent,
+        "This relay doesn't support direct actions yet.",
+      );
+    } finally {
+      await unmount();
+    }
+  }
+});

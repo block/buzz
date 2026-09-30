@@ -17,6 +17,7 @@
 
 import { useDeferredValue, useRef, useState } from "react";
 import { toast } from "sonner";
+import { classifyKeyImportInput } from "@/features/onboarding/lib/keyImportInput";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   useUserProfileQuery,
@@ -38,6 +39,8 @@ import {
 import {
   adminErrorCode,
   adminErrorMessage,
+  adminMutationNotSent,
+  adminMutationRelayStatus,
   preserveRequestIdOnError,
   useAsyncLoad,
 } from "./AdminConsolePanelHelpers";
@@ -57,6 +60,14 @@ function directErrorMessage(e: unknown): string {
       return "Relay staff can't be banned or timed out. Remove their staff role first.";
     case "request_id_conflict":
       return "This request id was already used for a different action. Review again to send it with a new id.";
+    case null: {
+      // A relay from before direct actions answers these routes bodyless.
+      const status = adminMutationRelayStatus(e);
+      if (status === 404 || status === 405) {
+        return "This relay doesn't support direct actions yet.";
+      }
+      return adminErrorMessage(e);
+    }
     default:
       return adminErrorMessage(e);
   }
@@ -84,6 +95,11 @@ export function communityHostFromRelayUrl(relayUrl: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** An `nsec` or NIP-49 backup, in either case. */
+function isSecretKey(input: string): boolean {
+  return classifyKeyImportInput(input.toLowerCase()) !== "unknown";
 }
 
 function memberLabel(user: UserSearchResult): string {
@@ -228,9 +244,11 @@ export function ActionsTab({
     } catch (e) {
       // Keep the frozen intent (same requestId) unless the relay definitively
       // rejected it before committing. A request-id conflict is final for
-      // this id, so resending it can never succeed.
+      // this id, and a refusal before sending (bad host, relay or signer
+      // moved) repeats on every resend, so neither can ever succeed.
       if (
         !preserveRequestIdOnError(e) ||
+        adminMutationNotSent(e) ||
         adminErrorCode(e) === "request_id_conflict"
       ) {
         setFrozen(null);
@@ -440,8 +458,10 @@ function MemberPicker({
   const [inspecting, setInspecting] = useState(false);
   const deferred = useDeferredValue(query.trim());
   const parsed = parsePubkeyInput(deferred);
+  // A pasted secret key must never leave the device as a search query.
+  const secret = isSecretKey(query) || isSecretKey(deferred);
   const search = useUserSearchQuery(deferred, {
-    enabled: searchEnabled && deferred.length > 0 && parsed === null,
+    enabled: searchEnabled && !secret && deferred.length > 0 && parsed === null,
     limit: 8,
   });
   const results: UserSearchResult[] = parsed
@@ -455,7 +475,7 @@ function MemberPicker({
           isAgent: false,
         },
       ]
-    : searchEnabled
+    : searchEnabled && !secret
       ? (search.data ?? [])
       : [];
 
@@ -502,6 +522,14 @@ function MemberPicker({
         }
         value={query}
       />
+      {secret && (
+        <p
+          className="text-xs text-destructive"
+          data-testid="direct-member-secret"
+        >
+          That's a secret key. Never paste it here.
+        </p>
+      )}
       {hint}
       {results.length > 0 && (
         <div className="rounded-md border border-border/60" role="listbox">
