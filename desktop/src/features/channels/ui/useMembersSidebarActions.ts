@@ -229,6 +229,7 @@ export function useMembersSidebarActions({
         assertStartNotBlockedByPresence(agent, isManagedAgentActive(agent));
         await respawnManagedAgentWithRules({
           agent,
+          relayUrl,
           startManagedAgent: startManagedAgentMutation.mutateAsync,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
           onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),

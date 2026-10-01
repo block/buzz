@@ -176,6 +176,37 @@ pub(super) async fn start_local_agent_with_preflight<R: tauri::Runtime>(
     expected_signer_pubkey: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
+    start_local_agent_after_preflight(
+        app,
+        state,
+        pubkey,
+        expected_relay_url,
+        expected_signer_pubkey,
+        replay_floor_unix,
+        |mesh_model_id| async move {
+            ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start)
+                .await
+        },
+    )
+    .await
+}
+
+/// The ordinary start with its one awaited step, mesh preflight, supplied by
+/// the caller so tests can hold it open across a removal.
+pub(super) async fn start_local_agent_after_preflight<R, P, F>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    pubkey: &str,
+    expected_relay_url: Option<&str>,
+    expected_signer_pubkey: Option<&str>,
+    replay_floor_unix: Option<u64>,
+    preflight: P,
+) -> Result<ManagedAgentSummary, String>
+where
+    R: tauri::Runtime,
+    P: FnOnce(Option<String>) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
     // Captured before mesh preflight: a community removed while it awaits
     // refuses this start below.
     let admission = crate::managed_agents::AdmissionSnapshot::capture(state);
@@ -211,7 +242,7 @@ pub(super) async fn start_local_agent_with_preflight<R: tauri::Runtime>(
             &personas,
             &global,
         );
-    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
+    preflight(mesh_model_id).await?;
 
     // The mesh preflight above is the suspension window Projects callbacks
     // capture their scope against: a community switch during that await

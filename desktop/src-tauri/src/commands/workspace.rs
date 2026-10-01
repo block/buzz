@@ -5,8 +5,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::app_state::AppState;
 use crate::managed_agents::{
-    effective_repos_dir, ensure_repos_symlink, nest_dir, restore_managed_agents_on_launch,
-    try_regenerate_nest, write_persisted_repos_dir,
+    effective_repos_dir, ensure_repos_symlink, nest_dir, try_regenerate_nest,
+    write_persisted_repos_dir,
 };
 use crate::relay;
 
@@ -359,9 +359,14 @@ pub async fn apply_workspace(
     let restore_pending = state
         .managed_agent_restore_pending
         .swap(false, Ordering::AcqRel);
-    // Captured before the task is spawned: a community removal that lands
-    // before restore begins must still refuse it.
-    let restore_admission = crate::managed_agents::AdmissionSnapshot::capture(&state);
+    // Scheduled (admission captured) before the task is spawned: a community
+    // removal that lands before restore begins must still refuse it.
+    let restore = restore_pending.then(|| {
+        crate::managed_agents::launch_restore_task(
+            restore_app.clone(),
+            crate::managed_agents::live_process_sweeps,
+        )
+    });
 
     // Transfer the apply guard to launch restoration. The command can return
     // promptly, but a queued workspace cannot mutate relay/identity until the
@@ -381,14 +386,8 @@ pub async fn apply_workspace(
                 }
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
-            if restore_pending {
-                if let Err(error) = restore_managed_agents_on_launch(
-                    &app,
-                    &state.shutdown_started,
-                    restore_admission,
-                )
-                .await
-                {
+            if let Some(restore) = restore {
+                if let Err(error) = restore.await {
                     eprintln!("buzz-desktop: failed to restore managed agents: {error}");
                 }
             }
@@ -397,16 +396,11 @@ pub async fn apply_workspace(
     }
 
     #[cfg(not(feature = "mesh-llm"))]
-    if restore_pending {
+    if let Some(restore) = restore {
         let restore_lock = apply_guard;
-        let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let _restore_lock = restore_lock;
-            let state = app.state::<AppState>();
-            if let Err(error) =
-                restore_managed_agents_on_launch(&app, &state.shutdown_started, restore_admission)
-                    .await
-            {
+            if let Err(error) = restore.await {
                 eprintln!("buzz-desktop: failed to restore managed agents: {error}");
             }
         });

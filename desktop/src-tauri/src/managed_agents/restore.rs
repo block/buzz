@@ -86,16 +86,62 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+/// Schedule launch restore: captures admission now, at scheduling, and
+/// returns the deferred restore that runs under that snapshot. A community
+/// removed after this call refuses the restore even if it is re-added before
+/// the task runs. `sweeps` is Phase A's live process sweeps.
+pub fn launch_restore_task<R, S>(
+    app: tauri::AppHandle<R>,
+    sweeps: S,
+) -> impl std::future::Future<Output = Result<(), String>>
+where
+    R: tauri::Runtime,
+    S: FnOnce(&tauri::AppHandle<R>, &[u32]),
+{
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
+    async move {
+        let state = app.state::<AppState>();
+        restore_managed_agents_on_launch(&app, &state.shutdown_started, admission, sweeps).await
+    }
+}
+
+/// Phase A's sweeps of live, untracked agent processes, skipping `tracked_pids`.
+pub fn live_process_sweeps(app: &tauri::AppHandle, tracked_pids: &[u32]) {
+    super::sweep_orphaned_agent_processes(app, tracked_pids);
+
+    // System-wide sweep: enumerate all user processes and kill any known
+    // agent binaries not tracked by this session. Catches orphans whose
+    // PID files were already cleaned up (e.g. agent workers in their own
+    // process group whose parent harness exited).
+    super::sweep_system_agent_processes(&super::current_instance_id(app), tracked_pids);
+
+    // Dead-instance reaping: find agents belonging to Buzz instances
+    // whose desktop process is no longer running and reap them.
+    super::reap_dead_instance_agents(&super::current_instance_id(app), tracked_pids);
+
+    // Exact-path sweep: kill any buzz-acp process whose executable path
+    // matches this bundle's harness binary but is not in the tracked set.
+    // Complements the env-var sweep above — catches orphans that predate
+    // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
+    //
+    // TODO: the three sweeps above each walk the PID table independently.
+    // A future consolidation should collect a single shared process snapshot
+    // at the top of this block and thread it through all sweep functions,
+    // replacing the three separate kernel enumerations.
+    super::sweep_untracked_bundle_harnesses(tracked_pids);
+}
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
 ///   A (under lock): sync process state, cleanup, collect agents to start
 ///   B (no locks):   resolve commands and spawn processes in parallel
 ///   C (re-lock):    write back PIDs and status to records on disk
-pub async fn restore_managed_agents_on_launch(
-    app: &tauri::AppHandle,
+async fn restore_managed_agents_on_launch<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     shutdown_started: &AtomicBool,
     admission: super::AdmissionSnapshot,
+    sweeps: impl FnOnce(&tauri::AppHandle<R>, &[u32]),
 ) -> Result<(), String> {
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
@@ -153,28 +199,7 @@ pub async fn restore_managed_agents_on_launch(
                     }),
             )
             .collect();
-        super::sweep_orphaned_agent_processes(app, &tracked_pids);
-
-        // System-wide sweep: enumerate all user processes and kill any known
-        // agent binaries not tracked by this session. Catches orphans whose
-        // PID files were already cleaned up (e.g. agent workers in their own
-        // process group whose parent harness exited).
-        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
-
-        // Dead-instance reaping: find agents belonging to Buzz instances
-        // whose desktop process is no longer running and reap them.
-        super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
-
-        // Exact-path sweep: kill any buzz-acp process whose executable path
-        // matches this bundle's harness binary but is not in the tracked set.
-        // Complements the env-var sweep above — catches orphans that predate
-        // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
-        //
-        // TODO: the three sweeps above each walk the PID table independently.
-        // A future consolidation should collect a single shared process snapshot
-        // at the top of this block and thread it through all sweep functions,
-        // replacing the three separate kernel enumerations.
-        super::sweep_untracked_bundle_harnesses(&tracked_pids);
+        sweeps(app, &tracked_pids);
 
         let candidates: Vec<String> = records
             .iter()
@@ -583,8 +608,8 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
 }
 
 #[cfg(feature = "mesh-llm")]
-fn persist_restore_error(
-    app: &tauri::AppHandle,
+fn persist_restore_error<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     pubkey: &str,
     error: String,

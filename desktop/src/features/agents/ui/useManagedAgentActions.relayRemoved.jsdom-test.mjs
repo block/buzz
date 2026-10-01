@@ -3,8 +3,10 @@ import test from "node:test";
 
 const PUBKEY = "ab".repeat(32);
 const RELAY = "wss://removed.example";
+const UNRELATED_RELAY = "wss://unrelated.example";
 const calls = [];
 let releaseStop;
+let createSpawnError = null;
 const rawAgent = {
   pubkey: PUBKEY,
   name: "Scout",
@@ -43,6 +45,28 @@ const tauriMock = {
       });
     }
     if (command === "start_managed_agent") return Promise.resolve(rawAgent);
+    if (command === "discover_acp_providers") {
+      return Promise.resolve([
+        {
+          id: "buzz-agent",
+          label: "Buzz Agent",
+          avatar_url: "",
+          availability: "available",
+          command: "buzz-agent",
+          binary_path: "/bin/buzz-agent",
+          default_args: [],
+          mcp_command: null,
+        },
+      ]);
+    }
+    if (command === "create_managed_agent") {
+      return Promise.resolve({
+        agent: { ...rawAgent, status: "stopped" },
+        private_key_nsec: "nsec1test",
+        profile_sync_error: null,
+        spawn_error: createSpawnError,
+      });
+    }
     return Promise.reject(new Error(`unmocked Tauri command: ${command}`));
   },
   transformCallback() {
@@ -63,6 +87,17 @@ const { markRelayRemoved } = await import("../managedAgentRelayCleanup.ts");
 const { CommunitiesProvider } = await import(
   "../../communities/useCommunities.tsx"
 );
+const { saveActiveCommunityId, saveCommunities } = await import(
+  "../../communities/communityStorage.ts"
+);
+const { RELAY_REMOVED_ERROR } = await import("../managedAgentRelayCleanup.ts");
+
+// The active community is the workspace pair the restart targets.
+saveCommunities([
+  { id: "b", name: "B", relayUrl: RELAY },
+  { id: "a", name: "A", relayUrl: UNRELATED_RELAY },
+]);
+saveActiveCommunityId("b");
 
 async function renderActions() {
   const queryClient = new QueryClient({
@@ -125,8 +160,52 @@ test("a Settings restart whose relay is removed and re-added during its stop sta
   assert.equal(result.error, null);
 });
 
+test("removing an unrelated community during the stop still restarts the agent", async () => {
+  const result = await restartAcrossStop(() =>
+    markRelayRemoved(UNRELATED_RELAY),
+  );
+  assert.equal(result.started, true);
+  assert.equal(result.error, null);
+});
+
 test("a Settings restart with no removal during its stop starts the agent", async () => {
   const result = await restartAcrossStop(() => {});
   assert.equal(result.started, true);
   assert.equal(result.error, null);
+});
+
+async function startPersonaWithSpawnError(spawnError) {
+  createSpawnError = spawnError;
+  calls.length = 0;
+  const { latest, unmount } = await renderActions();
+  await act(async () => {
+    await latest.handleStartPersona({
+      id: "persona-1",
+      displayName: "Scout",
+      systemPrompt: "help",
+      avatarUrl: null,
+      runtime: null,
+    });
+  });
+  const result = {
+    created: calls.includes("create_managed_agent"),
+    error: latest.actionErrorMessage,
+  };
+  await unmount();
+  createSpawnError = null;
+  return result;
+}
+
+test("a persona Start whose spawn a relay removal cancelled shows no error", async () => {
+  const result = await startPersonaWithSpawnError(RELAY_REMOVED_ERROR);
+  assert.equal(result.created, true);
+  assert.equal(result.error, null);
+});
+
+test("a persona Start with a genuine spawn error still shows it", async () => {
+  const result = await startPersonaWithSpawnError(
+    "runtime executable not found",
+  );
+  assert.equal(result.created, true);
+  assert.equal(result.error, "runtime executable not found");
 });

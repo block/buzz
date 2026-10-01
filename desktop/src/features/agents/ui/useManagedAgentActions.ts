@@ -1,4 +1,5 @@
 import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
+import { useCommunities } from "@/features/communities/useCommunities";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -41,6 +42,7 @@ import {
 
 export function useManagedAgentActions() {
   const queryClient = useQueryClient();
+  const relayUrl = useCommunities().activeCommunity?.relayUrl;
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -202,6 +204,7 @@ export function useManagedAgentActions() {
       assertStartNotBlockedByPresence(agent);
       await respawnManagedAgentWithRules({
         agent,
+        relayUrl,
         startManagedAgent: startMutation.mutateAsync,
         stopManagedAgent: stopMutation.mutateAsync,
         onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
@@ -246,7 +249,7 @@ export function useManagedAgentActions() {
       toast.success("Agent created");
       const notices = [...warnings];
 
-      if (created.spawnError) {
+      if (created.spawnError && !isRelayRemovedError(created.spawnError)) {
         setActionErrorMessage(created.spawnError);
       }
 

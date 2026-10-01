@@ -190,9 +190,9 @@ pub(crate) fn mark_profile_reconciled(
 /// keeps deferred reconciliation from following a community switch it was
 /// never authorized for while honoring a deliberate per-agent pin wherever
 /// it points.
-pub(crate) async fn reconcile_agent_profile(
+pub(crate) async fn reconcile_agent_profile<R: tauri::Runtime>(
     state: &AppState,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
