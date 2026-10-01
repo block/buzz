@@ -91,6 +91,42 @@ test("communities-directory: the connected community is pinned by exact host and
   }
 });
 
+test("communities-pin-search: the connected community stays pinned only under a matching host prefix", async () => {
+  // Mutation: pin regardless of the search → RED (c9 pinned under "c1").
+  setIpcHandler("admin_connected_community_host", () =>
+    Promise.resolve("c9.example.com"),
+  );
+  setIpcHandler("admin_list_communities", ({ q: query }) =>
+    Promise.resolve({
+      items: [community(1), community(9)].filter((x) =>
+        x.host.startsWith((query ?? "").toLowerCase()),
+      ),
+      nextCursor: null,
+    }),
+  );
+  const { container: c, unmount } = await mountCommunities();
+  const search = async (text) => {
+    await act(async () => {
+      fireEvent.change(q(c, "communities-search-input"), {
+        target: { value: text },
+      });
+    });
+    await settle();
+  };
+  try {
+    await search("c1");
+    assert.equal(q(c, "communities-pinned"), null, "unrelated search");
+    assert.ok(q(c, "community-row-c1.example.com"));
+    await search(" C9 ");
+    assert.ok(
+      q(q(c, "communities-pinned"), "community-row-c9.example.com"),
+      "case-insensitive trimmed prefix keeps the pin",
+    );
+  } finally {
+    await unmount();
+  }
+});
+
 test("communities-stale-more: a late page from an earlier search leaves the current search's pages alone", async () => {
   // Mutation: drop either searchRef check in loadMore → RED (B's second page
   // vanishes, or B shows A's error).

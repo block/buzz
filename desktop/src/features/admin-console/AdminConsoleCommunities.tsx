@@ -91,7 +91,12 @@ export function CommunitiesTab({
 
   const extra = more?.search === search ? more : null;
   const moreStatus = moreState?.search === search ? moreState : null;
-  const pinnedRow = pinned.status === "ok" ? pinned.data : null;
+  // Pinned only while it matches the search the way the relay does: a
+  // case-insensitive host prefix.
+  const pinnedRow =
+    pinned.status === "ok" && pinned.data?.host.toLowerCase().startsWith(q)
+      ? pinned.data
+      : null;
   const items =
     first.status === "ok"
       ? [...first.data.items, ...(extra?.items ?? [])].filter(
