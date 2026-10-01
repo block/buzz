@@ -435,6 +435,7 @@ pub fn sanitized_reason_for(err: &crate::handlers::ingest::IngestError) -> Sanit
         E::Rejected(_) => SanitizedReason::Invalid,
         E::CanvasConflict(_) => SanitizedReason::Invalid,
         E::AuthFailed(_) => SanitizedReason::Restricted,
+        E::RateLimited(_) => SanitizedReason::Restricted,
         E::Internal(_) => SanitizedReason::ServerError,
     }
 }

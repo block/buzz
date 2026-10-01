@@ -1426,6 +1426,9 @@ mod postgres_tests {
                 panic!("unexpected canvas conflict: {message}")
             }
             Err(IngestError::AuthFailed(message)) => panic!("unexpected auth failure: {message}"),
+            Err(IngestError::RateLimited(message)) => {
+                panic!("unexpected rate limit: {message}")
+            }
             Err(IngestError::Internal(message)) => panic!("unexpected internal failure: {message}"),
             Ok(_) => panic!("expected revision parsing to fail"),
         }

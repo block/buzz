@@ -207,6 +207,244 @@ async fn create_test_channel(keys: &Keys) -> String {
     channel_uuid.to_string()
 }
 
+/// HTTP observer frames are authorized by NIP-OA, fanned out to the owner's
+/// `#p` subscription, and omitted from durable queries.
+#[tokio::test]
+#[ignore]
+async fn test_http_agent_observer_frame_is_ephemeral_and_owner_scoped() {
+    let owner_keys = test_owner_keys();
+    let wrong_owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    seed_relay_owner(&owner_keys).await;
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner_keys)
+        .await
+        .expect("connect owner");
+    let subscription_id = sub_id("agent-observer");
+    let observer_filter = Filter::new()
+        .kinds(vec![Kind::Custom(
+            buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16,
+        )])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            owner_keys.public_key().to_hex(),
+        );
+    owner_client
+        .subscribe(&subscription_id, vec![observer_filter])
+        .await
+        .expect("subscribe to observer frames");
+    owner_client
+        .collect_until_eose(&subscription_id, Duration::from_secs(5))
+        .await
+        .expect("observer subscription EOSE");
+
+    let plaintext = serde_json::json!({"kind": "turn_started"});
+    let encrypted = buzz_core::observer::encrypt_observer_payload(
+        &agent_keys,
+        &owner_keys.public_key(),
+        &plaintext,
+    )
+    .expect("encrypt observer payload");
+    let event = buzz_sdk::build_agent_observer_frame(
+        &owner_keys.public_key().to_hex(),
+        &agent_keys.public_key().to_hex(),
+        buzz_core::observer::OBSERVER_FRAME_TELEMETRY,
+        &encrypted,
+    )
+    .expect("build observer frame")
+    .sign_with_keys(&agent_keys)
+    .expect("sign observer frame");
+    let body = serde_json::to_string(&event).expect("serialize observer frame");
+    let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+        .expect("compute owner auth tag");
+    let http = relay_http_url();
+    let response = reqwest::Client::new()
+        .post(format!("{http}/events"))
+        .header(
+            "Authorization",
+            nip98_post_header(&agent_keys, &format!("{http}/events"), &body),
+        )
+        .header("x-auth-tag", &auth_tag)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST observer frame");
+    assert!(
+        response.status().is_success(),
+        "observer POST failed: {response:?}"
+    );
+    let result: serde_json::Value = response.json().await.expect("observer response JSON");
+    assert_eq!(
+        result["accepted"], true,
+        "observer frame rejected: {result}"
+    );
+
+    let received = owner_client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("receive observer frame");
+    let RelayMessage::Event {
+        event: received, ..
+    } = received
+    else {
+        panic!("expected observer EVENT, got {received:?}");
+    };
+    assert_eq!(received.id, event.id);
+
+    let query = serde_json::json!([{
+        "kinds": [buzz_core::kind::KIND_AGENT_OBSERVER_FRAME],
+        "authors": [agent_keys.public_key().to_hex()],
+        "#p": [owner_keys.public_key().to_hex()],
+    }]);
+    let query_response = reqwest::Client::new()
+        .post(format!("{http}/query"))
+        .header("X-Pubkey", owner_keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(query.to_string())
+        .send()
+        .await
+        .expect("query observer frame");
+    assert!(query_response.status().is_success());
+    let queried: Vec<serde_json::Value> = query_response.json().await.expect("query JSON");
+    assert!(queried.iter().all(|value| value["id"] != event.id.to_hex()));
+
+    let wrong_event = buzz_sdk::build_agent_observer_frame(
+        &wrong_owner_keys.public_key().to_hex(),
+        &agent_keys.public_key().to_hex(),
+        buzz_core::observer::OBSERVER_FRAME_TELEMETRY,
+        &encrypted,
+    )
+    .expect("build wrong-owner observer frame")
+    .sign_with_keys(&agent_keys)
+    .expect("sign wrong-owner observer frame");
+    let wrong_body = serde_json::to_string(&wrong_event).expect("serialize wrong-owner frame");
+    let wrong_auth_tag =
+        buzz_sdk::nip_oa::compute_auth_tag(&wrong_owner_keys, &agent_keys.public_key(), "")
+            .expect("compute wrong owner auth tag");
+    let wrong_response = reqwest::Client::new()
+        .post(format!("{http}/events"))
+        .header(
+            "Authorization",
+            nip98_post_header(&agent_keys, &format!("{http}/events"), &wrong_body),
+        )
+        .header("x-auth-tag", wrong_auth_tag)
+        .header("Content-Type", "application/json")
+        .body(wrong_body)
+        .send()
+        .await
+        .expect("POST wrong-owner observer frame");
+    assert_eq!(wrong_response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_http_observer_rate_limit_returns_429() {
+    let owner = test_owner_keys();
+    let agent = Keys::generate();
+    seed_relay_owner(&owner).await;
+
+    let http = relay_http_url();
+    let client = reqwest::Client::new();
+    let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+        .expect("compute owner auth tag");
+
+    let mut bodies = Vec::with_capacity(101);
+    for sequence in 0..101 {
+        let encrypted = buzz_core::observer::encrypt_observer_payload(
+            &agent,
+            &owner.public_key(),
+            &serde_json::json!({"kind": "turn_started", "sequence": sequence}),
+        )
+        .expect("encrypt observer payload");
+        let event = buzz_sdk::build_agent_observer_frame(
+            &owner.public_key().to_hex(),
+            &agent.public_key().to_hex(),
+            buzz_core::observer::OBSERVER_FRAME_TELEMETRY,
+            &encrypted,
+        )
+        .expect("build observer frame")
+        .sign_with_keys(&agent)
+        .expect("sign observer frame");
+        let body = serde_json::to_string(&event).expect("serialize observer frame");
+        bodies.push(body);
+    }
+
+    let mut requests = tokio::task::JoinSet::new();
+    for body in bodies {
+        let client = client.clone();
+        let http = http.clone();
+        let auth_tag = auth_tag.clone();
+        let agent = agent.clone();
+        requests.spawn(async move {
+            let response = client
+                .post(format!("{http}/events"))
+                .header(
+                    "Authorization",
+                    nip98_post_header(&agent, &format!("{http}/events"), &body),
+                )
+                .header("x-auth-tag", auth_tag)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("POST observer frame");
+            response.status()
+        });
+    }
+
+    let mut accepted = 0;
+    let mut rate_limited = 0;
+    while let Some(result) = requests.join_next().await {
+        match result.expect("observer request task") {
+            status if status.is_success() => accepted += 1,
+            reqwest::StatusCode::TOO_MANY_REQUESTS => rate_limited += 1,
+            status => panic!("unexpected observer status: {status}"),
+        }
+    }
+    assert_eq!(accepted, 100);
+    assert_eq!(rate_limited, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_http_direct_relay_member_observer_frame_hits_known_owner_recording_gap() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    seed_relay_member(&relay_authority(), &agent, "member").await;
+
+    let encrypted = buzz_core::observer::encrypt_observer_payload(
+        &agent,
+        &owner.public_key(),
+        &serde_json::json!({"kind": "turn_started"}),
+    )
+    .expect("encrypt observer payload");
+    let event = buzz_sdk::build_agent_observer_frame(
+        &owner.public_key().to_hex(),
+        &agent.public_key().to_hex(),
+        buzz_core::observer::OBSERVER_FRAME_TELEMETRY,
+        &encrypted,
+    )
+    .expect("build observer frame")
+    .sign_with_keys(&agent)
+    .expect("sign observer frame");
+    let body = serde_json::to_string(&event).expect("serialize observer frame");
+    let http = relay_http_url();
+    let response = reqwest::Client::new()
+        .post(format!("{http}/events"))
+        .header(
+            "Authorization",
+            nip98_post_header(&agent, &format!("{http}/events"), &body),
+        )
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST observer frame without x-auth-tag");
+
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_connect_and_authenticate() {

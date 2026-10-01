@@ -154,12 +154,18 @@ subscribe attempts MUST be rejected with `AUTH required`.
 
 ## Relay Behavior
 
-On receiving a kind 24200 event, a relay MUST:
+On receiving a kind 24200 event over WebSocket or the HTTP `POST /events`
+bridge, a relay MUST apply the same signature, freshness, envelope, and
+agent-owner authorization checks, then:
 
 1. Validate the event signature per NIP-01.
 2. Verify authorization per the rules above.
-3. Fan out to matching subscribers via in-memory pub/sub.
-4. NOT invoke the normal event ingestion or persistence path.
+3. Use in-memory pub/sub to fan out only to matching subscribers.
+4. Do not invoke the normal event ingestion or persistence path.
+
+The HTTP bridge uses the same validation and authorization as WebSocket. It
+returns an HTTP error for rejected frames and only accepts frames for live
+fan-out; accepted frames are never persisted or made queryable.
 
 Relays SHOULD enforce a rate limit of 100 events/second per agent pubkey.
 Relays are RECOMMENDED to reject events whose `created_at` falls outside a ±5-minute

@@ -1195,6 +1195,14 @@ async fn submit_event_authed(
                 response: e,
             }
         }
+        Err(IngestError::RateLimited(msg)) => {
+            crate::handlers::ingest::reject_with_transport("http", "rate-limited");
+            let e = api_error(StatusCode::TOO_MANY_REQUESTS, &msg);
+            SubmitOutcome::Err {
+                status: e.0,
+                response: e,
+            }
+        }
         Err(IngestError::Internal(msg)) => {
             crate::handlers::ingest::reject_with_transport("http", "error");
             let e = internal_error(&msg);
