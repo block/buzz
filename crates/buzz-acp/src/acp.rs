@@ -113,6 +113,11 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    /// A configured model was not applied. The turn must stop. Continuing
+    /// would run whatever model the adapter selected on its own.
+    #[error("configured model `{model}` was not applied ({reason})")]
+    ModelUnapplied { model: String, reason: &'static str },
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,

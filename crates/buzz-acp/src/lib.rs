@@ -4787,6 +4787,24 @@ fn handle_prompt_result(
                     to apply the new configuration, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if let PromptOutcome::Error(acp::AcpError::ModelUnapplied { model, reason }) =
+                &result.outcome
+            {
+                // A missed or rejected pin cannot be repaired by retrying, and
+                // running the adapter's own model is the failure this exists
+                // to prevent.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    %model,
+                    "dead-lettering batch immediately — configured model was not applied"
+                );
+                let content = format!(
+                    "⚠️ I couldn't process the last request: the configured model `{model}` \
+                    was not applied ({reason}). The turn stopped instead of running on \
+                    another model. Set the pin to a model this agent lists, then re-send."
+                );
+                spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -11205,6 +11223,136 @@ mod error_outcome_emission_tests {
             .unwrap()
             .iter()
             .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn model_unapplied_posts_failure_notice_without_retrying() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let keys = Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xcc; 32]);
+        let parent = nostr::EventId::from_byte_array([0xdd; 32]);
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            scope: scope::SessionScope::Conversation { channel_id },
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let model_error = AcpError::ModelUnapplied {
+            model: "grok-4.6[effort=high,fast=false]".into(),
+            reason: "it is not in the agent's available models",
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                scope: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(model_error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            Some(&rest),
+        );
+
+        assert_eq!(queue.pending_channels(), 0);
+        assert_eq!(queue.queued_event_count(channel_id), 0);
+        assert!(pool.agents_mut()[0].is_some());
+        assert!(respawn_tasks.is_empty());
+
+        let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "POST /events HTTP/1.1\r\n");
+            let mut content_length = None;
+            for _ in 0..64 {
+                line.clear();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let size = content_length.expect("request Content-Length");
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        })
+        .await
+        .expect("failure notice must be posted");
+        notice.verify().unwrap();
+        assert_eq!(
+            notice.content,
+            "⚠️ I couldn't process the last request: the configured model `grok-4.6[effort=high,fast=false]` was not applied (it is not in the agent's available models). The turn stopped instead of running on another model. Set the pin to a model this agent lists, then re-send."
+        );
         let threading = queue::parse_thread_tags(&notice);
         assert_eq!(threading.root_event_id, Some(root.to_hex()));
         assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
