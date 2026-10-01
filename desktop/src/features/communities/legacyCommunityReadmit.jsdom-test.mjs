@@ -19,8 +19,9 @@ const tauriMock = {
       });
     }
     if (command === "readd_community_relay") {
-      // Native normalize_relay_url rejects credentials and fragments.
-      if (/[#@]/.test(args.relayUrl)) {
+      // Mirrors only native's credential and fragment rejection, not full validation.
+      const url = new URL(args.relayUrl);
+      if (url.username || url.password || args.relayUrl.includes("#")) {
         return Promise.reject(new Error("invalid relay url"));
       }
       removedRelays.delete(args.relayUrl);
