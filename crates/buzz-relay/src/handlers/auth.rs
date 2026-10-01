@@ -1875,6 +1875,61 @@ mod tests {
             assert!(!conns[2].cancel.is_cancelled(), "the bystander stays");
         }
 
+        /// AUTH with NIP-OA records a previously ownerless agent's owner. That
+        /// closes the agent's earlier ownerless socket so it reconnects with
+        /// the owner attached, but not the socket being admitted, even when
+        /// the clusterwide echo of that disconnect arrives after the bind. A
+        /// bystander stays admitted.
+        ///
+        /// Mutations: drop `disconnect_unowned_agent_clusterwide` → the old
+        /// socket stays open → RED; ignore `unowned_only` in the disconnect →
+        /// the admitted socket closes on the echo → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn owner_link_at_auth_closes_only_earlier_ownerless_sockets() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent, bystander) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let admit = |keys: &Keys, tag: Option<Vec<String>>, challenge: &'static str| {
+                let (conn, ctrl) = registered_pending_conn(&state, community, challenge);
+                let state = Arc::clone(&state);
+                let event = signed_auth(keys, challenge, tag);
+                async move {
+                    handle_auth(event, Arc::clone(&conn), state).await;
+                    assert!(
+                        matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                        "{challenge} is admitted"
+                    );
+                    (conn, ctrl)
+                }
+            };
+            let (ownerless, _c1) = admit(&agent, None, "late-ownerless").await;
+            let (watcher, _c2) = admit(&bystander, None, "late-bystander").await;
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+            let (linked, _c3) = admit(&agent, Some(tag), "late-linked").await;
+
+            assert!(
+                ownerless.cancel.is_cancelled(),
+                "the earlier ownerless socket closes"
+            );
+            // The clusterwide publish also reaches this pod after the bind.
+            state.disconnect_pubkey_local(
+                community,
+                &agent.public_key().to_bytes(),
+                &"0".repeat(64),
+                "auth-required: agent owner recorded; reconnect",
+                true,
+            );
+            assert!(
+                !linked.cancel.is_cancelled(),
+                "the socket admitted with its owner stays"
+            );
+            assert!(!watcher.cancel.is_cancelled(), "the bystander stays");
+        }
+
         async fn auth_test_state_real_db_expect() -> std::sync::Arc<crate::state::AppState> {
             use std::sync::Arc;
             let db_url = crate::test_support::database_url();

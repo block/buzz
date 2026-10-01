@@ -8090,4 +8090,183 @@ mod postgres_tests {
         drop(conn);
         fx.drop().await;
     }
+
+    /// An agent socket admitted with no owner, then linked to its owner by a
+    /// later `POST /events` carrying NIP-OA, closes when the owner is banned
+    /// or removed even though the owner-to-agent lookup fails: recording the
+    /// owner made the ownerless sockets reconnect. The same agent's socket in
+    /// another community stays up.
+    /// Mutation: drop `disconnect_unowned_agent_clusterwide` from
+    /// `materialize_nip_oa_owner` → the agent's sockets stay open → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn late_owner_link_closes_ownerless_agent_sockets_on_owner_revoke() {
+        use crate::state::CommunityConnectionControl;
+        use sqlx::postgres::PgConnectOptions;
+        use tokio_util::sync::CancellationToken;
+
+        for action in ["ban", "removal"] {
+            let mut state = bridge_handler_test_state()
+                .await
+                .expect("local Postgres and Redis");
+            // A schema whose `users` table can be taken away after the link,
+            // so only the owner-to-agent lookup fails at revoke time.
+            let db_url = crate::test_support::database_url();
+            let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE SCHEMA {schema}; \
+                 CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+                 CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+                 CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL);"
+            )))
+            .execute(state.db.pool())
+            .await
+            .expect("create schema");
+            let admin = state.db.pool().clone();
+            let pool = sqlx::PgPool::connect_with(
+                db_url
+                    .parse::<PgConnectOptions>()
+                    .expect("database url")
+                    .options([("search_path", schema.as_str())]),
+            )
+            .await
+            .expect("schema pool");
+            Arc::get_mut(&mut state).expect("unique state").db = buzz_db::Db::from_pool(pool);
+
+            let tenant = fresh_tenant("late-owner.test");
+            let other = fresh_tenant("late-owner-other.test");
+            let (owner, agent) = (Keys::generate(), Keys::generate());
+            let agent_bytes = agent.public_key().to_bytes();
+
+            // The agent's ownerless main and audio sockets, plus its socket in
+            // another community.
+            let root = CancellationToken::new();
+            let root_id = uuid::Uuid::new_v4();
+            let (tx, _rx) = tokio::sync::mpsc::channel(4);
+            let (ctrl, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+            let (terminal, _terminal_rx) = tokio::sync::mpsc::channel(1);
+            state.conn_manager.register(
+                root_id,
+                tx,
+                ctrl,
+                terminal,
+                None,
+                root.clone(),
+                tenant.community(),
+                Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                3,
+                crate::state::CommunityConnectionControl::new(root.clone()),
+            );
+            state
+                .conn_manager
+                .set_authenticated_pubkey(root_id, agent_bytes.to_vec());
+            let bound = |community| {
+                let control = CommunityConnectionControl::new(CancellationToken::new());
+                control.bind_pubkey(agent_bytes);
+                let guard = state.community_connections.register(
+                    uuid::Uuid::new_v4(),
+                    community,
+                    control.clone(),
+                );
+                (control, guard)
+            };
+            let (audio, _g1) = bound(tenant.community());
+            let (elsewhere, _g2) = bound(other.community());
+
+            // The real HTTP submit path records the owner from `x-auth-tag`.
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let mut headers = HeaderMap::new();
+            headers.insert("x-auth-tag", auth_tag.parse().expect("header value"));
+            let event = EventBuilder::new(Kind::TextNote, "linked")
+                .sign_with_keys(&agent)
+                .expect("sign event");
+            let _ = submit_event_authed(
+                &state,
+                &tenant,
+                &headers,
+                serde_json::to_vec(&event).expect("event json").as_slice(),
+                agent.public_key(),
+                fresh_nip98_event_id_bytes(),
+                Some(nostr::Timestamp::now().as_secs()),
+            )
+            .await;
+            assert!(
+                state
+                    .db
+                    .is_agent_owner(
+                        tenant.community(),
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner lookup"),
+                "{action}: the HTTP request recorded the owner"
+            );
+
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.users RENAME TO users_unavailable"
+            )))
+            .execute(&admin)
+            .await
+            .expect("break the owner-to-agent lookup");
+            let owner_hex = owner.public_key().to_hex();
+            match action {
+                "ban" => state
+                    .db
+                    .ban_community_member(
+                        tenant.community(),
+                        owner.public_key().as_bytes(),
+                        &[9u8; 32],
+                        None,
+                        None,
+                    )
+                    .await
+                    .map(|_| ())
+                    .expect("ban commits"),
+                _ => {
+                    buzz_db::relay_members::add_relay_member(
+                        state.db.pool(),
+                        tenant.community(),
+                        &owner_hex,
+                        "member",
+                        None,
+                    )
+                    .await
+                    .expect("seed member");
+                    state
+                        .db
+                        .remove_relay_member(tenant.community(), &owner_hex)
+                        .await
+                        .map(|_| ())
+                        .expect("removal commits");
+                }
+            }
+            let revoked = state
+                .revoke_live_access(
+                    &tenant,
+                    owner.public_key().as_bytes(),
+                    "owner-revoke",
+                    "blocked: you are banned from this community",
+                )
+                .await;
+            assert!(revoked.is_err(), "{action}: the failed lookup is reported");
+            assert!(
+                root.is_cancelled(),
+                "{action}: the agent's main socket closes"
+            );
+            assert!(
+                audio.cancellation_token().is_cancelled(),
+                "{action}: the agent's audio socket closes"
+            );
+            assert!(
+                !elsewhere.cancellation_token().is_cancelled(),
+                "{action}: the agent's socket in another community stays"
+            );
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(&admin)
+                .await;
+        }
+    }
 }
