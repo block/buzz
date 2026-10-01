@@ -378,7 +378,8 @@ export function useChannelSubscription(channel: Channel | null) {
         if (
           payload.type === "member_joined" ||
           payload.type === "member_left" ||
-          payload.type === "member_removed"
+          payload.type === "member_removed" ||
+          payload.type === "admin_kick"
         ) {
           noteChannelMembershipChange(channelId);
           void queryClient.invalidateQueries({

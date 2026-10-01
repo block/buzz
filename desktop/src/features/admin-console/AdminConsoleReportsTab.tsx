@@ -407,7 +407,7 @@ function ResolveReportForm({
     const payload = frozenRef.current;
 
     try {
-      const resolution = await resolveAdminReport(origin, report.id, {
+      const resolution = await resolveAdminReport(origin, report, {
         action: payload.action,
         requestId: payload.requestId,
         expirationSecs: payload.expirationSecs,

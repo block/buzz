@@ -35,6 +35,8 @@ import {
   directAdminAction,
   type AdminDirectAction,
   type AdminDirectIntent,
+  communityHostFromRelayUrl,
+  normalizeCommunityHost,
 } from "./api";
 import {
   adminErrorCode,
@@ -76,30 +78,6 @@ function directErrorMessage(e: unknown): string {
     }
     default:
       return adminErrorMessage(e);
-  }
-}
-
-/**
- * Normalize a community host the way the relay's `normalize_host` does:
- * lowercase, no default port, no trailing root dot.
- */
-function normalizeCommunityHost(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/:(443|80)$/, "")
-    .replace(/\.$/, "");
-}
-
-/**
- * The community a relay URL serves is its `Host`: the URL's authority, with
- * the default port already dropped for `ws`/`wss`. Null when unparseable.
- */
-export function communityHostFromRelayUrl(relayUrl: string): string | null {
-  try {
-    return normalizeCommunityHost(new URL(relayUrl).host) || null;
-  } catch {
-    return null;
   }
 }
 
