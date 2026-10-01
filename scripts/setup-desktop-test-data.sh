@@ -32,13 +32,34 @@ run_sql() {
   run_psql -c "$1"
 }
 
+PYTHON_CMD=""
+if python3 -c "import sys" &>/dev/null; then
+  PYTHON_CMD="python3"
+elif python -c "import sys" &>/dev/null; then
+  PYTHON_CMD="python"
+fi
+
 uuid5_hex() {
   local slug="$1"
-  python3 - "$slug" <<'PYEOF'
+  if [[ -n "${PYTHON_CMD}" ]]; then
+    $PYTHON_CMD - "$slug" <<'PYEOF'
 import sys, uuid
 # Format as UUID with hyphens for Postgres
 print(str(uuid.uuid5(uuid.NAMESPACE_DNS, sys.argv[1])))
 PYEOF
+  elif command -v node &>/dev/null; then
+    node -e "
+const crypto = require('crypto');
+const slug = process.argv[1];
+const nsStr = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+const nsBytes = Buffer.from(nsStr.replace(/-/g, ''), 'hex');
+const hash = crypto.createHash('sha1').update(Buffer.concat([nsBytes, Buffer.from(slug)])).digest();
+hash[6] = (hash[6] & 0x0f) | 0x50;
+hash[8] = (hash[8] & 0x3f) | 0x80;
+const hex = hash.toString('hex');
+console.log([hex.slice(0,8), hex.slice(8,12), hex.slice(12,16), hex.slice(16,20), hex.slice(20,32)].join('-'));
+" "$slug"
+  fi
 }
 
 echo "Checking database connection..."

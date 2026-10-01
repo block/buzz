@@ -8,7 +8,7 @@ const _maxBoxDepth = 32;
 const _maxMoovBytes = 64 * 1024 * 1024;
 const _copyBufferBytes = 1024 * 1024;
 const _uint32Max = 0xffffffff;
-const _uint64Max = 0x7fffffffffffffff;
+const _uint64Max = 0x7ffffffffffff;
 const _containerTypes = {
   'moov',
   'trak',

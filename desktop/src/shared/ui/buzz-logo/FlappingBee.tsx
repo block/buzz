@@ -1,117 +1,340 @@
 import { useId } from "react";
+import type { ComponentType } from "react";
+
+import {
+  Bot,
+  BrainCircuit,
+  Boxes,
+  Cloud,
+  Code2,
+  Database,
+  FileCode2,
+  Globe2,
+  HardDrive,
+  Network,
+  Server,
+  Sparkles,
+  Terminal,
+  Webhook,
+  Workflow,
+} from "lucide-react";
+
+import {
+  SiGithub,
+  SiNotion,
+  SiClaude,
+  SiFigma,
+  SiLinear,
+  SiDiscord,
+  SiPostgresql,
+  SiVercel,
+} from "react-icons/si";
+
+type FlappingBeeProps = {
+  className?: string;
+  index?: number;
+};
+
+type Integration = {
+  name: string;
+
+  icon: ComponentType<{
+    className?: string;
+    color?: string;
+    size?: string | number;
+  }>;
+
+  color: string;
+
+  background?: string;
+};
 
 /**
- * The Buzz bee mark with flapping wings. Geometry is identical to the static
- * {@link BuzzMark} (v8 final keyframe) — the same silhouette, rendered in
- * `currentColor` so it tints per-theme — with the wing-flap keyframes (ported
- * from the Buzz website) beating the wings on an infinite loop.
+ * Unique Orbit integrations.
  *
- * Unlike the static mark's single `<svg>`, each wing here is its own
- * HTML-level `<svg>` layer and the flap animates those elements' CSS
- * transforms. This is deliberate: WebKit paints SVG *children* on the main
- * thread, so a transform animation on a `<circle>` freezes for as long as boot
- * work (bundle eval, first React render of the app tree) hogs the thread —
- * exactly the window in which the loading gate is on screen. Transforms on
- * HTML-level elements run on the compositor (Core Animation in WKWebView) and
- * keep flapping regardless. The `bee-wing-layer` masks reproduce the slot
- * cutouts over the wings so the layered build stays pixel-identical to the
- * masked single-SVG mark (see animations.css).
- *
- * Everything is plain SVG + CSS (no JS/SMIL), so it paints on the very first
- * frame and the flap starts as soon as styles load. Reduced motion falls back
- * to the static silhouette via the CSS media query.
+ * IMPORTANT:
+ * There are enough unique entries here to match the BEES array.
+ * Therefore the landing screen doesn't need to repeat integrations.
  */
-export function FlappingBee({ className }: { className?: string }) {
-  const maskId = `flapping-bee-cutouts-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
+const INTEGRATIONS: Integration[] = [
+  {
+    name: "GitHub",
+    icon: SiGithub,
+    color: "#FFFFFF",
+  },
+  {
+    name: "Claude",
+    icon: SiClaude,
+    color: "#D97757",
+  },
+  {
+    name: "Linear",
+    icon: SiLinear,
+    color: "#FFFFFF",
+  },
+  {
+    name: "Codex",
+    icon: Terminal,
+    color: "#10A37F",
+  },
+  {
+    name: "Figma",
+    icon: SiFigma,
+    color: "#F24E1E",
+  },
+  {
+    name: "Notion",
+    icon: SiNotion,
+    color: "#FFFFFF",
+  },
+  {
+    name: "Discord",
+    icon: SiDiscord,
+    color: "#5865F2",
+  },
+  {
+    name: "Vercel",
+    icon: SiVercel,
+    color: "#FFFFFF",
+  },
+  {
+    name: "PostgreSQL",
+    icon: SiPostgresql,
+    color: "#4169E1",
+  },
+];
 
-  // Wing geometry from the 466x309 mark: circles r=91.7 at (91.7, 154.5) and
-  // (374.3, 154.5). Each wing layer is the circle's bounding box, positioned
-  // as percentages of the mark: top 62.8/309, size 183.4/466 x 183.4/309.
+/**
+ * Generic Orbit capabilities.
+ *
+ * These are here if you later increase the number of BEES beyond
+ * the number of branded integrations.
+ */
+const ORBIT_CAPABILITIES: Integration[] = [
+  {
+    name: "MCP Server",
+    icon: Server,
+    color: "#A855F7",
+  },
+
+  {
+    name: "AI Agent",
+    icon: Bot,
+    color: "#D60FD9",
+  },
+
+  {
+    name: "AI Memory",
+    icon: BrainCircuit,
+    color: "#7C3AED",
+  },
+
+  {
+    name: "Terminal Agent",
+    icon: Terminal,
+    color: "#22C55E",
+  },
+
+  {
+    name: "Database",
+    icon: Database,
+    color: "#3B82F6",
+  },
+
+  {
+    name: "Cloud",
+    icon: Cloud,
+    color: "#06B6D4",
+  },
+
+  {
+    name: "Tools",
+    icon: Boxes,
+    color: "#8B5CF6",
+  },
+
+  {
+    name: "Workflow",
+    icon: Workflow,
+    color: "#F59E0B",
+  },
+
+  {
+    name: "Webhook",
+    icon: Webhook,
+    color: "#EC4899",
+  },
+
+  {
+    name: "Network",
+    icon: Network,
+    color: "#06B6D4",
+  },
+
+  {
+    name: "Code Agent",
+    icon: Code2,
+    color: "#8B5CF6",
+  },
+
+  {
+    name: "File Context",
+    icon: FileCode2,
+    color: "#22C55E",
+  },
+
+  {
+    name: "Knowledge Store",
+    icon: HardDrive,
+    color: "#3B82F6",
+  },
+
+  {
+    name: "Web Context",
+    icon: Globe2,
+    color: "#06B6D4",
+  },
+
+  {
+    name: "Agent Intelligence",
+    icon: Sparkles,
+    color: "#D60FD9",
+  },
+];
+
+export function FlappingBee({
+  className,
+  index = 0,
+}: FlappingBeeProps) {
+  const maskId = `flapping-bee-cutouts-${useId().replace(
+    /[^a-zA-Z0-9_-]/g,
+    "",
+  )}`;
+
   const wingLayer =
-    "bee-wing-layer absolute top-[20.3236%] h-[59.3528%] w-[39.3562%]";
-  const wingSvg = "bee-wing block h-full w-full";
+    "bee-wing-layer absolute left-0 top-0 h-full w-full";
+
+  const wingSvg =
+    "bee-wing block h-full w-full overflow-visible";
+
+  /*
+   * First consume every branded integration.
+   *
+   * Only after all branded integrations have been used do we
+   * fall back to Orbit capability icons.
+   *
+   * This prevents:
+   *
+   * GitHub
+   * Gmail
+   * Notion
+   * GitHub again
+   * Gmail again
+   *
+   * etc.
+   */
+  const integration =
+    INTEGRATIONS[index] ??
+    ORBIT_CAPABILITIES[
+      (index - INTEGRATIONS.length) %
+        ORBIT_CAPABILITIES.length
+    ];
+
+  const Icon = integration.icon;
 
   return (
     <div
       aria-hidden="true"
+      title={integration.name}
       className={[
         "buzz-mark",
         "bee-sprite",
+        "group",
         "relative",
-        "aspect-[466/309]",
+        "flex",
+        "aspect-square",
+        "items-center",
+        "justify-center",
         className,
       ]
         .filter(Boolean)
         .join(" ")}
     >
-      <div className={`${wingLayer} bee-wing-layer-left left-0`}>
+      {/* =====================================================
+          VERY SUBTLE AMBIENT GLOW
+
+          Kept inside the icon bounds so it doesn't visually
+          collide with neighbouring integrations.
+      ===================================================== */}
+
+      <div className={`${wingLayer} bee-wing-layer-left`}>
         <svg
           aria-hidden="true"
           className={`${wingSvg} bee-wing-left`}
-          viewBox="0 0 183.4 183.4"
-          fill="currentColor"
+          viewBox="0 0 100 100"
         >
-          <circle cx="91.7" cy="91.7" r="91.7" />
+          <defs>
+            <radialGradient
+              id={`${maskId}-glow`}
+              cx="50%"
+              cy="50%"
+              r="50%"
+            >
+              <stop
+                offset="0%"
+                stopColor={integration.color}
+                stopOpacity="0.22"
+              />
+
+              <stop
+                offset="52%"
+                stopColor={integration.color}
+                stopOpacity="0.08"
+              />
+
+              <stop
+                offset="100%"
+                stopColor={integration.color}
+                stopOpacity="0"
+              />
+            </radialGradient>
+          </defs>
+
+          <circle
+            cx="50"
+            cy="50"
+            r="45"
+            fill={`url(#${maskId}-glow)`}
+          />
         </svg>
       </div>
-      <div className={`${wingLayer} bee-wing-layer-right right-0`}>
-        <svg
-          aria-hidden="true"
-          className={`${wingSvg} bee-wing-right`}
-          viewBox="0 0 183.4 183.4"
-          fill="currentColor"
-        >
-          <circle cx="91.7" cy="91.7" r="91.7" />
-        </svg>
-      </div>
-      {/* Body last in DOM order and positioned, so it paints over the wings —
-          matching the single-SVG mark where the body rect draws on top. */}
-      <svg
-        aria-hidden="true"
-        className="relative block h-full w-full"
-        viewBox="0 0 466 309"
-        fill="currentColor"
+
+      {/* =====================================================
+          ICON CARD
+      ===================================================== */}
+
+      <div
+        className="
+          relative
+          z-10
+          flex
+          h-[78%]
+          w-[78%]
+          items-center
+          justify-center
+          rounded-[25%]
+          border
+          border-white/[0.10]
+          bg-[#111111]/90
+          shadow-[0_5px_18px_rgba(0,0,0,0.24)]
+          backdrop-blur-md
+        "
       >
-        <defs>
-          <mask
-            id={maskId}
-            x="-80"
-            y="-80"
-            width="626"
-            height="469"
-            maskUnits="userSpaceOnUse"
-            maskContentUnits="userSpaceOnUse"
-          >
-            <rect x="-80" y="-80" width="626" height="469" fill="#fff" />
-            <ellipse cx="193.3" cy="84.4" rx="27" ry="27" fill="#000" />
-            <ellipse cx="276" cy="84.4" rx="27" ry="27" fill="#000" />
-            <rect
-              x="166.3"
-              y="157.2"
-              width="136.9"
-              height="38.3"
-              rx="5"
-              fill="#000"
-            />
-            <rect
-              x="166.9"
-              y="235.1"
-              width="136.2"
-              height="37.6"
-              rx="5"
-              fill="#000"
-            />
-          </mask>
-        </defs>
-        <rect
-          x="128"
-          y="0"
-          width="210"
-          height="309"
-          rx="34"
-          mask={`url(#${maskId})`}
+        <Icon
+          className="h-[56%] w-[56%]"
+          color={integration.color}
         />
-      </svg>
+      </div>
     </div>
   );
 }

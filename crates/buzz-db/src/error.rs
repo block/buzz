@@ -82,6 +82,10 @@ pub enum DbError {
     /// Operator before demoting or deleting the current one.
     #[error("operation would remove the last relay operator")]
     LastOperator,
+
+    /// An internal database or memory subsystem error.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl DbError {

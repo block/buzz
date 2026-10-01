@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+target-agent/
 /dist/
 /admin-web/dist/
 

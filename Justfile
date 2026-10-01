@@ -2,6 +2,9 @@
 
 set dotenv-load := true
 
+export PATH := justfile_directory() + "/bin;C:\\Program Files\\Git\\usr\\bin;" + env_var_or_default("PATH", "")
+
+
 desktop_dir := "desktop"
 desktop_tauri_manifest := "desktop/src-tauri/Cargo.toml"
 web_dir := "web"
@@ -54,16 +57,22 @@ setup: bootstrap
 hooks:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Use the Hermit-pinned lefthook (bin/lefthook self-downloads on first use):
-    # works with no pre-installed lefthook and guarantees the pinned version
-    # rather than whatever happens to be on PATH.
-    export PATH="{{justfile_directory()}}/bin:$PATH"
     # --path-format=absolute guarantees an absolute path from every invocation context:
     # without it, --git-common-dir returns ".git" from the main checkout and a
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.
     HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
     git config --local core.hooksPath "$HOOKS_DIR"
-    lefthook install --force
+    export HERMIT_STATE_DIR_RAW="${HERMIT_STATE_DIR_RAW:-}"
+    if command -v pnpm &>/dev/null; then
+        pnpm dlx lefthook install --force
+    elif command -v npx &>/dev/null; then
+        npx -y lefthook install --force
+    elif command -v lefthook &>/dev/null; then
+        lefthook install --force
+    else
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+        lefthook install --force
+    fi
 
 # Wipe development state and recreate a clean environment. Installed Buzz is preserved.
 [confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
@@ -171,11 +180,7 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
-    if [[ "$TARGET" != *windows* ]]; then
-        SIDECARS+=(buzz-backend-kubernetes)
-    fi
-    for bin in "${SIDECARS[@]}"; do
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
@@ -284,9 +289,6 @@ desktop-release-build target="aarch64-apple-darwin":
     mkdir -p desktop/src-tauri/binaries
     touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    if [[ "$TARGET" != *windows* ]]; then
-        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
-    fi
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
@@ -739,7 +741,7 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
         cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done

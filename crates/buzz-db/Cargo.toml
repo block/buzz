@@ -24,6 +24,7 @@ thiserror   = { workspace = true }
 nostr       = { workspace = true }
 rand        = { workspace = true }
 metrics     = { workspace = true }
+rusqlite    = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

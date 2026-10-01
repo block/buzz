@@ -1,0 +1,26 @@
+[package]
+name = "buzz-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "File watcher, AST chunker, and ingestion pipeline for Orbit"
+
+[dependencies]
+buzz-core   = { workspace = true }
+buzz-db     = { workspace = true }
+buzz-ai     = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+sha2        = { workspace = true }
+hex         = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+buzz-auth = { workspace = true }

@@ -154,10 +154,10 @@ export function BackupStep({
 
   const storageDescription =
     identityStorage === "system-keyring"
-      ? "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key."
+      ? "Orbit keeps your identity key in your system keychain. Your computer may ask for your password when Orbit needs to read the key."
       : identityStorage === "local-file"
-        ? "Your system keychain wasn’t available, so Buzz keeps your identity key in a private file on this device."
-        : "Buzz keeps your identity key protected on this device. Make a separate backup in case you lose access.";
+        ? "Your system keychain wasn’t available, so Orbit keeps your identity key in a private file on this device."
+        : "Orbit keeps your identity key protected on this device. Make a separate backup in case you lose access.";
   const storageTitle =
     identityStorage === "system-keyring"
       ? "Protected by your system keychain"

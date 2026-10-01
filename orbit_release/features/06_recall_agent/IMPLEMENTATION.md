@@ -1,0 +1,110 @@
+# Feature 06 — Recall Agent (9 IDE Transcript Parsers & Retroactive Ingestion)
+
+> **Priority**: P1 — Day-one knowledge bootstrapping from existing agent transcripts.  
+> **Sprint**: Sprint 3 (Weeks 5–6)  
+> **Dependencies**: Feature 01 (Storage), Feature 02 (Embeddings), Feature 03 (Ingestion)  
+> **Crates**: `buzz-plugins` (plugin traits), `buzz-recall` (parser implementations)  
+> **Environment Variables**: `BUZZ_DATA_DIR`, `BUZZ_RECALL_SYNC_INTERVAL_SEC`
+
+---
+
+## Overview
+
+Feature 06 retroactively parses, normalizes, and ingests past session transcripts from AI coding agents so Orbit starts with a rich memory from day one. Ingested raw transcripts are cached under `orbit_brain/transcripts/` and vectorized into `orbit_chunks`.
+
+---
+
+## Supported IDE & Agent Parsers
+
+| # | Agent / IDE | Parser Plugin | Default Storage Location | Format |
+|---|-------------|---------------|--------------------------|--------|
+| 1 | **Antigravity IDE** | `AntigravityRecallPlugin` | `~/.gemini/antigravity-ide/brain/*/transcript.jsonl` | JSONL with step objects |
+| 2 | **Claude Code** | `ClaudeCodeRecallPlugin` | `~/.claude/projects/**/` | Session JSON logs |
+| 3 | **Codex** | `CodexRecallPlugin` | `~/.codex/conversations/` | Conversation JSON |
+| 4 | **Cursor** | `CursorRecallPlugin` | `~/.cursor/User/workspaceStorage/` | Workspace state JSON |
+| 5 | **Goose** | `GooseRecallPlugin` | `~/.config/goose/sessions/` | Session files |
+| 6 | **OpenCode** | `OpenCodeRecallPlugin` | `~/.opencode/sessions/` | Markdown / JSON session logs |
+| 7 | **ZCode** | `ZCodeRecallPlugin` | `~/.zcode/conversations/` | Conversation records |
+| 8 | **AGY CLI** | `AgyCliRecallPlugin` | `~/.gemini/transcripts/` | AGY CLI execution transcripts |
+| 9 | **Kimi** | `KimiRecallPlugin` | `~/.kimi/chats/` | Kimi chat & session logs |
+
+---
+
+## Architecture & Parser Contract
+
+### 1. `RecallPlugin` Trait (`crates/buzz-plugins/src/recall.rs`)
+
+```rust
+use async_trait::async_trait;
+use std::path::Path;
+use crate::models::RawDocument;
+
+#[async_trait]
+pub trait RecallPlugin: Send + Sync {
+    /// Name of the agent harness (e.g. "antigravity", "claude_code", "opencode")
+    fn name(&self) -> &'static str;
+
+    /// Detect if the agent's data directory exists on the workstation
+    fn detect(&self) -> bool;
+
+    /// Discover and parse sessions for the specified workspace path
+    async fn ingest_sessions(&self, workspace_path: &Path) -> Vec<RawDocument>;
+}
+```
+
+### 2. Session Normalization & Redaction
+
+For each detected session:
+1. Extract user queries, agent explanations, tool invocations, and code diffs.
+2. Run through `SecretRedactor` to strip credentials.
+3. Compute `content_hash` to guarantee idempotency (prevent re-ingesting identical sessions).
+4. Chunk and embed using `buzz-ingest` and `buzz-ai`.
+5. Store in `orbit_documents` (`source_type = 'session'`) and `orbit_chunks` (`agent_name = plugin.name()`).
+
+---
+
+## 4-Tier Implementation Layer Architecture
+
+### 1. Frontend Tier: Agent Recall UX
+- **AI Brain Agent Filter (`desktop/src/features/memory/BrainGraph.tsx`)**:
+  - Filter the entire knowledge universe by agent identity (`Antigravity`, `Claude Code`, `Cursor`, `Goose`, etc.).
+- **Session History Dialog (`desktop/src/features/memory/NodeDetailsDrawer.tsx`)**:
+  - View normalized past conversation turns, tool calls, and decisions.
+
+### 2. Desktop Backend Tier: Tauri Rust IPC & Agent Discovery
+- **Location**: `desktop/src-tauri/src/commands/agent_discovery.rs`
+- Probes local developer directory locations for active agent transcripts.
+- Triggers non-blocking background ingestion on startup and after workspace activity.
+
+### 3. Core Workspace Crates Tier (`crates/buzz-recall`, `crates/buzz-db`, `crates/buzz-ai`)
+- `crates/buzz-recall`: 9 IDE transcript parser implementations (Antigravity, Claude Code, Codex, Cursor, Goose, OpenCode, ZCode, AGY, Kimi).
+- `crates/buzz-db`: Persists extracted session records to `orbit_documents` and `orbit_chunks`.
+- `crates/buzz-ai`: Embeds past sessions for multi-modal recall.
+
+### 4. Packaging, Bundling & Container Tier
+- **Zero Docker**: Reads local host filesystem directly from `~/.gemini/`, `~/.claude/`, `~/.cursor/`, etc.
+- No network transmission of raw transcripts unless explicitly enabled by user policy.
+
+---
+
+## Verification & Quality Gates
+
+- Unit tests for all 9 parser plugins with sample synthetic session files.
+- Verify deduplication: re-running ingestion does not create duplicate chunks.
+- Run `cargo test -p buzz-recall`.
+- Run `just ci`.
+
+## Multi-device transcript policy
+
+Raw agent transcripts are not automatically cloud-synced. Feature 06 should distinguish:
+
+- raw local transcript data,
+- durable extracted memories/decisions,
+- compact session summaries selected for sync.
+
+Cloud sync can default to durable memories and summaries so a second device receives useful long-term context without uploading every raw transcript. The user may explicitly choose broader transcript synchronization.
+
+
+## Policy-aware recall
+
+Recall returns only policy-eligible context. Workspace scope, ownership, local-only flags, retention state and hosted-processing permissions are checked before context compilation. If a relevant memory is not eligible for the current agent/task, the recall system must omit it rather than expose it as a restricted result.

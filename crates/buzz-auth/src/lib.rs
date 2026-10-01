@@ -31,7 +31,10 @@ pub mod nip_fi;
 pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
 pub mod scope;
+/// OS keyring and credential resolution for Orbit AI providers.
+pub mod keyring;
 
+pub use keyring::{delete_secret, resolve_secret, set_secret, KeyringError};
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
 pub use error::AuthError;
 pub use nip42::{generate_challenge, verify_nip42_event};

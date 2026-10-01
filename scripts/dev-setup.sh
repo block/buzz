@@ -111,7 +111,7 @@ fail_if_local_redis_blocks_compose
 # ---- Start services ---------------------------------------------------------
 
 log "Starting services and waiting for health..."
-"${REPO_ROOT}/bin/just" _ensure-services
+just _ensure-services
 
 # ---- Run migrations ---------------------------------------------------------
 
@@ -128,7 +128,7 @@ until postgres_accepting_connections; do
   sleep 2
 done
 
-"${REPO_ROOT}/bin/cargo" run -p buzz-admin -- migrate
+cargo run -p buzz-admin -- migrate
 "${REPO_ROOT}/scripts/seed-local-community.sh"
 success "Database migrations complete"
 
@@ -169,13 +169,20 @@ fi
 # ---- Install git hooks ------------------------------------------------------
 
 log "Installing git hooks..."
-# Install into the shared .git/hooks directory using --path-format=absolute so the
-# stored hooksPath is always an absolute path. Without it, --git-common-dir returns
-# ".git" from the main checkout; a relative hooksPath would silently break
-# linked-worktree dispatch (same failure mode as the old worktree-relative .hooks).
 HOOKS_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir)/hooks"
 git -C "${REPO_ROOT}" config --local core.hooksPath "$HOOKS_DIR"
-lefthook install --force
+export HERMIT_STATE_DIR_RAW="${HERMIT_STATE_DIR_RAW:-}"
+if command -v pnpm &>/dev/null; then
+  pnpm dlx lefthook install --force
+elif command -v npx &>/dev/null; then
+  npx -y lefthook install --force
+elif command -v lefthook &>/dev/null; then
+  lefthook install --force
+else
+  # On Windows without core.symlinks, bin/lefthook is a text file.
+  # Use bash 'exec -a' to invoke hermit pretending to be lefthook.
+  (exec -a lefthook "${REPO_ROOT}/bin/hermit" install --force)
+fi
 success "Git hooks installed"
 
 # ---- Print connection info --------------------------------------------------
