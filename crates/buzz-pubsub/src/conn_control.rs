@@ -116,6 +116,11 @@ pub enum ConnControl {
         event_id: String,
         /// Human-readable close reason for the `OK` frame.
         reason: String,
+        /// Close only sockets admitted with no recorded owner. Sent when an
+        /// agent's owner is first recorded, so its ownerless sockets reconnect
+        /// with the owner attached while owner-bound sockets stay up.
+        #[serde(default)]
+        unowned_only: bool,
     },
 }
 
@@ -341,6 +346,7 @@ mod tests {
             pubkey: vec![7u8; 32],
             event_id: "abc123".to_string(),
             reason: "blocked: you are banned from this community".to_string(),
+            unowned_only: true,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);

@@ -394,7 +394,13 @@ pub mod relay_members {
             )
             .await
         {
-            Ok(true) => true,
+            Ok(true) => {
+                // The owner was just recorded. Sockets this agent opened
+                // without it would only be found by an owner-to-agent lookup
+                // at revoke time; make them reconnect with the owner attached.
+                state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
+                true
+            }
             Ok(false) => state
                 .db
                 .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())

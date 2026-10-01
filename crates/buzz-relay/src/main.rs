@@ -1263,12 +1263,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                             pubkey,
                             event_id,
                             reason,
+                            unowned_only,
                         } => {
                             state_for_conn_ctrl.disconnect_pubkey_local(
                                 scoped.community_id,
                                 &pubkey,
                                 &event_id,
                                 &reason,
+                                unowned_only,
                             );
                         }
                     },

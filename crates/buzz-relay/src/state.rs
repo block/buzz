@@ -124,10 +124,13 @@ impl CommunityConnectionControl {
         let _ = self.owner.set(owner);
     }
 
-    fn is_principal_or_owner(&self, pubkey: &[u8]) -> bool {
-        [&self.pubkey, &self.owner]
-            .iter()
-            .any(|slot| slot.get().map(|k| &k[..]) == Some(pubkey))
+    fn matches_revocation(&self, pubkey: &[u8], unowned_only: bool) -> bool {
+        let principal = self.pubkey.get().map(|k| &k[..]) == Some(pubkey);
+        match self.owner.get() {
+            Some(_) if unowned_only => false,
+            Some(owner) => principal || owner[..] == *pubkey,
+            None => principal,
+        }
     }
 
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
@@ -364,12 +367,18 @@ impl CommunityConnectionRegistry {
 
     /// Disconnects every socket in `community` bound to `pubkey` or admitted
     /// as an agent `pubkey` owns, attributing the close to revoked access.
-    /// Fenced to `community` like [`ConnectionManager::disconnect_pubkey`].
-    pub fn disconnect_pubkey(&self, community_id: CommunityId, pubkey: &[u8]) -> usize {
+    /// With `unowned_only`, closes only `pubkey`'s sockets admitted without an
+    /// owner. Fenced to `community` like [`ConnectionManager::disconnect_pubkey`].
+    pub fn disconnect_pubkey(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+        unowned_only: bool,
+    ) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             let (community, control) = entry.value();
-            if *community == community_id && control.is_principal_or_owner(pubkey) {
+            if *community == community_id && control.matches_revocation(pubkey, unowned_only) {
                 control.revoke_access();
                 closed += 1;
             }
@@ -769,6 +778,9 @@ impl ConnectionManager {
     /// community A must close only A's sockets, never a session the member holds
     /// in community B ("authority stays inside the tenant fence").
     ///
+    /// With `unowned_only`, closes only `pubkey`'s sockets admitted without an
+    /// owner (see [`AppState::disconnect_unowned_agent_clusterwide`]).
+    ///
     /// Returns the number of connections closed. This is the pod-local half of
     /// live enforcement; cross-pod fan-out publishes the same intent over Redis.
     pub fn disconnect_pubkey(
@@ -777,16 +789,21 @@ impl ConnectionManager {
         pubkey: &[u8],
         event_id: &str,
         reason: &str,
+        unowned_only: bool,
     ) -> usize {
         let frame = crate::protocol::RelayMessage::ok(event_id, false, reason);
         let mut closed = 0usize;
         for entry in self.connections.iter() {
-            let owned = entry.admitted_owner.get().map(|k| &k[..]) == Some(pubkey);
             let principal = entry
                 .authenticated_pubkey
                 .read()
                 .is_ok_and(|key| key.as_deref() == Some(pubkey));
-            if entry.community_id != community || !(principal || owned) {
+            let matches = match entry.admitted_owner.get() {
+                Some(_) if unowned_only => false,
+                Some(owner) => principal || owner[..] == *pubkey,
+                None => principal,
+            };
+            if entry.community_id != community || !matches {
                 continue;
             }
             // Best-effort delivery: a full control buffer still gets the
@@ -1713,6 +1730,8 @@ impl AppState {
     /// Close everything `pubkey` has open in `community` on this pod: root
     /// sockets (with a final `OK false` carrying `reason`) and audio sockets.
     ///
+    /// With `unowned_only`, only `pubkey`'s sockets admitted without an owner.
+    ///
     /// The pod-local half of [`Self::disconnect_pubkey_clusterwide`], and what
     /// the conn-control subscriber runs for a remote pod's publish.
     pub fn disconnect_pubkey_local(
@@ -1721,12 +1740,13 @@ impl AppState {
         pubkey: &[u8],
         event_id: &str,
         reason: &str,
+        unowned_only: bool,
     ) -> usize {
         self.conn_manager
-            .disconnect_pubkey(community, pubkey, event_id, reason)
+            .disconnect_pubkey(community, pubkey, event_id, reason, unowned_only)
             + self
                 .community_connections
-                .disconnect_pubkey(community, pubkey)
+                .disconnect_pubkey(community, pubkey, unowned_only)
     }
 
     /// Close every live session of `pubkey` and of the agents it owns, on
@@ -1804,7 +1824,43 @@ impl AppState {
         event_id: &str,
         reason: &str,
     ) -> usize {
-        let closed = self.disconnect_pubkey_local(tenant.community(), pubkey, event_id, reason);
+        self.disconnect_clusterwide(tenant, pubkey, event_id, reason, false)
+    }
+
+    /// Close, on every pod, the sockets `agent` holds in `tenant`'s community
+    /// that were admitted with no recorded owner. Called once an agent's owner
+    /// is first recorded: those sockets reconnect with the owner attached, so
+    /// revoking the owner reaches them with no database read. Sockets that
+    /// already carry the owner, including one being admitted with it, stay up.
+    pub fn disconnect_unowned_agent_clusterwide(
+        &self,
+        tenant: &TenantContext,
+        agent: &[u8],
+    ) -> usize {
+        self.disconnect_clusterwide(
+            tenant,
+            agent,
+            &"0".repeat(64),
+            "auth-required: agent owner recorded; reconnect",
+            true,
+        )
+    }
+
+    fn disconnect_clusterwide(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+        unowned_only: bool,
+    ) -> usize {
+        let closed = self.disconnect_pubkey_local(
+            tenant.community(),
+            pubkey,
+            event_id,
+            reason,
+            unowned_only,
+        );
 
         // The banning pod re-receives its own publish through the subscriber and
         // no-ops (its local sockets are already closed above) — intentional; do
@@ -1815,6 +1871,7 @@ impl AppState {
             pubkey: pubkey.to_vec(),
             event_id: event_id.to_string(),
             reason: reason.to_string(),
+            unowned_only,
         };
         // This pre-existing ban path may remain fire-and-forget because the
         // durable ban row rejects the member again at auth. Community archival
@@ -3001,7 +3058,7 @@ pub(crate) mod tests {
         let (other_community, _g3) = bound(community_b, Some(target));
         let (unbound, _g4) = bound(community_a, None);
 
-        assert_eq!(registry.disconnect_pubkey(community_a, &target), 1);
+        assert_eq!(registry.disconnect_pubkey(community_a, &target, false), 1);
         assert!(hit.cancellation_token().is_cancelled());
         assert_eq!(
             *hit.disconnect_reason().borrow(),
@@ -3442,6 +3499,7 @@ pub(crate) mod tests {
             &pubkey,
             "0".repeat(64).as_str(),
             "blocked: banned",
+            false,
         );
 
         assert_eq!(closed, 1, "the one matching connection is closed");
@@ -3471,6 +3529,7 @@ pub(crate) mod tests {
             &[2u8; 32],
             "0".repeat(64).as_str(),
             "blocked: banned",
+            false,
         );
 
         assert_eq!(closed, 0, "no connection matches a different pubkey");
@@ -3518,6 +3577,7 @@ pub(crate) mod tests {
             &pubkey,
             "0".repeat(64).as_str(),
             "blocked: banned",
+            false,
         );
 
         assert_eq!(closed, 1, "only the community-A socket is closed");

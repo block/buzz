@@ -13344,6 +13344,7 @@ mod tests {
                 &member_key.public_key().to_bytes(),
                 &"0".repeat(64),
                 "blocked: you are banned from this community",
+                false,
             );
             assert_eq!(closed, 1, "the ban must close the live audio socket");
             expect_policy_close(&mut client).await;

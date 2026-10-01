@@ -627,10 +627,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // `final_admission_denial`), then refuse if a disconnect already
             // cancelled this socket. No await separates the last check from
             // `authenticate`.
-            //
-            // The bind carries the admitting NIP-FI issuer, so a concurrent
-            // `disconnect_nip_fi` scan that sees the pubkey also sees its
-            // issuer; the deny-set check after `authenticate` closes the rest.
             let owner =
                 match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
                     Ok(owner) => owner,
@@ -639,6 +635,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         return;
                     }
                 };
+            // Owner before pubkey: a disconnect of the agent's ownerless
+            // sockets must never see this socket bound without its owner.
+            if let Some(owner) = owner {
+                state.conn_manager.set_admitted_owner(conn_id, owner);
+            }
+            // The bind carries the admitting NIP-FI issuer, so a concurrent
+            // `disconnect_nip_fi` scan that sees the pubkey also sees its
+            // issuer; the deny-set check after `authenticate` closes the rest.
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 pubkey.to_bytes().to_vec(),
@@ -646,9 +650,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .as_ref()
                     .map(|a| a.identity().issuer().to_owned()),
             );
-            if let Some(owner) = owner {
-                state.conn_manager.set_admitted_owner(conn_id, owner);
-            }
             let denial = match final_admission_denial(
                 &state,
                 conn.tenant.community(),
