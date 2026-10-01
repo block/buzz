@@ -4,6 +4,7 @@ import { isMacPlatform } from "@/shared/lib/platform";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
+import { readmitRelay } from "@/features/agents/managedAgentRelayCleanup";
 import {
   autoConnectDefaultRelayEnabled,
   getDefaultRelayUrl,
@@ -228,6 +229,14 @@ export function useCommunityInit(
               identity.pubkey,
             );
             if (community && !cancelled) {
+              // Removing the last community refused this relay in the native
+              // process, which survives the reload.
+              await readmitRelay(community.relayUrl).catch((error) => {
+                console.error(
+                  "[communities] re-admitting local agents on the default relay failed:",
+                  error,
+                );
+              });
               window.location.reload();
               return;
             }
