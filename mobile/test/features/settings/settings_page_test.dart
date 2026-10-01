@@ -98,7 +98,7 @@ void main() {
               (ref) async => Community.create(
                 name: 'No push',
                 relayUrl: 'wss://relay.example',
-              ).copyWith(pushNotificationsEnabled: true),
+              ).copyWith(pushNotificationsEnabled: false),
             ),
             currentRelayPushDescriptorProvider.overrideWith(
               (ref) => capability.future,
@@ -150,7 +150,7 @@ void main() {
       relayUrl: 'wss://relay.example',
     ).copyWith(pushNotificationsEnabled: true);
 
-    var capability = Future<BuzzPushLeaseDescriptor?>.value(_pushDescriptor);
+    final capability = Future<BuzzPushLeaseDescriptor?>.value(_pushDescriptor);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -175,25 +175,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey('push-notifications-enabled')),
-      findsOneWidget,
-    );
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(SettingsPage)),
-    );
-    final rediscovery = Completer<BuzzPushLeaseDescriptor?>();
-    capability = rediscovery.future;
-    container.invalidate(currentRelayPushDescriptorProvider);
-    await tester.pump();
-    expect(find.text('Notifications'), findsNothing);
-    rediscovery.complete(null);
-    await tester.pumpAndSettle();
-    expect(find.byType(Switch), findsNothing);
-    capability = Future.value(_pushDescriptor);
-    container.invalidate(currentRelayPushDescriptorProvider);
-    await tester.pumpAndSettle();
     expect(
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,

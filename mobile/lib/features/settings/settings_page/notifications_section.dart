@@ -11,9 +11,11 @@ class _NotificationsSection extends ConsumerWidget {
     final community = ref.watch(activeCommunityProvider).value;
     if (community == null) return const SizedBox.shrink();
     final capability = ref.watch(currentRelayPushDescriptorProvider);
-    if (capability.isLoading ||
-        capability.hasError ||
-        capability.value == null) {
+    final hasCapability =
+        !capability.isLoading &&
+        !capability.hasError &&
+        capability.value != null;
+    if (!hasCapability && !community.pushNotificationsEnabled) {
       return const SizedBox.shrink();
     }
     final authorization = ref.watch(buzzPushAuthorizationStatusProvider);
@@ -25,6 +27,8 @@ class _NotificationsSection extends ConsumerWidget {
         (permissionDenied || permissionUnavailable);
     final subtitle = !community.pushNotificationsEnabled
         ? 'Off for this community'
+        : !hasCapability
+        ? 'Push support unavailable; you can still turn notifications off'
         : switch (status) {
             BuzzPushAuthorizationStatus.notDetermined =>
               'Waiting for iOS notification permission',
