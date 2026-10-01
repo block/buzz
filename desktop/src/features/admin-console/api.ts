@@ -9,7 +9,7 @@
  * Callers must cancel in-flight queries on pubkey or origin change.
  */
 
-import { getRelayWsUrl, invokeTauri } from "@/shared/api/tauri";
+import { invokeTauri } from "@/shared/api/tauri";
 import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import { invoke as invokeTauriRaw } from "@tauri-apps/api/core";
 
@@ -372,13 +372,15 @@ export async function resolveAdminReport(
   );
   // A kick removes the target from the report's channel. Reports are
   // deployment-wide, so only a channel in the active community is recorded.
+  // The relay has already resolved the report, so a failed host lookup counts
+  // as another community rather than throwing.
   const action = resolution.activeAction;
   if (
     action?.action === "kick" &&
     action.status === "succeeded" &&
     report.channelId &&
-    communityHostFromRelayUrl(await getRelayWsUrl()) ===
-      normalizeCommunityHost(report.communityHost)
+    (await getConnectedCommunityHost().catch(() => null)) ===
+      report.communityHost
   ) {
     record(report.channelId);
   }
@@ -847,28 +849,4 @@ export async function directAdminAction(
   return invokeTauri<AdminDirectActionResult>("admin_direct_action", {
     intent,
   });
-}
-
-/**
- * Normalize a community host the way the relay's `normalize_host` does:
- * lowercase, no default port, no trailing root dot.
- */
-export function normalizeCommunityHost(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/:(443|80)$/, "")
-    .replace(/\.$/, "");
-}
-
-/**
- * The community a relay URL serves is its `Host`: the URL's authority, with
- * the default port already dropped for `ws`/`wss`. Null when unparseable.
- */
-export function communityHostFromRelayUrl(relayUrl: string): string | null {
-  try {
-    return normalizeCommunityHost(new URL(relayUrl).host) || null;
-  } catch {
-    return null;
-  }
 }
