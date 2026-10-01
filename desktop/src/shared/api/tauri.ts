@@ -1,5 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { noteChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
+import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
@@ -349,11 +349,12 @@ export function getRelayHttpUrl(): Promise<string> {
 export async function addChannelMembers(
   input: AddChannelMembersInput,
 ): Promise<AddChannelMembersResult> {
+  const record = beginChannelMembershipWrite();
   const result = await invokeTauri<RawAddChannelMembersResult>(
     "add_channel_members",
     input,
   );
-  noteChannelMembershipChange(input.channelId);
+  record(input.channelId);
   return result;
 }
 
@@ -361,8 +362,9 @@ export async function removeChannelMember(
   channelId: string,
   pubkey: string,
 ): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("remove_channel_member", { channelId, pubkey });
-  noteChannelMembershipChange(channelId);
+  record(channelId);
 }
 
 export async function changeChannelMemberRole(
@@ -370,18 +372,21 @@ export async function changeChannelMemberRole(
   pubkey: string,
   role: string,
 ): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("change_channel_member_role", { channelId, pubkey, role });
-  noteChannelMembershipChange(channelId);
+  record(channelId);
 }
 
 export async function joinChannel(channelId: string): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("join_channel", { channelId });
-  noteChannelMembershipChange(channelId);
+  record(channelId);
 }
 
 export async function leaveChannel(channelId: string): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri("leave_channel", { channelId });
-  noteChannelMembershipChange(channelId);
+  record(channelId);
 }
 
 export async function getHomeFeed(

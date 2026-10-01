@@ -20,6 +20,7 @@
 const WRITER_READ_WINDOW_MS = 31_000;
 
 const writerReadDeadlines = new Map<string, number>();
+let generation = 0;
 const listeners = new Set<(channelId: string) => void>();
 
 /**
@@ -33,6 +34,19 @@ export function noteChannelMembershipChange(channelId: string) {
   }
   writerReadDeadlines.set(channelId, now + WRITER_READ_WINDOW_MS);
   for (const listener of listeners) listener(channelId);
+}
+
+/**
+ * Starts a membership write. Call before the write's first await; the
+ * returned recorder notes a changed channel only if no community reset has
+ * happened since, so a write that settles after a switch can't mark a
+ * channel in the new community.
+ */
+export function beginChannelMembershipWrite(): (channelId: string) => void {
+  const started = generation;
+  return (channelId) => {
+    if (started === generation) noteChannelMembershipChange(channelId);
+  };
 }
 
 export function shouldReadChannelMembersFromWriter(channelId: string) {
@@ -58,5 +72,6 @@ export function onChannelMembershipChange(
 
 /** Community reset: changes recorded on the old relay don't apply to the new one. */
 export function resetChannelMembershipWrites() {
+  generation++;
   writerReadDeadlines.clear();
 }

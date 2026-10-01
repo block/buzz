@@ -1,4 +1,4 @@
-import { noteChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
+import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import type { Channel } from "@/shared/api/types";
 import { fromRawChannel, type RawChannel } from "@/shared/api/tauriChannels";
 import { invokeTauri } from "@/shared/api/tauri";
@@ -51,10 +51,11 @@ export async function clearBestieAssignment(scope: BestieScope): Promise<void> {
 export async function resolveBestieConversation(
   scope: BestieScope,
 ): Promise<Channel> {
+  const record = beginChannelMembershipWrite();
   const channel = fromRawChannel(
     await invokeTauri<RawChannel>("resolve_bestie_conversation", scope),
   );
   // May open a new DM, as openDm does.
-  noteChannelMembershipChange(channel.id);
+  record(channel.id);
   return channel;
 }

@@ -28,8 +28,11 @@ const id = "00000000-0000-0000-0000-0000000000c1";
 let writer;
 let replica;
 let routes;
+// Commands whose reply is held until the test releases it.
+const held = new Map();
 window.__TAURI_INTERNALS__ = {
   invoke: async (command, args) => {
+    await held.get(command)?.promise;
     if (command === "get_relay_ws_url") return "wss://alpha.example.com";
     if (command === "get_channel_window") return [];
     if (command === "get_channel_members") {
@@ -41,6 +44,10 @@ window.__TAURI_INTERNALS__ = {
           role: "member",
         })),
       };
+    }
+    if (command === "add_channel_members") {
+      writer = [OWNER];
+      return { added: [], errors: [] };
     }
     if (command === "admin_resolve_report") {
       writer = [OWNER];
@@ -55,11 +62,12 @@ window.__TAURI_INTERNALS__ = {
 
 const { useChannelSubscription } = await import("@/features/messages/hooks");
 const { relayClient } = await import("@/shared/api/relayClient");
-const { getChannelMembers } = await import("@/shared/api/tauri");
-const { resolveAdminReport } = await import("@/features/admin-console/api");
-const { resetChannelMembershipWrites } = await import(
-  "@/shared/api/channelMembershipWrites"
+const { addChannelMembers, getChannelMembers } = await import(
+  "@/shared/api/tauri"
 );
+const { resolveAdminReport } = await import("@/features/admin-console/api");
+const { resetChannelMembershipWrites, shouldReadChannelMembersFromWriter } =
+  await import("@/shared/api/channelMembershipWrites");
 const { channelMembersQueryKey, refreshRostersOnMembershipChange } =
   await import("./rosterFreshness.ts");
 const { KIND_SYSTEM_MESSAGE } = await import("@/shared/constants/kinds");
@@ -154,5 +162,41 @@ for (const { host, recorded } of [
     );
     assert.deepEqual(shown, recorded ? [OWNER] : [OWNER, BOT]);
     assert.deepEqual(routes, recorded ? ["replica", "writer"] : ["replica"]);
+  });
+}
+
+const kick = () =>
+  resolveAdminReport(
+    "https://admin.invalid",
+    { id: "report", channelId: id, communityHost: "alpha.example.com" },
+    { action: "kick", requestId: "request" },
+  );
+const addMember = () =>
+  addChannelMembers({ channelId: id, pubkeys: [BOT], role: "member" });
+
+// A write started before a community switch must not mark its channel in the
+// new community, whichever reply is still in flight when the switch happens.
+for (const { name, write, pending } of [
+  { name: "a report kick", write: kick, pending: "admin_resolve_report" },
+  { name: "a report kick", write: kick, pending: "get_relay_ws_url" },
+  { name: "an added member", write: addMember, pending: "add_channel_members" },
+]) {
+  test(`${name} whose ${pending} reply lands after a community reset records nothing`, async () => {
+    const shown = await rosterAfter(async () => {
+      let release;
+      held.set(pending, { promise: new Promise((r) => (release = r)) });
+      try {
+        const write$ = write();
+        await settle();
+        resetChannelMembershipWrites();
+        release();
+        await write$;
+      } finally {
+        held.delete(pending);
+      }
+    });
+    assert.equal(shouldReadChannelMembersFromWriter(id), false);
+    assert.deepEqual(routes, ["replica"]);
+    assert.deepEqual(shown, [OWNER, BOT]);
   });
 }

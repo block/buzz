@@ -11,7 +11,7 @@ import type {
   UpdateChannelInput,
 } from "@/shared/api/types";
 import {
-  noteChannelMembershipChange,
+  beginChannelMembershipWrite,
   shouldReadChannelMembersFromWriter,
 } from "@/shared/api/channelMembershipWrites";
 import { invokeTauri, toTauriError } from "@/shared/api/tauri";
@@ -166,21 +166,23 @@ export async function getOpenChannelDirectory(): Promise<Channel[]> {
 export async function createChannel(
   input: CreateChannelInput,
 ): Promise<Channel> {
+  const record = beginChannelMembershipWrite();
   const channel = fromRawChannel(
     await invokeTauri<RawChannel>("create_channel", input),
   );
-  noteChannelMembershipChange(channel.id);
+  record(channel.id);
   return channel;
 }
 
 export async function ensureStarterChannels(): Promise<Channel[]> {
+  const record = beginChannelMembershipWrite();
   // Channels created or joined are reported even when a later step fails.
   const result = await invokeTauri<{
     channels: RawChannel[];
     changed_channel_ids: string[];
     error: string | null;
   }>("ensure_starter_channels");
-  for (const id of result.changed_channel_ids) noteChannelMembershipChange(id);
+  for (const id of result.changed_channel_ids) record(id);
   if (result.error !== null) throw toTauriError(result.error);
   return result.channels.map(fromRawChannel);
 }
@@ -194,11 +196,12 @@ export async function syncAgentsToActiveHuddle(
   channelId: string,
   agentPubkeys: string[],
 ): Promise<void> {
+  const record = beginChannelMembershipWrite();
   const result = await invokeTauri<{
     changed_channel_ids: string[];
     error: string | null;
   }>("sync_agents_to_active_huddle", { channelId, agentPubkeys });
-  for (const id of result.changed_channel_ids) noteChannelMembershipChange(id);
+  for (const id of result.changed_channel_ids) record(id);
   if (result.error !== null) throw toTauriError(result.error);
 }
 
@@ -222,10 +225,11 @@ export type OpenDmInput = {
 };
 
 export async function openDm(input: OpenDmInput): Promise<Channel> {
+  const record = beginChannelMembershipWrite();
   const channel = fromRawChannel(
     await invokeTauri<RawChannel>("open_dm", input),
   );
-  noteChannelMembershipChange(channel.id);
+  record(channel.id);
   return channel;
 }
 
@@ -336,6 +340,7 @@ export async function getChannelMembers(
 }
 
 export async function joinChannel(channelId: string): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri<void>("join_channel", { channelId });
-  noteChannelMembershipChange(channelId);
+  record(channelId);
 }

@@ -10,7 +10,7 @@
  */
 
 import { getRelayWsUrl, invokeTauri } from "@/shared/api/tauri";
-import { noteChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
+import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import { invoke as invokeTauriRaw } from "@tauri-apps/api/core";
 
 // ── Probe ─────────────────────────────────────────────────────────────────
@@ -365,6 +365,7 @@ export async function resolveAdminReport(
   report: Pick<AdminReportDto, "id" | "channelId" | "communityHost">,
   body: AdminResolveReportBody,
 ): Promise<AdminReportResolution> {
+  const record = beginChannelMembershipWrite();
   const resolution = await invokeTauri<AdminReportResolution>(
     "admin_resolve_report",
     { origin, id: report.id, body },
@@ -379,7 +380,7 @@ export async function resolveAdminReport(
     communityHostFromRelayUrl(await getRelayWsUrl()) ===
       normalizeCommunityHost(report.communityHost)
   ) {
-    noteChannelMembershipChange(report.channelId);
+    record(report.channelId);
   }
   return resolution;
 }

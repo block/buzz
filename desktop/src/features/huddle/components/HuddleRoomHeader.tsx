@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
 
 import { useProfileQuery, useSelfProfileCache } from "@/features/profile/hooks";
-import { noteChannelMembershipChange } from "@/shared/api/channelMembershipWrites";
+import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { useHuddleParticipantRoster } from "../hooks/useHuddleParticipantRoster";
@@ -57,12 +57,13 @@ export function HuddleRoomHeader() {
   const handleRemoveAgent = React.useCallback(
     async (pubkey: string) => {
       if (!window.confirm("Remove this agent from the huddle?")) return;
+      const record = beginChannelMembershipWrite();
       try {
         await invoke("remove_agent_from_huddle", {
           agentPubkey: pubkey,
         });
         if (state?.ephemeral_channel_id) {
-          noteChannelMembershipChange(state.ephemeral_channel_id);
+          record(state.ephemeral_channel_id);
         }
         setState((current) =>
           current
