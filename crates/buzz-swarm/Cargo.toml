@@ -1,0 +1,26 @@
+[package]
+name = "buzz-swarm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Start and supervise a swarm of Buzz agents from one YAML file"
+
+[[bin]]
+name = "buzz-swarm"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+buzz-sdk = { workspace = true }
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+zeroize = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+rustix = { version = "1", features = ["process"] }
+tempfile = "3"
+url = { workspace = true }

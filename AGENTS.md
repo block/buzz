@@ -121,6 +121,7 @@ crates/
   buzz-cli            # Agent-first CLI
   buzz-sdk            # Typed Nostr event builders
   buzz-admin          # Operator CLI for relay administration
+  buzz-swarm          # Runs agent identities across relays from one YAML file
   buzz-ws-client      # Shared NIP-42 WebSocket client (connect, auth, publish)
   buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
