@@ -4106,6 +4106,57 @@ mod off_mode_precedence_tests {
             Some(Arc::new(state))
         }
 
+        /// A NIP-98-authenticated Git request whose restriction lookup fails
+        /// answers 503, not the 403 a real ban or non-member gets.
+        /// Mutation: treat every membership-step error as 403 → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn failed_restriction_lookup_is_503_not_403() {
+            use base64::Engine as _;
+            let Some(mut state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let host = format!("git-ban-lookup-{}.test", uuid::Uuid::new_v4().simple());
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+            let (db, admin, schema) = crate::test_support::restriction_lookup_failing_db().await;
+            Arc::get_mut(&mut state)
+                .expect("fixture state is uniquely owned")
+                .db = db;
+            let scheme = if state.config.relay_url.starts_with("wss://") {
+                "https"
+            } else {
+                "http"
+            };
+            let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
+            let event_json = serde_json::to_string(
+                &nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                    .tags([
+                        nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
+                        nostr::Tag::parse(["method", "GET"]).expect("method tag"),
+                    ])
+                    .sign_with_keys(&nostr::Keys::generate())
+                    .expect("sign NIP-98 event"),
+            )
+            .expect("serialize");
+            let auth = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD.encode(event_json)
+            );
+            let (status, _, body) = git_request(state, &host, Some(&auth)).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "body {body:?}"
+            );
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(&admin)
+                .await;
+        }
+
         async fn git_request(
             state: Arc<AppState>,
             host: &str,

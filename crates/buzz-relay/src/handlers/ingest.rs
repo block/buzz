@@ -6593,4 +6593,118 @@ mod postgres_tests {
         assert!(agent_socket.cancellation_token().is_cancelled());
         assert!(!bystander_socket.cancellation_token().is_cancelled());
     }
+
+    /// A ban commits, but the owned-agent lookup fails: `revoke_live_access`
+    /// reports the failure, still closes the owner, and keeps retrying until
+    /// the agent's socket closes once the lookup recovers. An unrelated
+    /// socket stays open.
+    /// Mutation: log and swallow the lookup error (no retry) → the agent's
+    /// socket never closes → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn failed_agent_lookup_during_revoke_still_closes_agent() {
+        use crate::state::CommunityConnectionControl;
+        use sqlx::postgres::PgConnectOptions;
+        use tokio_util::sync::CancellationToken;
+
+        // A schema with bans but no `users` table: the ban commits, and only
+        // the owned-agent lookup fails.
+        let db_url = crate::test_support::database_url();
+        let admin = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let schema = format!("revoke_retry_{}", Uuid::new_v4().simple());
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE SCHEMA {schema}; \
+             CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL);"
+        )))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+        let options = db_url
+            .parse::<PgConnectOptions>()
+            .expect("database url")
+            .options([("search_path", schema.as_str())]);
+        let pool = sqlx::PgPool::connect_with(options)
+            .await
+            .expect("schema pool");
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "revoke-retry.test".to_string());
+        let (owner, agent, bystander) = (
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+        );
+        let bound = |keys: &nostr::Keys| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            control.bind_pubkey(keys.public_key().to_bytes());
+            let guard =
+                state
+                    .community_connections
+                    .register(Uuid::new_v4(), community, control.clone());
+            (control, guard)
+        };
+        let (owner_socket, _g1) = bound(&owner);
+        let (agent_socket, _g2) = bound(&agent);
+        let (bystander_socket, _g3) = bound(&bystander);
+
+        state
+            .db
+            .ban_community_member(
+                community,
+                owner.public_key().as_bytes(),
+                bystander.public_key().as_bytes(),
+                None,
+                None,
+            )
+            .await
+            .expect("ban commits");
+        let revoked = state
+            .revoke_live_access(
+                &tenant,
+                owner.public_key().as_bytes(),
+                "test-event",
+                "blocked: you are banned from this community",
+            )
+            .await;
+        assert!(revoked.is_err(), "the failed agent lookup is reported");
+        assert!(owner_socket.cancellation_token().is_cancelled());
+        assert!(!agent_socket.cancellation_token().is_cancelled());
+
+        // The lookup recovers: the agent's owner link becomes readable.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL);"
+        )))
+        .execute(&admin)
+        .await
+        .expect("restore users table");
+        for keys in [&owner, &agent] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .expect("link agent"));
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            agent_socket.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("the retry closes the agent's socket");
+        assert!(!bystander_socket.cancellation_token().is_cancelled());
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+    }
 }

@@ -252,7 +252,6 @@ run_unit_tests() {
     handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected
     handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path
     handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence
-    handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack
     handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission
     state::tests::f3_cancellation_during_check_terminates_socket_without_waiting_for_check
     state::tests::on_not_run_runs_once_on_each_deny_arm_and_never_on_admit

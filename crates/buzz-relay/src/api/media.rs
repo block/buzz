@@ -4300,5 +4300,61 @@ mod tests {
                 );
             }
         }
+
+        /// Upload, GET and HEAD pass proof admission, then only the
+        /// restriction lookup fails: each answers 503 (unavailable), not the
+        /// 403 a real ban or non-member gets, in both NIP-FI modes.
+        /// Mutation: map every membership-step refusal to
+        /// `RelayMembershipRequired` → 403 → RED.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn failed_restriction_lookup_is_503_not_403() {
+            for (state_fn, assertion_for) in [
+                (
+                    Box::pin(media_off_test_state())
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = _>>>,
+                    false,
+                ),
+                (Box::pin(media_enforce_test_state()), true),
+            ] {
+                let (rt, mut state, host) = media_fixture(state_fn);
+                let (db, admin, schema) =
+                    rt.block_on(crate::test_support::restriction_lookup_failing_db());
+                Arc::get_mut(&mut state)
+                    .expect("fixture state is uniquely owned")
+                    .db = db;
+                let keys = Keys::generate();
+                let assertion =
+                    assertion_for.then(|| signed_assertion(&keys.public_key().to_hex()));
+                let upload_proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+                let read_proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
+                let assertion = assertion.as_deref();
+                for (response, context) in [
+                    (
+                        upload_request(&rt, &state, "/upload", &host, &[&upload_proof], assertion),
+                        "upload",
+                    ),
+                    (
+                        media_read(&rt, &state, "GET", &host, &read_proof, assertion),
+                        "GET",
+                    ),
+                    (
+                        media_read(&rt, &state, "HEAD", &host, &read_proof, assertion),
+                        "HEAD",
+                    ),
+                ] {
+                    assert_eq!(
+                        response.0,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "{context} (NIP-FI {assertion_for}); body {:?}",
+                        response.2
+                    );
+                }
+                let _ = rt.block_on(
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                        .execute(&admin),
+                );
+            }
+        }
     }
 }
