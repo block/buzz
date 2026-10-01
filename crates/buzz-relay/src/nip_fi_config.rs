@@ -203,7 +203,8 @@ impl NipFiCommunities {
         }
         Ok(Self {
             by_host,
-            ..Self::default()
+            #[cfg(test)]
+            any_host: None,
         })
     }
 
