@@ -11,14 +11,15 @@
 //!    target_pubkey, and until ceiling.
 //! 4. Principal authorization (issuer-configured authorized `sub` list).
 //! 5. Signed-target / request-body agreement.
-//! 6. Shared `(iss, jti)` claim ([`super::command_replay`]), then atomic local
-//!    jti reservation + deny-entry insertion (both-or-neither).
+//! 6. Reserve a local jti + deny-entry slot, then take the shared `(iss, jti)`
+//!    claim ([`super::command_replay`]), then commit the slot (both-or-neither).
 //! 7. Return [`CommandResult`].
 //!
 //! Fail-closed: any failure inserts no deny entry, closes no session and
 //! publishes nothing.  A failure after step 6's shared claim may leave that
 //! claim in place until its TTL (a guard error whose `SET` reply was lost, or a
-//! failed release); that is fail closed, since a retry is then denied.
+//! process stopped between claim and commit); that is fail closed, since a
+//! retry is then denied.
 
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
@@ -29,7 +30,7 @@ use super::command_replay::CommandReplayGuard;
 use super::config::{
     IssuerPolicy, IssuerRegistry, MAX_JTI_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES,
 };
-use super::deny_map::{NipFiDenyMap, ReserveError};
+use super::deny_map::{NipFiDenyMap, Reservation, ReserveError};
 use super::verifier::{
     enforce_compact_structure, enforce_signature_shape, parse_header, parse_numeric_date,
     parse_unique_claims, select_unique_jwk, validate_jwk, AssertionKeySet, IssuerKeySource,
@@ -261,16 +262,17 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
     /// * `body_pubkey`    — the `pubkey` field parsed from the JSON body.
     /// * `replay`         — the shared command replay guard.
     ///
-    /// The shared claim is taken only after authentication, and released if
-    /// the local reservation fails for capacity, so a `DenySetFull` command
-    /// can be retried.
+    /// Order: authenticate, reserve a local slot, claim `(iss, jti)` in the
+    /// shared guard, then commit the slot.  A full deny set fails before the
+    /// shared claim, so `DenySetFull` never consumes the command and it can be
+    /// retried.  A replayed or failed claim, or a cancelled future, drops the
+    /// local slot; the commit after a successful claim cannot fail.
     ///
-    /// A claim can nevertheless remain without a local deny entry: when Redis
-    /// applied the claim but its reply was lost (`AuthorizationUnavailable`),
-    /// when the release after a capacity failure fails (`DenySetFull`), or when
-    /// the process is interrupted between claim and insertion.  Every such
-    /// failure inserts no deny entry, closes no session and publishes nothing;
-    /// it fails closed, since a retry is denied until the claim's TTL.
+    /// A claim can still remain without a local deny entry when Redis applied
+    /// it but its reply was lost (`AuthorizationUnavailable`), or when the
+    /// process stops between claim and commit.  That inserts no deny entry,
+    /// closes no session and publishes nothing; it fails closed, since a retry
+    /// is denied until the claim's TTL.
     pub async fn verify(
         &self,
         token: &str,
@@ -281,6 +283,7 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
     ) -> Result<CommandResult, CommandError> {
         let now = Utc::now();
         let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
+        let reservation = self.reserve(&cmd, now)?;
         // Cover the command's remaining validity plus this pod's skew, so a
         // pod whose clock trails still sees the claim; the guard floors this.
         match replay
@@ -295,14 +298,7 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
             Ok(false) => return Err(CommandError::AuthorizationDenied),
             Err(_) => return Err(CommandError::AuthorizationUnavailable),
         }
-        let result = self.commit(&cmd, now);
-        if result == Err(CommandError::DenySetFull) {
-            if let Err(e) = replay.release(&cmd.issuer, &cmd.jti).await {
-                // The jti stays claimed until its TTL; a retry gets 403.
-                tracing::warn!("nip-fi command: replay claim release failed: {e}");
-            }
-        }
-        result
+        Ok(Self::commit(&cmd, reservation))
     }
 
     /// Verify against this pod's deny map only, with an injectable clock.
@@ -321,7 +317,8 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         now: DateTime<Utc>,
     ) -> Result<CommandResult, CommandError> {
         let cmd = self.authenticate_at(token, request_method, request_path, body_pubkey, now)?;
-        self.commit(&cmd, now)
+        let reservation = self.reserve(&cmd, now)?;
+        Ok(Self::commit(&cmd, reservation))
     }
 
     /// Steps 1–5: authenticate and authorize the command with no side effects.
@@ -485,31 +482,29 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         })
     }
 
-    /// Steps 6+7: atomic local jti reservation + deny-entry insertion.
-    fn commit(
+    /// Step 6, local half: hold this pod's jti and deny-entry slots.
+    fn reserve(
         &self,
         cmd: &AuthenticatedCommand,
         now: DateTime<Utc>,
-    ) -> Result<CommandResult, CommandError> {
-        match self.deny_map.atomic_reserve_and_insert(
-            &cmd.issuer,
-            &cmd.jti,
-            cmd.effective_expiry,
-            &cmd.target_pubkey,
-            cmd.until,
-            now,
-        ) {
-            Ok(()) => {}
-            Err(ReserveError::JtiAlreadyReserved) => return Err(CommandError::AuthorizationDenied),
-            Err(ReserveError::CapacityExceeded) => return Err(CommandError::DenySetFull),
-        }
+    ) -> Result<Reservation, CommandError> {
+        self.deny_map
+            .reserve(&cmd.issuer, &cmd.jti, &cmd.target_pubkey, now)
+            .map_err(|e| match e {
+                ReserveError::JtiAlreadyReserved => CommandError::AuthorizationDenied,
+                ReserveError::CapacityExceeded => CommandError::DenySetFull,
+            })
+    }
 
-        Ok(CommandResult {
+    /// Step 7: record the jti and deny entry; cannot fail.
+    fn commit(cmd: &AuthenticatedCommand, reservation: Reservation) -> CommandResult {
+        reservation.commit(cmd.effective_expiry, cmd.until);
+        CommandResult {
             target_pubkey: cmd.target_pubkey,
             caller_iss: cmd.issuer.clone(),
             caller_sub: cmd.sub.clone(),
             until: cmd.until,
-        })
+        }
     }
 }
 
@@ -1331,6 +1326,195 @@ mod tests {
             cv.verify_at(&token_b, METHOD, PATH, &target_b, t1).is_ok(),
             "retry with same jti after slot freed must succeed — 503 must NOT burn the jti"
         );
+    }
+
+    // ── Reserve-first ordering through verify() ───────────────────────────────
+    //
+    // verify() reserves the local slot before the shared claim, so a full deny
+    // set never reaches the guard, and every uncommitted path frees the slot.
+
+    #[derive(Clone, Copy)]
+    enum Claim {
+        Accept,
+        Replay,
+        Fail,
+        Hang,
+    }
+
+    /// A replay guard with a fixed reply that counts its `try_claim` calls.
+    struct ScriptedGuard {
+        claim: Claim,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedGuard {
+        fn new(claim: Claim) -> Self {
+            Self {
+                claim,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl CommandReplayGuard for ScriptedGuard {
+        fn try_claim<'a>(
+            &'a self,
+            _issuer: &'a str,
+            _jti: &'a str,
+            _ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<bool, crate::error::AuthError>> + Send + 'a,
+            >,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let claim = self.claim;
+            Box::pin(async move {
+                // Yield once so concurrent verifies interleave at the claim.
+                tokio::task::yield_now().await;
+                match claim {
+                    Claim::Accept => Ok(true),
+                    Claim::Replay => Ok(false),
+                    Claim::Fail => Err(crate::error::AuthError::Internal("simulated".into())),
+                    Claim::Hang => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// A verifier whose issuer shard holds exactly one deny entry.
+    fn one_slot_verifier() -> CommandVerifier<crate::nip_fi::verifier::StaticIssuerKeySource> {
+        use crate::nip_fi::verifier::{AssertionKeySet, StaticIssuerKeySource};
+        let future = Utc::now() + Duration::seconds(3600);
+        let key_set = AssertionKeySet::new(ISS.to_owned(), 1, test_jwks_cmd(), future)
+            .expect("valid key set");
+        let mut registry = IssuerRegistry::new();
+        registry.insert(test_issuer_policy());
+        let deny_map = NipFiDenyMap::new(
+            1,
+            vec![IssuerCapacity {
+                issuer: ISS.to_owned(),
+                capacity: 1,
+            }],
+        );
+        CommandVerifier::new(
+            registry,
+            StaticIssuerKeySource::new([key_set]),
+            vec![test_command_policy()],
+            deny_map,
+        )
+    }
+
+    /// The single slot is free: a fresh command for a new key is accepted.
+    async fn assert_slot_free(
+        cv: &CommandVerifier<crate::nip_fi::verifier::StaticIssuerKeySource>,
+    ) {
+        let target = target_key();
+        let token = mint_cmd_jwt(&target, 300, serde_json::json!({}));
+        let accept = ScriptedGuard::new(Claim::Accept);
+        assert!(
+            cv.verify(&token, METHOD, PATH, &target, &accept)
+                .await
+                .is_ok(),
+            "the only slot must have been freed"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_deny_set_fails_before_shared_claim_and_retry_succeeds() {
+        let cv = one_slot_verifier();
+        let held = cv
+            .deny_map()
+            .reserve(ISS, "filler", &target_key(), Utc::now())
+            .expect("filler takes the only slot");
+        let target = target_key();
+        let token = mint_cmd_jwt(&target, 300, serde_json::json!({}));
+        let guard = ScriptedGuard::new(Claim::Accept);
+
+        assert_eq!(
+            cv.verify(&token, METHOD, PATH, &target, &guard).await,
+            Err(CommandError::DenySetFull)
+        );
+        assert_eq!(
+            guard.calls(),
+            0,
+            "a full deny set must not touch the shared guard"
+        );
+
+        drop(held);
+        assert!(cv
+            .verify(&token, METHOD, PATH, &target, &guard)
+            .await
+            .is_ok());
+        assert_eq!(guard.calls(), 1);
+        assert!(cv.deny_map().is_denied(ISS, &target, Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn rejected_or_failed_claim_frees_reserved_slot() {
+        let cv = one_slot_verifier();
+        for (claim, expected) in [
+            (Claim::Replay, CommandError::AuthorizationDenied),
+            (Claim::Fail, CommandError::AuthorizationUnavailable),
+        ] {
+            let target = target_key();
+            let token = mint_cmd_jwt(&target, 300, serde_json::json!({}));
+            let guard = ScriptedGuard::new(claim);
+            assert_eq!(
+                cv.verify(&token, METHOD, PATH, &target, &guard).await,
+                Err(expected)
+            );
+            assert_eq!(guard.calls(), 1);
+            assert!(!cv.deny_map().is_denied(ISS, &target, Utc::now()));
+        }
+        assert_slot_free(&cv).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_verify_frees_reserved_slot() {
+        let cv = one_slot_verifier();
+        let target = target_key();
+        let token = mint_cmd_jwt(&target, 300, serde_json::json!({}));
+        let guard = ScriptedGuard::new(Claim::Hang);
+        let verify = cv.verify(&token, METHOD, PATH, &target, &guard);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), verify)
+                .await
+                .is_err(),
+            "the hanging claim must time out"
+        );
+        assert_eq!(guard.calls(), 1, "the verify reached the shared claim");
+        assert_slot_free(&cv).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_commands_for_one_free_slot_admit_exactly_one() {
+        let cv = one_slot_verifier();
+        let (a, b) = (target_key(), target_key());
+        let (token_a, token_b) = (
+            mint_cmd_jwt(&a, 300, serde_json::json!({})),
+            mint_cmd_jwt(&b, 300, serde_json::json!({})),
+        );
+        let guard = ScriptedGuard::new(Claim::Accept);
+        let (ra, rb) = tokio::join!(
+            cv.verify(&token_a, METHOD, PATH, &a, &guard),
+            cv.verify(&token_b, METHOD, PATH, &b, &guard),
+        );
+        let results = [ra, rb];
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        assert!(
+            results.contains(&Err(CommandError::DenySetFull)),
+            "{results:?}"
+        );
+        assert_eq!(guard.calls(), 1, "the loser never reaches the shared guard");
     }
 
     // ── Signed fractional verify_at witness ──────────────────────────────────

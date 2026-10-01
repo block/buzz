@@ -11,7 +11,7 @@ use buzz_auth::{
 /// Redis-backed NIP-FI command replay seen-set.
 ///
 /// `try_claim` issues `SET buzz:nip-fi:command:{hash} 1 NX EX <ttl>`; `OK`
-/// is a first claim and `nil` is a replay.  `release` is a `DEL`.
+/// is a first claim and `nil` is a replay.
 pub struct RedisCommandReplayGuard {
     pool: deadpool_redis::Pool,
 }
@@ -60,22 +60,6 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
                     "unexpected SET NX EX reply: {other}"
                 ))),
             }
-        })
-    }
-
-    fn release<'a>(
-        &'a self,
-        issuer: &'a str,
-        jti: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AuthError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut conn = self.conn().await?;
-            redis::cmd("DEL")
-                .arg(command_replay_key(issuer, jti))
-                .query_async::<()>(&mut *conn)
-                .await
-                .map_err(|e| AuthError::Internal(format!("Redis DEL: {e}")))
         })
     }
 }
