@@ -1,8 +1,10 @@
 //! Private deployment moderation API.
 //!
-//! Read routes are available in both auth modes (nip98, disabled).
-//! Mutation and staffing routes require an authenticated `nip98` principal
-//! (per-person, attributed to the resolved operator).
+//! Legacy reads (reports, feedback, member restrictions) are available in both
+//! auth modes (nip98, disabled). Community reads (directory, member search and
+//! lookup, event preview), mutations and staffing routes require an
+//! authenticated `nip98` principal (per-person, attributed to the resolved
+//! operator).
 
 mod auth;
 mod direct;
@@ -41,9 +43,11 @@ pub(crate) use auth::admin_api_origin;
 
 /// Build the deployment-admin routes.
 ///
-/// Read routes are available in all auth modes.
-/// Mutation routes (/reports/{id}/resolve, /feedback/{id}) and staffing routes
-/// (/operators) require an authenticated `nip98` principal.
+/// Legacy reads (reports, feedback, member restrictions) are available in all
+/// auth modes.
+/// Community reads (/communities, /members/search, /members/{pubkey},
+/// /events/{id}), mutation routes and staffing routes (/operators) require an
+/// authenticated `nip98` principal.
 pub fn router(state: Arc<crate::state::AppState>) -> Router {
     Router::new()
         .route("/probe", get(probe))
@@ -121,12 +125,14 @@ struct ReportQuery {
     limit: Option<i64>,
 }
 
-fn limit(value: Option<i64>) -> Result<i64, ApiError> {
-    match value.unwrap_or(50) {
-        value @ 1..=200 => Ok(value),
+/// A page size: `default` when absent, otherwise 1 to `max`, else 400
+/// `invalid_limit`.
+fn limit(value: Option<i64>, default: i64, max: i64) -> Result<i64, ApiError> {
+    match value.unwrap_or(default) {
+        value if (1..=max).contains(&value) => Ok(value),
         _ => Err(ApiError::bad_request(
             "invalid_limit",
-            "limit must be between 1 and 200",
+            &format!("limit must be between 1 and {max}"),
         )),
     }
 }
@@ -237,7 +243,7 @@ async fn reports(
             query.after,
             query.before,
             None,
-            limit(query.limit)?,
+            limit(query.limit, 50, 200)?,
         )
         .await?;
     Ok(Json(items))
@@ -1200,7 +1206,7 @@ fn decode_cursor(token: &str) -> Result<(DateTime<Utc>, Vec<u8>), ApiError> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommunityQuery {
     community_host: String,
 }
@@ -1257,7 +1263,7 @@ async fn list_member_restrictions(
 ) -> Result<Json<RestrictionsPage>, ApiError> {
     authorize_read(&state, &headers, &method, &uri).await?;
 
-    let page_limit = limit(Some(query.limit.unwrap_or(200)))?;
+    let page_limit = limit(query.limit, 200, 200)?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1531,7 +1537,7 @@ mod postgres_tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    pub(super) fn database_url() -> String {
+    fn database_url() -> String {
         std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| {
             "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1 -- local test-only credentials
         })

@@ -1,6 +1,7 @@
-//! Tests for the staff-only community reads. The unsigned, disabled-auth and
-//! HEAD checks reject or answer before any database access; the rest are
-//! `#[ignore]`d and run in the PostgreSQL lane.
+//! Tests for the staff-only community reads and the HEAD binding of every
+//! admin read. The unsigned, disabled-auth, HEAD and validation checks reject
+//! or answer before any database access; the rest are `#[ignore]`d and run in
+//! the PostgreSQL lane.
 
 use std::sync::Arc;
 
@@ -119,16 +120,53 @@ async fn new_reads_refuse_disabled_auth_mode() {
     }
 }
 
+/// Every legacy GET read route, the status a HEAD-signed HEAD gets past auth,
+/// and whether producing that status needs the database.
+fn legacy_reads() -> Vec<(String, StatusCode, bool)> {
+    let id = Uuid::new_v4();
+    vec![
+        ("/probe".to_owned(), StatusCode::OK, false),
+        (
+            "/reports?status=bogus".to_owned(),
+            StatusCode::BAD_REQUEST,
+            false,
+        ),
+        (format!("/reports/{id}"), StatusCode::NOT_FOUND, true),
+        ("/feedback".to_owned(), StatusCode::OK, true),
+        (format!("/feedback/{id}"), StatusCode::NOT_FOUND, true),
+        (
+            format!("/feedback/{id}/attachments/not-a-hash"),
+            StatusCode::NOT_FOUND,
+            false,
+        ),
+        ("/operators".to_owned(), StatusCode::OK, true),
+        (
+            "/members/restrictions?communityHost=a.example&limit=0".to_owned(),
+            StatusCode::BAD_REQUEST,
+            false,
+        ),
+    ]
+}
+
 /// Axum serves HEAD through GET handlers; the credential must be checked
-/// against the real method, so a HEAD-signed HEAD passes and a GET-signed
-/// HEAD does not.
+/// against the real method, so a GET-signed HEAD is refused on every legacy
+/// read, and a HEAD-signed HEAD passes auth wherever the answer needs no
+/// database (the rest are covered by the Postgres lane below).
 #[tokio::test]
-async fn admin_reads_authorize_head_with_the_real_method() {
+async fn legacy_reads_authorize_head_with_the_real_method() {
     let keys = test_operator_keys();
     let state = nip98_state(vec![keys.public_key().to_hex()]).await;
-    let head = |signed: &str| signed_as(&keys, "HEAD", signed, "/probe", "/probe");
-    assert_eq!(send(&state, head("HEAD")).await.0, StatusCode::OK);
-    assert_eq!(send(&state, head("GET")).await.0, StatusCode::UNAUTHORIZED);
+    for (uri, want, needs_db) in legacy_reads() {
+        let head = |signed: &str| signed_as(&keys, "HEAD", signed, &uri, &uri);
+        assert_eq!(
+            send(&state, head("GET")).await.0,
+            StatusCode::UNAUTHORIZED,
+            "GET-signed HEAD {uri}"
+        );
+        if !needs_db {
+            assert_eq!(send(&state, head("HEAD")).await.0, want, "HEAD {uri}");
+        }
+    }
 }
 
 /// The credential covers the full target: a GET-signed HEAD, or a query
@@ -152,6 +190,26 @@ async fn new_reads_reject_method_and_query_tampering() {
             send(&state, request).await.0,
             StatusCode::UNAUTHORIZED,
             "{tampered}"
+        );
+    }
+}
+
+/// Out-of-range limits are refused before any database access.
+#[tokio::test]
+async fn community_reads_reject_out_of_range_limits() {
+    let keys = test_operator_keys();
+    let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+    for uri in [
+        "/communities?limit=0",
+        "/communities?limit=101",
+        "/members/search?communityHost=a.example&q=a&limit=0",
+        "/members/search?communityHost=a.example&q=a&limit=51",
+    ] {
+        let (status, body) = get(&state, &keys, uri).await;
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_limit")),
+            "{uri}"
         );
     }
 }
@@ -401,17 +459,19 @@ async fn community_directory_pages_live_hosts_by_literal_prefix() {
             .collect()
     };
     // Paging with limit 2 visits every live host once, then stops.
+    // The page cap turns a cursor that never ends into a failure, not a hang.
     let mut seen = Vec::new();
-    let mut uri = format!("/communities?q={}&limit=2", p.to_uppercase());
-    loop {
+    let mut next = Some(format!("/communities?q={}&limit=2", p.to_uppercase()));
+    for _ in 0..=live.len() {
+        let Some(uri) = next.take() else { break };
         let (status, page) = get(&state, &keys, &uri).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         seen.extend(hosts(&page));
-        match page["nextCursor"].as_str() {
-            Some(cursor) => uri = format!("/communities?q={p}&limit=2&cursor={cursor}"),
-            None => break,
-        }
+        next = page["nextCursor"]
+            .as_str()
+            .map(|cursor| format!("/communities?q={p}&limit=2&cursor={cursor}"));
     }
+    assert!(next.is_none(), "paging did not end: {next:?}");
     let mut want = live.to_vec();
     want.sort();
     seen.sort();
@@ -506,10 +566,10 @@ async fn member_lookup_fails_closed_when_the_staff_lookup_fails() {
     );
 }
 
-/// The route clamps `limit` to 1–50 before searching.
+/// The boundary limits return exactly that many matches.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn member_search_clamps_the_limit() {
+async fn member_search_returns_up_to_the_limit() {
     let (pool, state) = fixture().await;
     let keys = test_operator_keys();
     let host = unique_host("search-limit");
@@ -518,15 +578,28 @@ async fn member_search_clamps_the_limit() {
     for i in 0..51u8 {
         seed_profile(&pool, c, &[i; 32], &format!("{tag} {i}")).await;
     }
-    for (limit, want) in [(0, 1), (1, 1), (50, 50), (51, 50)] {
+    for limit in [1usize, 50] {
         let uri = format!("/members/search?communityHost={host}&q={tag}&limit={limit}");
         let (status, page) = get(&state, &keys, &uri).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         assert_eq!(
             page["items"].as_array().unwrap().len(),
-            want,
+            limit,
             "limit={limit}"
         );
+    }
+}
+
+/// The database-backed half of
+/// `legacy_reads_authorize_head_with_the_real_method`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn legacy_reads_serve_a_head_signed_head() {
+    let (_, state) = fixture().await;
+    let keys = test_operator_keys();
+    for (uri, want, _) in legacy_reads().into_iter().filter(|r| r.2) {
+        let head = signed_as(&keys, "HEAD", "HEAD", &uri, &uri);
+        assert_eq!(send(&state, head).await.0, want, "HEAD {uri}");
     }
 }
 

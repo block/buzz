@@ -21,11 +21,12 @@
 //! Config outranks DB: a `relay_operators` DB row for a config-backed
 //! Operator pubkey is ignored; it never demotes a config grant.
 //!
-//! # disabled mode (read-only)
+//! # disabled mode (legacy reads only)
 //!
 //! `authorize()` succeeds for read requests but returns `None` for the
-//! principal — mutations and staffing routes call
-//! [`require_mutation_principal`], which 403s on `None`.
+//! principal, so only the legacy reads (reports, feedback, member
+//! restrictions) are served. Community reads, mutations and staffing routes
+//! require a resolved principal and 403 on `None`.
 
 use axum::http::{header, HeaderMap, Method, Uri};
 use base64::engine::general_purpose::STANDARD as BASE64;

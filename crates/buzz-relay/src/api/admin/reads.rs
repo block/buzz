@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::auth::{authorize_read, lookup_admin_principal, AdminPrincipal};
 use super::error::ApiError;
-use super::{community_for_host, decode_hex_pubkey};
+use super::{community_for_host, decode_hex_pubkey, limit, CommunityQuery};
 use crate::state::AppState;
 
 type AppStateRef = State<Arc<AppState>>;
@@ -72,7 +72,7 @@ fn decode_community_cursor(token: &str) -> Result<(String, Uuid), ApiError> {
 }
 
 /// `GET /communities?q=&cursor=&limit=` — active communities whose host starts
-/// with `q`, paged by `(lower(host), id)`.
+/// with `q`, paged by `(lower(host), id)`. `limit` is 1–100, default 50.
 pub(super) async fn communities(
     State(state): AppStateRef,
     method: Method,
@@ -81,15 +81,7 @@ pub(super) async fn communities(
     Query(query): Query<CommunitiesQuery>,
 ) -> Result<Json<CommunitiesPage>, ApiError> {
     require_staff(&state, &headers, &method, &uri).await?;
-    let limit = match query.limit.unwrap_or(50) {
-        limit @ 1..=100 => limit,
-        _ => {
-            return Err(ApiError::bad_request(
-                "invalid_limit",
-                "limit must be between 1 and 100",
-            ))
-        }
-    };
+    let limit = limit(query.limit, 50, 100)?;
     let after = query
         .cursor
         .as_deref()
@@ -134,6 +126,7 @@ pub(super) struct MemberSearchPage {
 
 /// `GET /members/search?communityHost=&q=&limit=` — profile search inside one
 /// community. Matches community profiles, so former members are included.
+/// `limit` is 1–50, default 20.
 pub(super) async fn search_members(
     State(state): AppStateRef,
     method: Method,
@@ -149,7 +142,7 @@ pub(super) async fn search_members(
             "q must be 1 to 100 characters",
         ));
     }
-    let limit = query.limit.unwrap_or(20).clamp(1, 50) as u32;
+    let limit = u32::try_from(limit(query.limit, 20, 50)?).map_err(|_| ApiError::internal())?;
     let community = community_for_host(&state, &query.community_host).await?;
     let items = state
         .db
@@ -164,12 +157,6 @@ pub(super) async fn search_members(
         })
         .collect();
     Ok(Json(MemberSearchPage { items }))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct HostQuery {
-    community_host: String,
 }
 
 #[derive(Serialize)]
@@ -207,7 +194,7 @@ pub(super) async fn lookup_member(
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
-    Query(query): Query<HostQuery>,
+    Query(query): Query<CommunityQuery>,
 ) -> Result<Json<MemberLookup>, ApiError> {
     require_staff(&state, &headers, &method, &uri).await?;
     let pubkey = decode_hex_pubkey(&pubkey_hex)?;
@@ -242,7 +229,7 @@ pub(super) async fn event_preview(
     uri: Uri,
     headers: HeaderMap,
     Path(id_hex): Path<String>,
-    Query(query): Query<HostQuery>,
+    Query(query): Query<CommunityQuery>,
 ) -> Result<Json<AdminEventPreview>, ApiError> {
     require_staff(&state, &headers, &method, &uri).await?;
     let id = decode_hex_pubkey(&id_hex)?;
