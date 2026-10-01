@@ -1387,6 +1387,7 @@ dependencies = [
  "aes-gcm",
  "appattest",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64 0.22.1",
  "byteorder",

@@ -2,7 +2,8 @@
 //! Apple production AAGUID material by default; personal development requires
 //! an explicit build feature and environment. No cryptographic checks are skipped.
 use crate::config::AppAttestEnvironment;
-use appattest::{assertion::Assertion, attestation::Attestation};
+use appattest::attestation::Attestation;
+use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use byteorder::{BigEndian, ByteOrder};
 use sha2::{Digest, Sha256};
@@ -119,19 +120,24 @@ impl AppAttestVerifier {
         if cbor.is_empty() || cbor.len() > MAX_ASSERTION_BYTES {
             return Err(AppAttestError::Invalid);
         }
-        let counter = assertion_counter(&cbor)?;
-        let client_data_hash = Sha256::digest(client_data);
-        Assertion::from_assertion(&cbor)
-            .map_err(|_| AppAttestError::Invalid)?
-            .verify(
-                client_data_hash,
-                challenge,
-                &self.app_id,
-                public_key,
-                previous_counter,
-                stored_challenge,
-            )
+        // Apple's assertion steps, done here because appattest 0.1.1 rejects
+        // authenticatorData longer than 37 bytes and iOS 27 appends signed
+        // extension data after that prefix.
+        let (auth, signature) = assertion_parts(&cbor)?;
+        let nonce = Sha256::new()
+            .chain_update(auth)
+            .chain_update(Sha256::digest(client_data))
+            .finalize();
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, public_key)
+            .verify(&nonce, signature)
             .map_err(|_| AppAttestError::Invalid)?;
+        let counter = BigEndian::read_u32(&auth[33..37]);
+        if auth[..32] != Sha256::digest(self.app_id.as_bytes())[..]
+            || counter <= previous_counter
+            || challenge != stored_challenge
+        {
+            return Err(AppAttestError::Invalid);
+        }
         Ok(VerifiedAssertion { counter })
     }
 }
@@ -213,30 +219,29 @@ fn verify_attestation_environment(
     Ok(())
 }
 
-/// App Attest assertion CBOR is a closed two-field map. Extracting signCount
-/// from authenticatorData is safe only after the library verifies the same
-/// bytes' RP ID, signature, and monotonic relation.
-fn assertion_counter(cbor: &[u8]) -> Result<u32, AppAttestError> {
+/// App Attest assertion CBOR is a closed two-field map. Returns the
+/// authenticatorData (fixed 37-byte prefix plus any signed extension data)
+/// and the DER signature.
+fn assertion_parts(cbor: &[u8]) -> Result<(&[u8], &[u8]), AppAttestError> {
     let mut d = minicbor::Decoder::new(cbor);
     let count = d
         .map()
         .map_err(|_| AppAttestError::Invalid)?
         .ok_or(AppAttestError::Invalid)?;
-    let mut auth = None;
+    let (mut auth, mut signature) = (None, None);
     for _ in 0..count {
         let k = d.str().map_err(|_| AppAttestError::Invalid)?;
+        let v = d.bytes().map_err(|_| AppAttestError::Invalid)?;
         match k {
-            "authenticatorData" => auth = Some(d.bytes().map_err(|_| AppAttestError::Invalid)?),
-            "signature" => {
-                d.bytes().map_err(|_| AppAttestError::Invalid)?;
-            }
+            "authenticatorData" if auth.is_none() => auth = Some(v),
+            "signature" if signature.is_none() => signature = Some(v),
             _ => return Err(AppAttestError::Invalid),
         }
     }
-    let auth = auth
-        .filter(|a| a.len() == 37)
-        .ok_or(AppAttestError::Invalid)?;
-    Ok(BigEndian::read_u32(&auth[33..37]))
+    match (auth, signature) {
+        (Some(auth), Some(signature)) if auth.len() >= 37 => Ok((auth, signature)),
+        _ => Err(AppAttestError::Invalid),
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +257,8 @@ mod tests {
         include_str!("../tests/fixtures/app-attest-wrong-root.json");
     const APPLE_ROOT_CERT_PEM: &[u8] =
         include_bytes!("../tests/fixtures/apple-app-attestation-root.pem");
+    const ASSERTION_EXTENSIONS_FIXTURE_JSON: &str =
+        include_str!("../tests/fixtures/app-attest-assertion-extensions.json");
 
     #[derive(Deserialize)]
     struct Fixture {
@@ -617,6 +624,83 @@ mod tests {
                     fixture.challenge.as_bytes(),
                 )
                 .is_err());
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct AssertionFixture {
+        description: String,
+        app_id: String,
+        public_key_hex: String,
+        client_data: String,
+        challenge: String,
+        assertion_b64: String,
+        previous_counter: u32,
+        expected_counter: u32,
+    }
+
+    fn assertion_fixture() -> AssertionFixture {
+        let fixture: AssertionFixture =
+            serde_json::from_str(ASSERTION_EXTENSIONS_FIXTURE_JSON).expect("valid fixture JSON");
+        assert!(!fixture.description.is_empty());
+        fixture
+    }
+
+    fn verify_fixture_assertion(
+        fixture: &AssertionFixture,
+        app_id: &str,
+        client_data: &str,
+        previous_counter: u32,
+        challenge: &str,
+    ) -> Result<VerifiedAssertion, AppAttestError> {
+        verifier(app_id, APPLE_ROOT_CERT_PEM).verify_assertion(
+            &fixture.assertion_b64,
+            client_data.as_bytes(),
+            &hex::decode(&fixture.public_key_hex).expect("hex public key"),
+            previous_counter,
+            challenge,
+            &fixture.challenge,
+        )
+    }
+
+    #[test]
+    fn real_assertion_with_apple_extension_data_verifies() {
+        let f = assertion_fixture();
+        let verified = verify_fixture_assertion(
+            &f,
+            &f.app_id,
+            &f.client_data,
+            f.previous_counter,
+            &f.challenge,
+        )
+        .expect("real assertion with extension data verifies");
+        assert_eq!(verified.counter, f.expected_counter);
+    }
+
+    #[test]
+    fn real_assertion_rejects_tampering_replay_wrong_app_and_challenge() {
+        let f = assertion_fixture();
+        let tampered = f.client_data.replace("\"generation\":", "\"generation\":9");
+        assert_ne!(tampered, f.client_data);
+        for result in [
+            verify_fixture_assertion(&f, &f.app_id, &tampered, f.previous_counter, &f.challenge),
+            verify_fixture_assertion(
+                &f,
+                &f.app_id,
+                &f.client_data,
+                f.expected_counter,
+                &f.challenge,
+            ),
+            verify_fixture_assertion(
+                &f,
+                "TEAMID.other.app",
+                &f.client_data,
+                f.previous_counter,
+                &f.challenge,
+            ),
+            verify_fixture_assertion(&f, &f.app_id, &f.client_data, f.previous_counter, "other"),
+        ] {
+            assert!(result.is_err());
         }
     }
 
