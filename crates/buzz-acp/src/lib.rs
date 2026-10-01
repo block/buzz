@@ -11,6 +11,7 @@ mod engram_fetch;
 mod filter;
 mod isolated_execution;
 mod observer;
+mod permission_ledger;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -1660,6 +1661,9 @@ fn handle_relay_observer_control_event(
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("resolve_permission") => {
+            handle_resolve_permission_control(&payload, pool, observer);
+        }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
                 &payload,
@@ -1671,6 +1675,69 @@ fn handle_relay_observer_control_event(
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvePermissionControl {
+    turn_id: String,
+    session_id: String,
+    request_id: serde_json::Value,
+    action_digest: String,
+    option_id: String,
+}
+
+/// Route an authenticated owner decision to one exact in-flight turn.
+///
+/// The owner signature and freshness window are checked before this function.
+/// This handler deliberately does not use a channel ID: concurrent thread
+/// sessions may share a channel. `AcpClient` performs the second, independent
+/// request/session/digest/offered-option binding before it writes ACP output.
+fn handle_resolve_permission_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Ok(control) = serde_json::from_value::<ResolvePermissionControl>(payload.clone()) else {
+        tracing::warn!("permission resolution control frame has an invalid payload");
+        return;
+    };
+    let resolution = acp::PermissionResolution {
+        turn_id: control.turn_id.clone(),
+        session_id: control.session_id,
+        request_id: control.request_id,
+        action_digest: control.action_digest,
+        option_id: control.option_id,
+    };
+    let status = match pool
+        .task_map_mut()
+        .values_mut()
+        .find(|meta| meta.turn_id == control.turn_id)
+        .and_then(|meta| meta.permission_tx.as_ref())
+    {
+        Some(tx) => match tx.try_send(resolution) {
+            Ok(()) => "sent",
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => "already_resolving",
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => "turn_ending",
+        },
+        None => "no_matching_turn",
+    };
+    if let Some(observer) = observer {
+        observer.emit(
+            "control_result",
+            None,
+            &observer::ObserverContext {
+                channel_id: None,
+                session_id: None,
+                turn_id: Some(control.turn_id),
+                started_at: None,
+            },
+            serde_json::json!({
+                "type": "resolve_permission",
+                "status": status,
+            }),
+        );
     }
 }
 
@@ -2620,6 +2687,17 @@ async fn run_harness(
     let config = runtime.config();
 
     tracing::info!("buzz-acp starting: {}", config.summary());
+
+    // The Desktop stamps this path after all user-provided environment layers.
+    // Open it before spawning an ACP client so a managed owner card can never
+    // exist without an acknowledged host lifecycle store.
+    if let Some(path) = config.permission_ledger_path.clone() {
+        let start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").map_err(|_| {
+            anyhow::anyhow!("permission lifecycle ledger requires managed start nonce")
+        })?;
+        permission_ledger::PermissionLedger::shared(path, start_nonce)
+            .map_err(|error| anyhow::anyhow!("permission lifecycle ledger unavailable: {error}"))?;
+    }
 
     let observer = config
         .relay_observer
@@ -4580,6 +4658,8 @@ fn dispatch_pending(
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
+        let (permission_tx, permission_rx) =
+            tokio::sync::mpsc::channel::<acp::PermissionResolution>(2);
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
 
@@ -4598,7 +4678,7 @@ fn dispatch_pending(
                 None,
                 ctx_clone,
                 result_tx,
-                Some(control_rx),
+                (Some(control_rx), Some(permission_rx)),
                 task_turn_id,
             )
             .await;
@@ -4614,6 +4694,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                permission_tx: Some(permission_tx),
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -5319,7 +5400,7 @@ fn dispatch_heartbeat(
             Some(prompt_text),
             ctx_clone,
             result_tx,
-            None,
+            (None, None),
             task_turn_id,
         )
         .await;
@@ -5335,6 +5416,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            permission_tx: None,
             successful_steer_deliveries: HashSet::new(),
         },
     );
@@ -6142,6 +6224,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -6188,6 +6271,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -9228,6 +9312,7 @@ mod build_mcp_servers_tests {
             channels_override: None,
             no_mention_filter: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            permission_ledger_path: None,
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
@@ -9492,6 +9577,7 @@ mod error_outcome_emission_tests {
             channels_override: None,
             no_mention_filter: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            permission_ledger_path: None,
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
@@ -9597,6 +9683,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: steer_event_id.into(),
@@ -9677,6 +9764,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
@@ -9799,6 +9887,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
@@ -9868,6 +9957,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -9948,6 +10038,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10041,6 +10132,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: Some(batch),
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10140,6 +10232,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -10238,6 +10331,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -10347,6 +10441,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -10425,6 +10520,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10523,6 +10619,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10645,6 +10742,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10788,6 +10886,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -10923,6 +11022,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -11079,6 +11179,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -11187,6 +11288,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -11458,6 +11560,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );

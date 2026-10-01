@@ -95,6 +95,19 @@ pub fn managed_agent_runtime_log_path(
     Ok(managed_agents_logs_dir(app)?.join(format!("{}.log", key.runtime_id())))
 }
 
+/// Owner-only permission lifecycle ledger for exactly one managed runtime.
+/// The stable filename is pair-scoped and lives under the build-scoped app data
+/// root, so demo and production builds cannot read each other's authority.
+pub fn managed_agent_permission_ledger_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    let dir = managed_agents_base_dir(app)?.join("permission-lifecycle");
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create permission lifecycle directory: {error}"))?;
+    Ok(dir.join(format!("{}.json", key.runtime_id())))
+}
+
 /// Log path to surface for an agent whose runtime is not tracked in memory:
 /// the most recently written of its pair-scoped logs, falling back to the
 /// legacy single-runtime path when the agent has not run since harnesses

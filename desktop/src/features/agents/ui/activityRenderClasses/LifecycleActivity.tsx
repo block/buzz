@@ -1,5 +1,7 @@
 import { AlertCircle, CheckCircle2, ShieldCheck, XCircle } from "lucide-react";
+import * as React from "react";
 
+import { resolveManagedAgentPermission } from "@/shared/api/agentControl";
 import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import { ActivityRow, ActivityRowLabel } from "./ActivityRow";
 import { ToolActivity } from "./ToolActivity";
@@ -38,6 +40,9 @@ function permissionOutcomeTone(outcome: string): "approve" | "deny" | "cancel" {
 }
 
 export function LifecycleActivity(props: ActivityRenderClassItemProps) {
+  const [submitting, setSubmitting] = React.useState<string | null>(null);
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
+
   if (props.item.type === "tool") {
     return <ToolActivity {...props} />;
   }
@@ -54,6 +59,7 @@ export function LifecycleActivity(props: ActivityRenderClassItemProps) {
   if (isPermission) {
     const { requestLines, optionsLine } = splitPermissionText(props.item.text);
     const outcome = props.item.outcome;
+    const pendingResolution = props.item.pendingResolution;
     const tone = outcome ? permissionOutcomeTone(outcome) : null;
     return (
       <div
@@ -72,6 +78,49 @@ export function LifecycleActivity(props: ActivityRenderClassItemProps) {
         {/* Row 2: options (muted sub-line) */}
         {optionsLine ? (
           <div className="mt-0.5 pl-5 opacity-60">{optionsLine}</div>
+        ) : null}
+        {pendingResolution && !outcome ? (
+          <div
+            className="mt-1.5 pl-5"
+            data-testid="transcript-owner-permission-card"
+          >
+            <div className="mb-1 text-muted-foreground">
+              Waiting for owner decision
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {pendingResolution.options.map((option) => (
+                <button
+                  key={option.optionId}
+                  type="button"
+                  disabled={submitting !== null}
+                  className="rounded border border-amber-500/30 px-1.5 py-0.5 text-xs font-medium disabled:opacity-50"
+                  onClick={() => {
+                    setSubmitting(option.optionId);
+                    setSubmitError(null);
+                    void resolveManagedAgentPermission(props.agentPubkey, {
+                      turnId: pendingResolution.turnId,
+                      sessionId: pendingResolution.sessionId,
+                      requestId: pendingResolution.requestId,
+                      actionDigest: pendingResolution.actionDigest,
+                      optionId: option.optionId,
+                    })
+                      .catch(() =>
+                        setSubmitError("Owner decision was not sent"),
+                      )
+                      .finally(() => setSubmitting(null));
+                  }}
+                >
+                  {submitting === option.optionId ? "Sending…" : option.label}
+                </button>
+              ))}
+            </div>
+            {submitError ? (
+              <div className="mt-1 text-destructive">{submitError}</div>
+            ) : null}
+            <div className="mt-1 text-muted-foreground">
+              Auto-review retry unavailable for this adapter.
+            </div>
+          </div>
         ) : null}
         {/* Row 3: decision — only when outcome is resolved */}
         {outcome && tone ? (
