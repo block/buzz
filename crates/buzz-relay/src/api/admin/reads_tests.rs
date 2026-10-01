@@ -15,11 +15,12 @@ use uuid::Uuid;
 
 use super::super::auth::ADMIN_API_PREFIX;
 use super::super::postgres_tests::{
-    database_url, disabled_mode_state, make_nostr_auth, make_nostr_auth_raw_tags, nip98_state,
+    disabled_mode_state, make_nostr_auth, make_nostr_auth_raw_tags, nip98_state,
     nip98_state_with_real_pool, test_operator_keys,
 };
 use super::super::router;
 use crate::state::AppState;
+use crate::test_support::database_url;
 
 const PK: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -54,6 +55,29 @@ fn signed_get(keys: &nostr::Keys, uri: &str) -> Request<Body> {
         .header(header::AUTHORIZATION, make_nostr_auth(keys, uri))
         .body(Body::empty())
         .expect("request")
+}
+
+/// A request to `sent` whose credential was signed for `signed_method` and
+/// `signed_uri`, so tests can tamper with the method or the query.
+fn signed_as(
+    keys: &nostr::Keys,
+    method: &str,
+    signed_method: &str,
+    signed_uri: &str,
+    sent: &str,
+) -> Request<Body> {
+    let url = format!("https://admin.example{ADMIN_API_PREFIX}{signed_uri}");
+    let tags = vec![
+        nostr::Tag::parse(["u", &url]).unwrap(),
+        nostr::Tag::parse(["method", signed_method]).unwrap(),
+    ];
+    Request::builder()
+        .method(method)
+        .uri(sent)
+        .header(header::HOST, "admin.example")
+        .header(header::AUTHORIZATION, make_nostr_auth_raw_tags(keys, tags))
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn get(state: &Arc<AppState>, keys: &nostr::Keys, uri: &str) -> (StatusCode, Value) {
@@ -102,22 +126,49 @@ async fn new_reads_refuse_disabled_auth_mode() {
 async fn admin_reads_authorize_head_with_the_real_method() {
     let keys = test_operator_keys();
     let state = nip98_state(vec![keys.public_key().to_hex()]).await;
-    let head = |signed: &str| {
-        let url = format!("https://admin.example{ADMIN_API_PREFIX}/probe");
-        let tags = vec![
-            nostr::Tag::parse(["u", &url]).unwrap(),
-            nostr::Tag::parse(["method", signed]).unwrap(),
-        ];
-        Request::builder()
-            .method("HEAD")
-            .uri("/probe")
-            .header(header::HOST, "admin.example")
-            .header(header::AUTHORIZATION, make_nostr_auth_raw_tags(&keys, tags))
-            .body(Body::empty())
-            .unwrap()
-    };
+    let head = |signed: &str| signed_as(&keys, "HEAD", signed, "/probe", "/probe");
     assert_eq!(send(&state, head("HEAD")).await.0, StatusCode::OK);
     assert_eq!(send(&state, head("GET")).await.0, StatusCode::UNAUTHORIZED);
+}
+
+/// The credential covers the full target: a GET-signed HEAD, or a query
+/// changed after signing, is refused on every new route.
+#[tokio::test]
+async fn new_reads_reject_method_and_query_tampering() {
+    let keys = test_operator_keys();
+    let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+    let mut routes = new_routes("a.example");
+    routes[0] = "/communities?q=a.example".to_owned();
+    for uri in routes {
+        let head = signed_as(&keys, "HEAD", "GET", &uri, &uri);
+        assert_eq!(
+            send(&state, head).await.0,
+            StatusCode::UNAUTHORIZED,
+            "{uri}"
+        );
+        let tampered = uri.replace("a.example", "b.example");
+        let request = signed_as(&keys, "GET", "GET", &uri, &tampered);
+        assert_eq!(
+            send(&state, request).await.0,
+            StatusCode::UNAUTHORIZED,
+            "{tampered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn member_search_rejects_empty_and_overlong_queries() {
+    let keys = test_operator_keys();
+    let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+    for q in ["%20%20".to_owned(), "a".repeat(101)] {
+        let uri = format!("/members/search?communityHost=a.example&q={q}");
+        let (status, body) = get(&state, &keys, &uri).await;
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_query")),
+            "{uri}"
+        );
+    }
 }
 
 async fn community(pool: &sqlx::PgPool, host: &str) -> CommunityId {
@@ -193,6 +244,8 @@ async fn new_reads_serve_operators_and_moderators_and_refuse_non_staff() {
     for (uri, want) in new_routes(&host).iter().zip(expected) {
         for keys in [test_operator_keys(), moderator.clone()] {
             assert_eq!(get(&state, &keys, uri).await.0, want, "{uri}");
+            let head = signed_as(&keys, "HEAD", "HEAD", uri, uri);
+            assert_eq!(send(&state, head).await.0, want, "HEAD {uri}");
         }
         let stranger = nostr::Keys::generate();
         assert_eq!(
@@ -417,13 +470,64 @@ async fn member_lookup_reports_staff_and_active_restrictions() {
     assert_eq!(member["pubkey"], staff);
 }
 
+/// Only the staff-roster read fails: each connection shadows
+/// `relay_operators` with an incompatible temp table, while the community,
+/// profile, role and restriction reads still succeed. The route must answer
+/// 500, never `isStaff: false`.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn member_staff_lookup_fails_closed() {
+async fn member_lookup_fails_closed_when_the_staff_lookup_fails() {
+    let (pool, _) = fixture().await;
+    let host = unique_host("staff-fail");
+    community(&pool, &host).await;
+    let broken = sqlx::postgres::PgPoolOptions::new()
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("CREATE TEMP TABLE relay_operators (unrelated int)")
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .connect(&database_url())
+        .await
+        .expect("connect");
+    let state = nip98_state_with_real_pool(broken).await;
+    let (status, body) = get(
+        &state,
+        &test_operator_keys(),
+        &format!("/members/{PK}?communityHost={host}"),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::INTERNAL_SERVER_ERROR, Some("internal_error")),
+        "{body}"
+    );
+}
+
+/// The route clamps `limit` to 1–50 before searching.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn member_search_clamps_the_limit() {
     let (pool, state) = fixture().await;
-    pool.close().await;
-    let err = super::is_staff(&state, &[0x11u8; 32]).await.unwrap_err();
-    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    let keys = test_operator_keys();
+    let host = unique_host("search-limit");
+    let c = community(&pool, &host).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    for i in 0..51u8 {
+        seed_profile(&pool, c, &[i; 32], &format!("{tag} {i}")).await;
+    }
+    for (limit, want) in [(0, 1), (1, 1), (50, 50), (51, 50)] {
+        let uri = format!("/members/search?communityHost={host}&q={tag}&limit={limit}");
+        let (status, page) = get(&state, &keys, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(
+            page["items"].as_array().unwrap().len(),
+            want,
+            "limit={limit}"
+        );
+    }
 }
 
 #[tokio::test]
