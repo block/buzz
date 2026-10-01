@@ -230,7 +230,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       );
       if (!removed) return;
 
-      // Relay membership is revoked by the caller before this local cleanup.
+      // The caller handles relay membership or confirms device-only removal.
       // Keep side effects outside the updater — updaters can execute twice under
       // React StrictMode.
       removeSelfProfileCachesForRelay(removed.relayUrl);

@@ -24,7 +24,10 @@ type SidebarProfileCardProps = {
   isPresencePending?: boolean;
   onOpenAddCommunity: () => void;
   onOpenSettings: (section?: SettingsSection) => void;
-  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
+  onRemoveCommunity: (
+    id: string,
+    mode?: "leave" | "local-only",
+  ) => Promise<LeaveCommunityResult | undefined>;
   onSendFeedback?: () => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
   onSetUserStatus: (status: UserStatusInput) => void;

@@ -72,7 +72,7 @@ export function useCommunityNavigationTransitions({
   );
 
   const removeCommunity = React.useCallback(
-    async (id: string) => {
+    async (id: string, mode: "leave" | "local-only" = "leave") => {
       const target = communities.communities.find(
         (community) => community.id === id,
       );
@@ -82,13 +82,15 @@ export function useCommunityNavigationTransitions({
         (community) => community.id !== id,
       );
 
-      // Do not touch local state until this relay has explicitly accepted the
-      // signed NIP-43 leave request. Rejections and timeouts bubble back to the
-      // dialog so the person can retry without losing their community config.
-      const leaveResult = await leaveCommunity(
-        target.relayUrl,
-        communities.activeCommunity?.relayUrl,
-      );
+      // Leaving still requires relay acceptance. Explicit device-only removal
+      // must also work when the relay is gone and cannot answer any request.
+      const leaveResult =
+        mode === "local-only"
+          ? undefined
+          : await leaveCommunity(
+              target.relayUrl,
+              communities.activeCommunity?.relayUrl,
+            );
 
       if (id !== communities.activeCommunity?.id) {
         communities.removeCommunity(id);
@@ -98,7 +100,7 @@ export function useCommunityNavigationTransitions({
       if (!fallback) {
         if (!markCommunityDiscoveryAfterLeave()) {
           throw new Error(
-            "Membership was removed, but community discovery state could not be saved. Restart Buzz and try again.",
+            "Community discovery state could not be saved. Restart Buzz and try again.",
           );
         }
         await goHome({ replace: true });
