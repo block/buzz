@@ -887,6 +887,18 @@ impl Db {
         }
     }
 
+    /// Writer-authoritative [`Db::is_relay_member`]: never replica-routed.
+    /// For admission fences that run after a removal's disconnect may already
+    /// have passed, where a stale replica answer would grant lasting access.
+    #[datastore_span(name = "is_relay_member_writer", system = "postgresql")]
+    pub async fn is_relay_member_writer(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<bool> {
+        is_relay_member(&self.pool, community, pubkey).await
+    }
+
     /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
     #[datastore_span(name = "get_relay_member", system = "postgresql")]
     pub async fn get_relay_member(

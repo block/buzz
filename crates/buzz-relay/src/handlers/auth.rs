@@ -160,7 +160,7 @@ pub(crate) async fn final_admission_denial(
             class,
         });
     }
-    match crate::api::relay_members::check_relay_membership(
+    match crate::api::relay_members::check_relay_membership_authoritative(
         state,
         community,
         pubkey.as_bytes(),
@@ -181,6 +181,39 @@ pub(crate) async fn final_admission_denial(
             Some(AdmissionDenial {
                 metric: "relay_membership_check_error",
                 reason: "error: internal error checking relay membership",
+                outcome: AuthOutcome::RelayMembershipCheckError,
+                class: buzz_auth::DenialClass::AuthorizationUnavailable,
+            })
+        }
+    }
+}
+
+/// Owner to record on an admitted socket: the proven NIP-OA owner, else the
+/// stored `users.agent_owner_pubkey` (first-write-wins, so fixed for the
+/// socket's life). Revoking that owner then closes the socket with no
+/// database read. A failed read refuses admission.
+pub(crate) async fn admitted_owner(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    pubkey: nostr::PublicKey,
+    nip_oa_owner: Option<nostr::PublicKey>,
+) -> Result<Option<[u8; 32]>, AdmissionDenial> {
+    if let Some(owner) = nip_oa_owner {
+        return Ok(Some(owner.to_bytes()));
+    }
+    match state
+        .db
+        .get_agent_channel_policy(community, pubkey.as_bytes())
+        .await
+    {
+        Ok(row) => Ok(row
+            .and_then(|(_, owner)| owner)
+            .and_then(|owner| owner.try_into().ok())),
+        Err(e) => {
+            warn!(pubkey = %pubkey.to_hex(), error = %e, "stored agent owner lookup failed, denying");
+            Err(AdmissionDenial {
+                metric: "agent_owner_link_error",
+                reason: OWNER_LINK_ERROR,
                 outcome: AuthOutcome::RelayMembershipCheckError,
                 class: buzz_auth::DenialClass::AuthorizationUnavailable,
             })
@@ -598,6 +631,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // The bind carries the admitting NIP-FI issuer, so a concurrent
             // `disconnect_nip_fi` scan that sees the pubkey also sees its
             // issuer; the deny-set check after `authenticate` closes the rest.
+            let owner =
+                match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
+                    Ok(owner) => owner,
+                    Err(denial) => {
+                        deny_admission(&conn, &event_id_hex, denial);
+                        return;
+                    }
+                };
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 pubkey.to_bytes().to_vec(),
@@ -605,6 +646,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .as_ref()
                     .map(|a| a.identity().issuer().to_owned()),
             );
+            if let Some(owner) = owner {
+                state.conn_manager.set_admitted_owner(conn_id, owner);
+            }
             let denial = match final_admission_denial(
                 &state,
                 conn.tenant.community(),

@@ -96,6 +96,8 @@ pub(crate) struct CommunityConnectionControl {
     /// Pubkey proven by this socket's auth, set once auth succeeds. Sockets
     /// whose pubkey is tracked by [`ConnectionManager`] leave it unset.
     pubkey: Arc<std::sync::OnceLock<[u8; 32]>>,
+    /// Owner of an admitted agent; revoking the owner closes this socket.
+    owner: Arc<std::sync::OnceLock<[u8; 32]>>,
 }
 
 impl CommunityConnectionControl {
@@ -107,12 +109,25 @@ impl CommunityConnectionControl {
             proven_identity: Arc::new(std::sync::RwLock::new(None)),
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
             pubkey: Arc::default(),
+            owner: Arc::default(),
         }
     }
 
     /// Records the authenticated pubkey so pubkey-scoped disconnects reach this socket.
     pub(crate) fn bind_pubkey(&self, pubkey: [u8; 32]) {
         let _ = self.pubkey.set(pubkey);
+    }
+
+    /// Records the admitted agent's owner so revoking the owner reaches this
+    /// socket without a database lookup.
+    pub(crate) fn bind_owner(&self, owner: [u8; 32]) {
+        let _ = self.owner.set(owner);
+    }
+
+    fn is_principal_or_owner(&self, pubkey: &[u8]) -> bool {
+        [&self.pubkey, &self.owner]
+            .iter()
+            .any(|slot| slot.get().map(|k| &k[..]) == Some(pubkey))
     }
 
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
@@ -256,6 +271,8 @@ struct ConnEntry {
     /// the `authenticated_pubkey` write lock and read under its read lock, so
     /// `disconnect_nip_fi` never sees the pubkey without its issuer.
     nip_fi_issuer: std::sync::RwLock<Option<String>>,
+    /// Owner of an admitted agent; revoking the owner closes this socket.
+    admitted_owner: std::sync::OnceLock<[u8; 32]>,
     grace_limit: u8,
     /// Lifecycle control used by `disconnect_nip_fi` for the denial transition.
     community_control: CommunityConnectionControl,
@@ -345,14 +362,14 @@ impl CommunityConnectionRegistry {
         closed
     }
 
-    /// Disconnects every socket bound to `pubkey` in `community`, attributing
-    /// the close to revoked access. Fenced to `community` like
-    /// [`ConnectionManager::disconnect_pubkey`].
+    /// Disconnects every socket in `community` bound to `pubkey` or admitted
+    /// as an agent `pubkey` owns, attributing the close to revoked access.
+    /// Fenced to `community` like [`ConnectionManager::disconnect_pubkey`].
     pub fn disconnect_pubkey(&self, community_id: CommunityId, pubkey: &[u8]) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             let (community, control) = entry.value();
-            if *community == community_id && control.pubkey.get().map(|k| &k[..]) == Some(pubkey) {
+            if *community == community_id && control.is_principal_or_owner(pubkey) {
                 control.revoke_access();
                 closed += 1;
             }
@@ -634,6 +651,7 @@ impl ConnectionManager {
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
                 nip_fi_issuer: std::sync::RwLock::new(None),
+                admitted_owner: std::sync::OnceLock::new(),
                 grace_limit,
                 community_control,
             },
@@ -682,6 +700,14 @@ impl ConnectionManager {
         }
     }
 
+    /// Record the owner of an agent admitted on `conn_id`, so revoking the
+    /// owner closes the socket without a database lookup.
+    pub fn set_admitted_owner(&self, conn_id: Uuid, owner: [u8; 32]) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            let _ = entry.admitted_owner.set(owner);
+        }
+    }
+
     /// Return live connection IDs authenticated as `pubkey_bytes` in one community.
     ///
     /// The same Nostr key may be connected to multiple communities at once.
@@ -727,9 +753,9 @@ impl ConnectionManager {
         }
     }
 
-    /// Disconnect every live connection authenticated as `pubkey` **in
-    /// `community`**, delivering a final `OK false` frame carrying `reason`
-    /// before closing.
+    /// Disconnect every live connection authenticated as `pubkey`, or
+    /// admitted as an agent `pubkey` owns, **in `community`**, delivering a
+    /// final `OK false` frame carrying `reason` before closing.
     ///
     /// Used for live ban enforcement (COMMUNITY_MODERATION_PLAN.md §0 decision
     /// 4): a ban must take effect immediately on existing sessions, not just at
@@ -754,19 +780,22 @@ impl ConnectionManager {
     ) -> usize {
         let frame = crate::protocol::RelayMessage::ok(event_id, false, reason);
         let mut closed = 0usize;
-        for conn_id in self.connection_ids_for_pubkey_in_community(community, pubkey) {
-            if let Some(entry) = self.connections.get(&conn_id) {
-                if entry.community_id != community {
-                    continue;
-                }
-                // Best-effort delivery: a full control buffer still gets the
-                // close via cancel below, just without the reason frame.
-                let _ = entry
-                    .ctrl_tx
-                    .try_send(WsMessage::Text(frame.clone().into()));
-                entry.cancel.cancel();
-                closed += 1;
+        for entry in self.connections.iter() {
+            let owned = entry.admitted_owner.get().map(|k| &k[..]) == Some(pubkey);
+            let principal = entry
+                .authenticated_pubkey
+                .read()
+                .is_ok_and(|key| key.as_deref() == Some(pubkey));
+            if entry.community_id != community || !(principal || owned) {
+                continue;
             }
+            // Best-effort delivery: a full control buffer still gets the
+            // close via cancel below, just without the reason frame.
+            let _ = entry
+                .ctrl_tx
+                .try_send(WsMessage::Text(frame.clone().into()));
+            entry.cancel.cancel();
+            closed += 1;
         }
         closed
     }
@@ -1042,11 +1071,6 @@ impl Default for ConnectionManager {
         Self::new()
     }
 }
-
-/// First and maximum delay between retries of a failed owned-agent lookup
-/// during a live revoke.
-const OWNED_AGENT_REVOKE_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
-const OWNED_AGENT_REVOKE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
@@ -1705,16 +1729,18 @@ impl AppState {
                 .disconnect_pubkey(community, pubkey)
     }
 
-    /// Close every live session of `pubkey` and of the agents it owns
-    /// (`users.agent_owner_pubkey`), on every pod. Ban, report-action ban, and
-    /// roster removal (admin or self-leave) all end access this way, because an
-    /// agent's access is derived from its owner's.
+    /// Close every live session of `pubkey` and of the agents it owns, on
+    /// every pod. Ban, report-action ban, and roster removal (admin or
+    /// self-leave) all end access this way, because an agent's access is
+    /// derived from its owner's.
     ///
-    /// The owner is always disconnected. If the owned-agent lookup fails, the
-    /// error is returned and a background task keeps retrying the lookup until
-    /// it succeeds and those agents are closed, so a transient DB failure
-    /// delays the agents' disconnect instead of abandoning it. Returns the
-    /// number of sockets closed on this pod.
+    /// One clusterwide disconnect closes every socket whose principal or
+    /// admission-recorded owner is `pubkey`, with no database read. The
+    /// `users.agent_owner_pubkey` sweep then covers an agent socket admitted
+    /// before its owner link existed (linked later, e.g. by an HTTP NIP-OA
+    /// request). If that lookup fails, the error is returned; every socket
+    /// with a recorded owner is already closed. Returns the number of sockets
+    /// closed on this pod.
     pub async fn revoke_live_access(
         &self,
         tenant: &TenantContext,
@@ -1729,26 +1755,7 @@ impl AppState {
         {
             Ok(agents_closed) => Ok(closed + agents_closed),
             Err(e) => {
-                tracing::error!(
-                    "owned-agent lookup failed during live revoke; retrying in background: {e}"
-                );
-                let state = self.clone();
-                let (tenant, pubkey) = (tenant.clone(), pubkey.to_vec());
-                let (event_id, reason) = (event_id.to_string(), reason.to_string());
-                tokio::spawn(async move {
-                    let mut delay = OWNED_AGENT_REVOKE_RETRY_INITIAL;
-                    loop {
-                        tokio::time::sleep(delay).await;
-                        match state
-                            .disconnect_owned_agents(&tenant, &pubkey, &event_id, &reason)
-                            .await
-                        {
-                            Ok(_) => return,
-                            Err(e) => tracing::error!("owned-agent revoke retry failed: {e}"),
-                        }
-                        delay = (delay * 2).min(OWNED_AGENT_REVOKE_RETRY_MAX);
-                    }
-                });
+                tracing::error!("owned-agent lookup failed during live revoke: {e}");
                 Err(format!("owned-agent lookup failed: {e}"))
             }
         }

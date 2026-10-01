@@ -125,14 +125,65 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            false,
+        )
+        .await
+    }
+
+    /// [`check_relay_membership`] reading principal and owner membership from
+    /// the writer. The final admission fence uses it: a removal whose
+    /// disconnect already ran must not be undone by a stale replica row.
+    pub async fn check_relay_membership_authoritative(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            true,
+        )
+        .await
+    }
+
+    async fn read_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_hex: &str,
+        writer: bool,
+    ) -> buzz_db::Result<bool> {
+        if writer {
+            state.db.is_relay_member_writer(community, pubkey_hex).await
+        } else {
+            state.db.is_relay_member(community, pubkey_hex).await
+        }
+    }
+
+    async fn check_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        writer: bool,
+    ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
             return Ok(MembershipDecision::OpenRelay);
         }
 
         let pubkey_hex = hex::encode(pubkey_bytes);
-        let is_member = state
-            .db
-            .is_relay_member(community, &pubkey_hex)
+        let is_member = read_membership(state, community, &pubkey_hex, writer)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
@@ -155,9 +206,7 @@ pub mod relay_members {
                 ) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
-                            .db
-                            .is_relay_member(community, &owner_hex)
+                        let owner_is_member = read_membership(state, community, &owner_hex, writer)
                             .await
                             .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
                         if owner_is_member {

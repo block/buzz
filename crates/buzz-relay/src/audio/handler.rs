@@ -812,16 +812,27 @@ pub(crate) async fn handle_active_audio_connection(
     // applies (see `final_admission_denial`), before any huddle lease. A ban
     // or removal whose disconnect ran before the bind is seen by these fresh
     // reads; one that runs after it cancels this socket (`check_cancel!`).
+    let owner =
+        crate::handlers::auth::admitted_owner(&state, tenant.community(), pubkey, nip_oa_owner)
+            .await;
+    if let Ok(Some(owner)) = owner {
+        control.bind_owner(owner);
+    }
     control.bind_pubkey(pubkey.to_bytes());
-    if let Some(denial) = crate::handlers::auth::final_admission_denial(
-        &state,
-        tenant.community(),
-        pubkey,
-        auth_tag_json.as_deref(),
-        Some(signed_auth_created_at),
-    )
-    .await
-    {
+    let denial = match owner {
+        Err(denial) => Some(denial),
+        Ok(_) => {
+            crate::handlers::auth::final_admission_denial(
+                &state,
+                tenant.community(),
+                pubkey,
+                auth_tag_json.as_deref(),
+                Some(signed_auth_created_at),
+            )
+            .await
+        }
+    };
+    if let Some(denial) = denial {
         let (class, message) = (denial.class, denial.reason);
         warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = message, "audio: denied at final admission check");
         exit_authorization_refusal(
