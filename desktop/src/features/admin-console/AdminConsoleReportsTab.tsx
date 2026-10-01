@@ -28,7 +28,10 @@ import {
   type AdminReportDto,
   type AdminReportResolution,
 } from "./api";
-import { CommunityBadge } from "./AdminConsoleCommunityBadge";
+import {
+  CommunityBadge,
+  NotConnectedWarning,
+} from "./AdminConsoleCommunityBadge";
 import {
   DetailRow,
   ErrorMessage,
@@ -506,6 +509,19 @@ function ResolveReportForm({
       </div>
 
       {selectedAction && (
+        <p
+          className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+          data-testid="resolve-community"
+        >
+          In{" "}
+          <CommunityBadge host={report.communityHost} id={report.communityId} />
+          {report.communityHost && (
+            <NotConnectedWarning host={report.communityHost} />
+          )}
+        </p>
+      )}
+
+      {selectedAction && (
         <Button
           data-testid="resolve-submit-btn"
           disabled={
@@ -730,7 +746,7 @@ export function ReportsTab({
           .filter(Boolean)
           .join(" · ");
         return (
-          <li key={id}>
+          <>
             {/* Processing rows stay navigable: the enforcement state (progress,
                 retry, cancel) lives inside the detail view, so disabling the row
                 would hide exactly the controls an operator needs while an action
@@ -756,7 +772,7 @@ export function ReportsTab({
                 </span>
               )}
             </button>
-          </li>
+          </>
         );
       }}
     />

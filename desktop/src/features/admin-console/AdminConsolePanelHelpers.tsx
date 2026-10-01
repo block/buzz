@@ -389,12 +389,17 @@ export function groupByCommunity<
 /**
  * Render community-grouped rows under per-community headings.
  *
- * Each group is headed by its community badge, which opens that community's
- * page and sits outside the row buttons. `renderItem` produces the row for
- * one entry — the caller owns row markup so navigation/testids are unchanged.
+ * Each group is headed by its community badge, and every row repeats it beside
+ * the row button, so a row read on its own still names its community. Badges
+ * open that community's page and sit outside the row buttons. `renderItem`
+ * produces the row button for one entry.
  */
 export function CommunityGroupedList<
-  T extends { communityId: string | null; communityHost: string | null },
+  T extends {
+    id: string;
+    communityId: string | null;
+    communityHost: string | null;
+  },
 >({ items, renderItem }: { items: T[]; renderItem: (item: T) => ReactNode }) {
   const groups = useMemo(() => groupByCommunity(items), [items]);
   return (
@@ -410,7 +415,17 @@ export function CommunityGroupedList<
               id={group.items[0].communityId}
             />
           </h4>
-          <ul className="space-y-1">{group.items.map(renderItem)}</ul>
+          <ul className="space-y-1">
+            {group.items.map((item) => (
+              <li className="flex items-center gap-2" key={item.id}>
+                <div className="min-w-0 flex-1">{renderItem(item)}</div>
+                <CommunityBadge
+                  host={item.communityHost}
+                  id={item.communityId}
+                />
+              </li>
+            ))}
+          </ul>
         </section>
       ))}
     </div>

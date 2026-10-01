@@ -139,27 +139,25 @@ export function FeedbackTab({
         const receivedAt = item.receivedAt;
         const status = item.status;
         return (
-          <li key={id}>
-            <button
-              className="w-full rounded-md border border-border/60 px-3 py-2.5 text-left text-sm hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => setSelectedId(id)}
-              type="button"
-            >
-              <div className="flex items-center gap-2 mb-0.5">
-                <span className="block font-medium line-clamp-2">{text}</span>
-                {status !== "new" && (
-                  <Badge className="shrink-0" variant="secondary">
-                    {status}
-                  </Badge>
-                )}
-              </div>
-              {receivedAt && (
-                <span className="text-xs text-muted-foreground">
-                  {formatTimestamp(receivedAt)}
-                </span>
+          <button
+            className="w-full rounded-md border border-border/60 px-3 py-2.5 text-left text-sm hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => setSelectedId(id)}
+            type="button"
+          >
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="block font-medium line-clamp-2">{text}</span>
+              {status !== "new" && (
+                <Badge className="shrink-0" variant="secondary">
+                  {status}
+                </Badge>
               )}
-            </button>
-          </li>
+            </div>
+            {receivedAt && (
+              <span className="text-xs text-muted-foreground">
+                {formatTimestamp(receivedAt)}
+              </span>
+            )}
+          </button>
         );
       }}
     />
