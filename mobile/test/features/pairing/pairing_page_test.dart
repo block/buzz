@@ -1,4 +1,7 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -715,14 +718,13 @@ void main() {
       );
     });
 
-    testWidgets('uses accessible SAS error contrast in both themes', (
-      tester,
-    ) async {
-      const errorMessage = 'Identity confirmation failed. Nothing transferred.';
-      const errorInk = Color(0xFF7A1025);
-      const gradientColors = [Color(0xFFD7D72E), Color(0xFFD7E7F6)];
-
-      for (final theme in [AppTheme.light(), AppTheme.dark()]) {
+    for (final brightness in Brightness.values) {
+      testWidgets('uses accessible SAS error contrast in ${brightness.name}', (
+        tester,
+      ) async {
+        const errorMessage =
+            'Identity confirmation failed. Nothing transferred.';
+        final isDark = brightness == Brightness.dark;
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
@@ -730,21 +732,104 @@ void main() {
                 () => _ConfirmingSasPairingNotifier(errorMessage: errorMessage),
               ),
             ],
-            child: MaterialApp(theme: theme, home: const PairingPage()),
+            child: MaterialApp(
+              theme: isDark ? AppTheme.dark() : AppTheme.light(),
+              home: const PairingPage(),
+            ),
           ),
         );
+        await tester.pumpAndSettle();
 
-        final errorText = tester.widget<Text>(find.text(errorMessage));
-        expect(errorText.style?.color, errorInk);
-        for (final background in gradientColors) {
+        final errorFinder = find.text(errorMessage);
+        expect(Theme.of(tester.element(errorFinder)).brightness, brightness);
+        final errorInk = tester.widget<Text>(errorFinder).style!.color!;
+        expect(
+          errorInk,
+          isDark ? const Color(0xFFFFAAA0) : const Color(0xFF7A1025),
+        );
+
+        final backgroundFinder = find.byKey(
+          const Key('pairing-onboarding-background'),
+        );
+        final background = tester.widget<DecoratedBox>(backgroundFinder);
+        final decoration = background.decoration as BoxDecoration;
+        expect(
+          decoration.color,
+          isDark ? const Color(0xFF11181D) : const Color(0xFFE7F0EF),
+        );
+        if (isDark) {
+          expect(decoration.image, isNull);
+        } else {
           expect(
-            _contrastRatio(errorInk, background),
-            greaterThanOrEqualTo(4.5),
+            (decoration.image!.image as AssetImage).assetName,
+            'assets/images/shell-gradient.png',
+          );
+          await tester.runAsync(
+            () => precacheImage(
+              decoration.image!.image,
+              tester.element(backgroundFinder),
+            ),
           );
         }
+        final size = tester.getSize(backgroundFinder);
+        final errorRect = tester
+            .getRect(errorFinder)
+            .shift(-tester.getTopLeft(backgroundFinder));
+
+        // Render the production decoration and painter without foreground
+        // content, so sampled pixels are the actual surface behind the error.
+        const captureKey = Key('sas-error-background-capture');
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: RepaintBoundary(
+              key: captureKey,
+              child: SizedBox.fromSize(
+                size: size,
+                child: DecoratedBox(
+                  decoration: decoration,
+                  child: CustomPaint(
+                    painter: (background.child! as CustomPaint).painter,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final boundary = tester.renderObject<RenderRepaintBoundary>(
+          find.byKey(captureKey),
+        );
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 1);
+          try {
+            final pixels = (await image.toByteData(
+              format: ui.ImageByteFormat.rawRgba,
+            ))!;
+            for (var y = errorRect.top.ceil(); y < errorRect.bottom; y += 4) {
+              for (var x = errorRect.left.ceil(); x < errorRect.right; x += 4) {
+                final offset = (y * image.width + x) * 4;
+                expect(pixels.getUint8(offset + 3), 255);
+                final surface = Color.fromARGB(
+                  255,
+                  pixels.getUint8(offset),
+                  pixels.getUint8(offset + 1),
+                  pixels.getUint8(offset + 2),
+                );
+                expect(
+                  _contrastRatio(errorInk, surface),
+                  greaterThanOrEqualTo(4.5),
+                  reason: '${brightness.name} error contrast at ($x, $y)',
+                );
+              }
+            }
+          } finally {
+            image.dispose();
+          }
+        });
         expect(tester.takeException(), isNull);
-      }
-    });
+      });
+    }
 
     testWidgets('keeps SAS actions above the keyboard on small screens', (
       tester,
