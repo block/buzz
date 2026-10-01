@@ -107,6 +107,9 @@ impl IntoResponse for MediaDenial {
                     BlossomDenialKind::MissingEvidence => DenialClass::MissingEvidence,
                     BlossomDenialKind::EvidenceRejected => DenialClass::EvidenceRejected,
                     BlossomDenialKind::AuthorizationDenied => DenialClass::AuthorizationDenied,
+                    BlossomDenialKind::AuthorizationUnavailable => {
+                        DenialClass::AuthorizationUnavailable
+                    }
                 };
                 tracing::warn!(
                     error = %error,
@@ -141,7 +144,7 @@ fn membership_denial(
     strictness: BlossomStrictness,
 ) -> MediaDenial {
     let error = if status.is_server_error() {
-        MediaError::ServiceUnavailable
+        MediaError::AuthorizationUnavailable
     } else {
         MediaError::RelayMembershipRequired
     };

@@ -207,7 +207,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
         let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        if let Err((status, _)) = crate::api::relay_members::enforce_relay_membership(
+        // A failed policy lookup is 503 (the canonical NIP-FI body outside
+        // Off mode); only a real refusal is 403.
+        let unavailable = |legacy: Response| match mode {
+            buzz_auth::NipFiMode::Off => legacy,
+            _ => crate::nip_fi_http::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable),
+        };
+        match crate::api::relay_members::check_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
@@ -216,17 +222,23 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         )
         .await
         {
-            // A failed lookup stays 503; only a real refusal is 403.
-            if status.is_server_error() {
-                warn!(pubkey = %pubkey.to_hex(), "git: relay membership lookup failed");
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "error: internal error checking relay membership",
-                )
-                    .into_response());
+            Ok(crate::api::relay_members::MembershipDecision::Denied) => {
+                warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
+                return Err(
+                    (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response()
+                );
             }
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-            return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
+            Ok(_) => {}
+            Err(e) => {
+                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
+                return Err(unavailable(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "error: internal error checking relay membership",
+                    )
+                        .into_response(),
+                ));
+            }
         }
 
         deny_banned_git_principal(
@@ -236,7 +248,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             auth_tag,
             Some(signed_auth_created_at),
         )
-        .await?;
+        .await
+        .map_err(|denial| {
+            if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
+                unavailable(denial)
+            } else {
+                denial
+            }
+        })?;
 
         Ok(GitAuth { pubkey, tenant })
     }
