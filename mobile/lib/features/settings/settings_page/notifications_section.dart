@@ -15,7 +15,11 @@ class _NotificationsSection extends ConsumerWidget {
         !capability.isLoading &&
         !capability.hasError &&
         capability.value != null;
-    if (!hasCapability && !community.pushNotificationsEnabled) {
+    final optOutPending =
+        community.pushSubscriptionState.pendingTombstoneGeneration != null;
+    if (!hasCapability &&
+        !community.pushNotificationsEnabled &&
+        !optOutPending) {
       return const SizedBox.shrink();
     }
     final authorization = ref.watch(buzzPushAuthorizationStatusProvider);
@@ -23,9 +27,13 @@ class _NotificationsSection extends ConsumerWidget {
     final permissionUnavailable = authorization.hasError;
     final permissionDenied = status == BuzzPushAuthorizationStatus.denied;
     final showSettingsRecovery =
-        community.pushNotificationsEnabled &&
-        (permissionDenied || permissionUnavailable);
-    final subtitle = !community.pushNotificationsEnabled
+        optOutPending ||
+        (community.pushNotificationsEnabled &&
+            (permissionDenied || permissionUnavailable));
+    final canToggle = hasCapability || community.pushNotificationsEnabled;
+    final subtitle = optOutPending
+        ? 'Waiting for relay confirmation; notifications may continue'
+        : !community.pushNotificationsEnabled
         ? 'Off for this community'
         : !hasCapability
         ? 'Push support unavailable; you can still turn notifications off'
@@ -59,20 +67,24 @@ class _NotificationsSection extends ConsumerWidget {
               : null,
           trailing: Switch.adaptive(
             value: community.pushNotificationsEnabled,
-            onChanged: (enabled) => unawaited(
-              ref
-                  .read(communityListProvider.notifier)
-                  .setPushNotificationsEnabled(community.id, enabled),
-            ),
+            onChanged: !canToggle
+                ? null
+                : (enabled) => unawaited(
+                    ref
+                        .read(communityListProvider.notifier)
+                        .setPushNotificationsEnabled(community.id, enabled),
+                  ),
           ),
-          onTap: () => unawaited(
-            ref
-                .read(communityListProvider.notifier)
-                .setPushNotificationsEnabled(
-                  community.id,
-                  !community.pushNotificationsEnabled,
+          onTap: !canToggle
+              ? null
+              : () => unawaited(
+                  ref
+                      .read(communityListProvider.notifier)
+                      .setPushNotificationsEnabled(
+                        community.id,
+                        !community.pushNotificationsEnabled,
+                      ),
                 ),
-          ),
         ),
         if (showSettingsRecovery)
           AppListRow(

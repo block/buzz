@@ -62,6 +62,7 @@ void main() {
       final snapshots = <List<Community>>[];
       final tombstones = <int?>[];
       var settingsOpened = 0;
+      var relayAvailable = false;
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -78,7 +79,7 @@ void main() {
               generation,
             }) async {
               tombstones.add(generation);
-              throw StateError('relay unavailable');
+              if (!relayAvailable) throw StateError('relay unavailable');
             }),
             currentRelayPushDescriptorProvider.overrideWith((ref) {
               if (outcome == 'loading') return pending.future;
@@ -135,6 +136,30 @@ void main() {
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
+      expect(
+        find.text('Waiting for relay confirmation; notifications may continue'),
+        findsOneWidget,
+      );
+      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      expect(offSwitch.value, isFalse);
+      expect(offSwitch.onChanged, isNull);
+      await tester.tap(
+        find.byKey(const ValueKey('push-notifications-open-settings')),
+      );
+      await tester.pump();
+      expect(settingsOpened, 2);
+      relayAvailable = true;
+      await container
+          .read(communityListProvider.notifier)
+          .retryPendingPushLeaseTombstone(community.id);
+      await tester.pumpAndSettle();
+      expect(
+        (await storage.loadAll())
+            .single
+            .pushSubscriptionState
+            .pendingTombstoneGeneration,
+        isNull,
+      );
       expect(find.text('Notifications'), findsNothing);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
