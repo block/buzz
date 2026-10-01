@@ -1,3 +1,4 @@
+import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import type { AgentAvailabilityReader } from "./useAgentAvailability";
@@ -99,8 +100,10 @@ export async function respawnManagedAgentWithRules({
   onStopped?: () => void;
 }) {
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
+    const assertRelayNotRemoved = captureRelayRemovals();
     await stopManagedAgent(agent.pubkey);
     onStopped?.();
+    assertRelayNotRemoved();
   }
 
   await startManagedAgent(agent.pubkey);

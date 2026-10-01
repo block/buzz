@@ -26,25 +26,50 @@ const defaultDependencies: Dependencies = {
 // device this session. A reconcile compares these before and after its call,
 // so only a positive removal — never a storage read — fences its result.
 const relayRemovals = new Map<string, number>();
+let totalRelayRemovals = 0;
 
 /** Record that the last community on `relayUrl` was removed from this device. */
 export function markRelayRemoved(relayUrl: string): void {
   const relay = canonicalRelayUrl(relayUrl);
-  if (relay) relayRemovals.set(relay, (relayRemovals.get(relay) ?? 0) + 1);
+  if (!relay) return;
+  relayRemovals.set(relay, (relayRemovals.get(relay) ?? 0) + 1);
+  totalRelayRemovals += 1;
+}
+
+/** Native refusal for a start on a relay removed from this device. */
+export const RELAY_REMOVED_ERROR = "relay was removed from this device";
+
+/** A start that a relay removal cancelled: a quiet no-op, not a failure. */
+export function isRelayRemovedError(error: unknown): boolean {
+  return error instanceof Error && error.message === RELAY_REMOVED_ERROR;
+}
+
+/**
+ * Capture the removal counters before a stop/start sequence awaits. The
+ * returned check throws `RELAY_REMOVED_ERROR` if `relayUrl` — or, for an
+ * agent-wide start whose relay is resolved natively, any relay — was removed
+ * since. Call it immediately before the start, with no await in between, so
+ * a removal followed by a re-add cannot readmit the stale continuation.
+ */
+export function captureRelayRemovals(relayUrl?: string): () => void {
+  const relay = relayUrl === undefined ? null : canonicalRelayUrl(relayUrl);
+  const before = relay ? (relayRemovals.get(relay) ?? 0) : totalRelayRemovals;
+  return () => {
+    const now = relay ? (relayRemovals.get(relay) ?? 0) : totalRelayRemovals;
+    if (now !== before) throw new Error(RELAY_REMOVED_ERROR);
+  };
 }
 
 // Writes to Rust's per-relay admission record run in order, and a reconcile
 // waits for them, so a reconcile issued after a re-add is admitted.
 let admissionWrites: Promise<void> = Promise.resolve();
 
+// A failed write rejects for its own caller; the queue itself recovers so
+// later writes still run.
 function queueAdmissionWrite(write: () => Promise<void>): Promise<void> {
-  admissionWrites = admissionWrites.then(write).catch((error) => {
-    console.warn(
-      "[managed-agent-runtimes] relay admission update failed:",
-      error,
-    );
-  });
-  return admissionWrites;
+  const result = admissionWrites.then(write);
+  admissionWrites = result.catch(() => {});
+  return result;
 }
 
 /** Refuse local pairs on a relay no saved community uses any more. */

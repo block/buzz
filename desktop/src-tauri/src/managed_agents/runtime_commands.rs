@@ -15,8 +15,8 @@ use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
-fn status_for(
-    app: &AppHandle,
+fn status_for<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
@@ -44,8 +44,8 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
-fn status_for_with(
-    app: &AppHandle,
+fn status_for_with<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
@@ -73,7 +73,7 @@ fn status_for_with(
     }
 }
 
-fn emit_status(app: &AppHandle, status: &ManagedAgentRuntimeStatus) {
+fn emit_status<R: tauri::Runtime>(app: &AppHandle<R>, status: &ManagedAgentRuntimeStatus) {
     let _ = app.emit(STATUS_EVENT, status);
 }
 
@@ -243,13 +243,13 @@ pub fn start_managed_agent_runtime(
     start_managed_agent_runtime_pair_lazy(pubkey, relay_url, &admission, app)
 }
 
-fn start_pair(
+fn start_pair<R: tauri::Runtime>(
     pubkey: String,
     relay_url: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
     admission: &super::AdmissionSnapshot,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
     let transition = state
@@ -332,6 +332,14 @@ pub fn stop_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    stop_pair(pubkey, relay_url, app)
+}
+
+fn stop_pair<R: tauri::Runtime>(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle<R>,
+) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -399,9 +407,22 @@ pub fn restart_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    let stop_app = app.clone();
+    let (stop_pubkey, stop_relay) = (pubkey.clone(), relay_url.clone());
+    restart_pair(pubkey, relay_url, app, move || {
+        stop_pair(stop_pubkey, stop_relay, stop_app).map(drop)
+    })
+}
+
+fn restart_pair<R: tauri::Runtime>(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle<R>,
+    stop: impl FnOnce() -> Result<(), String>,
+) -> Result<ManagedAgentRuntimeStatus, String> {
     // Captured before the stop, so a removal landing between the two refuses the start.
     let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
-    stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
+    stop()?;
     start_pair(pubkey, relay_url, true, None, &admission, app)
 }
 
@@ -750,3 +771,7 @@ mod tests {
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
     }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "runtime_commands_admission_tests.rs"]
+mod admission_tests;

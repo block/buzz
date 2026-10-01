@@ -287,6 +287,48 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    let reconcile_items = spawn_and_register_restored_agents(
+        app,
+        shutdown_started,
+        &admission,
+        restore_relay,
+        &agents_to_start,
+        owner_hex.as_deref(),
+    )?;
+
+    // ── Profile reconciliation (fire-and-forget) ────────────────────────────
+    // Spawn background tasks to ensure each restored agent's kind:0 profile is
+    // published on the relay. Same pattern as the UI start path.
+    for (pubkey, data) in reconcile_items {
+        let reconcile_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = reconcile_app.state::<AppState>();
+            if let Err(e) =
+                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
+                    .await
+            {
+                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+/// Phases B and C of launch restore: spawn `agents_to_start` on `restore_relay`
+/// if it is still admitted under the snapshot `apply_workspace` scheduled the
+/// restore with, then register them. Split from the sweeps above so tests can
+/// drive the real admission and registration without sweeping live processes.
+/// Returns the profile reconciliations to run for the agents it registered.
+fn spawn_and_register_restored_agents<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    shutdown_started: &AtomicBool,
+    admission: &super::AdmissionSnapshot,
+    restore_relay: &str,
+    agents_to_start: &[super::ManagedAgentRecord],
+    owner_hex: Option<&str>,
+) -> Result<Vec<(String, crate::commands::ProfileReconcileData)>, String> {
+    let state = app.state::<AppState>();
     // Serialize spawning and runtime registration with shutdown cleanup. The
     // shutdown flag is rechecked after taking the lock so shutdown either
     // prevents this transition or waits until every child is tracked and can
@@ -295,11 +337,11 @@ pub async fn restore_managed_agents_on_launch(
     let spawned = spawn_if_admitted(
         &state,
         shutdown_started,
-        &admission,
+        admission,
         restore_relay,
         |admitted| {
             std::thread::scope(|scope| {
-                let owner_hex_ref = owner_hex.as_deref();
+                let owner_hex_ref = owner_hex;
                 let handles: Vec<_> = agents_to_start
                     .iter()
                     .filter(|_| !shutdown_started.load(Ordering::SeqCst))
@@ -373,11 +415,11 @@ pub async fn restore_managed_agents_on_launch(
         },
     )?;
     let Some((restore_transition, spawn_results)) = spawned else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
     if spawn_results.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // ── Phase C (re-acquire lock): write back PIDs and status to records ──
@@ -486,23 +528,7 @@ pub async fn restore_managed_agents_on_launch(
     drop(_store_guard);
     drop(restore_transition);
 
-    // ── Profile reconciliation (fire-and-forget) ────────────────────────────
-    // Spawn background tasks to ensure each restored agent's kind:0 profile is
-    // published on the relay. Same pattern as the UI start path.
-    for (pubkey, data) in reconcile_items {
-        let reconcile_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = reconcile_app.state::<AppState>();
-            if let Err(e) =
-                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
-                    .await
-            {
-                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
-            }
-        });
-    }
-
-    Ok(())
+    Ok(reconcile_items)
 }
 
 fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome) -> bool {
@@ -676,3 +702,7 @@ mod launch_restore_admission_tests {
         assert_eq!(spawns(&state, &shutdown, &admission), 0);
     }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "restore_admission_tests.rs"]
+mod admission_entry_tests;

@@ -5,6 +5,7 @@ import {
   managedAgentsQueryKey,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import {
   startManagedAgent,
@@ -103,6 +104,7 @@ export function useAutoRestartPolicy() {
 
       void (async () => {
         try {
+          const assertRelayNotRemoved = captureRelayRemovals();
           // Pre-fire re-fetch: shrink the stale-decision window to ~0.
           const fresh = await listManagedAgents();
           const current = fresh.find((a) => a.pubkey === agent.pubkey);
@@ -116,6 +118,7 @@ export function useAutoRestartPolicy() {
           }
           await stopManagedAgent(agent.pubkey);
           clearActiveTurnsForAgentOnStop(agent.pubkey);
+          assertRelayNotRemoved();
           await startManagedAgent(agent.pubkey);
         } catch {
           // Failed attempt: edge stays consumed — badge-only until the

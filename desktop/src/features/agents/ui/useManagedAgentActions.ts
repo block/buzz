@@ -1,3 +1,4 @@
+import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -182,6 +183,7 @@ export function useManagedAgentActions() {
         startManagedAgent: startMutation.mutateAsync,
       });
     } catch (error) {
+      if (isRelayRemovedError(error)) return;
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );
@@ -205,6 +207,7 @@ export function useManagedAgentActions() {
         onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
       });
     } catch (error) {
+      if (isRelayRemovedError(error)) return;
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to restart agent.",
       );
@@ -257,6 +260,7 @@ export function useManagedAgentActions() {
       void managedAgentsQuery.refetch();
       void relayAgentsQuery.refetch();
     } catch (error) {
+      if (isRelayRemovedError(error)) return;
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );

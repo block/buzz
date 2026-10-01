@@ -3,7 +3,9 @@ import test, { mock } from "node:test";
 
 import {
   markRelayRemoved,
+  readmitRelay,
   reconcileConfiguredManagedAgentRuntimes,
+  refuseRelayAdmission,
   stopManagedAgentPairsOnRelay,
 } from "./managedAgentRelayCleanup.ts";
 
@@ -128,4 +130,17 @@ test("removing a 127.* hostname does not fence the real loopback relay", async (
   );
   assert.deepEqual(stopped, ["a"]);
   assert.deepEqual([...removedRelays], ["wss://127.preview.example"]);
+});
+
+test("a failed admission write rejects for its caller and the queue keeps running", async () => {
+  // No Tauri runtime here, so every native admission write fails.
+  await assert.rejects(refuseRelayAdmission("wss://write-fails.example"));
+  await assert.rejects(readmitRelay("wss://write-fails.example"));
+  // The queue recovered: a reconcile waiting on it still runs.
+  const { runtimes } = await reconcileConfiguredManagedAgentRuntimes([], {
+    list: async () => [],
+    reconcile: async () => [],
+    stop: async () => {},
+  });
+  assert.deepEqual(runtimes, []);
 });

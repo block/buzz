@@ -215,7 +215,12 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       return next;
     });
     // A relay removed from this device earlier admits local agent pairs again.
-    void readmitRelay(community.relayUrl);
+    readmitRelay(community.relayUrl).catch((error) => {
+      console.error(
+        "[communities] re-admitting local agents on this relay failed; their starts stay refused:",
+        error,
+      );
+    });
     return resolvedId;
   }, []);
 

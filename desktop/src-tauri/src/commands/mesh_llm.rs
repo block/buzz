@@ -678,8 +678,8 @@ fn pick_serve_target_for_model(
 /// a relay query failure ("could not refresh targets") is not the same as a
 /// relay that answered with no live target for this model ("peer offline").
 /// Non relay-mesh records are a no-op.
-pub(crate) async fn ensure_relay_mesh_for_record(
-    app: &AppHandle,
+pub(crate) async fn ensure_relay_mesh_for_record<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     model_id: Option<&str>,
     _allow_fresh_create_start: bool,
 ) -> Result<(), String> {

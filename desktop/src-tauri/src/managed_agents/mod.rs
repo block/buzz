@@ -10,6 +10,8 @@ pub(crate) use agent_env::{
 };
 mod agent_description;
 pub(crate) use agent_description::{effective_agent_description, record_effective_description};
+#[cfg(all(test, not(target_os = "windows")))]
+pub(crate) mod admission_test_support;
 mod backend;
 pub(crate) mod bestie_assignment;
 pub(crate) mod claude_config;

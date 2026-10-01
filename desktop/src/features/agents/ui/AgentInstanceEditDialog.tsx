@@ -1,3 +1,4 @@
+import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
@@ -807,12 +808,15 @@ export function AgentInstanceEditDialog({
             onClick: () => {
               startMutation.mutate(result.agent.pubkey, {
                 onSuccess: () => toast.success(`${startedName} started.`),
-                onError: (error) =>
+                onError: (error) => {
+                  // Its community was removed meanwhile: nothing to report.
+                  if (isRelayRemovedError(error)) return;
                   toast.error(
                     error instanceof Error
                       ? `${startedName} failed to start: ${error.message}`
                       : `${startedName} failed to start.`,
-                  ),
+                  );
+                },
               });
             },
           },
