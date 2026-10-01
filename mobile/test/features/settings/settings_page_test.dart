@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:buzz/shared/push/dev_push_lease.dart';
+import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -76,6 +80,64 @@ void main() {
     });
   }
 
+  for (final outcome in ['absent', 'error']) {
+    testWidgets('hides notifications while capability loads and is $outcome', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final capability = Completer<BuzzPushLeaseDescriptor?>();
+      var permissionReads = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            activeCommunityProvider.overrideWith(
+              (ref) async => Community.create(
+                name: 'No push',
+                relayUrl: 'wss://relay.example',
+              ).copyWith(pushNotificationsEnabled: false),
+            ),
+            currentRelayPushDescriptorProvider.overrideWith(
+              (ref) => capability.future,
+            ),
+            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
+              () async {
+                permissionReads += 1;
+                return BuzzPushAuthorizationStatus.authorized;
+              },
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              invitePageBuilder: (_) => const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Notifications'), findsNothing);
+      expect(find.byType(Switch), findsNothing);
+      if (outcome == 'absent') {
+        capability.complete(null);
+      } else {
+        capability.completeError(StateError('discovery failed'));
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('Notifications'), findsNothing);
+      expect(find.text('Push notifications'), findsNothing);
+      expect(find.byType(Switch), findsNothing);
+      expect(permissionReads, 0);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   testWidgets('shows the persisted per-community push opt-in on iOS', (
     tester,
   ) async {
@@ -88,11 +150,14 @@ void main() {
       relayUrl: 'wss://relay.example',
     ).copyWith(pushNotificationsEnabled: true);
 
+    final capability = Future<BuzzPushLeaseDescriptor?>.value(_pushDescriptor);
+
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
+          currentRelayPushDescriptorProvider.overrideWith((ref) => capability),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => BuzzPushAuthorizationStatus.authorized,
@@ -136,6 +201,9 @@ void main() {
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
+          currentRelayPushDescriptorProvider.overrideWith(
+            (ref) async => _pushDescriptor,
+          ),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => BuzzPushAuthorizationStatus.denied,
@@ -189,6 +257,9 @@ void main() {
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
+          currentRelayPushDescriptorProvider.overrideWith(
+            (ref) async => _pushDescriptor,
+          ),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => throw StateError('authorization unavailable'),
@@ -541,3 +612,15 @@ class _SettingsLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
 }
+
+const _pushDescriptor = BuzzPushLeaseDescriptor(
+  origin: 'wss://relay.example',
+  executorKeyId: 'key',
+  executorPubkey: 'pubkey',
+  transport: 'apns',
+  maxLeaseTtlSeconds: 3600,
+  maxContentLength: 4096,
+  maxPlaintextLength: 4096,
+  maxEndpointLength: 2048,
+  maxStringLength: 512,
+);

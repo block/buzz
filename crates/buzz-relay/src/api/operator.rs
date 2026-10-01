@@ -24,7 +24,7 @@ use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
 
-fn deletion_api_error(
+fn coded_api_error(
     status: StatusCode,
     code: &'static str,
     message: &str,
@@ -304,11 +304,10 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
-        Err(msg)
-            if msg == "community already exists"
-                || msg.starts_with("limit_reached:")
-                || msg.starts_with("owner_conflict:") =>
-        {
+        Err(msg) if msg.starts_with("limit_reached:") => {
+            Err(coded_api_error(StatusCode::CONFLICT, "limit_reached", &msg))
+        }
+        Err(msg) if msg == "community already exists" || msg.starts_with("owner_conflict:") => {
             Err(api_error(StatusCode::CONFLICT, &msg))
         }
         Err(msg)
@@ -329,10 +328,11 @@ pub struct ArchiveCommunityRequest {
     owner_pubkey: String,
 }
 
-/// Authenticated owner intent mediated by a trusted deployment operator.
+/// Operator-attested owner intent mediated by a trusted deployment operator.
 #[derive(Debug, Deserialize)]
 pub struct DeleteCommunityRequest {
     host: String,
+    community_id: Option<Uuid>,
     owner_pubkey: String,
     request_id: Uuid,
     acknowledgement_version: i32,
@@ -430,7 +430,7 @@ pub async fn unarchive_community(
     let record = match result {
         buzz_db::UnarchiveCommunityResult::Unarchived(record) => record,
         buzz_db::UnarchiveCommunityResult::DeletionPending => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::CONFLICT,
                 "deletion_lifecycle_conflict",
                 "community deletion is pending",
@@ -449,7 +449,7 @@ pub async fn unarchive_community(
     })))
 }
 
-/// Persist authenticated owner deletion intent without executing deletion work.
+/// Persist operator-attested owner deletion intent without executing deletion work.
 ///
 /// `POST /operator/communities/delete`, NIP-98 signed by a pubkey in
 /// `RELAY_OPERATOR_PUBKEYS`, body:
@@ -457,6 +457,7 @@ pub async fn unarchive_community(
 /// ```json
 /// {
 ///   "host": "archived.communities.example",
+///   "community_id": "<optional community UUID>",
 ///   "owner_pubkey": "<64-char hex>",
 ///   "request_id": "<stable UUID>",
 ///   "acknowledgement_version": 1
@@ -470,13 +471,20 @@ pub async fn unarchive_community(
 /// Resubmitting the same UUID with the same host, owner, and acknowledgement
 /// version returns `202` with that request's current `status`, at any stage and
 /// even after membership purge, and never admits new work. Callers recover an
-/// ambiguous submission by resending it; a different tuple under a known UUID
-/// is `409 deletion_request_conflict`.
+/// ambiguous submission by resending it; any other owner request under a known
+/// UUID (different host, owner, or stored acknowledgement version, or a UUID
+/// held by an operator-origin request) is `409 deletion_request_conflict`. An unsupported
+/// acknowledgement version is rejected before the UUID lookup with
+/// `400 unsupported_acknowledgement_version`, even for a known UUID.
+/// If supplied, `community_id` must identify the community bound to `host`;
+/// a mismatch returns `409 community_id_mismatch`, including on UUID replay.
+/// A malformed UUID returns `400 invalid_request`.
 ///
 /// Owner consent is asserted by the operator, not proven to the relay. The
 /// operator authenticates the owner and collects the acknowledgement upstream;
 /// this request carries only the operator's NIP-98 signature. Authorization is
-/// therefore operator authority plus "the asserted pubkey is still the owner".
+/// therefore operator authority plus "the asserted pubkey is the community's
+/// sole current owner".
 /// `owner_pubkey` and `acknowledgement_version` are recorded as provenance for
 /// that upstream ceremony, not verified as cryptographic owner consent.
 pub async fn delete_community(
@@ -488,16 +496,16 @@ pub async fn delete_community(
     let operator =
         authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: DeleteCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
-        deletion_api_error(
+        coded_api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             &format!("invalid delete-community JSON: {e}"),
         )
     })?;
     let normalized_host = normalize_candidate_host(&request.host)
-        .map_err(|msg| deletion_api_error(StatusCode::BAD_REQUEST, "invalid_request", &msg))?;
+        .map_err(|msg| coded_api_error(StatusCode::BAD_REQUEST, "invalid_request", &msg))?;
     if normalized_host != request.host {
-        return Err(deletion_api_error(
+        return Err(coded_api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "host must use its exact canonical authority spelling",
@@ -505,14 +513,14 @@ pub async fn delete_community(
     }
     let deployment_host = buzz_core::tenant::relay_url_authority(&state.config.relay_url);
     if normalized_host == deployment_host {
-        return Err(deletion_api_error(
+        return Err(coded_api_error(
             StatusCode::CONFLICT,
             "protected_community",
             "the deployment community cannot be deleted",
         ));
     }
     let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
-        deletion_api_error(
+        coded_api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "invalid owner_pubkey: expected 64-char hex pubkey",
@@ -528,41 +536,49 @@ pub async fn delete_community(
             &operator,
             request.acknowledgement_version,
             request.request_id,
+            request.community_id,
         )
         .await
         .map_err(|error| internal_error(&format!("admit owner deletion request: {error}")))?;
     let accepted = match admission {
         buzz_db::deletion::OwnerDeletionAdmission::Accepted(request) => request,
         buzz_db::deletion::OwnerDeletionAdmission::NotFoundOrNotOwner => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::NOT_FOUND,
                 "community_not_found",
                 "community not found",
             ));
         }
         buzz_db::deletion::OwnerDeletionAdmission::NotArchived => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::CONFLICT,
                 "community_not_archived",
                 "community must be archived before deletion",
             ));
         }
         buzz_db::deletion::OwnerDeletionAdmission::LifecycleConflict => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::CONFLICT,
                 "deletion_lifecycle_conflict",
                 "community deletion lifecycle is already active",
             ));
         }
+        buzz_db::deletion::OwnerDeletionAdmission::CommunityIdMismatch => {
+            return Err(coded_api_error(
+                StatusCode::CONFLICT,
+                "community_id_mismatch",
+                "community_id does not match the community resolved for host",
+            ));
+        }
         buzz_db::deletion::OwnerDeletionAdmission::RequestConflict => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::CONFLICT,
                 "deletion_request_conflict",
                 "deletion request conflicts with existing intent",
             ));
         }
         buzz_db::deletion::OwnerDeletionAdmission::UnsupportedAcknowledgementVersion => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::BAD_REQUEST,
                 "unsupported_acknowledgement_version",
                 "unsupported acknowledgement_version",
@@ -713,15 +729,16 @@ pub async fn transfer_community(
             ));
         }
         buzz_db::relay_members::TransferResult::DeletionPending => {
-            return Err(deletion_api_error(
+            return Err(coded_api_error(
                 StatusCode::CONFLICT,
                 "deletion_lifecycle_conflict",
                 "community deletion is pending",
             ));
         }
         buzz_db::relay_members::TransferResult::LimitReached => {
-            return Err(api_error(
+            return Err(coded_api_error(
                 StatusCode::CONFLICT,
+                "limit_reached",
                 "limit_reached: transferee has reached the community limit",
             ));
         }
@@ -1166,6 +1183,273 @@ mod postgres_tests {
         assert_eq!(
             request.mediating_operator_pubkey.as_deref(),
             Some(operator.public_key().to_hex().as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_delete_community_id_confirms_host_on_admission_and_replay() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let created = provision_community(Arc::clone(&state), &operator, &host, &owner).await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let community_id: Uuid = read_json(created).await["community_id"]
+            .as_str()
+            .expect("community id")
+            .parse()
+            .expect("valid community id");
+        archive_for_owner_deletion(&state, &host, &owner).await;
+        let pool = state.db.pool();
+        let lifecycle_before: (
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT archived_at, deletion_state, deleted_at FROM communities WHERE id = $1",
+        )
+        .bind(community_id)
+        .fetch_one(pool)
+        .await
+        .expect("archived lifecycle");
+        assert!(lifecycle_before.0.is_some());
+        let owner_before = state
+            .db
+            .get_relay_member(
+                CommunityId::from_uuid(community_id),
+                &owner.public_key().to_hex(),
+            )
+            .await
+            .expect("read owner")
+            .expect("owner exists")
+            .role;
+        let request_id = Uuid::new_v4();
+        let body = |community_id: Value| {
+            serde_json::json!({
+                "host": host,
+                "community_id": community_id,
+                "owner_pubkey": owner.public_key().to_hex(),
+                "request_id": request_id,
+                "acknowledgement_version": 1,
+                "ignored_extension": "forward-compatible",
+            })
+            .to_string()
+        };
+        // A non-owner must see the same 404 as an unknown host, even with a wrong id.
+        let stranger_mismatch = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(
+                serde_json::json!({
+                    "host": host,
+                    "community_id": Uuid::new_v4(),
+                    "owner_pubkey": Keys::generate().public_key().to_hex(),
+                    "request_id": request_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(stranger_mismatch.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            read_json(stranger_mismatch).await["code"],
+            "community_not_found"
+        );
+        assert_no_persisted_request(&state, request_id, "non-owner mismatched id").await;
+        let mismatch = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(body(serde_json::json!(Uuid::new_v4()))),
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(mismatch).await["code"], "community_id_mismatch");
+        assert_no_persisted_request(&state, request_id, "mismatched community id").await;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+        )
+        .bind(community_id)
+        .fetch_one(pool)
+        .await
+        .expect("count rejected requests");
+        assert_eq!(count, 0);
+        let lifecycle_after: (
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT archived_at, deletion_state, deleted_at FROM communities WHERE id = $1",
+        )
+        .bind(community_id)
+        .fetch_one(pool)
+        .await
+        .expect("unchanged lifecycle");
+        assert_eq!(lifecycle_after, lifecycle_before);
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(
+                    CommunityId::from_uuid(community_id),
+                    &owner.public_key().to_hex()
+                )
+                .await
+                .expect("read unchanged owner")
+                .expect("owner still exists")
+                .role,
+            owner_before
+        );
+
+        let malformed = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(body(serde_json::json!("not-a-uuid"))),
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(read_json(malformed).await["code"], "invalid_request");
+        assert_no_persisted_request(&state, request_id, "malformed community id").await;
+
+        let matched = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(body(serde_json::json!(community_id))),
+        )
+        .await;
+        assert_eq!(matched.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            read_json(matched).await["community_id"],
+            community_id.to_string()
+        );
+        let admitted = state
+            .db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("admitted request");
+        let replay = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(body(serde_json::json!(Uuid::new_v4()))),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(replay).await["code"], "community_id_mismatch");
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request_id)
+                .await
+                .expect("unchanged request"),
+            admitted
+        );
+        let matched_replay = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(body(serde_json::json!(community_id))),
+        )
+        .await;
+        assert_eq!(matched_replay.status(), StatusCode::ACCEPTED);
+        let matched_replay = read_json(matched_replay).await;
+        assert_eq!(matched_replay["request_id"], request_id.to_string());
+        assert_eq!(matched_replay["community_id"], community_id.to_string());
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request_id)
+                .await
+                .expect("replayed request"),
+            admitted
+        );
+
+        let other_host = format!("community-{}.example", Uuid::new_v4().simple());
+        let other_created =
+            provision_community(Arc::clone(&state), &operator, &other_host, &owner).await;
+        assert_eq!(other_created.status(), StatusCode::OK);
+        let other_id: Uuid = read_json(other_created).await["community_id"]
+            .as_str()
+            .expect("other community id")
+            .parse()
+            .expect("valid other community id");
+        archive_for_owner_deletion(&state, &other_host, &owner).await;
+        // A known request id reused for a different host is a request conflict,
+        // even when `community_id` correctly names that other host.
+        let collision = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(
+                serde_json::json!({
+                    "host": other_host,
+                    "community_id": other_id,
+                    "owner_pubkey": owner.public_key().to_hex(),
+                    "request_id": request_id,
+                    "acknowledgement_version": 1,
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(collision.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            read_json(collision).await["code"],
+            "deletion_request_conflict"
+        );
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request_id)
+                .await
+                .expect("request unchanged by collision"),
+            admitted
+        );
+        let other_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+        )
+        .bind(other_id)
+        .fetch_one(pool)
+        .await
+        .expect("count other-host requests");
+        assert_eq!(other_count, 0);
+        let absent_id = Uuid::new_v4();
+        let absent = signed_operator_request(
+            Arc::clone(&state),
+            &operator,
+            "POST",
+            "/operator/communities/delete",
+            Some(owner_delete_body(&other_host, &owner, absent_id)),
+        )
+        .await;
+        assert_eq!(absent.status(), StatusCode::ACCEPTED);
+        assert_eq!(read_json(absent).await["request_id"], absent_id.to_string());
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(absent_id)
+                .await
+                .expect("legacy request")
+                .stage,
+            buzz_db::deletion::DeletionStage::Submitted
         );
     }
 
@@ -2544,6 +2828,7 @@ mod postgres_tests {
         let response = provision_community(state.clone(), &operator, &host, &owner).await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let json = read_json(response).await;
+        assert_eq!(json["code"], "limit_reached");
         assert!(json["error"]
             .as_str()
             .is_some_and(|error| error.starts_with("limit_reached:")));
@@ -2642,6 +2927,80 @@ mod postgres_tests {
             &[(&new_owner_hex, "owner"), (&initial_owner_hex, "member")],
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_to_owner_at_limit_returns_coded_limit_reached_without_mutation() {
+        let operator = Keys::generate();
+        let initial_owner = Keys::generate();
+        let transferee = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+
+        for _ in 0..buzz_db::relay_members::MAX_COMMUNITIES_PER_OWNER {
+            let host = format!("community-{}.example", Uuid::new_v4().simple());
+            assert_eq!(
+                provision_community(state.clone(), &operator, &host, &transferee)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(state.clone(), &operator, &host, &initial_owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup community")
+            .expect("community exists");
+        let initial_owner_hex = initial_owner.public_key().to_hex();
+        let transferee_hex = transferee.public_key().to_hex();
+
+        let transfer_body = serde_json::json!({
+            "community_id": community.id.to_string(),
+            "new_owner_pubkey": transferee_hex,
+            "expected_owner_pubkey": initial_owner_hex,
+        })
+        .to_string();
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(transfer_body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let json = read_json(response).await;
+        assert_eq!(json["code"], "limit_reached");
+        assert!(json["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("limit_reached:")));
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(community.id, &initial_owner_hex)
+                .await
+                .expect("get initial owner")
+                .expect("initial owner exists")
+                .role,
+            "owner"
+        );
+        assert!(state
+            .db
+            .get_relay_member(community.id, &transferee_hex)
+            .await
+            .expect("get transferee")
+            .is_none());
     }
 
     #[tokio::test]

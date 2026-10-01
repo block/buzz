@@ -926,6 +926,8 @@ test("adds channel-mentioned agents to the live huddle roster", async ({
   expect(result).toEqual({
     matched_active_huddle: true,
     added: [TEST_IDENTITIES.bob.pubkey],
+    changed_channel_ids: [HUDDLE_CHANNEL_ID],
+    error: null,
   });
   await expect(participantTiles).toHaveCount(3);
   await expect(

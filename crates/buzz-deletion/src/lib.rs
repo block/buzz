@@ -1970,7 +1970,7 @@ mod postgres_tests {
             .expect("owned community");
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let buzz_db::deletion::OwnerDeletionAdmission::Accepted(request) = store
-            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
             .await
             .expect("admit owner request")
         else {

@@ -72,40 +72,54 @@ pub enum AdminRoute {
     },
     OperatorsList,
     OperatorPut {
-        pubkey: HexPubkey,
+        pubkey: Hex64,
     },
     OperatorDelete {
-        pubkey: HexPubkey,
+        pubkey: Hex64,
     },
     /// GET /members/restrictions — communityHost in query.
     MemberRestrictionsList,
     /// DELETE /members/{pubkey}/ban — communityHost in query.
     MemberBanDelete {
-        pubkey: HexPubkey,
+        pubkey: Hex64,
     },
     /// DELETE /members/{pubkey}/timeout — communityHost in query.
     MemberTimeoutDelete {
-        pubkey: HexPubkey,
+        pubkey: Hex64,
+    },
+    /// POST /members/{pubkey}/ban — communityHost in query.
+    MemberBan {
+        pubkey: Hex64,
+    },
+    /// POST /members/{pubkey}/timeout — communityHost in query.
+    MemberTimeout {
+        pubkey: Hex64,
+    },
+    /// POST /events/{id}/delete — communityHost in query. An event id has the
+    /// same 64 lowercase-hex grammar as a pubkey.
+    EventDelete {
+        id: Hex64,
     },
 }
 
-/// A validated 64 lowercase-hex character pubkey for use as a URL path segment.
+/// A validated 64 lowercase-hex id (a pubkey or an event id) for use as a URL
+/// path segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HexPubkey(String);
+pub struct Hex64(String);
 
-impl HexPubkey {
-    /// Parse `raw` as a 64-character lowercase hex pubkey.
+impl Hex64 {
+    /// Parse `raw` as a 64-character lowercase hex id.
     pub fn parse(raw: &str) -> Result<Self, String> {
         if raw.len() != 64 {
             return Err(format!(
-                "pubkey must be exactly 64 hex characters; got {}",
+                "id must be exactly 64 hex characters; got {}",
                 raw.len()
             ));
         }
         if !raw.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
-            return Err("pubkey must be lowercase hex only (0-9, a-f)".to_string());
+            return Err("id must be lowercase hex only (0-9, a-f)".to_string());
         }
-        Ok(HexPubkey(raw.to_string()))
+        Ok(Hex64(raw.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -139,6 +153,11 @@ impl AdminRoute {
             AdminRoute::MemberTimeoutDelete { pubkey } => {
                 format!("/members/{}/timeout", pubkey.as_str())
             }
+            AdminRoute::MemberBan { pubkey } => format!("/members/{}/ban", pubkey.as_str()),
+            AdminRoute::MemberTimeout { pubkey } => {
+                format!("/members/{}/timeout", pubkey.as_str())
+            }
+            AdminRoute::EventDelete { id } => format!("/events/{}/delete", id.as_str()),
         }
     }
 }
@@ -428,7 +447,7 @@ mod tests {
 
     #[test]
     fn member_ban_delete_path() {
-        let pubkey = HexPubkey::parse(&"ab".repeat(32)).unwrap();
+        let pubkey = Hex64::parse(&"ab".repeat(32)).unwrap();
         assert_eq!(
             AdminRoute::MemberBanDelete { pubkey }.path(),
             format!("/members/{}/ban", "ab".repeat(32))
@@ -437,10 +456,28 @@ mod tests {
 
     #[test]
     fn member_timeout_delete_path() {
-        let pubkey = HexPubkey::parse(&"cd".repeat(32)).unwrap();
+        let pubkey = Hex64::parse(&"cd".repeat(32)).unwrap();
         assert_eq!(
             AdminRoute::MemberTimeoutDelete { pubkey }.path(),
             format!("/members/{}/timeout", "cd".repeat(32))
+        );
+    }
+
+    #[test]
+    fn direct_action_paths() {
+        let hex = || Hex64::parse(&"ef".repeat(32)).unwrap();
+        let h = "ef".repeat(32);
+        assert_eq!(
+            AdminRoute::MemberBan { pubkey: hex() }.path(),
+            format!("/members/{h}/ban")
+        );
+        assert_eq!(
+            AdminRoute::MemberTimeout { pubkey: hex() }.path(),
+            format!("/members/{h}/timeout")
+        );
+        assert_eq!(
+            AdminRoute::EventDelete { id: hex() }.path(),
+            format!("/events/{h}/delete")
         );
     }
 }

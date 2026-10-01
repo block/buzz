@@ -1208,6 +1208,10 @@ pub struct AppState {
     /// on top of the verifier's per-pod reservation.  Redis `SET NX EX`, like
     /// `nip98_replay`; callers fail closed on error.
     pub nip_fi_command_replay: Arc<dyn CommandReplayGuard>,
+    /// Detached cross-pod NIP-FI disconnect publishes.  Spawning through it
+    /// lets tests wait for every publish to finish; nothing waits on it in
+    /// production.
+    pub nip_fi_publish_tasks: tokio_util::task::TaskTracker,
 }
 
 impl AppState {
@@ -1401,6 +1405,7 @@ impl AppState {
             nip_fi_deny_map: None,
             nip_fi_command_verifier: None,
             nip_fi_command_replay,
+            nip_fi_publish_tasks: tokio_util::task::TaskTracker::new(),
         };
         (
             state,
