@@ -24,7 +24,8 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('Welcome to Buzz'), findsOneWidget);
+    expect(find.bySemanticsLabel('Buzz'), findsOneWidget);
+    expect(find.text('Scan a QR code'), findsOneWidget);
   });
 }
 
