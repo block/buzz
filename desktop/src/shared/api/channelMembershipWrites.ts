@@ -55,3 +55,8 @@ export function onChannelMembershipChange(
     listeners.delete(listener);
   };
 }
+
+/** Community reset: changes recorded on the old relay don't apply to the new one. */
+export function resetChannelMembershipWrites() {
+  writerReadDeadlines.clear();
+}

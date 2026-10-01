@@ -174,13 +174,13 @@ export async function createChannel(
 }
 
 export async function ensureStarterChannels(): Promise<Channel[]> {
-  // Joins that landed are reported even when a later join fails.
+  // Channels created or joined are reported even when a later step fails.
   const result = await invokeTauri<{
     channels: RawChannel[];
-    joined_channel_ids: string[];
+    changed_channel_ids: string[];
     error: string | null;
   }>("ensure_starter_channels");
-  for (const id of result.joined_channel_ids) noteChannelMembershipChange(id);
+  for (const id of result.changed_channel_ids) noteChannelMembershipChange(id);
   if (result.error !== null) throw toTauriError(result.error);
   return result.channels.map(fromRawChannel);
 }

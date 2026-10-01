@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { resetChannelMembershipWrites } from "@/shared/api/channelMembershipWrites";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
 import {
   autoConnectDefaultRelayEnabled,
@@ -88,6 +89,7 @@ async function resetCommunityState({
   resetBackgroundMediaUploads();
   resetLinkPreviewPreparations();
   resetPersistentAgentAudienceStore();
+  resetChannelMembershipWrites();
   // Intentionally NOT reset: the in-flight detached agent-start map
   // (`useDetachedAgentStart`). Its entries are keyed by the scope each start
   // asserts (relay URL + signer + agent pubkey), so they cannot leak into the

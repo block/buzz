@@ -249,7 +249,7 @@ async fn ensure_starter_channel_memberships(
     state: &AppState,
     keys: &nostr::Keys,
     channels: &mut [ChannelInfo],
-    joined_channel_ids: &mut Vec<String>,
+    changed_channel_ids: &mut Vec<String>,
 ) -> Result<(), String> {
     for spec in STARTER_CHANNELS {
         let Some(channel) = channels
@@ -267,7 +267,7 @@ async fn ensure_starter_channel_memberships(
         let builder = events::build_join(channel_uuid)?;
         submit_event_with_keys(builder, state, keys, None).await?;
         channel.is_member = true;
-        joined_channel_ids.push(channel.id.clone());
+        changed_channel_ids.push(channel.id.clone());
     }
 
     Ok(())
@@ -375,13 +375,14 @@ pub async fn create_channel(
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
 }
 
-/// Starter channels plus the joins that landed. A join failure is reported in
-/// `error` rather than as the command error so that the joins accepted before
-/// it are still reported; the frontend rethrows `error` unchanged.
+/// Starter channels plus every channel this call created or joined. Any
+/// failure is reported in `error` rather than as the command error, so the
+/// writes accepted before it are still reported; the frontend rethrows
+/// `error` unchanged.
 #[derive(serde::Serialize)]
 pub struct StarterChannelsResult {
     channels: Vec<ChannelInfo>,
-    joined_channel_ids: Vec<String>,
+    changed_channel_ids: Vec<String>,
     error: Option<String>,
 }
 
@@ -389,9 +390,25 @@ pub struct StarterChannelsResult {
 pub async fn ensure_starter_channels(
     state: State<'_, AppState>,
 ) -> Result<StarterChannelsResult, String> {
-    let mut existing_channels =
-        fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
-    let relay_scope = relay_api_base_url_with_override(&state);
+    let mut changed_channel_ids = Vec::new();
+    let (channels, error) =
+        match ensure_starter_channels_inner(&state, &mut changed_channel_ids).await {
+            Ok(channels) => (channels, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+    Ok(StarterChannelsResult {
+        channels,
+        changed_channel_ids,
+        error,
+    })
+}
+
+async fn ensure_starter_channels_inner(
+    state: &AppState,
+    changed_channel_ids: &mut Vec<String>,
+) -> Result<Vec<ChannelInfo>, String> {
+    let mut existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
+    let relay_scope = relay_api_base_url_with_override(state);
     let creator_keys = state.signing_keys()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
     let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
@@ -417,10 +434,11 @@ pub async fn ensure_starter_channels(
             None,
         )?;
 
-        match submit_event_with_keys(builder, &state, &creator_keys, None).await {
+        match submit_event_with_keys(builder, state, &creator_keys, None).await {
             Ok(_) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
                 created_ids.insert(channel_uuid_string.clone());
+                changed_channel_ids.push(channel_uuid_string.clone());
             }
             Err(error) if is_duplicate_channel_rejection(&error) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
@@ -430,7 +448,7 @@ pub async fn ensure_starter_channels(
     }
 
     for _ in 0..3 {
-        let metadata = fetch_starter_channel_metadata(&state, &starter_ids).await?;
+        let metadata = fetch_starter_channel_metadata(state, &starter_ids).await?;
         for mut channel in metadata {
             if created_ids.contains(&channel.id) {
                 channel.is_member = true;
@@ -449,27 +467,21 @@ pub async fn ensure_starter_channels(
     }
 
     if !has_all_starter_channels(&existing_channels) {
-        existing_channels = fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
+        existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
     }
 
     if !has_all_starter_channels(&existing_channels) {
         return Err("starter channels created but metadata not yet available".to_string());
     }
 
-    let mut joined_channel_ids = Vec::new();
-    let error = ensure_starter_channel_memberships(
-        &state,
+    ensure_starter_channel_memberships(
+        state,
         &creator_keys,
         &mut existing_channels,
-        &mut joined_channel_ids,
+        changed_channel_ids,
     )
-    .await
-    .err();
-    Ok(StarterChannelsResult {
-        channels: existing_channels,
-        joined_channel_ids,
-        error,
-    })
+    .await?;
+    Ok(existing_channels)
 }
 
 #[derive(serde::Deserialize)]
@@ -658,3 +670,6 @@ pub async fn leave_channel(channel_id: String, state: State<'_, AppState>) -> Re
 #[cfg(test)]
 #[path = "channels_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod starter_tests;

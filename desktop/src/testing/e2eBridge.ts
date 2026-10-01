@@ -7223,7 +7223,7 @@ async function handleEnsureStarterChannels(
   config: E2eConfig | undefined,
 ): Promise<{
   channels: RawChannelWithMembership[];
-  joined_channel_ids: string[];
+  changed_channel_ids: string[];
   error: null;
 }> {
   const starterChannelError =
@@ -7233,7 +7233,7 @@ async function handleEnsureStarterChannels(
   }
 
   const currentPubkey = getMockMemberPubkey(config);
-  const joinedChannelIds: string[] = [];
+  const changedChannelIds: string[] = [];
   const ensureMember = (channel: MockChannel) => {
     if (
       channel.members.some(
@@ -7247,7 +7247,7 @@ async function handleEnsureStarterChannels(
     channel.members.push(createCurrentMember(config, "member"));
     syncMockChannel(channel);
     touchMockChannel(channel);
-    joinedChannelIds.push(channel.id);
+    changedChannelIds.push(channel.id);
   };
 
   for (const channelName of [
@@ -7269,7 +7269,7 @@ async function handleEnsureStarterChannels(
 
   return {
     channels: listMockChannels(config),
-    joined_channel_ids: joinedChannelIds,
+    changed_channel_ids: changedChannelIds,
     error: null,
   };
 }

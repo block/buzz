@@ -65,9 +65,8 @@ const { ensureStarterChannels, syncAgentsToActiveHuddle } = await import(
 const { resolveBestieConversation } = await import(
   "@/protectedFeatures/bestie/api"
 );
-const { noteChannelMembershipChange } = await import(
-  "@/shared/api/channelMembershipWrites"
-);
+const { noteChannelMembershipChange, resetChannelMembershipWrites } =
+  await import("@/shared/api/channelMembershipWrites");
 const { channelsQueryKey, invalidateChannelState } = await import("./hooks.ts");
 const { channelMembersQueryKey, refreshRostersOnMembershipChange } =
   await import("./rosterFreshness.ts");
@@ -219,7 +218,7 @@ test("starter joins that landed are recorded when a later join fails", async () 
   const unmount = await cacheOldRoster(roster);
   nativeResults.ensure_starter_channels = {
     channels: [],
-    joined_channel_ids: ["starter-general"],
+    changed_channel_ids: ["starter-general"],
     error: "starter join rejected",
   };
   await assert.rejects(ensureStarterChannels(), {
@@ -328,5 +327,18 @@ test("ordinary reads return to the replica once the window passes", async () => 
   await getChannelMembers("ch-later");
   await getChannelMembers("ch-other");
   assert.deepEqual(routes.slice(-2), ["replica", "replica"]);
+  roster.teardown();
+});
+
+test("a community switch clears recorded changes", async () => {
+  const roster = setup("ch-community");
+  await addChannelMembers({
+    channelId: "ch-community",
+    pubkeys: [BOT],
+    role: "bot",
+  });
+  resetChannelMembershipWrites();
+  await getChannelMembers("ch-community");
+  assert.equal(routes.at(-1), "replica");
   roster.teardown();
 });
