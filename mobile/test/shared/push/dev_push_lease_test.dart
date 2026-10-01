@@ -328,6 +328,19 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  test('descriptor ignores relay metadata outside push', () {
+    // NIP-11 is extensible: relays add top-level fields (read_state_snapshot,
+    // artifacts) and that must not silently disable push.
+    final information = _descriptorJson(relay.public)
+      ..['artifacts'] = {'version': 1}
+      ..['read_state_snapshot'] = {'version': 1};
+
+    expect(
+      BuzzPushLeaseDescriptor.fromRelayInformation(information).origin,
+      'wss://tenant.example:8443',
+    );
+  });
 }
 
 class _UnauthenticatedAuthNotifier extends AuthNotifier {
