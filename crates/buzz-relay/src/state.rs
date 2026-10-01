@@ -276,6 +276,9 @@ struct ConnEntry {
     nip_fi_issuer: std::sync::RwLock<Option<String>>,
     /// Owner of an admitted agent; revoking the owner closes this socket.
     admitted_owner: std::sync::OnceLock<[u8; 32]>,
+    /// Set once AUTH succeeds. The pubkey is bound earlier so revocation can
+    /// find a socket mid-admission; online counts and presence read this.
+    admitted: AtomicBool,
     grace_limit: u8,
     /// Lifecycle control used by `disconnect_nip_fi` for the denial transition.
     community_control: CommunityConnectionControl,
@@ -661,6 +664,7 @@ impl ConnectionManager {
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
                 nip_fi_issuer: std::sync::RwLock::new(None),
                 admitted_owner: std::sync::OnceLock::new(),
+                admitted: AtomicBool::new(false),
                 grace_limit,
                 community_control,
             },
@@ -715,6 +719,26 @@ impl ConnectionManager {
         if let Some(entry) = self.connections.get(&conn_id) {
             let _ = entry.admitted_owner.set(owner);
         }
+    }
+
+    /// Mark `conn_id` admitted, once AUTH has succeeded.
+    pub fn mark_admitted(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.admitted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether `pubkey_bytes` has an admitted connection in one community on
+    /// this pod. Sockets still mid-admission do not count.
+    pub fn has_admitted_connection(&self, community_id: CommunityId, pubkey_bytes: &[u8]) -> bool {
+        self.connections.iter().any(|entry| {
+            entry.community_id == community_id
+                && entry.admitted.load(Ordering::Acquire)
+                && entry
+                    .authenticated_pubkey
+                    .read()
+                    .is_ok_and(|value| value.as_deref() == Some(pubkey_bytes))
+        })
     }
 
     /// Return live connection IDs authenticated as `pubkey_bytes` in one community.
@@ -1014,6 +1038,9 @@ impl ConnectionManager {
         // community_id → set of pubkey bytes
         let mut seen: HashMap<CommunityId, HashSet<Vec<u8>>> = HashMap::new();
         for entry in self.connections.iter() {
+            if !entry.admitted.load(Ordering::Acquire) {
+                continue;
+            }
             if let Ok(lock) = entry.authenticated_pubkey.read() {
                 if let Some(pk) = lock.as_ref() {
                     seen.entry(entry.community_id)
@@ -3484,6 +3511,64 @@ pub(crate) mod tests {
         assert!(registry.bound_communities().is_empty());
         assert_eq!(registry.disconnect_community(community), 0);
         assert!(!cancel.is_cancelled());
+    }
+
+    /// Registers a root socket in `community` bound to `pubkey`, as AUTH does
+    /// before its final checks.
+    fn bound_conn(mgr: &ConnectionManager, community: CommunityId, pubkey: &[u8]) -> Uuid {
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (terminal_tx, _terminal_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            terminal_tx,
+            None,
+            cancel.clone(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+            CommunityConnectionControl::new(cancel),
+        );
+        mgr.set_authenticated_pubkey(conn_id, pubkey.to_vec());
+        conn_id
+    }
+
+    #[tokio::test]
+    async fn users_online_skips_sockets_still_mid_admission() {
+        let mgr = ConnectionManager::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xc));
+        let admitted = bound_conn(&mgr, community, &[1u8; 32]);
+        mgr.mark_admitted(admitted);
+        let _pending = bound_conn(&mgr, community, &[2u8; 32]);
+
+        assert_eq!(
+            mgr.per_community_users_online().get(&community),
+            Some(&1),
+            "only the admitted socket is online"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_clears_when_only_a_pending_sibling_remains() {
+        let mgr = ConnectionManager::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xd));
+        let pubkey = [3u8; 32];
+        let admitted = bound_conn(&mgr, community, &pubkey);
+        mgr.mark_admitted(admitted);
+        let _pending = bound_conn(&mgr, community, &pubkey);
+        assert!(mgr.has_admitted_connection(community, &pubkey));
+
+        mgr.deregister(admitted);
+
+        assert!(
+            !mgr.has_admitted_connection(community, &pubkey),
+            "a pending sibling does not keep presence"
+        );
     }
 
     #[tokio::test]

@@ -757,11 +757,10 @@ async fn handle_active_connection(
     crate::handlers::close::release_connection_subscriptions(&conn, &state).await;
     state.conn_manager.deregister(conn.conn_id);
     if let Some(auth_ctx) = authenticated {
-        let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(
+        if !state.conn_manager.has_admitted_connection(
             conn.tenant.community(),
             auth_ctx.pubkey.to_bytes().as_slice(),
-        );
-        if remaining.is_empty() {
+        ) {
             let _ = state
                 .pubsub
                 .clear_presence(&conn.tenant, &auth_ctx.pubkey)
