@@ -238,9 +238,25 @@ impl CommunityConnectionControl {
         self.cancel.cancel();
     }
 
+    /// Revoked community access. A NIP-FI socket takes the shared
+    /// `authorization_denied` transition, so its client sees the same denial
+    /// as any other NIP-FI refusal; an Off-mode socket closes `AccessRevoked`.
+    /// Neither overwrites a terminal response already chosen.
     fn revoke_access(&self) {
-        self.reason_tx
-            .send_replace(Some(CommunityDisconnectReason::AccessRevoked));
+        let nip_fi = self
+            .proven_identity
+            .read()
+            .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi_issuer.is_some()));
+        if nip_fi {
+            self.publish_authorization_denied(crate::nip_fi_session::NipFiWsRoute::Audio, None);
+        } else {
+            self.reason_tx.send_if_modified(|current| {
+                current.is_none() && {
+                    *current = Some(CommunityDisconnectReason::AccessRevoked);
+                    true
+                }
+            });
+        }
         self.cancel.cancel();
     }
 }
