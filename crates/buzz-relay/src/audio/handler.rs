@@ -4009,6 +4009,7 @@ mod tests {
             assertion,
             key,
             sign_issued_challenge,
+            None,
         )
         .await
     }
@@ -4022,6 +4023,28 @@ mod tests {
         key: &nostr::Keys,
         sign_issued_challenge: bool,
     ) -> (Vec<String>, bool) {
+        run_audio_auth_tagged(
+            state,
+            tenant,
+            channel_id,
+            assertion,
+            key,
+            sign_issued_challenge,
+            None,
+        )
+        .await
+    }
+
+    /// [`run_audio_auth_in`] with an optional NIP-OA `auth` tag on the AUTH event.
+    async fn run_audio_auth_tagged(
+        state: std::sync::Arc<crate::state::AppState>,
+        tenant: buzz_core::tenant::TenantContext,
+        channel_id: uuid::Uuid,
+        assertion: Option<buzz_auth::VerifiedAssertion>,
+        key: &nostr::Keys,
+        sign_issued_challenge: bool,
+        auth_tag: Option<Vec<String>>,
+    ) -> (Vec<String>, bool) {
         let (frames, cancelled) = run_audio_auth_in_wire(
             state,
             tenant,
@@ -4029,6 +4052,7 @@ mod tests {
             assertion,
             key,
             sign_issued_challenge,
+            auth_tag,
         )
         .await;
         let texts = frames
@@ -4041,7 +4065,7 @@ mod tests {
         (texts, cancelled)
     }
 
-    /// [`run_audio_auth_in`], returning every Text and Close frame.
+    /// [`run_audio_auth_tagged`], returning every Text and Close frame.
     async fn run_audio_auth_in_wire(
         state: std::sync::Arc<crate::state::AppState>,
         tenant: buzz_core::tenant::TenantContext,
@@ -4049,6 +4073,7 @@ mod tests {
         assertion: Option<buzz_auth::VerifiedAssertion>,
         key: &nostr::Keys,
         sign_issued_challenge: bool,
+        auth_tag: Option<Vec<String>>,
     ) -> (Vec<tokio_tungstenite::tungstenite::Message>, bool) {
         use std::sync::Arc;
         let relay_url =
@@ -4104,9 +4129,13 @@ mod tests {
         };
         let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
             .tag(nostr::Tag::parse(["relay", relay_url.as_str()]).unwrap())
-            .tag(nostr::Tag::parse(["challenge", signed_challenge]).unwrap())
-            .sign_with_keys(key)
-            .unwrap();
+            .tag(nostr::Tag::parse(["challenge", signed_challenge]).unwrap());
+        let auth_event = match auth_tag {
+            Some(tag) => auth_event.tag(nostr::Tag::parse(tag).unwrap()),
+            None => auth_event,
+        }
+        .sign_with_keys(key)
+        .unwrap();
         client
             .send(tokio_tungstenite::tungstenite::Message::Text(
                 serde_json::json!({"type": "auth", "event": auth_event})
@@ -12983,6 +13012,247 @@ mod tests {
             server.abort();
         }
 
+        /// Run audio admission over a real WebSocket for `key` (optionally with
+        /// a NIP-OA `auth` tag), registered in the community connection
+        /// registry as production does, and assert it is admitted.
+        async fn open_admitted_audio_socket(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: buzz_core::tenant::TenantContext,
+            channel_id: uuid::Uuid,
+            key: &nostr::Keys,
+            auth_tag: Option<Vec<String>>,
+        ) -> (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio::task::JoinHandle<std::io::Result<()>>,
+        ) {
+            use std::sync::Arc;
+            let relay_url =
+                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let handler_state = Arc::clone(state);
+            let app = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| {
+                    let (state, tenant) = (Arc::clone(&handler_state), tenant.clone());
+                    async move {
+                        ws.on_upgrade(move |socket| async move {
+                            let control = crate::state::CommunityConnectionControl::new(
+                                CancellationToken::new(),
+                            );
+                            let _guard = state.community_connections.register(
+                                uuid::Uuid::new_v4(),
+                                tenant.community(),
+                                control.clone(),
+                            );
+                            handle_active_audio_connection(
+                                socket,
+                                state,
+                                tenant,
+                                channel_id,
+                                control,
+                                None,
+                                chrono::Utc::now(),
+                                None,
+                            )
+                            .await
+                        })
+                    }
+                }),
+            );
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect");
+            let challenge: serde_json::Value =
+                serde_json::from_str(&next_audio_text(&mut client).await).expect("challenge JSON");
+            let mut auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", relay_url.as_str()]).unwrap())
+                .tag(
+                    nostr::Tag::parse(["challenge", challenge["challenge"].as_str().unwrap()])
+                        .unwrap(),
+                );
+            if let Some(tag) = auth_tag {
+                auth_event = auth_event.tag(nostr::Tag::parse(tag).unwrap());
+            }
+            let auth_event = auth_event.sign_with_keys(key).unwrap();
+            client
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({"type": "auth", "event": auth_event})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send auth");
+            // The first frame after auth is the join result; it proves admission.
+            let joined = next_audio_text(&mut client).await;
+            assert!(
+                !joined.contains("\"error\""),
+                "must be admitted; got {joined}"
+            );
+            (client, server)
+        }
+
+        async fn next_audio_text(
+            client: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> String {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .expect("frame timeout")
+            {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => t.to_string(),
+                other => panic!("expected text frame; got {other:?}"),
+            }
+        }
+
+        async fn expect_policy_close(
+            client: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) {
+            let close = loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                    .await
+                    .expect("socket must close after revocation")
+                {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame))) => break frame,
+                    Some(Ok(_)) => continue,
+                    other => panic!("expected a close frame; got {other:?}"),
+                }
+            };
+            let close = close.expect("close frame carries a reason");
+            assert_eq!(u16::from(close.code), 1008);
+            assert_eq!(close.reason.as_str(), "access revoked");
+        }
+
+        /// Adds `key` as a member of the audio fixture's channel.
+        async fn add_channel_member(
+            pool: &sqlx::PgPool,
+            tenant: &buzz_core::tenant::TenantContext,
+            channel_id: uuid::Uuid,
+            key: &nostr::Keys,
+        ) {
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+                 VALUES ($1, $2, $3, 'member')",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(channel_id)
+            .bind(key.public_key().to_bytes().to_vec())
+            .execute(pool)
+            .await
+            .expect("seed channel member");
+        }
+
+        /// A delegated agent that has only ever authenticated on audio (no
+        /// prior `users` row or owner link) is closed when its owner is
+        /// revoked: audio admission records the owner link. A second member
+        /// on the same channel stays connected.
+        ///
+        /// Mutation: stop audio admission from recording the owner link →
+        /// the owner revoke finds no agent → the socket stays open → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn owner_revoke_closes_audio_only_agent() {
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let (tenant, channel_id, bystander) = seed_audio_fixture(state.db.pool()).await;
+            let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+            add_channel_member(state.db.pool(), &tenant, channel_id, &agent).await;
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+
+            let (mut agent_client, agent_server) = open_admitted_audio_socket(
+                &state,
+                tenant.clone(),
+                channel_id,
+                &agent,
+                Some(auth_tag),
+            )
+            .await;
+            let (_bystander_client, bystander_server) =
+                open_admitted_audio_socket(&state, tenant.clone(), channel_id, &bystander, None)
+                    .await;
+
+            let closed = state
+                .revoke_live_access(
+                    &tenant,
+                    owner.public_key().as_bytes(),
+                    &"0".repeat(64),
+                    "blocked: you are banned from this community",
+                )
+                .await
+                .expect("revoke");
+            assert_eq!(closed, 1, "only the agent's audio socket closes");
+            expect_policy_close(&mut agent_client).await;
+            agent_server.abort();
+            bystander_server.abort();
+        }
+
+        /// Audio refuses an agent whose owner link cannot be recorded (the
+        /// agent is already linked to a different owner): revoking its NIP-OA
+        /// owner could not find it.
+        ///
+        /// Mutation: admit on a failed owner-link write → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn audio_refuses_agent_whose_owner_link_fails() {
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let (tenant, channel_id, _member) = seed_audio_fixture(state.db.pool()).await;
+            let (agent, owner, prior_owner) = (
+                nostr::Keys::generate(),
+                nostr::Keys::generate(),
+                nostr::Keys::generate(),
+            );
+            add_channel_member(state.db.pool(), &tenant, channel_id, &agent).await;
+            for key in [&agent, &prior_owner] {
+                state
+                    .db
+                    .ensure_user_for_authorization(tenant.community(), key.public_key().as_bytes())
+                    .await
+                    .expect("seed user");
+            }
+            assert!(state
+                .db
+                .set_agent_owner_for_authorization(
+                    tenant.community(),
+                    agent.public_key().as_bytes(),
+                    prior_owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("seed prior owner"));
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+
+            let (frames, _) = run_audio_auth_tagged(
+                state,
+                tenant,
+                channel_id,
+                None,
+                &agent,
+                true,
+                Some(auth_tag),
+            )
+            .await;
+            assert_eq!(
+                frames,
+                vec![serde_json::json!({
+                    "type": "error",
+                    "message": crate::handlers::auth::OWNER_LINK_ERROR
+                })
+                .to_string()]
+            );
+        }
+
         /// A community-banned member must be refused at audio join with the same
         /// verdict the root socket gives, before any lease or durable write.
         /// Mutation: delete the audio ban gate → the member is admitted → RED.
@@ -13026,88 +13296,13 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn ban_disconnect_closes_live_audio_socket() {
-            use std::sync::Arc;
             let state = audio_test_state_real_db().await.expect(
                 "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
             );
             let (tenant, channel_id, member_key) = seed_audio_fixture(state.db.pool()).await;
             let community = tenant.community();
-            let relay_url =
-                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
-
-            let cancel = CancellationToken::new();
-            let control = crate::state::CommunityConnectionControl::new(cancel.clone());
-            let _guard = state.community_connections.register(
-                uuid::Uuid::new_v4(),
-                community,
-                control.clone(),
-            );
-            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-            let addr = listener.local_addr().expect("addr");
-            let handler_state = Arc::clone(&state);
-            let app = Router::new().route(
-                "/",
-                get(move |ws: WebSocketUpgrade| {
-                    let (state, tenant, control) =
-                        (Arc::clone(&handler_state), tenant.clone(), control.clone());
-                    async move {
-                        ws.on_upgrade(move |socket| async move {
-                            handle_active_audio_connection(
-                                socket,
-                                state,
-                                tenant,
-                                channel_id,
-                                control,
-                                None,
-                                chrono::Utc::now(),
-                                None,
-                            )
-                            .await
-                        })
-                    }
-                }),
-            );
-            let server = tokio::spawn(async move { axum::serve(listener, app).await });
-            let (mut client, _) = connect_async(format!("ws://{addr}/"))
-                .await
-                .expect("connect");
-            let next_text =
-                |msg: Option<Result<tokio_tungstenite::tungstenite::Message, _>>| match msg {
-                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => t.to_string(),
-                    other => panic!("expected text frame; got {other:?}"),
-                };
-            let challenge: serde_json::Value = serde_json::from_str(&next_text(
-                tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
-                    .await
-                    .expect("challenge timeout"),
-            ))
-            .expect("challenge JSON");
-            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
-                .tag(nostr::Tag::parse(["relay", relay_url.as_str()]).unwrap())
-                .tag(
-                    nostr::Tag::parse(["challenge", challenge["challenge"].as_str().unwrap()])
-                        .unwrap(),
-                )
-                .sign_with_keys(&member_key)
-                .unwrap();
-            client
-                .send(tokio_tungstenite::tungstenite::Message::Text(
-                    serde_json::json!({"type": "auth", "event": auth_event})
-                        .to_string()
-                        .into(),
-                ))
-                .await
-                .expect("send auth");
-            // The first frame after auth is the join result; it proves admission.
-            let joined = next_text(
-                tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
-                    .await
-                    .expect("join timeout"),
-            );
-            assert!(
-                !joined.contains("\"error\""),
-                "member must be admitted; got {joined}"
-            );
+            let (mut client, server) =
+                open_admitted_audio_socket(&state, tenant, channel_id, &member_key, None).await;
 
             let closed = state.disconnect_pubkey_local(
                 community,
@@ -13116,19 +13311,7 @@ mod tests {
                 "blocked: you are banned from this community",
             );
             assert_eq!(closed, 1, "the ban must close the live audio socket");
-            let close = loop {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
-                    .await
-                    .expect("socket must close after the ban")
-                {
-                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame))) => break frame,
-                    Some(Ok(_)) => continue,
-                    other => panic!("expected a close frame; got {other:?}"),
-                }
-            };
-            let close = close.expect("close frame carries a reason");
-            assert_eq!(u16::from(close.code), 1008);
-            assert_eq!(close.reason.as_str(), "access revoked");
+            expect_policy_close(&mut client).await;
             server.abort();
         }
     }

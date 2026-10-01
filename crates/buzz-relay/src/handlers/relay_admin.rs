@@ -961,4 +961,126 @@ mod postgres_tests {
         assert!(member_socket.cancellation_token().is_cancelled());
         assert!(!bystander_socket.cancellation_token().is_cancelled());
     }
+
+    /// A pod-local root socket registered and bound to `keys`, as root AUTH
+    /// leaves it.
+    fn bound_root_socket(
+        state: &crate::state::AppState,
+        community: buzz_core::tenant::CommunityId,
+        keys: &Keys,
+    ) -> tokio_util::sync::CancellationToken {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let (ctrl, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+        let (terminal, _terminal_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let conn_id = uuid::Uuid::new_v4();
+        state.conn_manager.register(
+            conn_id,
+            tx,
+            ctrl,
+            terminal,
+            None,
+            cancel.clone(),
+            community,
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            3,
+            crate::state::CommunityConnectionControl::new(cancel.clone()),
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, keys.public_key().to_bytes().to_vec());
+        cancel
+    }
+
+    /// A NIP-43 self-leave ends access now: the member's root socket, their
+    /// audio socket, and their owned agent's socket all close. The same
+    /// member's socket in another community stays open.
+    /// Mutation: drop `revoke_live_access` from the leave path → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn self_leave_closes_member_audio_and_agent_sockets() {
+        use crate::state::CommunityConnectionControl;
+        use tokio_util::sync::CancellationToken;
+
+        let host = format!("self-leave-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let other_host = format!(
+            "self-leave-control-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (_, other_tenant) = workspace_profile_test_state(&other_host, true).await;
+        let (owner, agent) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("seed member");
+        for keys in [&owner, &agent] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("link agent"));
+
+        let root = bound_root_socket(&state, tenant.community(), &owner);
+        let control_root = bound_root_socket(&state, other_tenant.community(), &owner);
+        let bound = |keys: &Keys| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            control.bind_pubkey(keys.public_key().to_bytes());
+            let guard = state.community_connections.register(
+                uuid::Uuid::new_v4(),
+                tenant.community(),
+                control.clone(),
+            );
+            (control, guard)
+        };
+        let (audio, _g1) = bound(&owner);
+        let (agent_socket, _g2) = bound(&agent);
+
+        let leave = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
+            "",
+        )
+        .tags([nostr::Tag::parse(["-"]).unwrap()])
+        .sign_with_keys(&owner)
+        .expect("sign leave");
+        let auth = crate::handlers::ingest::IngestAuth::Http {
+            pubkey: owner.public_key(),
+            scopes: vec![buzz_auth::Scope::ChannelsRead],
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        };
+        crate::handlers::ingest::ingest_event(&state, &tenant, leave, auth)
+            .await
+            .expect("member leaves");
+
+        assert!(root.is_cancelled(), "the member's root socket closes");
+        assert!(
+            audio.cancellation_token().is_cancelled(),
+            "their audio socket closes"
+        );
+        assert!(
+            agent_socket.cancellation_token().is_cancelled(),
+            "their agent's socket closes"
+        );
+        assert!(
+            !control_root.is_cancelled(),
+            "another community's socket stays open"
+        );
+    }
 }

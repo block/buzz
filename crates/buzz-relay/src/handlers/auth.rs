@@ -1372,6 +1372,241 @@ mod tests {
     mod postgres_tests {
         use super::*;
 
+        /// A community whose row exists, so bans and users can reference it.
+        async fn seeded_community(
+            state: &crate::state::AppState,
+        ) -> buzz_core::tenant::CommunityId {
+            let id = uuid::Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(id)
+                .bind(format!("admission-{}.example", id.simple()))
+                .execute(state.db.pool())
+                .await
+                .expect("insert community");
+            buzz_core::tenant::CommunityId::from_uuid(id)
+        }
+
+        /// A pending, non-NIP-FI root socket registered with the connection
+        /// manager, the registry a ban's disconnect searches.
+        fn registered_pending_conn(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            challenge: &str,
+        ) -> (
+            std::sync::Arc<crate::connection::ConnectionState>,
+            tokio::sync::mpsc::Receiver<WsMessage>,
+        ) {
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            let (send_tx, _send_rx) = tokio::sync::mpsc::channel::<WsMessage>(8);
+            let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<WsMessage>(8);
+            let (terminal_ctrl_tx, _terminal_rx) = tokio::sync::mpsc::channel::<WsMessage>(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let backpressure = Arc::new(std::sync::atomic::AtomicU8::new(0));
+            let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(AuthState::Pending {
+                    challenge: challenge.to_string(),
+                    started_at: Instant::now(),
+                }),
+                subscriptions: Arc::clone(&subscriptions),
+                send_tx: send_tx.clone(),
+                ctrl_tx: ctrl_tx.clone(),
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::clone(&backpressure),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
+            state.conn_manager.register(
+                conn.conn_id,
+                send_tx,
+                ctrl_tx,
+                conn.terminal_ctrl_tx.clone(),
+                None,
+                cancel,
+                community,
+                backpressure,
+                subscriptions,
+                3,
+                conn.community_control.clone(),
+            );
+            (conn, ctrl_rx)
+        }
+
+        fn signed_auth(
+            keys: &Keys,
+            challenge: &str,
+            auth_tag: Option<Vec<String>>,
+        ) -> nostr::Event {
+            let mut builder = EventBuilder::new(Kind::Authentication, "")
+                .tag(Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(Tag::parse(["challenge", challenge]).unwrap());
+            if let Some(tag) = auth_tag {
+                builder = builder.tag(Tag::parse(tag).unwrap());
+            }
+            builder.sign_with_keys(keys).unwrap()
+        }
+
+        /// A ban whose disconnect lands after AUTH's policy reads but before it
+        /// binds the socket must still refuse admission: the final check runs
+        /// after the bind. A user in another community, paused at the same
+        /// point, is still admitted.
+        ///
+        /// Mutation: remove the `final_admission_denial` call from
+        /// `handle_auth` → the banned socket is admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ban_committed_during_auth_refuses_admission() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let (banned_community, control_community) = (
+                seeded_community(&state).await,
+                seeded_community(&state).await,
+            );
+            let (member, bystander) = (Keys::generate(), Keys::generate());
+            let (banned_conn, mut banned_ctrl) =
+                registered_pending_conn(&state, banned_community, "race-banned");
+            let (control_conn, _control_ctrl) =
+                registered_pending_conn(&state, control_community, "race-control");
+
+            let mut paused = Vec::new();
+            for (conn, keys, challenge) in [
+                (&banned_conn, &member, "race-banned"),
+                (&control_conn, &bystander, "race-control"),
+            ] {
+                let (arrived, release) =
+                    crate::nip_fi_test_hooks::auth_commit_hook::arm(conn.tenant.community());
+                let handle = tokio::spawn(handle_auth(
+                    signed_auth(keys, challenge, None),
+                    Arc::clone(conn),
+                    Arc::clone(&state),
+                ));
+                tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+                    .await
+                    .expect("AUTH must pause after its policy reads")
+                    .expect("hook channel closed");
+                paused.push((handle, release));
+            }
+
+            // The ban commits and its disconnect runs while AUTH is paused.
+            state
+                .db
+                .ban_community_member(
+                    banned_community,
+                    &member.public_key().to_bytes(),
+                    &Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("ban");
+            let tenant = banned_conn.tenant.clone();
+            state
+                .revoke_live_access(
+                    &tenant,
+                    &member.public_key().to_bytes(),
+                    "race-ban",
+                    "blocked: you are banned from this community",
+                )
+                .await
+                .expect("revoke");
+
+            for (handle, release) in paused {
+                release.notify_one();
+                tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                    .await
+                    .expect("AUTH must finish")
+                    .expect("AUTH must not panic");
+            }
+
+            assert!(
+                !matches!(
+                    banned_conn.auth_state_snapshot(),
+                    AuthState::Authenticated(_)
+                ),
+                "a ban committed during AUTH must refuse admission"
+            );
+            assert!(
+                banned_conn.cancel.is_cancelled(),
+                "the refused socket closes"
+            );
+            let refusal = banned_ctrl.try_recv().expect("refusal frame");
+            assert!(
+                matches!(&refusal, WsMessage::Text(t) if t.contains("banned")),
+                "refusal names the ban, got {refusal:?}"
+            );
+            assert!(
+                matches!(
+                    control_conn.auth_state_snapshot(),
+                    AuthState::Authenticated(_)
+                ),
+                "an unaffected community's user is still admitted"
+            );
+        }
+
+        /// An agent whose owner link cannot be recorded (here: the agent is
+        /// already linked to a different owner) is refused, because revoking
+        /// its NIP-OA owner could not find it.
+        ///
+        /// Mutation: restore "continue on a failed owner-link write" in
+        /// `handle_auth` → the agent is admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn root_auth_refuses_agent_whose_owner_link_fails() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (agent, owner, prior_owner) =
+                (Keys::generate(), Keys::generate(), Keys::generate());
+            for key in [&agent, &prior_owner] {
+                state
+                    .db
+                    .ensure_user_for_authorization(community, key.public_key().as_bytes())
+                    .await
+                    .expect("seed user");
+            }
+            assert!(state
+                .db
+                .set_agent_owner_for_authorization(
+                    community,
+                    agent.public_key().as_bytes(),
+                    prior_owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("seed prior owner"));
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+
+            let (conn, mut ctrl) = registered_pending_conn(&state, community, "owner-link");
+            handle_auth(
+                signed_auth(&agent, "owner-link", Some(auth_tag)),
+                Arc::clone(&conn),
+                state,
+            )
+            .await;
+
+            assert!(!matches!(
+                conn.auth_state_snapshot(),
+                AuthState::Authenticated(_)
+            ));
+            let refusal = ctrl.try_recv().expect("refusal frame");
+            assert!(
+                matches!(&refusal, WsMessage::Text(t) if t.contains(crate::handlers::auth::OWNER_LINK_ERROR)),
+                "refusal names the owner-link failure, got {refusal:?}"
+            );
+        }
+
         async fn auth_test_state_real_db_expect() -> std::sync::Arc<crate::state::AppState> {
             use std::sync::Arc;
             let db_url = crate::test_support::database_url();

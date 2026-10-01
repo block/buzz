@@ -261,7 +261,6 @@ run_unit_tests() {
     handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected
     handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path
     handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence
-    handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack
     handlers::event::tests::fanout_access::owner_only_kinds_keep_only_the_owner
     handlers::event::tests::pubsub_fanout::pubsub_owner_only_kinds_reach_only_the_owner
     handlers::event::tests::pubsub_fanout::dispatch_owner_only_kinds_reach_only_the_owner
