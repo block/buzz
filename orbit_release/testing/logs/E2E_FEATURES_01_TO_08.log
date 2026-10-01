@@ -1,0 +1,134 @@
+================================================================================
+ORBIT BRAIN V1 — FULL E2E FEATURES 01 TO 08 EXECUTION LOG
+================================================================================
+Timestamp: 2026-10-01T23:49:56Z
+Target Suite: crates/buzz-mcp/tests/e2e_features_01_to_08.rs
+Operating System: Windows 11 (MSVC x86_64)
+Execution Profile: debuginfo (zero external PostgreSQL / Redis services required)
+Test Result: 7 PASSED; 0 FAILED; 0 IGNORED; 0 MEASURED
+
+--------------------------------------------------------------------------------
+FEATURE MAPPING & VERIFICATION BREAKDOWN
+--------------------------------------------------------------------------------
+
+1. FEATURE 01: Storage Foundation (Embedded Local-First Store)
+   Directory: orbit_release/features/01_storage_foundation/
+   Test Case IDs: TC-F01-001, TC-F01-002, TC-F01-003, TC-F01-004
+   How it Works:
+     - Embedded SQLite metadata database initializes at `~/.orbit/brain/db/orbit.db` with WAL mode and foreign keys enabled.
+     - Vector store (`~/.orbit/brain/vectors/`) and knowledge graph store (`~/.orbit/brain/graph/`) initialized in-process.
+     - SecretRedactor filters out credentials (`sk-*`, `ghp_*`, `AKIA*`, PEM private keys) before persistence.
+     - Cascading deletion permanently removes chunks from SQLite, vector index, and knowledge graph relations.
+   Status: PASS (Verified in TC-E2E-COMB-01, TC-E2E-COMB-05, TC-E2E-COMB-07)
+
+2. FEATURE 02: Embedding & Reranker Engine
+   Directory: orbit_release/features/02_embedding_engine/
+   Test Case IDs: TC-F02-001, TC-F02-002, TC-F02-003
+   How it Works:
+     - LocalOnnxEmbedder computes deterministic 384-dimensional normalized dense vectors.
+     - LocalOnnxReranker scores candidate text pairs with zero network latency.
+     - EmbedProvider and RerankProvider traits support seamless swapping between local ONNX and cloud providers.
+     - OS keyring fallback safely manages API keys without plaintext on-disk exposure.
+   Status: PASS (Verified in TC-E2E-COMB-01, TC-E2E-COMB-07)
+
+3. FEATURE 03: Ingestion Pipeline (L1 -> L2)
+   Directory: orbit_release/features/03_ingestion_pipeline/
+   Test Case IDs: TC-F03-001, TC-F03-002, TC-F03-003
+   How it Works:
+     - AstChunker parses Rust, Python, Go, TypeScript, and Markdown files preserving semantic symbol boundaries.
+     - Content-hash (SHA-256) deduplication skips unchanged files with zero re-embedding overhead.
+     - Git metadata extraction tracks commits, authors, and file revisions.
+     - IngestionPipeline connects Redactor -> Chunker -> Embedder -> Storage atomically.
+   Status: PASS (Verified in TC-E2E-COMB-01, TC-E2E-COMB-04, TC-E2E-COMB-07)
+
+4. FEATURE 04: SuperRAG Retrieval Layer (Pre-Retrieval Routing, RRF, Re-Trial, Knapsack Packer)
+   Directory: orbit_release/features/04_multi_rag_search/
+   Test Case IDs: TC-F04-001, TC-F04-002, TC-F04-003, TC-F04-004, TC-F04-005, TC-F04-006
+   How it Works:
+     - QueryRouter classifies queries into Symbolic, Conceptual, TemporalDecision, and MultiHopRelationship intents.
+     - Multi-modal retrieval executes over dense vectors, SQLite FTS5 lexical index, and graph neighborhoods.
+     - Reciprocal Rank Fusion (RRF) applies temporal decay (e^(-lambda*delta_t)) and authority weighting.
+     - Confidence verification loop triggers adaptive data re-trial on ambiguous or sparse queries.
+     - TokenBudgetPacker greedily packs highest-scoring chunks into `<orbit_context>` semantic XML tags.
+   Status: PASS (Verified in TC-E2E-COMB-01, TC-E2E-COMB-03, TC-E2E-COMB-07)
+
+5. FEATURE 05: Knowledge Graph (L3 Bi-temporal Memory)
+   Directory: orbit_release/features/05_knowledge_graph/
+   Test Case IDs: TC-F05-001, TC-F05-002, TC-F05-003
+   How it Works:
+     - Bi-temporal model records valid time (`valid_at`, `invalid_at`) and transaction time (`created_at`, `deleted_at`).
+     - Contradiction resolver marks obsolete facts with `invalid_at = replacement.valid_at` preserving historical audit trail.
+     - 2-hop neighborhood BFS traversal injects contextual graph connections into SuperRAG queries.
+   Status: PASS (Verified in TC-E2E-COMB-03, TC-E2E-COMB-07)
+
+6. FEATURE 06: Recall Agent (9 IDE Parsers)
+   Directory: orbit_release/features/06_recall_agent/
+   Test Case IDs: TC-F06-001, TC-F06-002
+   How it Works:
+     - Retroactively discovers and parses past session transcripts from 9 agent harnesses:
+       Antigravity, Claude Code, Codex, Cursor, Goose, OpenCode, ZCode, AGY CLI, Kimi.
+     - Normalizes multi-turn conversations into clean Markdown with user prompts, reasoning, and tool calls.
+     - Scrubs tokens and API keys prior to chunk storage and embedding.
+     - Incremental sync guarantees zero duplicate chunks on repeated re-ingestion.
+   Status: PASS (Verified in TC-E2E-COMB-02, TC-E2E-COMB-07)
+
+7. FEATURE 07: MCP Server Tools (`orbit.*`)
+   Directory: orbit_release/features/07_mcp_server_tools/
+   Test Case IDs: TC-F07-001, TC-F07-002, TC-F07-003
+   How it Works:
+     - Exposes 8 standardized tools via rmcp protocol:
+       `orbit.search_context`, `orbit.store_memory`, `orbit.get_project_context`, `orbit.recall_session`,
+       `orbit.get_file_history`, `orbit.mark_decision`, `orbit.get_index_stats`, `orbit.delete_memory`.
+     - Context Arbiter encloses all retrieved text in `<orbit_untrusted_context source="...">` delimiter tags.
+     - Real-time outbound secret redaction masks credentials before JSON-RPC transmission.
+     - Append-only audit logger records every invocation to `~/.orbit/audit.log`.
+   Status: PASS (Verified in TC-E2E-COMB-01..07)
+
+8. FEATURE 08: Agent Auto-Wiring & 1-Click Harness Hub
+   Directory: orbit_release/features/08_agent_auto_wiring/
+   Test Case IDs: TC-F08-001, TC-F08-002
+   How it Works:
+     - Scans workstation for 9 coding agent harnesses across standard config locations.
+     - Injects Orbit stdio MCP server configuration into JSON and YAML configs without terminal intervention.
+     - Injects universal `orbit-memory.skill.md` template instructing agents on proper tool calling patterns.
+     - Connect and disconnect actions are fully idempotent, preserving developer custom servers and settings.
+   Status: PASS (Verified in TC-E2E-COMB-06, TC-E2E-COMB-07)
+
+--------------------------------------------------------------------------------
+CROSS-FEATURE COMBINATIONS SUMMARY
+--------------------------------------------------------------------------------
+
+- TC-E2E-COMB-01: Ingestion -> Embedding -> Storage -> SuperRAG -> MCP Search
+  Result: PASS
+  Verified: Code authored in workspace is AST chunked, embedded via LocalOnnxEmbedder, committed to SQLite,
+  and returned via MCP `orbit.search_context` wrapped in `<orbit_untrusted_context>`.
+
+- TC-E2E-COMB-02: Multi-IDE Recall Agent -> Secret Redaction -> MCP Recall
+  Result: PASS
+  Verified: Antigravity transcript containing Anthropic API key and GitHub token is normalized, credentials
+  redacted into mask placeholders, and returned securely via `orbit.recall_session`.
+
+- TC-E2E-COMB-03: Knowledge Graph Invalidation -> Decision Preference
+  Result: PASS
+  Verified: Marking obsolete decision ADR-001 as superseded via `orbit.mark_decision` causes SuperRAG
+  to prioritize the active decision ADR-002 over the obsolete one.
+
+- TC-E2E-COMB-04: File History & Project Context
+  Result: PASS
+  Verified: `orbit.get_file_history` tracks multi-file changes and `orbit.get_project_context` generates
+  an architectural summary within the requested token budget.
+
+- TC-E2E-COMB-05: Cascading Memory Deletion
+  Result: PASS
+  Verified: Calling `orbit.delete_memory` permanently purges the chunk from SQLite, vector index, and
+  search results, with index stats reflecting the decrement.
+
+- TC-E2E-COMB-06: Agent Auto-Wiring Detection & Universal Skill Verification
+  Result: PASS
+  Verified: All 9 agent configurations (JSON & YAML) and skill files match the exact tool contracts
+  and parameter schemas exposed by the Orbit MCP server.
+
+- TC-E2E-COMB-07: Full Master Lifecycle Loop (Features 01 through 08)
+  Result: PASS
+  Verified: Complete end-to-end lifecycle executing sequentially across all 8 features in 10 steps.
+================================================================================

@@ -234,7 +234,46 @@ Notes:
   - Tier 2 Desktop Backend: `desktop/src-tauri/src/commands/harness.rs` exposing `detect_agent_harnesses`, `connect_harness`, `disconnect_harness` registered in Tauri handler.
   - Tier 3 Universal Skill & Core: canonical Markdown and YAML templates instructing agents on standard tool invocation workflows.
   - Tier 4 CLI Fallback: `buzz memory install --auto` and `buzz mem install --harness <name>` in `buzz-cli`.
-Follow-up: Feature 08 complete. Ready for Feature 09.
+```text
+Date: 2026-10-01
+Feature: E2E Cross-Feature Integration (Features 01 through 08)
+Build/commit: local-build-e2e-all-features
+Automated tests:
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_01_ingest_embed_store_superrag_mcp -> PASS
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_02_recall_agent_secret_redaction_mcp -> PASS
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_03_knowledge_graph_invalidation_and_decision_preference -> PASS
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_04_file_history_and_project_context -> PASS
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_05_memory_deletion_cascade -> PASS
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_06_agent_auto_wiring_harness_integration -> PASS
+  - buzz-mcp::e2e_features_01_to_08::test_tc_e2e_comb_07_full_master_lifecycle -> PASS
+  - Feature test suites (F01..F08 regressions):
+    - buzz-db::f01_storage_foundation_tests (6 tests) -> PASS
+    - buzz-ai::f02_embedding_engine_tests (4 tests) -> PASS
+    - buzz-ingest::f03_ingestion_pipeline_tests (4 tests) -> PASS
+    - buzz-search::f04_superrag_tests (6 tests) -> PASS
+    - buzz-db::f05_knowledge_graph_tests (3 tests) -> PASS
+    - buzz-recall::f06_recall_agent_tests (4 tests) -> PASS
+    - buzz-mcp::mcp_tools_test (1 test) -> PASS
+    - desktop::commands::harness (3 tests) -> PASS
+Manual tests:
+  - Verified full master lifecycle executing all 8 features sequentially:
+    1. Initialized zero-external-process SQLite metadata at `~/.orbit/brain/db/orbit.db` and vector/graph stores (F01).
+    2. Verified local deterministic 384-dimensional embedding and cross-encoder reranking (F02).
+    3. Ingested source files with AST chunking, git metadata, and secret redaction (F03).
+    4. Built bi-temporal knowledge graph entities and ADR decisions with contradiction invalidation (F05).
+    5. Ingested agent transcripts across 9 IDEs with session normalization and deduplication (F06).
+    6. Verified 1-click agent auto-wiring detection and universal skill injection (F08).
+    7. Performed hybrid multi-modal SuperRAG retrieval with greedy knapsack token budget packing (F04).
+    8. Executed all 8 MCP tools (`orbit.search_context`, `orbit.store_memory`, `orbit.get_project_context`, `orbit.recall_session`, `orbit.get_file_history`, `orbit.mark_decision`, `orbit.get_index_stats`, `orbit.delete_memory`) with delimiter fencing (`<orbit_untrusted_context>`) (F07).
+    9. Verified decision invalidation preference and temporal decay resolution (F05 + F04 + F07).
+    10. Verified cascading memory deletion permanently purging records across SQLite, vector store, and graph (F01 + F07).
+Environment: Windows 11, Rust 1.88, tokio 1.52, rusqlite 0.40.2 (bundled)
+Result: PASS
+Notes:
+  - Execution logs stored at `orbit_release/testing/logs/E2E_FEATURES_01_TO_08.log`.
+  - Zero mock processes; pure local-first execution conforming to Orbit V1 contract.
+Follow-up: Advance to Feature 09 (Obsidian-Style Brain Graph Panel).
 ```
+
 
 

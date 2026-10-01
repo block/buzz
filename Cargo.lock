@@ -1312,6 +1312,7 @@ dependencies = [
  "buzz-audit",
  "buzz-core",
  "buzz-db",
+ "buzz-ingest",
  "buzz-plugins",
  "buzz-recall",
  "buzz-search",
