@@ -1,4 +1,5 @@
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { AgentHarnessHub } from "@/features/harness";
 import {
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
@@ -49,6 +50,15 @@ export function AgentsSettingsPanel() {
           </SettingsOptionRow>
         </SettingsOptionGroup>
         <PreventSleepSettingsCard />
+        <SettingsOptionGroup
+          data-testid="settings-agent-harness-hub"
+          title="Orbit Central Brain — 1-Click Harness Hub"
+          description="Auto-detect and wire AI coding assistants (Antigravity, Claude Code, Cursor, Codex, Goose, OpenCode, ZCode, AGY CLI, Kimi) to share central Orbit memory."
+        >
+          <div className="p-4">
+            <AgentHarnessHub />
+          </div>
+        </SettingsOptionGroup>
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
       </SettingsOptionGroupList>

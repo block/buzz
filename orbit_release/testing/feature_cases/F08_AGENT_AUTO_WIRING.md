@@ -8,6 +8,6 @@
 | TC-F08-002 | Reconnect | Run connect twice. | No duplicate/broken configuration is produced. |
 
 ## Status
-- [ ] Automated coverage implemented where appropriate
-- [ ] Manual local validation completed
-- [ ] Evidence recorded
+- [x] Automated coverage implemented where appropriate
+- [x] Manual local validation completed
+- [x] Evidence recorded

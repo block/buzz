@@ -272,6 +272,7 @@ enum Cmd {
     Upload(UploadCmd),
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
+    #[command(alias = "memory")]
     Mem(MemCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
@@ -1994,6 +1995,18 @@ pub enum MemCmd {
         slug: String,
         #[arg(long)]
         owner: Option<String>,
+    },
+    /// Install and auto-wire Orbit MCP memory server to local AI agent harnesses
+    Install {
+        /// Automatically detect and wire all installed AI agent harnesses
+        #[arg(long, default_value_t = false)]
+        auto: bool,
+        /// Target specific harness to wire (antigravity, claude_code, cursor, codex, goose, opencode, zcode, agy_cli, kimi)
+        #[arg(long)]
+        harness: Option<String>,
+        /// Emit JSON result
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 

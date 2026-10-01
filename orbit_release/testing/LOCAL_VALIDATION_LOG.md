@@ -197,3 +197,44 @@ Notes:
 Follow-up: Feature 07 complete. Ready for Feature 08 or end-to-end integration.
 ```
 
+```text
+Date: 2026-10-01
+Feature: 08 - Agent Auto-Wiring & 1-Click Harness Hub
+Build/commit: local-build-f08
+Automated tests:
+  - desktop::commands::harness::tests::test_tc_f08_001_connect_harness_idempotent -> PASS
+  - desktop::commands::harness::tests::test_tc_f08_002_reconnect_no_duplicates_or_corruption -> PASS
+  - desktop::commands::harness::tests::test_goose_yaml_connect_and_disconnect -> PASS
+  - desktop::ui::AgentHarnessHub.test.mjs (2 tests: 9 supported harnesses, status enum) -> PASS
+  - desktop::ui settings test suite (105 unit tests) -> PASS (zero regressions)
+  - buzz-cli total test suite (493 unit tests: mem ls/get/hash/set/patch/rm/install) -> PASS (zero regressions)
+  - desktop cargo check (buzz-desktop Tauri IPC backend with harness commands) -> PASS (0 errors)
+  - desktop frontend typecheck (npx tsc --noEmit) -> PASS (0 errors)
+  - desktop linter/formatter (npx @biomejs/biome check) -> PASS (0 errors)
+Manual tests:
+  - Verified 1-Click auto-detection across all 9 coding agent harnesses:
+    - Antigravity IDE (`~/.gemini/config/mcp_config.json`, `~/.gemini/antigravity/skills/orbit/SKILL.md`)
+    - Claude Code (`~/.claude/mcp_config.json`, `~/.claude/skills/orbit-memory/SKILL.md`)
+    - Cursor (`.cursor/mcp.json` or `~/.cursor/mcp.json`, `.cursor/rules/orbit-memory.md`)
+    - Codex (`~/.codex/config.json`, `~/.codex/instructions.md`)
+    - Goose (`~/.config/goose/config.yaml`, `~/.goose/skills/orbit.yaml`)
+    - OpenCode (`~/.opencode/mcp.json`, `~/.opencode/skills/orbit.md`)
+    - ZCode (`~/.zcode/mcp_config.json`, `~/.zcode/instructions/orbit.md`)
+    - AGY CLI (`~/.gemini/config/mcp_config.json`, `~/.gemini/skills/orbit.md`)
+    - Kimi (`~/.kimi/mcp.json`, `~/.kimi/rules/orbit.md`)
+  - Verified idempotent connect: multiple connect executions preserve existing developer server configs, leaving JSON/YAML clean and without duplicate keys.
+  - Verified universal canonical Orbit Skill injection instructing agents on `orbit.get_project_context`, `orbit.get_file_history`, `orbit.search_context`, `orbit.store_memory`, and `orbit.mark_decision`.
+  - Verified disconnect action cleanly strips `orbit` MCP registration and removes injected skill files.
+  - Verified separation between local brain agent wiring and cloud account sync.
+  - Verified CLI headless auto-wiring fallback: `buzz memory install --auto` / `buzz mem install`.
+Environment: Windows 11, Rust 1.88, tauri 2.11, React 19, Tailwind CSS, serde_yaml 0.9
+Result: PASS
+Notes:
+  - Tier 1 Frontend: `desktop/src/features/harness/AgentHarnessHub.tsx` integrated into `AgentsSettingsPanel.tsx`, live scanning, status badges (`✓ Connected`, `Detected`, `Not Installed`), 1-click connect/disconnect, and universal skill specification drawer.
+  - Tier 2 Desktop Backend: `desktop/src-tauri/src/commands/harness.rs` exposing `detect_agent_harnesses`, `connect_harness`, `disconnect_harness` registered in Tauri handler.
+  - Tier 3 Universal Skill & Core: canonical Markdown and YAML templates instructing agents on standard tool invocation workflows.
+  - Tier 4 CLI Fallback: `buzz memory install --auto` and `buzz mem install --harness <name>` in `buzz-cli`.
+Follow-up: Feature 08 complete. Ready for Feature 09.
+```
+
+

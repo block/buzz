@@ -15,9 +15,9 @@
 | **03** | Ingestion Pipeline (L1 $\rightarrow$ L2) | `03_ingestion_pipeline/` | P0 | Sprint 2 | F01, F02 | `[x] Completed` |
 | **04** | SuperRAG Retrieval Layer (Data Re-Trial & Reranking)| `04_multi_rag_search/` | P0 | Sprint 2 | F01, F02 | `[x] Completed` |
 | **05** | Knowledge Graph (L3 Bi-temporal Memory) | `05_knowledge_graph/` | P1 | Sprint 3 | F01, F03 | `[x] Completed` |
-| **06** | Recall Agent (9 IDE Parsers) | `06_recall_agent/` | P1 | Sprint 3 | F01, F02, F03 | `[ ] Not Started` |
-| **07** | MCP Server Tools (`orbit.*`) | `07_mcp_server_tools/` | P0 | Sprint 4 | F01, F02, F04, F05, F06 | `[ ] Not Started` |
-| **08** | Desktop 1-Click Harness Hub | `08_agent_auto_wiring/` | P1 | Sprint 4 | F07 | `[ ] Not Started` |
+| **06** | Recall Agent (9 IDE Parsers) | `06_recall_agent/` | P1 | Sprint 3 | F01, F02, F03 | `[x] Completed` |
+| **07** | MCP Server Tools (`orbit.*`) | `07_mcp_server_tools/` | P0 | Sprint 4 | F01, F02, F04, F05, F06 | `[x] Completed` |
+| **08** | Desktop 1-Click Harness Hub | `08_agent_auto_wiring/` | P1 | Sprint 4 | F07 | `[x] Completed` |
 | **09** | Obsidian-Style Brain Graph | `09_desktop_brain_panel/` | P1 | Sprint 5 | F04, F05, F07 | `[ ] Not Started` |
 | **10** | Packaging & Hardening | `10_packaging_hardening/` | P0 | Sprint 6 | F01–F10 | `[ ] Not Started` |
 | **11** | Hosted / Enterprise Foundation | `11_hosted_enterprise/` | P1 | Post-V1 | F01–F10 | `[ ] Planned` |
@@ -52,36 +52,36 @@
 - [x] **F05**: Bi-temporal entity and relation extraction operational (Graphiti model)
 - [x] **F05**: Contradiction resolver invalidates obsolete facts (`invalid_at = replacement.valid_at`)
 - [x] **F05**: 2-hop neighborhood traversal integrated into SuperRAG retrieval
-- [ ] **F06**: 9 IDE transcript parsers implemented:
-  - [ ] Antigravity (`~/.gemini/...`)
-  - [ ] Claude Code (`~/.claude/...`)
-  - [ ] Codex (`~/.codex/...`)
-  - [ ] Cursor (`~/.cursor/...`)
-  - [ ] Goose (`~/.config/goose/...`)
-  - [ ] OpenCode (`~/.opencode/...`)
-  - [ ] ZCode (`~/.zcode/...`)
-  - [ ] AGY CLI (`~/.gemini/...`)
-  - [ ] Kimi (`~/.kimi/...`)
-- [ ] **F06**: Incremental sync ensures no duplicate transcript ingestion
+- [x] **F06**: 9 IDE transcript parsers implemented:
+  - [x] Antigravity (`~/.gemini/...`)
+  - [x] Claude Code (`~/.claude/...`)
+  - [x] Codex (`~/.codex/...`)
+  - [x] Cursor (`~/.cursor/...`)
+  - [x] Goose (`~/.config/goose/...`)
+  - [x] OpenCode (`~/.opencode/...`)
+  - [x] ZCode (`~/.zcode/...`)
+  - [x] AGY CLI (`~/.gemini/...`)
+  - [x] Kimi (`~/.kimi/...`)
+- [x] **F06**: Incremental sync ensures no duplicate transcript ingestion
 
 ### Phase 4: MCP Tools, Plugins & Desktop Settings Hub (Sprint 4)
-- [ ] **F07**: 8 `orbit.*` MCP tools implemented and registered in `buzz-dev-mcp` and `buzz-mcp`:
-  - [ ] `orbit.search_context`
-  - [ ] `orbit.store_memory`
-  - [ ] `orbit.get_project_context`
-  - [ ] `orbit.recall_session`
-  - [ ] `orbit.get_file_history`
-  - [ ] `orbit.mark_decision`
-  - [ ] `orbit.get_index_stats`
-  - [ ] `orbit.delete_memory`
-- [ ] **F07**: Context Arbiter security fencing operational (`<orbit_untrusted_context>`, secret redaction)
-- [ ] **F07**: Desktop Settings UI: **"Plugins & MCP Tools"** panel (`PluginsMcpSettingsPanel.tsx`)
-- [ ] **F07**: Settings tool toggles (enable/disable built-in tools) and execution policies (`Auto-Approve` vs `Confirm-on-Execute`)
-- [ ] **F07**: Custom MCP server registration (stdio & SSE) with live handshake & tool discovery tester
-- [ ] **F07**: Plugins directory, marketplace, and custom plugin installer
-- [ ] **F08**: Desktop App Onboarding / Settings "Agent Harnesses" screen implemented
-- [ ] **F08**: 1-Click "Connect to Orbit Brain" writes MCP config & skill files without terminal
-- [ ] **F08**: Centralized `~/.orbit/brain/` shared automatically across all connected harnesses
+- [x] **F07**: 8 `orbit.*` MCP tools implemented and registered in `buzz-dev-mcp` and `buzz-mcp`:
+  - [x] `orbit.search_context`
+  - [x] `orbit.store_memory`
+  - [x] `orbit.get_project_context`
+  - [x] `orbit.recall_session`
+  - [x] `orbit.get_file_history`
+  - [x] `orbit.mark_decision`
+  - [x] `orbit.get_index_stats`
+  - [x] `orbit.delete_memory`
+- [x] **F07**: Context Arbiter security fencing operational (`<orbit_untrusted_context>`, secret redaction)
+- [x] **F07**: Desktop Settings UI: **"Plugins & MCP Tools"** panel (`PluginsMcpSettingsPanel.tsx`)
+- [x] **F07**: Settings tool toggles (enable/disable built-in tools) and execution policies (`Auto-Approve` vs `Confirm-on-Execute`)
+- [x] **F07**: Custom MCP server registration (stdio & SSE) with live handshake & tool discovery tester
+- [x] **F07**: Plugins directory, marketplace, and custom plugin installer
+- [x] **F08**: Desktop App Onboarding / Settings "Agent Harnesses" screen implemented
+- [x] **F08**: 1-Click "Connect to Orbit Brain" writes MCP config & skill files without terminal
+- [x] **F08**: Centralized `~/.orbit/brain/` shared automatically across all connected harnesses
 
 ### Phase 5: "AI Brain" Primary Navigation & Obsidian-Style Brain Graph (Sprint 5)
 - [ ] **F09**: Primary navigation entry **"AI Brain"** on main page left sidebar (`AppSidebar.tsx` / `CommunityRail.tsx`)

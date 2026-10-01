@@ -774,7 +774,192 @@ pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), Cli
             .await
         }
         MemCmd::Rm { slug, owner } => cmd_rm(client, &slug, owner.as_deref()).await,
+        MemCmd::Install { auto, harness, json } => {
+            cmd_install(auto, harness.as_deref(), json).await
+        }
     }
+}
+
+/// `buzz memory install` / `buzz mem install` — auto-wire Orbit MCP server and canonical skill to coding agent harnesses.
+pub async fn cmd_install(auto: bool, harness: Option<&str>, json: bool) -> Result<(), CliError> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    struct Target {
+        id: &'static str,
+        name: &'static str,
+        config_rel: &'static str,
+        skill_rel: &'static str,
+        detect_dirs: &'static [&'static str],
+    }
+
+    let targets = [
+        Target {
+            id: "antigravity",
+            name: "Antigravity IDE",
+            config_rel: ".gemini/config/mcp_config.json",
+            skill_rel: ".gemini/antigravity/skills/orbit/SKILL.md",
+            detect_dirs: &[".gemini"],
+        },
+        Target {
+            id: "claude_code",
+            name: "Claude Code",
+            config_rel: ".claude/mcp_config.json",
+            skill_rel: ".claude/skills/orbit-memory/SKILL.md",
+            detect_dirs: &[".claude"],
+        },
+        Target {
+            id: "cursor",
+            name: "Cursor",
+            config_rel: ".cursor/mcp.json",
+            skill_rel: ".cursor/rules/orbit-memory.md",
+            detect_dirs: &[".cursor"],
+        },
+        Target {
+            id: "codex",
+            name: "Codex",
+            config_rel: ".codex/config.json",
+            skill_rel: ".codex/instructions.md",
+            detect_dirs: &[".codex"],
+        },
+        Target {
+            id: "opencode",
+            name: "OpenCode",
+            config_rel: ".opencode/mcp.json",
+            skill_rel: ".opencode/skills/orbit.md",
+            detect_dirs: &[".opencode"],
+        },
+        Target {
+            id: "zcode",
+            name: "ZCode",
+            config_rel: ".zcode/mcp_config.json",
+            skill_rel: ".zcode/instructions/orbit.md",
+            detect_dirs: &[".zcode"],
+        },
+        Target {
+            id: "agy_cli",
+            name: "AGY CLI",
+            config_rel: ".gemini/config/mcp_config.json",
+            skill_rel: ".gemini/skills/orbit.md",
+            detect_dirs: &[".gemini"],
+        },
+        Target {
+            id: "kimi",
+            name: "Kimi",
+            config_rel: ".kimi/mcp.json",
+            skill_rel: ".kimi/rules/orbit.md",
+            detect_dirs: &[".kimi"],
+        },
+    ];
+
+    let canonical_skill = r#"---
+name: orbit-memory
+description: Centralized Orbit persistent memory, knowledge graph, and cross-agent context synchronization.
+---
+
+# Orbit Centralized Brain Skill
+
+You are connected to the central Orbit persistent memory and knowledge graph (`~/.orbit/brain/`).
+Always use the `orbit.*` tools to maintain architectural continuity across coding sessions and peer AI agents.
+
+## Core Tool Usage Patterns
+
+1. **At Session Start**:
+   Call `orbit.get_project_context(path=".")` to load the active architectural decisions, tech stack, and conventions before planning changes.
+
+2. **Before Modifying Code**:
+   Call `orbit.get_file_history(file_path="<target-file>")` to see previous decisions, changes, and architectural rationale affecting that file.
+
+3. **Before Making Major Decisions**:
+   Call `orbit.search_context(query="<architectural query>")` to search past decisions, dense semantic memories, and documentation across all agents.
+
+4. **After Completing Significant Tasks**:
+   Call `orbit.store_memory(content="<decision or architectural fact>", tags=["architecture", "decision"])` to record state so other agents stay synchronized.
+
+5. **When Obsoleting Decisions**:
+   Call `orbit.mark_decision(id="<decision-id>", state="superseded", note="<reason>")` to keep the bi-temporal knowledge graph accurate.
+"#;
+
+    let mut results = Vec::new();
+
+    for t in &targets {
+        let should_wire = if let Some(target) = harness {
+            t.id.eq_ignore_ascii_case(target)
+        } else if auto {
+            t.detect_dirs.iter().any(|d| home.join(d).exists()) || home.join(t.config_rel).exists()
+        } else {
+            home.join(t.config_rel).exists()
+        };
+
+        if !should_wire {
+            continue;
+        }
+
+        let cfg_path = home.join(t.config_rel);
+        let skill_path = home.join(t.skill_rel);
+
+        if let Some(parent) = cfg_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let mut config: serde_json::Value = if cfg_path.exists() {
+            std::fs::read_to_string(&cfg_path)
+                .ok()
+                .and_then(|c| serde_json::from_str(&c).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+
+        let obj = config.as_object_mut().unwrap();
+        if !obj.contains_key("mcpServers") || !obj["mcpServers"].is_object() {
+            obj.insert("mcpServers".to_string(), serde_json::json!({}));
+        }
+
+        let servers = obj["mcpServers"].as_object_mut().unwrap();
+        servers.insert(
+            "orbit".to_string(),
+            serde_json::json!({
+                "command": "buzz-mcp",
+                "args": ["--stdio"]
+            }),
+        );
+
+        let _ = std::fs::write(&cfg_path, serde_json::to_string_pretty(&config).unwrap_or_default());
+
+        if let Some(parent) = skill_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&skill_path, canonical_skill);
+
+        results.push(serde_json::json!({
+            "harness": t.id,
+            "name": t.name,
+            "status": "connected",
+            "config_path": cfg_path.display().to_string(),
+            "skill_path": skill_path.display().to_string()
+        }));
+
+        if !json {
+            println!("Connected {} to Orbit Central Brain (~/.orbit/brain/)", t.name);
+            println!("  Config: {}", cfg_path.display());
+            println!("  Skill:  {}", skill_path.display());
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&results).unwrap_or_default());
+    } else if results.is_empty() {
+        println!("No matching or installed agent harnesses found. Use --auto to scan all known harnesses.");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
