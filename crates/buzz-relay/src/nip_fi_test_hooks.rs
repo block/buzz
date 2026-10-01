@@ -203,6 +203,9 @@ make_hook!(audio_add_peer_hook, after_add_peer);
 // before the effect permit that covers join-owner resolution. Cancelling here
 // proves the resolver (and its lease CAS) never runs without a permit.
 make_hook!(audio_lease_permit_hook, before_lease_permit);
+// `before_owner_permit`: fires in `handle_active_audio_connection` immediately
+// before the effect permit that covers a delegated agent's owner-link write.
+make_hook!(audio_owner_permit_hook, before_owner_permit);
 // `after_directory_cas`: fires in `SessionDirectory::acquire` once the Redis
 // CAS reply is in hand and before the serving-write guard's post-write
 // verification, so a test can stall that verification after the lease landed.
