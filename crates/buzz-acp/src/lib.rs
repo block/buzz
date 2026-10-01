@@ -9543,6 +9543,24 @@ mod build_mcp_servers_tests {
         }
     }
 
+    /// Restores the runner's saved variables and clears fixture ones on drop,
+    /// so a panic mid-install cannot leave the process environment altered.
+    struct EnvRestore {
+        saved: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        fixture: Vec<String>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for name in &self.fixture {
+                std::env::remove_var(name);
+            }
+            for (name, value) in &self.saved {
+                std::env::set_var(name, value);
+            }
+        }
+    }
+
     /// Run `GitEnvironment::install` with `vars` set and the runner's own
     /// `GIT_CONFIG*` / `BUZZ_GIT_IDENTITY` hidden, so an agent session's
     /// inherited identity cannot leak into the result. Caller holds `ENV_LOCK`.
@@ -9550,31 +9568,27 @@ mod build_mcp_servers_tests {
         config: &Config,
         vars: &[(String, String)],
     ) -> anyhow::Result<git::GitEnvironment> {
-        let saved: Vec<_> = std::env::vars_os()
-            .filter(|(name, _)| {
-                name.to_str().is_some_and(|name| {
-                    name.starts_with("GIT_CONFIG") || name == "BUZZ_GIT_IDENTITY"
+        let restore = EnvRestore {
+            saved: std::env::vars_os()
+                .filter(|(name, _)| {
+                    name.to_str().is_some_and(|name| {
+                        name.starts_with("GIT_CONFIG") || name == "BUZZ_GIT_IDENTITY"
+                    })
                 })
-            })
-            .collect();
-        for (name, _) in &saved {
+                .collect(),
+            fixture: vars.iter().map(|(name, _)| name.clone()).collect(),
+        };
+        for (name, _) in &restore.saved {
             std::env::remove_var(name);
         }
         for (name, value) in vars {
             std::env::set_var(name, value);
         }
-        let git = git::GitEnvironment::install(
+        git::GitEnvironment::install(
             &config.keys,
             &config.relay_url,
             &std::env::current_exe().unwrap(),
-        );
-        for (name, _) in vars {
-            std::env::remove_var(name);
-        }
-        for (name, value) in saved {
-            std::env::set_var(name, value);
-        }
-        git
+        )
     }
 
     #[test]
