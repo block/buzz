@@ -223,9 +223,9 @@ impl NipFiCommunities {
 /// byte-for-byte. The round trip rejects anything the parser would repair:
 /// whitespace, control characters, backslashes, uppercase, userinfo, path,
 /// query, fragment, a redundant default `:443`, and non-canonical IPv6.
-/// The authority must also already be Host-normalized, which rejects a
-/// trailing dot and `:80`, so the Host map key is the exact non-empty `aud`
-/// authority and each community has one valid `aud` spelling.
+/// The authority must also already be in `normalize_host()` form, which
+/// rejects a final trailing dot and `:80`, so the Host map key equals the
+/// `aud` authority exactly and is never empty.
 fn canonical_authority(uri: &str) -> Option<&str> {
     let authority = uri.strip_prefix("https://")?;
     let parsed = url::Url::parse(uri).ok()?;
@@ -1517,6 +1517,7 @@ mod tests {
         let _env = EnvGuard::new(NIP_FI_VARS);
         // `https://.` would normalize to an empty Host key if startup let it
         // through, so whichever configs boot must never match a blank Host.
+        let mut booted = Vec::new();
         for uri in ["https://a.relay.test", "https://."] {
             let Ok(cfg) = enforce_with_communities(serde_json::json!([community_entry(
                 uri,
@@ -1531,7 +1532,12 @@ mod tests {
                     "{uri}: Host {host:?} must resolve to no community"
                 );
             }
+            booted.push(uri);
         }
+        assert!(
+            booted.contains(&"https://a.relay.test"),
+            "the valid row must boot so resolve() is exercised"
+        );
     }
 
     #[test]
