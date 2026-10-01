@@ -298,9 +298,12 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Admin API mutations: every JSON body passes the guard in
     // `helpers::send_admin_mutation` (injection tests in admin `direct_action_tests.rs`).
     // The `/events/{id}/delete` route + its path test and the native delete
-    // test only construct URLs that flow into that guarded boundary.
+    // test only construct URLs that flow into that guarded boundary. The
+    // bodyless `GET /events/{id}` preview read and its mock-relay test carry
+    // no key material.
     ("src/commands/admin/helpers.rs", 0, 1),
-    ("src/commands/admin/routes.rs", 2, 0),
+    ("src/commands/admin/routes.rs", 3, 0),
+    ("src/commands/admin/reads_tests.rs", 1, 0),
     ("src/commands/admin/direct_action_tests.rs", 1, 0),
 ];
 
