@@ -93,12 +93,27 @@ export function useBrainGraph({ workspacePath, initialHops = 2 }: UseBrainGraphO
       const nodeTime = new Date(node.created_at).getTime();
       if (nodeTime > cutoffTime) return false;
 
-      // Type filter
-      if (
-        activeFilter !== "ALL" &&
-        node.entity_type.toUpperCase() !== activeFilter.toUpperCase()
-      ) {
-        return false;
+      // Type & Agent identity filter
+      if (activeFilter !== "ALL") {
+        const filterUpper = activeFilter.toUpperCase();
+        const entityUpper = node.entity_type.toUpperCase();
+
+        if (filterUpper === "AGENT") {
+          if (entityUpper !== "AGENT" && entityUpper !== "CHAT") return false;
+        } else if (filterUpper.startsWith("AGENT:")) {
+          const targetAgent = filterUpper.slice(6).toLowerCase();
+          const nodeAgent = (
+            (node.metadata?.agent_name as string) || ""
+          ).toLowerCase();
+          const nodeName = node.name.toLowerCase();
+
+          if (entityUpper !== "AGENT" && entityUpper !== "CHAT") return false;
+          if (nodeAgent !== targetAgent && !nodeName.includes(targetAgent)) {
+            return false;
+          }
+        } else if (entityUpper !== filterUpper) {
+          return false;
+        }
       }
 
       return true;

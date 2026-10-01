@@ -1,0 +1,22 @@
+[package]
+name = "buzz-plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Plugin abstractions, source plugins, and recall traits for Orbit"
+
+[dependencies]
+buzz-core   = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+sha2        = { workspace = true }
+hex         = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

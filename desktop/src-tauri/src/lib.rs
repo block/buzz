@@ -532,6 +532,8 @@ pub fn run() {
             graph::invalidate_brain_decision,
             graph::get_brain_stats,
             graph::sync_brain_now,
+            graph::get_detected_recall_agents,
+            graph::trigger_agent_recall,
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,

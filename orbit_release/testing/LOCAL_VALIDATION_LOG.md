@@ -135,5 +135,37 @@ Notes:
 Follow-up: Advance to Feature 06 (Recall Agent / 9 IDE Parsers).
 ```
 
-
+```text
+Date: 2026-09-30
+Feature: 06 - Recall Agent (9 IDE Parsers)
+Build/commit: local-build-f06
+Automated tests:
+  - buzz-plugins::tests (1 test: RawDocument hashing + to_document() round-trip) -> PASS
+  - buzz-recall::normalizer::tests (1 test: normalizer + secret redaction) -> PASS
+  - buzz-recall::chunker::tests (1 test: session chunking) -> PASS
+  - buzz-recall::parsers::antigravity::tests (1 test: transcript.jsonl parsing) -> PASS
+  - buzz-recall::parsers::claude_code::tests (1 test: session JSON parsing) -> PASS
+  - buzz-recall::parsers::codex::tests (1 test: conversation JSON parsing) -> PASS
+  - buzz-recall::parsers::cursor::tests (1 test: workspace-state JSON parsing, 3 variants) -> PASS
+  - buzz-recall::parsers::goose::tests (1 test: session JSON/YAML parsing) -> PASS
+  - buzz-recall::parsers::opencode::tests (1 test: Markdown + JSON parsing) -> PASS
+  - buzz-recall::parsers::zcode::tests (1 test: conversation-records parsing) -> PASS
+  - buzz-recall::parsers::agy_cli::tests (1 test: CLI transcript parsing) -> PASS
+  - buzz-recall::parsers::kimi::tests (1 test: chat-log JSON parsing) -> PASS
+  - buzz-recall::f06_recall_agent_tests (4 tests: TC-F06-001 all 9 parsers fixtures, TC-F06-002 incremental replay idempotency, secret redaction during recall, policy-eligible context filter) -> PASS
+  - buzz-ingest regression (8 unit + 4 integration + 1 e2e = 13 tests) -> PASS (zero regressions)
+  - desktop::src-tauri cargo check -> PASS (0 errors, buzz-desktop verified)
+  - desktop pnpm typecheck (tsc --noEmit) -> PASS (0 errors)
+Manual tests: Verified all 9 parsers extract SessionTurn sequences with correct role assignment from synthetic fixtures. Verified content-hash dedup prevents duplicate chunks on re-ingestion (0 new chunks on second pass). Verified SecretRedactor scrubs API keys and tokens from normalized transcript output. Verified SessionPolicy filters context by workspace scope and hosted fence.
+Environment: Windows 11, Rust 1.88, tokio 1.52, async-trait 0.1, walkdir 2.5
+Result: PASS
+Notes:
+  - `buzz-plugins` crate created with RecallPlugin trait (async_trait), SourcePlugin trait, RawDocument/SessionTurn/TurnRole models.
+  - `buzz-recall` crate created with all 9 IDE parsers: Antigravity, Claude Code, Codex, Cursor (3 variants), Goose, OpenCode, ZCode, AGY CLI, Kimi.
+  - Core modules: normalizer (Markdown + SecretRedactor), chunker (SessionChunker), policy (workspace scope fence), orchestrator (dedup + cache + background sync).
+  - Desktop Tauri: get_detected_recall_agents and trigger_agent_recall IPC commands wired in graph.rs and registered in lib.rs.
+  - Frontend: agent sub-filter dropdown in BrainFilterControls.tsx, compound AGENT:name filter logic in useBrainGraph.ts.
+  - Total: 15 new tests in buzz-recall + 1 in buzz-plugins = 16 new tests, all passing. 13 regression tests in buzz-ingest, all passing.
+Follow-up: Advance to Feature 07 or run `just ci` for full workspace validation.
+```
 

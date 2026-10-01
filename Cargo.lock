@@ -1396,6 +1396,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-plugins"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "buzz-core",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-pubsub"
 version = "0.1.0"
 dependencies = [
@@ -1446,6 +1462,31 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "buzz-recall"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "buzz-ai",
+ "buzz-core",
+ "buzz-db",
+ "buzz-ingest",
+ "buzz-plugins",
+ "chrono",
+ "dirs",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

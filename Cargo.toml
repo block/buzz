@@ -35,6 +35,8 @@ members = [
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",
     "crates/buzz-datastore-tracing",
+    "crates/buzz-plugins",
+    "crates/buzz-recall",
     "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
@@ -159,6 +161,12 @@ buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 buzz-datastore-tracing = { path = "crates/buzz-datastore-tracing" }
+buzz-plugins = { path = "crates/buzz-plugins" }
+buzz-recall = { path = "crates/buzz-recall" }
+async-trait = "0.1"
+dirs = "6.0"
+walkdir = "2.5"
+tempfile = "3"
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full
 # release optimization (warm from main's cache; they carry the runtime hot
