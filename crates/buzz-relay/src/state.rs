@@ -46,6 +46,8 @@ pub(crate) enum CommunityDisconnectReason {
     CommunityDeleted,
     /// NIP-FI: the connection's proven pubkey was added to the deny set.
     AuthorizationDenied,
+    /// The authenticated pubkey lost access to the community (e.g. a ban).
+    AccessRevoked,
 }
 
 impl CommunityDisconnectReason {
@@ -58,6 +60,10 @@ impl CommunityDisconnectReason {
             Self::AuthorizationDenied => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("authorization denied"),
+            })),
+            Self::AccessRevoked => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("access revoked"),
             })),
         }
     }
@@ -87,6 +93,11 @@ pub(crate) struct CommunityConnectionControl {
     /// Serializes NIP-FI denial writers across reason-win + terminal enqueue,
     /// and holds the audio terminal-frame sender (root connections leave it `None`).
     terminal_frame_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<WsMessage>>>>,
+    /// Pubkey proven by this socket's auth, set once auth succeeds. Sockets
+    /// whose pubkey is tracked by [`ConnectionManager`] leave it unset.
+    pubkey: Arc<std::sync::OnceLock<[u8; 32]>>,
+    /// Owner of an admitted agent; revoking the owner closes this socket.
+    owner: Arc<std::sync::OnceLock<[u8; 32]>>,
 }
 
 impl CommunityConnectionControl {
@@ -97,6 +108,28 @@ impl CommunityConnectionControl {
             reason_tx,
             proven_identity: Arc::new(std::sync::RwLock::new(None)),
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
+            pubkey: Arc::default(),
+            owner: Arc::default(),
+        }
+    }
+
+    /// Records the authenticated pubkey so pubkey-scoped disconnects reach this socket.
+    pub(crate) fn bind_pubkey(&self, pubkey: [u8; 32]) {
+        let _ = self.pubkey.set(pubkey);
+    }
+
+    /// Records the admitted agent's owner so revoking the owner reaches this
+    /// socket without a database lookup.
+    pub(crate) fn bind_owner(&self, owner: [u8; 32]) {
+        let _ = self.owner.set(owner);
+    }
+
+    fn matches_revocation(&self, pubkey: &[u8], unowned_only: bool) -> bool {
+        let principal = self.pubkey.get().map(|k| &k[..]) == Some(pubkey);
+        match self.owner.get() {
+            Some(_) if unowned_only => false,
+            Some(owner) => principal || owner[..] == *pubkey,
+            None => principal,
         }
     }
 
@@ -204,6 +237,28 @@ impl CommunityConnectionControl {
             .send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
         self.cancel.cancel();
     }
+
+    /// Revoked community access. A NIP-FI socket takes the shared
+    /// `authorization_denied` transition, so its client sees the same denial
+    /// as any other NIP-FI refusal; an Off-mode socket closes `AccessRevoked`.
+    /// Neither overwrites a terminal response already chosen.
+    fn revoke_access(&self) {
+        let nip_fi = self
+            .proven_identity
+            .read()
+            .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi_issuer.is_some()));
+        if nip_fi {
+            self.publish_authorization_denied(crate::nip_fi_session::NipFiWsRoute::Audio, None);
+        } else {
+            self.reason_tx.send_if_modified(|current| {
+                current.is_none() && {
+                    *current = Some(CommunityDisconnectReason::AccessRevoked);
+                    true
+                }
+            });
+        }
+        self.cancel.cancel();
+    }
 }
 
 /// Leaves headroom under the process-wide drain deadline for a stalled writer.
@@ -235,6 +290,11 @@ struct ConnEntry {
     /// the `authenticated_pubkey` write lock and read under its read lock, so
     /// `disconnect_nip_fi` never sees the pubkey without its issuer.
     nip_fi_issuer: std::sync::RwLock<Option<String>>,
+    /// Owner of an admitted agent; revoking the owner closes this socket.
+    admitted_owner: std::sync::OnceLock<[u8; 32]>,
+    /// Set once AUTH succeeds. The pubkey is bound earlier so revocation can
+    /// find a socket mid-admission; online counts and presence read this.
+    admitted: AtomicBool,
     grace_limit: u8,
     /// Lifecycle control used by `disconnect_nip_fi` for the denial transition.
     community_control: CommunityConnectionControl,
@@ -318,6 +378,27 @@ impl CommunityConnectionRegistry {
                 .unwrap_or(false);
             if matches {
                 entry.value().1.disconnect_nip_fi();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// Disconnects every socket in `community` bound to `pubkey` or admitted
+    /// as an agent `pubkey` owns, attributing the close to revoked access.
+    /// With `unowned_only`, closes only `pubkey`'s sockets admitted without an
+    /// owner. Fenced to `community` like [`ConnectionManager::disconnect_pubkey`].
+    pub fn disconnect_pubkey(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+        unowned_only: bool,
+    ) -> usize {
+        let mut closed = 0;
+        for entry in self.connections.iter() {
+            let (community, control) = entry.value();
+            if *community == community_id && control.matches_revocation(pubkey, unowned_only) {
+                control.revoke_access();
                 closed += 1;
             }
         }
@@ -598,6 +679,8 @@ impl ConnectionManager {
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
                 nip_fi_issuer: std::sync::RwLock::new(None),
+                admitted_owner: std::sync::OnceLock::new(),
+                admitted: AtomicBool::new(false),
                 grace_limit,
                 community_control,
             },
@@ -646,6 +729,34 @@ impl ConnectionManager {
         }
     }
 
+    /// Record the owner of an agent admitted on `conn_id`, so revoking the
+    /// owner closes the socket without a database lookup.
+    pub fn set_admitted_owner(&self, conn_id: Uuid, owner: [u8; 32]) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            let _ = entry.admitted_owner.set(owner);
+        }
+    }
+
+    /// Mark `conn_id` admitted, once AUTH has succeeded.
+    pub fn mark_admitted(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.admitted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether `pubkey_bytes` has an admitted connection in one community on
+    /// this pod. Sockets still mid-admission do not count.
+    pub fn has_admitted_connection(&self, community_id: CommunityId, pubkey_bytes: &[u8]) -> bool {
+        self.connections.iter().any(|entry| {
+            entry.community_id == community_id
+                && entry.admitted.load(Ordering::Acquire)
+                && entry
+                    .authenticated_pubkey
+                    .read()
+                    .is_ok_and(|value| value.as_deref() == Some(pubkey_bytes))
+        })
+    }
+
     /// Return live connection IDs authenticated as `pubkey_bytes` in one community.
     ///
     /// The same Nostr key may be connected to multiple communities at once.
@@ -691,9 +802,9 @@ impl ConnectionManager {
         }
     }
 
-    /// Disconnect every live connection authenticated as `pubkey` **in
-    /// `community`**, delivering a final `OK false` frame carrying `reason`
-    /// before closing.
+    /// Disconnect every live connection authenticated as `pubkey`, or
+    /// admitted as an agent `pubkey` owns, **in `community`**, delivering a
+    /// final `OK false` frame carrying `reason` before closing.
     ///
     /// Used for live ban enforcement (COMMUNITY_MODERATION_PLAN.md §0 decision
     /// 4): a ban must take effect immediately on existing sessions, not just at
@@ -707,6 +818,9 @@ impl ConnectionManager {
     /// community A must close only A's sockets, never a session the member holds
     /// in community B ("authority stays inside the tenant fence").
     ///
+    /// With `unowned_only`, closes only `pubkey`'s sockets admitted without an
+    /// owner (see [`AppState::disconnect_unowned_agent_clusterwide`]).
+    ///
     /// Returns the number of connections closed. This is the pod-local half of
     /// live enforcement; cross-pod fan-out publishes the same intent over Redis.
     pub fn disconnect_pubkey(
@@ -715,22 +829,30 @@ impl ConnectionManager {
         pubkey: &[u8],
         event_id: &str,
         reason: &str,
+        unowned_only: bool,
     ) -> usize {
         let frame = crate::protocol::RelayMessage::ok(event_id, false, reason);
         let mut closed = 0usize;
-        for conn_id in self.connection_ids_for_pubkey_in_community(community, pubkey) {
-            if let Some(entry) = self.connections.get(&conn_id) {
-                if entry.community_id != community {
-                    continue;
-                }
-                // Best-effort delivery: a full control buffer still gets the
-                // close via cancel below, just without the reason frame.
-                let _ = entry
-                    .ctrl_tx
-                    .try_send(WsMessage::Text(frame.clone().into()));
-                entry.cancel.cancel();
-                closed += 1;
+        for entry in self.connections.iter() {
+            let principal = entry
+                .authenticated_pubkey
+                .read()
+                .is_ok_and(|key| key.as_deref() == Some(pubkey));
+            let matches = match entry.admitted_owner.get() {
+                Some(_) if unowned_only => false,
+                Some(owner) => principal || owner[..] == *pubkey,
+                None => principal,
+            };
+            if entry.community_id != community || !matches {
+                continue;
             }
+            // Best-effort delivery: a full control buffer still gets the
+            // close via cancel below, just without the reason frame.
+            let _ = entry
+                .ctrl_tx
+                .try_send(WsMessage::Text(frame.clone().into()));
+            entry.cancel.cancel();
+            closed += 1;
         }
         closed
     }
@@ -932,6 +1054,9 @@ impl ConnectionManager {
         // community_id → set of pubkey bytes
         let mut seen: HashMap<CommunityId, HashSet<Vec<u8>>> = HashMap::new();
         for entry in self.connections.iter() {
+            if !entry.admitted.load(Ordering::Acquire) {
+                continue;
+            }
             if let Ok(lock) = entry.authenticated_pubkey.read() {
                 if let Some(pk) = lock.as_ref() {
                     seen.entry(entry.community_id)
@@ -1645,13 +1770,86 @@ impl AppState {
         }
     }
 
+    /// Close everything `pubkey` has open in `community` on this pod: root
+    /// sockets (with a final `OK false` carrying `reason`) and audio sockets.
+    ///
+    /// With `unowned_only`, only `pubkey`'s sockets admitted without an owner.
+    ///
+    /// The pod-local half of [`Self::disconnect_pubkey_clusterwide`], and what
+    /// the conn-control subscriber runs for a remote pod's publish.
+    pub fn disconnect_pubkey_local(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+        unowned_only: bool,
+    ) -> usize {
+        self.conn_manager
+            .disconnect_pubkey(community, pubkey, event_id, reason, unowned_only)
+            + self
+                .community_connections
+                .disconnect_pubkey(community, pubkey, unowned_only)
+    }
+
+    /// Close every live session of `pubkey` and of the agents it owns, on
+    /// every pod. Ban, report-action ban, and roster removal (admin or
+    /// self-leave) all end access this way, because an agent's access is
+    /// derived from its owner's.
+    ///
+    /// One clusterwide disconnect closes every socket whose principal or
+    /// admission-recorded owner is `pubkey`, with no database read. The
+    /// `users.agent_owner_pubkey` sweep then covers an agent socket admitted
+    /// before its owner link existed (linked later, e.g. by an HTTP NIP-OA
+    /// request). If that lookup fails, the error is returned; every socket
+    /// with a recorded owner is already closed. Returns the number of sockets
+    /// closed on this pod.
+    pub async fn revoke_live_access(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> Result<usize, String> {
+        let closed = self.disconnect_pubkey_clusterwide(tenant, pubkey, event_id, reason);
+        match self
+            .disconnect_owned_agents(tenant, pubkey, event_id, reason)
+            .await
+        {
+            Ok(agents_closed) => Ok(closed + agents_closed),
+            Err(e) => {
+                tracing::error!("owned-agent lookup failed during live revoke: {e}");
+                Err(format!("owned-agent lookup failed: {e}"))
+            }
+        }
+    }
+
+    async fn disconnect_owned_agents(
+        &self,
+        tenant: &TenantContext,
+        owner: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> Result<usize, String> {
+        let agents = self
+            .db
+            .list_agents_for_owner(tenant.community(), owner)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(agents
+            .iter()
+            .map(|agent| self.disconnect_pubkey_clusterwide(tenant, agent, event_id, reason))
+            .sum())
+    }
+
     /// Enforce a live ban cluster-wide: close this pod's sockets for `pubkey`
     /// now (fenced to `tenant`'s community) and fan the same disconnect out to
     /// every other pod over the conn-control Redis channel.
     ///
-    /// This is the single entry point for live ban enforcement (decision 4:
-    /// "a ban takes effect immediately, everywhere, including live sessions").
-    /// Callers must not invoke the pod-local `conn_manager.disconnect_pubkey`
+    /// This is the per-pubkey primitive under [`Self::revoke_live_access`],
+    /// which ban and roster removal call (decision 4: "a ban takes effect
+    /// immediately, everywhere, including live sessions").
+    /// Callers must not invoke the pod-local [`Self::disconnect_pubkey_local`]
     /// directly — doing so closes sockets only on the pod that processed the
     /// ban and silently drops the cluster-wide half. Pairing both halves here
     /// makes that mistake unrepresentable.
@@ -1669,9 +1867,43 @@ impl AppState {
         event_id: &str,
         reason: &str,
     ) -> usize {
-        let closed =
-            self.conn_manager
-                .disconnect_pubkey(tenant.community(), pubkey, event_id, reason);
+        self.disconnect_clusterwide(tenant, pubkey, event_id, reason, false)
+    }
+
+    /// Close, on every pod, the sockets `agent` holds in `tenant`'s community
+    /// that were admitted with no recorded owner. Called once an agent's owner
+    /// is first recorded: those sockets reconnect with the owner attached, so
+    /// revoking the owner reaches them with no database read. Sockets that
+    /// already carry the owner, including one being admitted with it, stay up.
+    pub fn disconnect_unowned_agent_clusterwide(
+        &self,
+        tenant: &TenantContext,
+        agent: &[u8],
+    ) -> usize {
+        self.disconnect_clusterwide(
+            tenant,
+            agent,
+            &"0".repeat(64),
+            "auth-required: agent owner recorded; reconnect",
+            true,
+        )
+    }
+
+    fn disconnect_clusterwide(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+        unowned_only: bool,
+    ) -> usize {
+        let closed = self.disconnect_pubkey_local(
+            tenant.community(),
+            pubkey,
+            event_id,
+            reason,
+            unowned_only,
+        );
 
         // The banning pod re-receives its own publish through the subscriber and
         // no-ops (its local sockets are already closed above) — intentional; do
@@ -1682,6 +1914,7 @@ impl AppState {
             pubkey: pubkey.to_vec(),
             event_id: event_id.to_string(),
             reason: reason.to_string(),
+            unowned_only,
         };
         // This pre-existing ban path may remain fire-and-forget because the
         // durable ban row rejects the member again at auth. Community archival
@@ -2847,6 +3080,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn pubkey_disconnect_reaches_only_that_bound_pubkey_in_that_community() {
+        let registry = CommunityConnectionRegistry::new();
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xb));
+        let (target, other) = ([1u8; 32], [2u8; 32]);
+        let bound = |community, pubkey: Option<[u8; 32]>| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            if let Some(pubkey) = pubkey {
+                control.bind_pubkey(pubkey);
+            }
+            let guard = registry.register(Uuid::new_v4(), community, control.clone());
+            (control, guard)
+        };
+        let (hit, _g1) = bound(community_a, Some(target));
+        let (other_pubkey, _g2) = bound(community_a, Some(other));
+        let (other_community, _g3) = bound(community_b, Some(target));
+        let (unbound, _g4) = bound(community_a, None);
+
+        assert_eq!(registry.disconnect_pubkey(community_a, &target, false), 1);
+        assert!(hit.cancellation_token().is_cancelled());
+        assert_eq!(
+            *hit.disconnect_reason().borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        for untouched in [other_pubkey, other_community, unbound] {
+            assert!(!untouched.cancellation_token().is_cancelled());
+        }
+    }
+
+    #[test]
     fn community_lifecycle_disconnect_covers_socket_types_and_preserves_tenant_fence() {
         let registry = CommunityConnectionRegistry::new();
         let community_a = CommunityId::from_uuid(Uuid::from_u128(0xa));
@@ -3263,6 +3526,64 @@ pub(crate) mod tests {
         assert!(!cancel.is_cancelled());
     }
 
+    /// Registers a root socket in `community` bound to `pubkey`, as AUTH does
+    /// before its final checks.
+    fn bound_conn(mgr: &ConnectionManager, community: CommunityId, pubkey: &[u8]) -> Uuid {
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (terminal_tx, _terminal_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            terminal_tx,
+            None,
+            cancel.clone(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+            CommunityConnectionControl::new(cancel),
+        );
+        mgr.set_authenticated_pubkey(conn_id, pubkey.to_vec());
+        conn_id
+    }
+
+    #[tokio::test]
+    async fn users_online_skips_sockets_still_mid_admission() {
+        let mgr = ConnectionManager::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xc));
+        let admitted = bound_conn(&mgr, community, &[1u8; 32]);
+        mgr.mark_admitted(admitted);
+        let _pending = bound_conn(&mgr, community, &[2u8; 32]);
+
+        assert_eq!(
+            mgr.per_community_users_online().get(&community),
+            Some(&1),
+            "only the admitted socket is online"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_clears_when_only_a_pending_sibling_remains() {
+        let mgr = ConnectionManager::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xd));
+        let pubkey = [3u8; 32];
+        let admitted = bound_conn(&mgr, community, &pubkey);
+        mgr.mark_admitted(admitted);
+        let _pending = bound_conn(&mgr, community, &pubkey);
+        assert!(mgr.has_admitted_connection(community, &pubkey));
+
+        mgr.deregister(admitted);
+
+        assert!(
+            !mgr.has_admitted_connection(community, &pubkey),
+            "a pending sibling does not keep presence"
+        );
+    }
+
     #[tokio::test]
     async fn disconnect_pubkey_closes_matching_conns_with_reason() {
         let (mgr, id, _rx, mut ctrl_rx, cancel, _bp) = setup_conn(8);
@@ -3276,6 +3597,7 @@ pub(crate) mod tests {
             &pubkey,
             "0".repeat(64).as_str(),
             "blocked: banned",
+            false,
         );
 
         assert_eq!(closed, 1, "the one matching connection is closed");
@@ -3305,6 +3627,7 @@ pub(crate) mod tests {
             &[2u8; 32],
             "0".repeat(64).as_str(),
             "blocked: banned",
+            false,
         );
 
         assert_eq!(closed, 0, "no connection matches a different pubkey");
@@ -3352,6 +3675,7 @@ pub(crate) mod tests {
             &pubkey,
             "0".repeat(64).as_str(),
             "blocked: banned",
+            false,
         );
 
         assert_eq!(closed, 1, "only the community-A socket is closed");

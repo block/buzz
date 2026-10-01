@@ -125,14 +125,65 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            false,
+        )
+        .await
+    }
+
+    /// [`check_relay_membership`] reading principal and owner membership from
+    /// the writer. The final admission fence uses it: a removal whose
+    /// disconnect already ran must not be undone by a stale replica row.
+    pub async fn check_relay_membership_authoritative(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            true,
+        )
+        .await
+    }
+
+    async fn read_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_hex: &str,
+        writer: bool,
+    ) -> buzz_db::Result<bool> {
+        if writer {
+            state.db.is_relay_member_writer(community, pubkey_hex).await
+        } else {
+            state.db.is_relay_member(community, pubkey_hex).await
+        }
+    }
+
+    async fn check_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        writer: bool,
+    ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
             return Ok(MembershipDecision::OpenRelay);
         }
 
         let pubkey_hex = hex::encode(pubkey_bytes);
-        let is_member = state
-            .db
-            .is_relay_member(community, &pubkey_hex)
+        let is_member = read_membership(state, community, &pubkey_hex, writer)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
@@ -155,9 +206,7 @@ pub mod relay_members {
                 ) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
-                            .db
-                            .is_relay_member(community, &owner_hex)
+                        let owner_is_member = read_membership(state, community, &owner_hex, writer)
                             .await
                             .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
                         if owner_is_member {
@@ -206,8 +255,28 @@ pub mod relay_members {
         )
         .await
         {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
+                deny_banned(
+                    state,
+                    community,
+                    pubkey_bytes,
+                    auth_tag_header,
+                    signed_auth_created_at,
+                )
+                .await?;
+                Ok(None)
+            }
+            Ok(MembershipDecision::ViaOwner(owner)) => {
+                deny_banned(
+                    state,
+                    community,
+                    pubkey_bytes,
+                    auth_tag_header,
+                    signed_auth_created_at,
+                )
+                .await?;
+                Ok(Some(owner))
+            }
             Ok(MembershipDecision::Denied) => Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -219,6 +288,40 @@ pub mod relay_members {
                 tracing::error!("relay membership check errored: {e}");
                 Err(super::internal_error(&e))
             }
+        }
+    }
+
+    /// Refuse a community-banned principal (own ban or its agent owner's) on
+    /// HTTP. Bans only: a timeout blocks writes, and HTTP writes reach the
+    /// ingest gate, while reads stay allowed. Fails closed with 503.
+    async fn deny_banned(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
+            return Err(super::internal_error("invalid pubkey for ban check"));
+        };
+        match crate::handlers::auth::community_ban_outcome(
+            state,
+            community,
+            pubkey,
+            auth_tag_header,
+            signed_auth_created_at,
+        )
+        .await
+        {
+            crate::handlers::auth::BanOutcome::Clear => Ok(()),
+            crate::handlers::auth::BanOutcome::Banned => Err(super::api_error(
+                StatusCode::FORBIDDEN,
+                "blocked: you are banned from this community",
+            )),
+            crate::handlers::auth::BanOutcome::DbError => Err(super::api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "error: internal error checking restriction state",
+            )),
         }
     }
 
@@ -291,7 +394,13 @@ pub mod relay_members {
             )
             .await
         {
-            Ok(true) => true,
+            Ok(true) => {
+                // The owner was just recorded. Sockets this agent opened
+                // without it would only be found by an owner-to-agent lookup
+                // at revoke time; make them reconnect with the owner attached.
+                state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
+                true
+            }
             Ok(false) => state
                 .db
                 .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())

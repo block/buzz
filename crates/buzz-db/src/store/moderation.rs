@@ -564,8 +564,12 @@ pub struct RestrictionState {
     pub muted_until: Option<DateTime<Utc>>,
 }
 
-/// Fetch the current restriction state for a pubkey in one community.
-/// Missing row ⇒ `RestrictionState::default()` (unrestricted).
+/// Fetch the effective restriction state for a pubkey in one community.
+///
+/// An agent is restricted by its own row and by its owner's row
+/// (`users.agent_owner_pubkey`), read now rather than copied onto the agent,
+/// so lifting the owner's restriction restores the agent with no extra step.
+/// No rows ⇒ `RestrictionState::default()` (unrestricted).
 pub async fn restriction_state(
     pool: &PgPool,
     community: CommunityId,
@@ -579,24 +583,28 @@ pub async fn restriction_state(
     let row = sqlx::query(
         r#"
         SELECT
-            (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
-            CASE WHEN muted_until > now() THEN muted_until ELSE NULL END AS muted_until
+            COALESCE(bool_or(banned AND (ban_expires_at IS NULL OR ban_expires_at > now())), false)
+                AS banned,
+            max(CASE WHEN muted_until > now() THEN muted_until END) AS muted_until
         FROM community_bans
-        WHERE community_id = $1 AND pubkey = $2
+        WHERE community_id = $1
+          AND pubkey IN (
+              SELECT $2::bytea
+              UNION ALL
+              SELECT agent_owner_pubkey FROM users
+              WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL
+          )
         "#,
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .fetch_optional(&mut *connection)
+    .fetch_one(&mut *connection)
     .await?;
 
-    match row {
-        Some(row) => Ok(RestrictionState {
-            banned: row.try_get("banned")?,
-            muted_until: row.try_get("muted_until")?,
-        }),
-        None => Ok(RestrictionState::default()),
-    }
+    Ok(RestrictionState {
+        banned: row.try_get("banned")?,
+        muted_until: row.try_get("muted_until")?,
+    })
 }
 
 /// Fetch the full ban/timeout row (moderation queue / audit views).
@@ -949,7 +957,8 @@ impl Db {
         untimeout_member(&self.pool, community, pubkey, actor).await
     }
 
-    /// Fetch the active ban/timeout restriction state for enforcement hot paths.
+    /// Fetch the effective (own or agent-owner) ban/timeout restriction state
+    /// for enforcement hot paths.
     #[datastore_span(name = "moderation_restriction_state", system = "postgresql")]
     pub async fn moderation_restriction_state(
         &self,

@@ -106,3 +106,33 @@ pub(crate) fn run_exact_test_child(test_name: &str, child_env: &str) {
         "exact selector did not run the intended test {test_name}:\n{output}"
     );
 }
+
+/// A database handle on which only restriction-state reads fail: its
+/// `search_path` puts a schema first whose `community_bans` is a view that
+/// errors when read, so every other table resolves to `public` as normal.
+/// Returns the handle, an admin pool, and the schema to drop afterwards.
+#[cfg(test)]
+pub(crate) async fn restriction_lookup_failing_db() -> (buzz_db::Db, sqlx::PgPool, String) {
+    use sqlx::postgres::PgConnectOptions;
+    let url = database_url();
+    let admin = sqlx::PgPool::connect(&url)
+        .await
+        .expect("PostgreSQL must be available");
+    let schema = format!("ban_lookup_fails_{}", uuid::Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA {schema}; \
+         CREATE VIEW {schema}.community_bans AS \
+         SELECT * FROM public.community_bans WHERE 1 / (SELECT count(*) * 0 FROM public.communities) = 1;"
+    )))
+    .execute(&admin)
+    .await
+    .expect("create failing restriction schema");
+    let options = url
+        .parse::<PgConnectOptions>()
+        .expect("database url")
+        .options([("search_path", format!("{schema}, public"))]);
+    let pool = sqlx::PgPool::connect_with(options)
+        .await
+        .expect("failing restriction pool");
+    (buzz_db::Db::from_pool(pool), admin, schema)
+}

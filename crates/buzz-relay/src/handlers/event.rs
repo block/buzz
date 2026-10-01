@@ -671,6 +671,28 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // Observer frames and ephemeral kinds return before ingest, so they take
+    // the ban / timeout write-block here. Persistent kinds get it in ingest.
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME || is_ephemeral(kind_u32) {
+        if let Err(e) =
+            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
+                .await
+        {
+            let (message, reason) = match e {
+                IngestError::Internal(_) => (
+                    "error: internal error checking restriction state".to_string(),
+                    "error",
+                ),
+                IngestError::AuthFailed(m)
+                | IngestError::Rejected(m)
+                | IngestError::CanvasConflict(m) => (m, "auth"),
+            };
+            reject(reason);
+            conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            return;
+        }
+    }
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
@@ -714,7 +736,11 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     // Persistent events skip this gate and rely on
     // ingest_event()'s per-kind scope allowlist instead, so a token with
     // only ChannelsWrite can still submit kind:9002 via WS.
-    if is_ephemeral(kind_u32) {
+    //
+    // NIP-43 leave (28936) sits in the ephemeral range but is a membership
+    // command: it must reach ingest, which removes membership and revokes
+    // live access.
+    if is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
             conn.send(RelayMessage::ok(
@@ -3161,6 +3187,163 @@ mod tests {
     // source `test_state()` uses — no hard-coded URL).
     mod postgres_tests {
 
+        /// An authenticated WebSocket connection for `keys` in `tenant`, and
+        /// the receiver its OK frames land on.
+        fn authed_conn(
+            keys: &nostr::Keys,
+            tenant: buzz_core::tenant::TenantContext,
+        ) -> (
+            std::sync::Arc<crate::connection::ConnectionState>,
+            tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+        ) {
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+            let cancel = CancellationToken::new();
+            let (send_tx, send_rx) = mpsc::channel(8);
+            let (ctrl_tx, _) = mpsc::channel(8);
+            let (terminal_ctrl_tx, _) = mpsc::channel(1);
+            let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant,
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+                cancel: cancel.clone(),
+                backpressure_count: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel),
+            });
+            (conn, send_rx)
+        }
+
+        /// Send `event` on a fresh connection for `keys` and return its OK frame.
+        async fn ok_frame(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: &buzz_core::tenant::TenantContext,
+            keys: &nostr::Keys,
+            event: nostr::Event,
+        ) -> String {
+            let (conn, mut rx) = authed_conn(keys, tenant.clone());
+            super::super::handle_event(event, conn, std::sync::Arc::clone(state)).await;
+            match rx
+                .try_recv()
+                .expect("handle_event must answer with an OK frame")
+            {
+                axum::extract::ws::Message::Text(t) => t.to_string(),
+                other => panic!("expected a Text frame, got {other:?}"),
+            }
+        }
+
+        /// Fresh community with an agent owned by a banned owner.
+        async fn banned_owner_fixture() -> (
+            std::sync::Arc<crate::state::AppState>,
+            buzz_core::tenant::TenantContext,
+            nostr::Keys,
+            nostr::Keys,
+        ) {
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-ban-gate-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+            for keys in [&owner, &agent] {
+                state
+                    .db
+                    .ensure_user(community, keys.public_key().as_bytes())
+                    .await
+                    .expect("ensure user");
+            }
+            state
+                .db
+                .set_agent_owner(
+                    community,
+                    agent.public_key().as_bytes(),
+                    owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("set agent owner");
+            let owner_bytes = owner.public_key().to_bytes();
+            state
+                .db
+                .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                .await
+                .expect("ban owner");
+            (state, tenant, owner, agent)
+        }
+
+        /// Ephemeral events return before ingest, so they carry their own ban
+        /// gate: a banned sender's ephemeral event is refused.
+        /// Mutation: drop the ephemeral/observer gate in `handle_event` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn banned_sender_ephemeral_event_is_refused() {
+            let (state, tenant, owner, _agent) = banned_owner_fixture().await;
+            let ephemeral = nostr::EventBuilder::new(nostr::Kind::Custom(20_555), "typing")
+                .sign_with_keys(&owner)
+                .expect("sign ephemeral");
+            let frame = ok_frame(&state, &tenant, &owner, ephemeral).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "banned sender's ephemeral event must be refused; got {frame}"
+            );
+        }
+
+        /// Observer frames return before ingest too: one from a banned
+        /// owner's agent is refused.
+        /// Mutation: drop the ephemeral/observer gate in `handle_event` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn banned_owners_agent_observer_frame_is_refused() {
+            let (state, tenant, owner, agent) = banned_owner_fixture().await;
+            // A well-formed telemetry frame, so only the ban gate can refuse it.
+            let encrypted = super::encrypt_observer_payload(
+                &agent,
+                &owner.public_key(),
+                &serde_json::json!({"type": "acp_read"}),
+            )
+            .expect("encrypt observer payload");
+            let observer = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+                encrypted,
+            )
+            .tags([
+                nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                nostr::Tag::parse([super::OBSERVER_AGENT_TAG, &agent.public_key().to_hex()])
+                    .expect("agent tag"),
+                nostr::Tag::parse([super::OBSERVER_FRAME_TAG, super::OBSERVER_FRAME_TELEMETRY])
+                    .expect("frame tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign observer frame");
+            let frame = ok_frame(&state, &tenant, &agent, observer).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "banned owner's agent observer frame must be refused; got {frame}"
+            );
+        }
+
         // W2 full witness: event-ingest barrier + durable absence + publication oracle.
         //
         // Extends the unit-level W2 barrier test with two Postgres-required assertions:
@@ -3330,159 +3513,167 @@ mod tests {
                  found {row_count} row(s)"
             );
         }
-    }
 
-    // ── P1-b: agent-observer EVENT gate — barrier expiry blocks fan-out + ack ─────
-    //
-    // Arms `before_observer_event` — the hook immediately before `acquire_effect()`
-    // in the `KIND_AGENT_OBSERVER_FRAME` branch of `handle_event`. Dispatches
-    // `handle_event` with a valid NIP-44-encrypted agent telemetry event and the
-    // authenticated session's `agent_owner_pubkey` set to the event's owner (fast
-    // path: skips DB ownership lookup). Waits for the hook, fires expiry, then
-    // releases. The handler must return OK(false, "restricted: authorization denied").
-    //
-    // With the permit REMOVED, the handler proceeds into `handle_agent_observer_event`:
-    // owner fast-path succeeds → rate limit passes → `mark_local_event` + `publish_event`
-    // + `fan_out_event_to_local_subscribers` + `conn.send(OK(true, ""))` are reached.
-    // The OK(true) response differs from the expected "authorization denied" → assertion panics.
-    // This proves the permit gate blocked at the real fan-out + ack seam.
-    //
-    // Hook location: `handlers/event.rs`, immediately before `acquire_effect()`
-    // in the KIND_AGENT_OBSERVER_FRAME branch.
-    //
-    // Mutation evidence:
-    //   A) Delete `#[cfg(test)] before_observer_event(...)` from event.rs →
-    //      hook never fires → `arrived_rx` times out → test panics.
-    //   B) Remove `acquire_effect()` from the observer branch →
-    //      handler proceeds to fan-out → OK(true, "") sent →
-    //      `t.contains("authorization denied")` assertion panics.
-    //   C) Change gate to `off_mode` → `acquire_effect()` always succeeds →
-    //      same as (B).
-    #[tokio::test]
-    async fn p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack() {
-        use super::handle_event;
-        use buzz_core::kind::KIND_AGENT_OBSERVER_FRAME;
-        use buzz_core::observer::{
-            encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG,
-            OBSERVER_FRAME_TELEMETRY,
-        };
-        use nostr::{EventBuilder, Keys, Kind, Tag};
-        use std::collections::HashMap;
-        use std::sync::Arc;
-        use tokio::sync::mpsc;
-        use tokio_util::sync::CancellationToken;
-        use uuid::Uuid;
+        // ── P1-b: agent-observer EVENT gate — barrier expiry blocks fan-out + ack ─────
+        //
+        // Arms `before_observer_event` — the hook immediately before `acquire_effect()`
+        // in the `KIND_AGENT_OBSERVER_FRAME` branch of `handle_event`. Dispatches
+        // `handle_event` with a valid NIP-44-encrypted agent telemetry event and the
+        // authenticated session's `agent_owner_pubkey` set to the event's owner (fast
+        // path: skips DB ownership lookup). Waits for the hook, fires expiry, then
+        // releases. The handler must return OK(false, "restricted: authorization denied").
+        //
+        // With the permit REMOVED, the handler proceeds into `handle_agent_observer_event`:
+        // owner fast-path succeeds → rate limit passes → `mark_local_event` + `publish_event`
+        // + `fan_out_event_to_local_subscribers` + `conn.send(OK(true, ""))` are reached.
+        // The OK(true) response differs from the expected "authorization denied" → assertion panics.
+        // This proves the permit gate blocked at the real fan-out + ack seam.
+        //
+        // Hook location: `handlers/event.rs`, immediately before `acquire_effect()`
+        // in the KIND_AGENT_OBSERVER_FRAME branch.
+        //
+        // Mutation evidence:
+        //   A) Delete `#[cfg(test)] before_observer_event(...)` from event.rs →
+        //      hook never fires → `arrived_rx` times out → test panics.
+        //   B) Remove `acquire_effect()` from the observer branch →
+        //      handler proceeds to fan-out → OK(true, "") sent →
+        //      `t.contains("authorization denied")` assertion panics.
+        //   C) Change gate to `off_mode` → `acquire_effect()` always succeeds →
+        //      same as (B).
+        #[tokio::test]
+        #[ignore = "requires Postgres: the observer write gate reads restriction state"]
+        async fn p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack() {
+            use crate::handlers::event::handle_event;
+            use buzz_core::kind::KIND_AGENT_OBSERVER_FRAME;
+            use buzz_core::observer::{
+                encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG,
+                OBSERVER_FRAME_TELEMETRY,
+            };
+            use nostr::{EventBuilder, Keys, Kind, Tag};
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
 
-        // agent sends, owner receives — agent is the conn's authenticating key.
-        let agent_keys = Keys::generate();
-        let owner_keys = Keys::generate();
-        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+            // agent sends, owner receives — agent is the conn's authenticating key.
+            let agent_keys = Keys::generate();
+            let owner_keys = Keys::generate();
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
 
-        let cancel = CancellationToken::new();
-        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
 
-        // Distinct community to avoid hook interference with other tests.
-        let community =
-            buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0x0000_0001_1B00_0000));
+            // Distinct community to avoid hook interference with other tests.
+            let community =
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0x0000_0001_1B00_0000));
 
-        let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
-        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
-        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
+            let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) =
+                mpsc::channel::<axum::extract::ws::Message>(1);
 
-        let conn = Arc::new(crate::connection::ConnectionState {
-            conn_id: Uuid::new_v4(),
-            tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
-            remote_addr: "127.0.0.1:1234".parse().unwrap(),
-            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
-                buzz_auth::AuthContext {
-                    pubkey: agent_keys.public_key(),
-                    scopes: vec![],
-                    channel_ids: None,
-                    auth_method: buzz_auth::AuthMethod::Nip42,
-                    // Fast path: session owner matches the event's target owner,
-                    // so `handle_agent_observer_event` skips the DB ownership lookup.
-                    agent_owner_pubkey: Some(owner_keys.public_key()),
-                },
-            )),
-            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            send_tx,
-            ctrl_tx,
-            terminal_ctrl_tx,
-            cancel: cancel.clone(),
-            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            grace_limit: 3,
-            nip_fi_assertion: None,
-            session_deadline: Some(deadline),
-            nip_fi_gate: gate,
-            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
-        });
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: agent_keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        // Fast path: session owner matches the event's target owner,
+                        // so `handle_agent_observer_event` skips the DB ownership lookup.
+                        agent_owner_pubkey: Some(owner_keys.public_key()),
+                    },
+                )),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
 
-        // Build a valid KIND_AGENT_OBSERVER_FRAME telemetry event:
-        //   - content: NIP-44 encrypted (passes content_looks_like_nip44 length check)
-        //   - tags: p = owner, agent = agent, frame = "telemetry"
-        //   - signed by agent key (event.pubkey == agent, recipient != agent → Telemetry)
-        // Without the permit, the handler reaches mark_local_event + publish + fanout + OK(true).
-        let encrypted = encrypt_observer_payload(
-            &agent_keys,
-            &owner_keys.public_key(),
-            &serde_json::json!({"type": "p1b_barrier_test"}),
-        )
-        .expect("P1-b: encrypt observer payload");
+            // Build a valid KIND_AGENT_OBSERVER_FRAME telemetry event:
+            //   - content: NIP-44 encrypted (passes content_looks_like_nip44 length check)
+            //   - tags: p = owner, agent = agent, frame = "telemetry"
+            //   - signed by agent key (event.pubkey == agent, recipient != agent → Telemetry)
+            // Without the permit, the handler reaches mark_local_event + publish + fanout + OK(true).
+            let encrypted = encrypt_observer_payload(
+                &agent_keys,
+                &owner_keys.public_key(),
+                &serde_json::json!({"type": "p1b_barrier_test"}),
+            )
+            .expect("P1-b: encrypt observer payload");
 
-        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
-            .tags([
-                Tag::parse(["p", &owner_keys.public_key().to_hex()]).expect("p tag"),
-                Tag::parse([OBSERVER_AGENT_TAG, &agent_keys.public_key().to_hex()])
-                    .expect("agent tag"),
-                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
-            ])
-            .sign_with_keys(&agent_keys)
-            .unwrap();
+            let event =
+                EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+                    .tags([
+                        Tag::parse(["p", &owner_keys.public_key().to_hex()]).expect("p tag"),
+                        Tag::parse([OBSERVER_AGENT_TAG, &agent_keys.public_key().to_hex()])
+                            .expect("agent tag"),
+                        Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY])
+                            .expect("frame tag"),
+                    ])
+                    .sign_with_keys(&agent_keys)
+                    .unwrap();
 
-        let state = crate::state::tests::test_state().await;
+            let state = crate::state::tests::test_state().await;
 
-        // Arm the barrier: fires when handle_event reaches before_observer_event.
-        let (arrived_rx, release) = crate::nip_fi_test_hooks::observer_event_hook::arm(community);
+            // Arm the barrier: fires when handle_event reaches before_observer_event.
+            let (arrived_rx, release) =
+                crate::nip_fi_test_hooks::observer_event_hook::arm(community);
 
-        let conn2 = Arc::clone(&conn);
-        let state2 = Arc::clone(&state);
-        let handle = tokio::spawn(async move { handle_event(event, conn2, state2).await });
+            let conn2 = Arc::clone(&conn);
+            let state2 = Arc::clone(&state);
+            let handle = tokio::spawn(async move { handle_event(event, conn2, state2).await });
 
-        // Wait for the handler to reach the permit boundary.
-        tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
-            .await
-            .expect("P1-b: handler must reach before_observer_event within 5s")
-            .expect("arrived channel closed");
+            // Wait for the handler to reach the permit boundary.
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("P1-b: handler must reach before_observer_event within 5s")
+                .expect("arrived channel closed");
 
-        // Fire expiry.
-        cancel.cancel();
+            // Fire expiry.
+            cancel.cancel();
 
-        // Release — handler tries acquire_effect(), gets SessionExpired.
-        release.notify_one();
+            // Release — handler tries acquire_effect(), gets SessionExpired.
+            release.notify_one();
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-            .await
-            .expect("P1-b: handle_event must return within 5s after hook release")
-            .expect("handle_event task must not panic");
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("P1-b: handle_event must return within 5s after hook release")
+                .expect("handle_event task must not panic");
 
-        // An OK(false, "restricted: authorization denied") frame must have been sent.
-        // Mutation-red (remove acquire_effect): handler reaches fan-out → OK(true, "") →
-        // `t.contains("authorization denied")` fails → test panics.
-        let frame = send_rx
-            .try_recv()
-            .expect("P1-b: handler must send OK(false) on expired gate");
-        match frame {
-            axum::extract::ws::Message::Text(t) => {
-                assert!(
-                    t.contains("authorization denied"),
-                    "P1-b: OK frame must contain 'authorization denied'; got: {t}"
-                );
-                assert!(
-                    t.contains("false"),
-                    "P1-b: OK frame must be OK(false); got: {t}"
-                );
+            // An OK(false, "restricted: authorization denied") frame must have been sent.
+            // Mutation-red (remove acquire_effect): handler reaches fan-out → OK(true, "") →
+            // `t.contains("authorization denied")` fails → test panics.
+            let frame = send_rx
+                .try_recv()
+                .expect("P1-b: handler must send OK(false) on expired gate");
+            match frame {
+                axum::extract::ws::Message::Text(t) => {
+                    assert!(
+                        t.contains("authorization denied"),
+                        "P1-b: OK frame must contain 'authorization denied'; got: {t}"
+                    );
+                    assert!(
+                        t.contains("false"),
+                        "P1-b: OK frame must be OK(false); got: {t}"
+                    );
+                }
+                other => panic!("P1-b: expected Text OK frame, got {other:?}"),
             }
-            other => panic!("P1-b: expected Text OK frame, got {other:?}"),
         }
     }
 }

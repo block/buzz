@@ -20,6 +20,10 @@ pub enum BlossomDenialKind {
     /// or similar authorization refusal that is not an auth-credential failure.
     /// Maps to HTTP 403 with fixed `authorization denied\n` body [NIP-FI.md:764-775].
     AuthorizationDenied,
+    /// The relay could not evaluate its access policy (membership or
+    /// restriction lookup failed). Maps to HTTP 503 with fixed
+    /// `authorization unavailable\n` body [NIP-FI.md:769-789].
+    AuthorizationUnavailable,
 }
 
 /// Errors from media operations.
@@ -80,6 +84,10 @@ pub enum MediaError {
     CommunityWriteFenced,
     #[error("media service temporarily unavailable")]
     ServiceUnavailable,
+    /// An access-policy lookup failed. Legacy responses match
+    /// [`MediaError::ServiceUnavailable`]; Strict mode uses the NIP-FI body.
+    #[error("media service temporarily unavailable")]
+    AuthorizationUnavailable,
     #[error("token revoked")]
     TokenRevoked,
     #[error("pubkey mismatch")]
@@ -166,6 +174,7 @@ impl MediaError {
             Self::RelayMembershipRequired | Self::CommunityWriteFenced => {
                 Some(BlossomDenialKind::AuthorizationDenied)
             }
+            Self::AuthorizationUnavailable => Some(BlossomDenialKind::AuthorizationUnavailable),
             _ => None,
         }
     }
@@ -216,7 +225,9 @@ impl IntoResponse for MediaError {
             Self::RelayMembershipRequired | Self::CommunityWriteFenced => {
                 (StatusCode::FORBIDDEN, self.to_string())
             }
-            Self::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
+            Self::ServiceUnavailable | Self::AuthorizationUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
