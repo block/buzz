@@ -79,8 +79,8 @@ pub(super) struct IssuerEnvConfig {
     pub command_audiences: Vec<String>,
     /// Removed field. Present only so a stale config fails loudly instead of
     /// being silently ignored.
-    #[serde(default)]
-    pub audiences: Option<serde::de::IgnoredAny>,
+    #[serde(default, deserialize_with = "field_present")]
+    pub audiences: bool,
     /// `"at+jwt"` or `"nip-fi+jwt"`.
     pub token_class: TokenClassEnvConfig,
     /// Algorithm names, e.g. `["ES256", "RS256"]`.
@@ -219,17 +219,19 @@ impl NipFiCommunities {
 }
 
 /// The authority of a canonical community URI, or `None` unless the URI is
-/// exactly `https://<authority>` in lowercase with a valid host.
+/// exactly `https://<authority>` and the URL parser reserializes that authority
+/// byte-for-byte. The round trip rejects anything the parser would repair:
+/// whitespace, control characters, backslashes, uppercase, userinfo, path,
+/// query, fragment, a redundant default `:443`, and non-canonical IPv6.
 fn canonical_authority(uri: &str) -> Option<&str> {
     let authority = uri.strip_prefix("https://")?;
-    if authority.is_empty()
-        || authority.contains(['/', '?', '#', '@'])
-        || authority != authority.to_ascii_lowercase()
-    {
-        return None;
-    }
-    url::Url::parse(uri).ok()?.host()?;
-    Some(authority)
+    let parsed = url::Url::parse(uri).ok()?;
+    let host = parsed.host_str()?;
+    let reserialized = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    (reserialized == authority).then_some(authority)
 }
 
 // ── Relay-level NIP-FI config ─────────────────────────────────────────────────
@@ -535,8 +537,13 @@ fn parse_algorithm(s: &str) -> Result<Algorithm, String> {
     }
 }
 
+/// `true` whenever the field appears, whatever its value (including `null`).
+fn field_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(d).map(|_| true)
+}
+
 fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConfig), String> {
-    if entry.audiences.is_some() {
+    if entry.audiences {
         return Err("\"audiences\" was removed: list command-JWT audiences in \
              \"command_audiences\" and map assertion audiences per community in \
              BUZZ_NIP_FI_COMMUNITIES"
@@ -1373,6 +1380,13 @@ mod tests {
             "https://user@a.relay.test",
             "https://A.relay.test",
             "https://",
+            "https://a.relay.test ",
+            "https://a.relay.test\t",
+            "https://a.\trelay.test",
+            "https://a.relay.test\n",
+            "https://a.relay.test\\path",
+            "https://a.relay.test:443",
+            "https://[0:0::1]",
         ] {
             let err = enforce_with_communities(serde_json::json!([community_entry(
                 uri,
@@ -1456,16 +1470,38 @@ mod tests {
     fn enforce_issuer_rejects_removed_audiences_field() {
         let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::new(NIP_FI_VARS);
-        let mut stale = valid_enforce_issuer();
-        stale["audiences"] = serde_json::json!(["https://relay.test"]);
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
-        set_issuers(serde_json::json!([stale]).to_string());
-        let err = NipFiRelayConfig::from_env().expect_err("stale audiences field");
-        assert!(
-            err.to_string().contains("\"audiences\" was removed"),
-            "{err}"
-        );
+        for value in [
+            serde_json::json!(["https://relay.test"]),
+            serde_json::Value::Null,
+        ] {
+            let mut stale = valid_enforce_issuer();
+            stale["audiences"] = value.clone();
+            set_issuers(serde_json::json!([stale]).to_string());
+            let err = NipFiRelayConfig::from_env().expect_err("stale audiences field");
+            assert!(
+                err.to_string().contains("\"audiences\" was removed"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforce_community_uri_accepts_canonical_authorities() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        for uri in [
+            "https://a.relay.test",
+            "https://a.relay.test:8443",
+            "https://[::1]:8443",
+        ] {
+            enforce_with_communities(serde_json::json!([community_entry(
+                uri,
+                &["https://issuer.test", "https://issuer-b.test"]
+            )]))
+            .expect(uri);
+        }
     }
 
     #[test]

@@ -596,8 +596,8 @@ async fn nip11_or_ws_handler(
     //
     // HTTP/2 extended-CONNECT (latent — workspace Axum does not enable
     // `http2`; the `/` route uses `get()` and Axum requires CONNECT routing
-    // for h2 WebSockets): not currently reachable. The gate inside `Ok(ws)`
-    // below is structural hardening for when `http2` is enabled. [F3-H2-GATE]
+    // for h2 WebSockets): gated by the same pre-bind predicate. The gate inside
+    // `Ok(ws)` below is a backstop for any shape the predicate misses. [F3-H2-GATE]
     //
     // Together these two fire-points ensure that every shape the extractor
     // accepts is also gated — no hand-rolled predicate can diverge from the
@@ -606,9 +606,8 @@ async fn nip11_or_ws_handler(
     // Zero DB cost invariant: the active HTTP/1.1 fire-point runs before
     // `bind_community`, so denied h1 upgrades pay zero DB cost
     // [FI-TRACE-TRANSPORT-CLOSED], and tests that assert 401/503 are not
-    // pre-empted by a 404 from an unseeded DB. The latent h2 fire-point inside
-    // `Ok(ws)` runs after `bind_community`; it is unreachable until `http2`
-    // is enabled.
+    // pre-empted by a 404 from an unseeded DB. The `Ok(ws)` backstop runs after
+    // `bind_community`; it is unreachable until `http2` is enabled.
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
@@ -629,7 +628,12 @@ async fn nip11_or_ws_handler(
                         .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
                 })
                 .unwrap_or(false);
-        if is_h1_ws_upgrade {
+        // HTTP/2 extended-CONNECT (RFC 8441), latent until Axum's `http2` is
+        // enabled. Gated here too so an unmapped Host gets 503 before the
+        // tenant lookup's 404, matching h1 and audio. [F3-H2-GATE]
+        let is_h2_ws_connect = req.version() == axum::http::Version::HTTP_2
+            && req.method() == axum::http::Method::CONNECT;
+        if is_h1_ws_upgrade || is_h2_ws_connect {
             use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
@@ -640,9 +644,9 @@ async fn nip11_or_ws_handler(
                 NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
             }
         } else {
-            // Not an HTTP/1.1 WS upgrade — could be an HTTP/2 extended-CONNECT,
-            // a NIP-11 request, or a plain browser GET. Do not gate here; the
-            // `Ok(ws)` arm below gates any extractor-accepted h2 upgrade. [F3-H2-GATE]
+            // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
+            // The `Ok(ws)` arm below backstops any extractor-accepted shape this
+            // predicate misses. [F3-H2-GATE]
             None
         }
     };
@@ -682,8 +686,8 @@ async fn nip11_or_ws_handler(
     // unmapped host still gets the document (with host-scoped fields like
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
     //
-    // The active HTTP/1.1 NIP-FI gate runs above (before bind_community) so
-    // denied h1 upgrades pay zero DB cost; the latent h2 gate runs below.
+    // The NIP-FI upgrade gate runs above (before bind_community) so denied
+    // upgrades pay zero DB cost; the `Ok(ws)` backstop runs below.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
