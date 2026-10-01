@@ -1,7 +1,6 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import { getStorageItem } from "@/shared/lib/safeStorage";
 import { readmitRelay } from "@/features/agents/managedAgentRelayCleanup";
-import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import { migrateLegacyCommunityStorage } from "./communityStorage";
 
 const BUZZ_COMMUNITIES_KEY = "buzz-communities";
@@ -76,19 +75,17 @@ function shouldWriteLegacyCommunities({
   return !hasNonLocalCurrentCommunities(currentCommunitiesRaw);
 }
 
-/** Relay URLs in `nextRaw` whose canonical relay isn't already in `currentRaw`. */
+/** Relay URLs in `nextRaw` that aren't already saved in `currentRaw`. */
 function newRelayUrls(currentRaw: string | null, nextRaw: string): string[] {
-  const canonical = (url: string) => canonicalRelayUrl(url) ?? url;
+  // Deliberately raw: native canonicalizes and validates on re-add, and a
+  // JavaScript notion of "same relay" can skip a URL native would admit.
   const seen = new Set(
-    (parseCommunityList(currentRaw) ?? [])
-      .map((c) => c.relayUrl)
-      .filter((url): url is string => typeof url === "string")
-      .map(canonical),
+    (parseCommunityList(currentRaw) ?? []).map((c) => c.relayUrl),
   );
   const introduced: string[] = [];
   for (const { relayUrl } of parseCommunityList(nextRaw) ?? []) {
-    if (typeof relayUrl !== "string" || seen.has(canonical(relayUrl))) continue;
-    seen.add(canonical(relayUrl));
+    if (typeof relayUrl !== "string" || seen.has(relayUrl)) continue;
+    seen.add(relayUrl);
     introduced.push(relayUrl);
   }
   return introduced;

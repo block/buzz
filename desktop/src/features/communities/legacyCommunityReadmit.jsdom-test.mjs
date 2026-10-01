@@ -19,6 +19,10 @@ const tauriMock = {
       });
     }
     if (command === "readd_community_relay") {
+      // Native normalize_relay_url rejects credentials and fragments.
+      if (/[#@]/.test(args.relayUrl)) {
+        return Promise.reject(new Error("invalid relay url"));
+      }
       removedRelays.delete(args.relayUrl);
       return Promise.resolve();
     }
@@ -94,10 +98,20 @@ test("a failed onboarding-completion write after the list is saved still re-admi
   }
 });
 
-test("an already-saved relay spelled with a trailing slash is not re-admitted", async () => {
-  const readds = await reloadWithLegacy({
-    workspaces: [legacy, legacy, local],
-    savedLocalRelay: `${LOCAL_RELAY}/`,
+for (const alias of [`${LEGACY_RELAY}/#old`, "wss://user@legacy.example"]) {
+  test(`an invalid alias ${alias} listed before the valid relay still re-admits it`, async () => {
+    await reloadWithLegacy({
+      workspaces: [{ ...legacy, id: "alias", relayUrl: alias }, legacy],
+    });
+    assert.equal(
+      removedRelays.has(LEGACY_RELAY),
+      false,
+      "legacy relay admitted",
+    );
   });
-  assert.equal(readds, 1, "only the legacy relay, once");
+}
+
+test("the same relay URL listed twice is re-admitted once", async () => {
+  const readds = await reloadWithLegacy({ workspaces: [legacy, legacy] });
+  assert.equal(readds, 1);
 });
