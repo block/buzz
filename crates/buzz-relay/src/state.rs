@@ -1855,12 +1855,9 @@ type NipFiComponents = (
 );
 
 fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
-    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, NipFiMode, ProductionJwksSource};
+    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, ProductionJwksSource};
 
-    if matches!(
-        config.nip_fi.mode,
-        NipFiMode::Off | NipFiMode::DenyProtected
-    ) {
+    if !config.nip_fi.mode.evaluates() {
         // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
         return (None, None);
     }

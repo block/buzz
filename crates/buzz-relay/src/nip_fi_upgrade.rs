@@ -50,11 +50,24 @@ pub(crate) fn check_nip_fi_at_upgrade(
     verifier: Option<&dyn VerifyAssertion>,
     mode: NipFiMode,
 ) -> NipFiUpgradeOutcome {
-    if matches!(mode, NipFiMode::Off) {
+    if !mode.restricts() {
+        // Shadow: evaluate as enforce would and record it, but admit exactly
+        // as Off. The assertion is dropped here, so no connection ever holds
+        // one in shadow mode.
+        if mode.observes_only() {
+            let verdict = resolve_community(headers, communities)
+                .map_err(|class| ("community", class))
+                .and_then(|community| {
+                    evaluate_attached_assertion(headers, community, verifier)
+                        .map(drop)
+                        .map_err(|rejection| ("assertion", rejection.denial_class()))
+                });
+            crate::nip_fi_shadow::record("ws", headers, communities, verdict);
+        }
         return NipFiUpgradeOutcome::NotRequired;
     }
 
-    if matches!(mode, NipFiMode::DenyProtected) {
+    if mode.denies_unconditionally() {
         return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
@@ -530,5 +543,19 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(verifier.calls(), 0);
+    }
+
+    // Pins: shadow evaluates the assertion but admits exactly as Off, so no
+    // connection is ever handed a verified assertion. Mutation: returning
+    // `Admitted` in shadow fails the `NotRequired` match.
+    #[test]
+    fn shadow_upgrade_evaluates_but_never_admits_an_assertion() {
+        let verifier = ScriptedVerifier::new(Ok(Some(nostr::Keys::generate().public_key())));
+        let headers = headers_with("Bearer a.b.c");
+        assert!(matches!(
+            check_nip_fi_at_upgrade(&headers, &communities(), Some(&verifier), NipFiMode::Shadow),
+            NipFiUpgradeOutcome::NotRequired
+        ));
+        assert_eq!(verifier.calls(), 1, "shadow must evaluate the assertion");
     }
 }

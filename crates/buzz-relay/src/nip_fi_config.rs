@@ -9,7 +9,7 @@
 //!
 //! | Variable | Required | Description |
 //! |---|---|---|
-//! | `BUZZ_NIP_FI_MODE` | No | `off` (default), `enforce`, or `deny_protected`. |
+//! | `BUZZ_NIP_FI_MODE` | No | `off` (default), `shadow`, `enforce`, or `deny_protected`. `shadow` requires everything `enforce` does. |
 //! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs (see [`IssuerEnvConfig`]). |
 //! | `BUZZ_NIP_FI_COMMUNITIES` | If enforce | JSON array mapping each community's canonical URI to its authorized issuers (see [`CommunityEnvConfig`]). |
 //! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
@@ -271,7 +271,7 @@ impl NipFiRelayConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let mode = parse_mode()?;
 
-        if let NipFiMode::Off | NipFiMode::DenyProtected = mode {
+        if !mode.evaluates() {
             return Ok(Self {
                 mode,
                 registry: IssuerRegistry::new(),
@@ -282,12 +282,11 @@ impl NipFiRelayConfig {
             });
         }
 
-        // Enforce mode: all fields required.
+        // Enforce and Shadow: all fields required.
         let issuers_json = std::env::var("BUZZ_NIP_FI_ISSUERS").map_err(|_| {
-            ConfigError::InvalidValue(
-                "BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_ISSUERS is not set; \
-                 set it to a JSON array of issuer configs"
-                    .to_string(),
+            mode_requires(
+                mode,
+                "BUZZ_NIP_FI_ISSUERS is not set; set it to a JSON array of issuer configs",
             )
         })?;
         if issuers_json.trim().is_empty() {
@@ -327,11 +326,10 @@ impl NipFiRelayConfig {
             MAX_CONNECTION_LIFETIME_SECS,
         )?
         .ok_or_else(|| {
-            ConfigError::InvalidValue(
-                "BUZZ_NIP_FI_MODE=enforce but \
-                         BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
-                         every enforce deployment must configure a positive finite value"
-                    .to_string(),
+            mode_requires(
+                mode,
+                "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
+                 every enforce deployment must configure a positive finite value",
             )
         })?;
 
@@ -429,7 +427,7 @@ impl NipFiRelayConfig {
         }
 
         let configured: BTreeSet<&str> = policies.iter().map(IssuerPolicy::issuer).collect();
-        let communities = parse_communities(&configured)?;
+        let communities = parse_communities(mode, &configured)?;
         // Fold each issuer's community allowlist into its policy ID
         // (NIP-FI.md:145), and reject an issuer no community authorizes
         // (NIP-FI.md:183).
@@ -446,7 +444,7 @@ impl NipFiRelayConfig {
         }
 
         // Delegate final validation to buzz-auth startup gate.
-        validate_nip_fi_config(NipFiMode::Enforce, &registry, &jwks_configs).map_err(
+        validate_nip_fi_config(mode, &registry, &jwks_configs).map_err(
             |e: NipFiStartupError| ConfigError::InvalidValue(format!("NIP-FI config invalid: {e}")),
         )?;
 
@@ -462,13 +460,16 @@ impl NipFiRelayConfig {
 }
 
 /// Parse and validate `BUZZ_NIP_FI_COMMUNITIES` against `registry`.
-fn parse_communities(configured: &BTreeSet<&str>) -> Result<NipFiCommunities, ConfigError> {
+fn parse_communities(
+    mode: NipFiMode,
+    configured: &BTreeSet<&str>,
+) -> Result<NipFiCommunities, ConfigError> {
     let raw = std::env::var("BUZZ_NIP_FI_COMMUNITIES").unwrap_or_default();
     if raw.trim().is_empty() {
-        return Err(ConfigError::InvalidValue(
-            "BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_COMMUNITIES is not set; \
-             set it to a JSON array of {canonical_uri, authorized_issuers}"
-                .to_string(),
+        return Err(mode_requires(
+            mode,
+            "BUZZ_NIP_FI_COMMUNITIES is not set; \
+             set it to a JSON array of {canonical_uri, authorized_issuers}",
         ));
     }
     let entries: Vec<CommunityEnvConfig> = serde_json::from_str(&raw).map_err(|e| {
@@ -494,10 +495,24 @@ fn parse_mode() -> Result<NipFiMode, ConfigError> {
         None | Some("") | Some("off") => Ok(NipFiMode::Off),
         Some("enforce") => Ok(NipFiMode::Enforce),
         Some("deny_protected") => Ok(NipFiMode::DenyProtected),
+        Some("shadow") => Ok(NipFiMode::Shadow),
         Some(other) => Err(ConfigError::InvalidValue(format!(
-            "BUZZ_NIP_FI_MODE must be \"enforce\", \"deny_protected\", or \"off\"; got {other:?}"
+            "BUZZ_NIP_FI_MODE must be \"enforce\", \"shadow\", \"deny_protected\", or \"off\"; \
+             got {other:?}"
         ))),
     }
+}
+
+/// A missing-setting startup error naming the configured mode, e.g.
+/// `BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_ISSUERS is not set; …`.
+fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
+    let value = match mode {
+        NipFiMode::Enforce => "enforce",
+        NipFiMode::Shadow => "shadow",
+        NipFiMode::Off => "off",
+        NipFiMode::DenyProtected => "deny_protected",
+    };
+    ConfigError::InvalidValue(format!("BUZZ_NIP_FI_MODE={value} but {missing}"))
 }
 
 /// Parse an optional positive `u64` env var bounded to `[min_val, max_val]`.
@@ -619,7 +634,7 @@ impl NipFiRelayConfig {
 
     /// Returns `true` when the relay is in `Enforce` mode.
     pub fn is_enforce(&self) -> bool {
-        matches!(self.mode, NipFiMode::Enforce)
+        self.mode.enforces()
     }
 }
 
@@ -1548,5 +1563,61 @@ mod tests {
         std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", "not json");
         let cfg = NipFiRelayConfig::from_env().expect("repair mode must still boot");
         assert!(cfg.communities.resolve("a.relay.test").is_none());
+    }
+
+    // Pins the startup-error formatter: the enforce text is unchanged and
+    // shadow names its own mode. Mutation: a hard-coded `enforce` fails the
+    // shadow test; any rewording fails the enforce test.
+    fn missing_issuers_error(mode: &str) -> String {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+        std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
+        match NipFiRelayConfig::from_env() {
+            Err(ConfigError::InvalidValue(msg)) => msg,
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_missing_issuers_error_is_exact() {
+        assert_eq!(
+            missing_issuers_error("enforce"),
+            "BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_ISSUERS is not set; \
+             set it to a JSON array of issuer configs"
+        );
+    }
+
+    #[test]
+    fn shadow_missing_issuers_error_names_shadow() {
+        assert_eq!(
+            missing_issuers_error("shadow"),
+            "BUZZ_NIP_FI_MODE=shadow but BUZZ_NIP_FI_ISSUERS is not set; \
+             set it to a JSON array of issuer configs"
+        );
+    }
+
+    // Pins D1: shadow loads the full enforce configuration, communities
+    // included, and refuses to start without them.
+    #[test]
+    fn shadow_startup_requires_full_enforce_config() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let communities = serde_json::json!([community_entry(
+            "https://a.relay.test",
+            &["https://issuer.test", "https://issuer-b.test"]
+        )]);
+        enforce_with_communities(communities.clone()).expect("enforce fixture is valid");
+        std::env::set_var("BUZZ_NIP_FI_MODE", "shadow");
+        let cfg = NipFiRelayConfig::from_env().expect("shadow accepts the enforce config");
+        assert_eq!(cfg.mode, NipFiMode::Shadow);
+        assert!(cfg.communities.resolve("a.relay.test").is_some());
+        std::env::remove_var("BUZZ_NIP_FI_COMMUNITIES");
+        let err = NipFiRelayConfig::from_env().expect_err("shadow without communities");
+        assert!(
+            err.to_string()
+                .contains("BUZZ_NIP_FI_MODE=shadow but BUZZ_NIP_FI_COMMUNITIES is not set"),
+            "{err}"
+        );
     }
 }

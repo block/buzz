@@ -619,7 +619,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 &nip_fi.command_configs,
             )
             .map_err(|e| anyhow::anyhow!("NIP-FI startup failed: {e}"))?;
-        } else if nip_fi.is_enforce() {
+        } else if nip_fi.mode.evaluates() {
             return Err(anyhow::anyhow!(
                 "NIP-FI: failed to construct JWKS key source \
                  (empty or duplicate issuer config)"

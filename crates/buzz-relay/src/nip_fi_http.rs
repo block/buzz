@@ -289,18 +289,30 @@ where
     // Step 1 — DenyProtected mode: unconditional 503.  Checked first so no
     // request shape (duplicate, missing, or invalid `Authorization`) can turn
     // it into a 401/403, and so neither NIP-98 nor the verifier runs.
-    if matches!(mode, NipFiMode::DenyProtected) {
+    if mode.denies_unconditionally() {
         return Err(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
-    // Off mode: NIP-FI not required.  Run the NIP-98 closure and propagate
-    // its result unchanged (legacy behavior) — no community resolution and no
-    // cardinality gate.  [FI-INV-15 exemption]
-    if matches!(mode, NipFiMode::Off) {
+    // Off and Shadow: NIP-FI not required.  Run the NIP-98 closure and
+    // propagate its result unchanged (legacy behavior) — no community
+    // resolution and no cardinality gate.  [FI-INV-15 exemption]
+    // Shadow additionally replays the enforce steps on the same proof and
+    // records the verdict; it never changes this result.
+    if !mode.restricts() {
+        let proof = extract_nip98();
+        if mode.observes_only() {
+            let verdict = evaluate_enforce_steps(headers, communities, verifier, deny_map, || {
+                proof
+                    .as_ref()
+                    .map(|p| Nip98Proof::new(p.pubkey, ()))
+                    .map_err(drop)
+            });
+            crate::nip_fi_shadow::record("http", headers, communities, verdict.map(drop));
+        }
         let Nip98Proof {
             pubkey: proven_pubkey,
             extra,
-        } = extract_nip98()?;
+        } = proof?;
         return Ok(NipFiAdmission {
             proven_pubkey,
             assertion: None,
@@ -308,85 +320,25 @@ where
         });
     }
 
-    // Enforce step 1 — the Host must map to a configured community, before
-    // any evidence (`Authorization`, NIP-98, assertion) is examined. Explicit
-    // here because some admitted routes are exempt from the router guard.
-    // [NIP-FI.md:266-268]
-    let community = resolve_community(headers, communities).map_err(http_denial)?;
-
-    // Step 2 — cardinality gate: Enforce mode requires exactly one Authorization
-    // field per NIP-FI.md:695-700.
-    //
-    // Axum / hyper de-duplicates most header fields during HTTP/1.1 parsing, but
-    // RFC 7230 permits comma-separated combining or multiple header lines;
-    // `HeaderMap::get` silently takes only the FIRST value.  Rejecting duplicates
-    // closes the attack where a relay-aware adversary slips a second credential
-    // past the NIP-98 verifier.  [FI-INV-15]
-    if headers.get_all("authorization").iter().count() > 1 {
-        return Err(http_denial(DenialClass::EvidenceRejected));
-    }
-
-    // Step 3: run NIP-98 extraction.
-    let nip98_result = extract_nip98();
-
-    // Enforce mode: NIP-98 closure failure MUST
-    // produce a NIP-FI DenialClass response, not a legacy JSON error.
-    // [NIP-FI.md §Admission procedure step 3; FI-TRACE-DENIAL-ORACLE]
-    let Nip98Proof {
-        pubkey: proven_pubkey,
-        extra,
-    } = nip98_result.map_err(|_legacy| {
-        // Determine the appropriate denial class from Authorization header presence.
-        // Absent header → MissingEvidence (401); present-but-invalid → EvidenceRejected (403).
-        // [FI-TRACE-DENIAL-ORACLE]
-        let class = if headers.contains_key("authorization") {
-            DenialClass::EvidenceRejected
-        } else {
-            DenialClass::MissingEvidence
-        };
-        http_denial(class)
-    })?;
-
-    // Steps 4–8 — Enforce mode.
-
-    // Steps 4–5: extract and verify the assertion.
-    let assertion =
-        evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
-            if let AssertionRejection::Verifier(e) = rejection {
-                tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
+    let (
+        Nip98Proof {
+            pubkey: proven_pubkey,
+            extra,
+        },
+        assertion,
+    ) = evaluate_enforce_steps(headers, communities, verifier, deny_map, extract_nip98).map_err(
+        |(stage, class)| {
+            let reason = match stage {
+                "pairing" => Some("nip_fi_http_key_mismatch"),
+                "deny_set" => Some("nip_fi_http_denied_pubkey"),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
             }
-            http_denial(rejection.denial_class())
-        })?;
-
-    // Step 6: key pairing — assertion.asserted_key MUST equal proven NIP-98 key.
-    // A claimless assertion (no nostr_pubkey) is also a denial.  [FI-INV-05]
-    if !asserted_key_matches(&assertion, proven_pubkey) {
-        metrics::counter!(
-            "buzz_auth_failures_total",
-            "reason" => "nip_fi_http_key_mismatch"
-        )
-        .increment(1);
-        tracing::debug!(
-            proven = %proven_pubkey.to_hex(),
-            "NIP-FI HTTP key pairing mismatch"
-        );
-        // Key mismatch is a private-state denial: authorization_denied (403).
-        // [FI-TRACE-DENIAL-ORACLE]
-        return Err(http_denial(DenialClass::AuthorizationDenied));
-    }
-
-    // Step 7: deny-map check — (iss, pubkey) must not be in an active deny window.
-    // [FI-INV-14] [NIP-FI.md:624-627]
-    let issuer = assertion.identity().issuer();
-    if deny_map.is_denied(issuer, &proven_pubkey, Utc::now()) {
-        metrics::counter!(
-            "buzz_auth_failures_total",
-            "reason" => "nip_fi_http_denied_pubkey"
-        )
-        .increment(1);
-        // Denied-pubkey is a private-state denial.  [FI-TRACE-DENIAL-ORACLE]
-        return Err(http_denial(DenialClass::AuthorizationDenied));
-    }
+            http_denial(class)
+        },
+    )?;
 
     // Step 8: admit.
     Ok(NipFiAdmission {
@@ -394,6 +346,78 @@ where
         assertion: Some(assertion),
         extra,
     })
+}
+
+/// Enforce admission steps 1–7 for one request, in their normative order.
+/// On denial, returns the step that denied (a `buzz_nip_fi_shadow_total`
+/// `stage` label) and its class. Pure apart from running `extract_nip98`
+/// after the community and cardinality steps.
+fn evaluate_enforce_steps<D, X, E, F>(
+    headers: &HeaderMap,
+    communities: &NipFiCommunities,
+    verifier: Option<&dyn VerifyAssertion>,
+    deny_map: &D,
+    extract_nip98: F,
+) -> Result<(Nip98Proof<X>, VerifiedAssertion), crate::nip_fi_shadow::WouldDeny>
+where
+    D: HttpDenyMap,
+    F: FnOnce() -> Result<Nip98Proof<X>, E>,
+{
+    // Step 1 — the Host must map to a configured community, before any
+    // evidence (`Authorization`, NIP-98, assertion) is examined. Explicit
+    // here because some admitted routes are exempt from the router guard.
+    // [NIP-FI.md:266-268]
+    let community = resolve_community(headers, communities).map_err(|c| ("community", c))?;
+
+    // Step 2 — cardinality gate: exactly one Authorization field per
+    // NIP-FI.md:695-700.
+    //
+    // Axum / hyper de-duplicates most header fields during HTTP/1.1 parsing, but
+    // RFC 7230 permits comma-separated combining or multiple header lines;
+    // `HeaderMap::get` silently takes only the FIRST value.  Rejecting duplicates
+    // closes the attack where a relay-aware adversary slips a second credential
+    // past the NIP-98 verifier.  [FI-INV-15]
+    if headers.get_all("authorization").iter().count() > 1 {
+        return Err(("cardinality", DenialClass::EvidenceRejected));
+    }
+
+    // Step 3: NIP-98.  A closure failure MUST produce a NIP-FI DenialClass,
+    // not a legacy JSON error: absent header → MissingEvidence (401);
+    // present-but-invalid → EvidenceRejected (403).
+    // [NIP-FI.md §Admission procedure step 3; FI-TRACE-DENIAL-ORACLE]
+    let proof = extract_nip98().map_err(|_legacy| {
+        let class = if headers.contains_key("authorization") {
+            DenialClass::EvidenceRejected
+        } else {
+            DenialClass::MissingEvidence
+        };
+        ("nip98", class)
+    })?;
+
+    // Steps 4–5: extract and verify the assertion.
+    let assertion =
+        evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
+            if let AssertionRejection::Verifier(e) = rejection {
+                tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
+            }
+            ("assertion", rejection.denial_class())
+        })?;
+
+    // Step 6: key pairing — assertion.asserted_key MUST equal proven NIP-98 key.
+    // A claimless assertion (no nostr_pubkey) is also a denial; key mismatch
+    // is a private-state denial (403).  [FI-INV-05] [FI-TRACE-DENIAL-ORACLE]
+    if !asserted_key_matches(&assertion, proof.pubkey) {
+        tracing::debug!(proven = %proof.pubkey.to_hex(), "NIP-FI HTTP key pairing mismatch");
+        return Err(("pairing", DenialClass::AuthorizationDenied));
+    }
+
+    // Step 7: deny-map check — (iss, pubkey) must not be in an active deny
+    // window.  Private-state denial.  [FI-INV-14] [NIP-FI.md:624-627]
+    if deny_map.is_denied(assertion.identity().issuer(), &proof.pubkey, Utc::now()) {
+        return Err(("deny_set", DenialClass::AuthorizationDenied));
+    }
+
+    Ok((proof, assertion))
 }
 
 // ── State-convenience wrapper ─────────────────────────────────────────────────
@@ -1424,5 +1448,68 @@ mod tests {
             );
             assert_eq!(verifier.calls(), 0);
         }
+    }
+
+    // Pins D8: in shadow, an unmapped or absent Host is admitted exactly as
+    // Off — the NIP-98 result passes through and no assertion is attached.
+    // Mutation: routing shadow through the enforce path makes this a 503.
+    #[test]
+    fn shadow_unmapped_host_admits_like_off() {
+        let mut unmapped = bearer_headers("Bearer a.b.c");
+        unmapped.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_static("other.example"),
+        );
+        let mut absent = bearer_headers("Bearer a.b.c");
+        absent.remove(axum::http::header::HOST);
+        let key = any_pubkey();
+        for headers in [unmapped, absent] {
+            let admission = admit_nip_fi_http::<_, (), _>(
+                &headers,
+                || Ok(Nip98Proof::new(key, ())),
+                &communities(),
+                None,
+                NipFiMode::Shadow,
+                &AlwaysAdmitStubDenyMap,
+            )
+            .expect("shadow admits an unmapped Host");
+            assert_eq!(admission.proven_pubkey, key);
+            assert!(admission.assertion.is_none());
+        }
+    }
+
+    // Pins: shadow runs the verifier on a mapped Host yet keeps Off's
+    // admission — a verified assertion is never attached, and a NIP-98
+    // failure is the legacy error, not a NIP-FI denial. Mutation: attaching
+    // the verdict's assertion fails `is_none`; skipping evaluation fails the
+    // call count.
+    #[test]
+    fn shadow_evaluates_assertion_without_changing_admission() {
+        let key = any_pubkey();
+        let verifier = ScriptedVerifier::new(Ok(Some(key)));
+        let admission = admit_nip_fi_http::<_, (), _>(
+            &bearer_headers("Bearer a.b.c"),
+            || Ok(Nip98Proof::new(key, ())),
+            &communities(),
+            Some(&verifier as &dyn VerifyAssertion),
+            NipFiMode::Shadow,
+            &AlwaysAdmitStubDenyMap,
+        )
+        .expect("shadow admits");
+        assert!(admission.assertion.is_none());
+        assert_eq!(verifier.calls(), 1);
+
+        let legacy = admit_nip_fi_http::<_, (), _>(
+            &bearer_headers("Bearer a.b.c"),
+            || Err(Response::new(Body::from("legacy"))),
+            &communities(),
+            Some(&verifier as &dyn VerifyAssertion),
+            NipFiMode::Shadow,
+            &AlwaysAdmitStubDenyMap,
+        );
+        let Err(resp) = legacy else {
+            panic!("NIP-98 failure must propagate")
+        };
+        assert_eq!(body_bytes(resp), b"legacy");
     }
 }

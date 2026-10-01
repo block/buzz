@@ -102,7 +102,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // must be verified against the tenant-bound host, not a process-global
         // domain.
         let mode = state.config.nip_fi.mode;
-        if matches!(mode, buzz_auth::NipFiMode::Off) {
+        if !mode.restricts() {
             parse_git_auth_header(&parts.headers, method)?;
         }
 

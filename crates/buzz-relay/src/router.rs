@@ -177,10 +177,9 @@ async fn nip_fi_assertion_guard(
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    use buzz_auth::NipFiMode;
-
-    // Off mode: fully transparent. [FI-INV-15]
-    if matches!(state.config.nip_fi.mode, NipFiMode::Off) {
+    // Off and Shadow: fully transparent. [FI-INV-15] Shadow records its
+    // verdict at handler admission and the WebSocket upgrade, not here.
+    if !state.config.nip_fi.mode.restricts() {
         return next.run(request).await;
     }
 
@@ -229,7 +228,7 @@ async fn nip_fi_assertion_guard(
     //
     // DenyProtected: unconditional 503 regardless of assertion presence.
     // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
-    if matches!(state.config.nip_fi.mode, NipFiMode::DenyProtected) {
+    if state.config.nip_fi.mode.denies_unconditionally() {
         return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
     }
 

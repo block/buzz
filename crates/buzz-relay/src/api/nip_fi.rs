@@ -136,12 +136,18 @@ pub async fn disconnect(
             let pubkey_bytes = cmd.target_pubkey.to_bytes();
             // Issuer-scoped: the deny entry is keyed by (caller_iss, k), so only
             // sessions admitted under caller_iss are closed. [FI-TRACE-DENY-SET]
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
-                + state
-                    .community_connections
-                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes);
+            // Shadow keeps the deny entry (so admission records would-denies)
+            // but closes nothing; the response is unchanged.
+            let closed = if !state.config.nip_fi.mode.observes_only() {
+                state
+                    .conn_manager
+                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
+                    + state
+                        .community_connections
+                        .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
+            } else {
+                0
+            };
             if closed > 0 {
                 // [FI-TRACE-PRIVACY-NONPUBLIC]: raw `iss` MUST NOT appear in
                 // logs, metrics, or traces.  Log only a count.
@@ -317,8 +323,12 @@ pub fn apply_nip_fi_disconnect(
     use buzz_auth::CrossPodMergeResult;
     let merge_result = deny_map.merge_cross_pod_deny(&message.issuer, &pubkey, until, now);
 
-    // Close sessions for all merge outcomes except UnknownIssuer.
+    // Close sessions for all merge outcomes except UnknownIssuer — never in
+    // shadow mode, where the merged entry only feeds would-deny records.
     let close_sessions = |reason: &str| {
+        if state.config.nip_fi.mode.observes_only() {
+            return;
+        }
         let closed = state
             .conn_manager
             .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes)
@@ -370,7 +380,7 @@ pub fn build_nip_fi_command_components<F: JwksFetcher>(
     key_source: Arc<ProductionJwksSource<F>>,
     issuer_command_configs: &[(String, CommandIssuerEnvConfig)],
 ) -> Result<Option<NipFiCommandComponents<F>>, String> {
-    if matches!(mode, NipFiMode::Off) {
+    if mode.is_off() {
         return Ok(None);
     }
 
@@ -385,7 +395,7 @@ pub fn build_nip_fi_command_components<F: JwksFetcher>(
             None => {
                 // In enforce mode every issuer must be command-capable;
                 // from_env() already guarantees this, but be defensive here too.
-                if matches!(mode, NipFiMode::Enforce) {
+                if mode.evaluates() {
                     return Err(format!(
                         "nip-fi: enforce issuer [index {idx}] has no maximum_command_age_seconds — \
                          assertion-only issuers are not supported in enforce mode"
@@ -425,7 +435,7 @@ pub fn build_nip_fi_command_components<F: JwksFetcher>(
     }
 
     if command_policies.is_empty() {
-        if matches!(mode, NipFiMode::Enforce) {
+        if mode.evaluates() {
             // Enforce with no command-capable issuers is a misconfiguration:
             // from_env() guarantees every enforce issuer has command config, so
             // an empty set here means something was skipped or the configs are wrong.
@@ -482,7 +492,7 @@ pub fn install_nip_fi_command_components<F: JwksFetcher>(
     command_configs: &[(String, CommandIssuerEnvConfig)],
 ) -> Result<NipFiCommandStartupReport, String> {
     // Pre-flight: enforce mode with no command configs is always an error.
-    if matches!(mode, NipFiMode::Enforce) && command_configs.is_empty() {
+    if mode.evaluates() && command_configs.is_empty() {
         return Err(
             "NIP-FI install: enforce mode requires at least one command-capable issuer".to_owned(),
         );
@@ -3300,5 +3310,41 @@ mod route_integration_tests {
         async fn redis_deny_set_full_leaves_shared_claim_retryable() {
             deny_set_full_leaves_command_retryable(redis_guard()).await;
         }
+    }
+
+    // Pins D2/D10: in shadow, a verified disconnect records the deny entry
+    // and answers the exact enforce body, but closes no session — locally
+    // or from a cross-pod message. Mutation: dropping the shadow check in
+    // either close path fails `assert_open`.
+    #[tokio::test]
+    async fn shadow_disconnect_records_deny_but_closes_nothing() {
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.mode = NipFiMode::Shadow;
+        config.nip_fi.registry.insert(test_issuer_policy());
+        let state = Arc::new(build_test_app_state(1000, config).await);
+        let key = nostr::Keys::generate().public_key();
+        let sessions = IssuerSessions::register(&state, TEST_ISS, &key);
+
+        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        let resp = do_request(
+            Arc::clone(&state),
+            "POST",
+            vec![
+                ("Content-Type", "application/json".into()),
+                (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
+            ],
+            Some(serde_json::json!({"pubkey": key.to_hex()})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"disconnected": true}"#);
+        let deny_map = state.nip_fi_deny_map.as_deref().expect("deny map");
+        assert!(deny_map.is_denied(TEST_ISS, &key, chrono::Utc::now()));
+
+        apply_nip_fi_disconnect(&state, &cross_pod_message(&key), chrono::Utc::now());
+        sessions.assert_open("shadow");
     }
 }
