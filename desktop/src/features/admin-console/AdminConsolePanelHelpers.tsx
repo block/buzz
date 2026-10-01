@@ -389,43 +389,38 @@ export function groupByCommunity<
 /**
  * Render community-grouped rows under per-community headings.
  *
- * Each group is headed by its community badge, and every row repeats it beside
- * the row button, so a row read on its own still names its community. Badges
- * open that community's page and sit outside the row buttons. `renderItem`
- * produces the row button for one entry.
+ * Each group is headed by its community badge, which opens that community's
+ * page. `hideHeadings` drops the headings when the list already sits on one
+ * community's page. `renderItem` produces the row for one entry.
  */
 export function CommunityGroupedList<
-  T extends {
-    id: string;
-    communityId: string | null;
-    communityHost: string | null;
-  },
->({ items, renderItem }: { items: T[]; renderItem: (item: T) => ReactNode }) {
+  T extends { communityId: string | null; communityHost: string | null },
+>({
+  items,
+  renderItem,
+  hideHeadings = false,
+}: {
+  items: T[];
+  renderItem: (item: T) => ReactNode;
+  hideHeadings?: boolean;
+}) {
   const groups = useMemo(() => groupByCommunity(items), [items]);
   return (
     <div className="space-y-4">
       {groups.map((group) => (
         <section key={group.communityId} data-testid="community-group">
-          <h4
-            className="mb-1.5 text-xs font-semibold text-muted-foreground"
-            data-testid="community-group-host"
-          >
-            <CommunityBadge
-              host={group.items[0].communityHost || group.communityId}
-              id={group.items[0].communityId}
-            />
-          </h4>
-          <ul className="space-y-1">
-            {group.items.map((item) => (
-              <li className="flex items-center gap-2" key={item.id}>
-                <div className="min-w-0 flex-1">{renderItem(item)}</div>
-                <CommunityBadge
-                  host={item.communityHost}
-                  id={item.communityId}
-                />
-              </li>
-            ))}
-          </ul>
+          {!hideHeadings && (
+            <h4
+              className="mb-1.5 text-xs font-semibold text-muted-foreground"
+              data-testid="community-group-host"
+            >
+              <CommunityBadge
+                host={group.items[0].communityHost || group.communityId}
+                id={group.items[0].communityId}
+              />
+            </h4>
+          )}
+          <ul className="space-y-1">{group.items.map(renderItem)}</ul>
         </section>
       ))}
     </div>

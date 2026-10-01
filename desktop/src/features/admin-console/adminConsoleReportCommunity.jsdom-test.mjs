@@ -1,7 +1,7 @@
 /**
- * Community identity on report rows and at report resolution: every row names
- * its community, and confirming a resolution names the report's community and
- * warns when it is not the one the app is connected to.
+ * Community identity on report lists and at report resolution: each group of
+ * rows is headed by its community, and confirming a resolution names the
+ * report's community and warns when it is not the one the app is connected to.
  */
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
@@ -21,7 +21,7 @@ const origin = "https://admin.example.com";
 const pubkey = "e4".repeat(32);
 const ALPHA = "[data-testid='community-badge-alpha.example.com']";
 
-test("report-row-badges: every row in a community group carries its own badge", async () => {
+test("report-group-badge: a community group names its community once, in its heading", async () => {
   const { openItem } = makeOpenReportFixtures(
     "00000000-0000-0000-0000-0000000000e1",
   );
@@ -33,17 +33,13 @@ test("report-row-badges: every row in a community group carries its own badge", 
   try {
     await doRender();
     await settle(30);
-    const rows = container.querySelectorAll(
-      "[data-testid='community-group'] ul > li",
+    const group = container.querySelector("[data-testid='community-group']");
+    assert.equal(group.querySelectorAll("ul > li").length, 2);
+    assert.equal(group.querySelectorAll(ALPHA).length, 1, "one badge");
+    assert.ok(
+      group.querySelector(`[data-testid='community-group-host'] ${ALPHA}`),
+      "the badge heads the group",
     );
-    assert.equal(rows.length, 2);
-    for (const row of rows) {
-      assert.ok(row.querySelector(ALPHA), "row names its community");
-      assert.ok(
-        !row.querySelector(`button ${ALPHA}`),
-        "badge sits outside the row button",
-      );
-    }
   } finally {
     await unmount();
   }

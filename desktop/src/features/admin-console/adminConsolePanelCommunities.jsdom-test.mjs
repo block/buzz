@@ -211,6 +211,13 @@ test("community-badge: a report's badge opens its community, with a host-initial
     assert.equal(q(badge, "community-badge-initial").textContent, "a");
     await click(badge);
     assert.match(q(c, "community-banner").textContent, /alpha\.example\.com/);
+    await settle(30);
+    assert.ok(q(c, "community-group"), "the page lists the report");
+    assert.equal(
+      q(c, "community-group-host"),
+      null,
+      "the banner already names the community",
+    );
   } finally {
     await panel.unmount();
   }

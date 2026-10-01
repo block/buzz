@@ -728,6 +728,7 @@ export function ReportsTab({
 
   return (
     <CommunityGroupedList
+      hideHeadings={communityId != null}
       items={reports}
       renderItem={(report: AdminReportDto) => {
         const id = report.id;
@@ -746,7 +747,7 @@ export function ReportsTab({
           .filter(Boolean)
           .join(" · ");
         return (
-          <>
+          <li key={id}>
             {/* Processing rows stay navigable: the enforcement state (progress,
                 retry, cancel) lives inside the detail view, so disabling the row
                 would hide exactly the controls an operator needs while an action
@@ -772,7 +773,7 @@ export function ReportsTab({
                 </span>
               )}
             </button>
-          </>
+          </li>
         );
       }}
     />
