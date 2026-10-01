@@ -334,7 +334,8 @@ void main() {
     // artifacts) and that must not silently disable push.
     final information = _descriptorJson(relay.public)
       ..['artifacts'] = {'version': 1}
-      ..['read_state_snapshot'] = {'version': 1};
+      ..['read_state_snapshot'] = {'version': 1}
+      ..['x_future_extension'] = true;
 
     expect(
       BuzzPushLeaseDescriptor.fromRelayInformation(information).origin,
