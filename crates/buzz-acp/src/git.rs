@@ -274,6 +274,62 @@ pub(crate) fn is_managed_env(name: &str) -> bool {
         )
 }
 
+/// Git identity variables that take precedence over the harness-composed
+/// `GIT_CONFIG_*` block, so an inherited value would silently override it.
+const GIT_IDENTITY_VARS: [&str; 4] = [
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+];
+
+/// What the harness should do with one of the [`GIT_IDENTITY_VARS`].
+enum IdentityEnv {
+    /// Drop the variable so the harness identity is the only one left.
+    Remove,
+    /// Keep the value the operator configured for this agent.
+    Keep(String),
+}
+
+/// Decide per identity variable whether the harness identity wins or the
+/// operator's configured value does. An inherited value is always dropped,
+/// because that override is what the harness exists to prevent; a value the
+/// operator set for this agent on purpose is kept, since removing it would
+/// discard an explicit choice without telling the operator.
+///
+/// The last matching entry wins, matching `Command::env` semantics.
+fn resolve_git_identity_env(extra_env: &[(String, String)]) -> Vec<(&str, IdentityEnv)> {
+    GIT_IDENTITY_VARS
+        .iter()
+        .map(|name| {
+            let resolution = match extra_env.iter().rev().find(|(key, _)| key == name) {
+                Some((_, value)) => IdentityEnv::Keep(value.clone()),
+                None => IdentityEnv::Remove,
+            };
+            (*name, resolution)
+        })
+        .collect()
+}
+
+/// Apply [`resolve_git_identity_env`] to the agent command, so the harness
+/// identity is the only one a native shell can see unless the operator
+/// configured an identity for this agent.
+pub(crate) fn apply_git_identity_env(
+    cmd: &mut std::process::Command,
+    extra_env: &[(String, String)],
+) {
+    for (name, resolution) in resolve_git_identity_env(extra_env) {
+        match resolution {
+            IdentityEnv::Remove => {
+                cmd.env_remove(name);
+            }
+            IdentityEnv::Keep(value) => {
+                cmd.env(name, value);
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 fn set_owner_only(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -618,5 +674,120 @@ mod git_user_name_tests {
         for c in ['.', '-', '_', '@', '(', 'a', '🐝'] {
             assert!(!is_git_crud(c), "{c:?} should not be crud");
         }
+    }
+}
+
+#[cfg(test)]
+mod git_identity_env_tests {
+    use super::{apply_git_identity_env, GIT_IDENTITY_VARS};
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    /// The env the agent would actually be handed, after
+    /// `apply_git_identity_env` ran. A key is present only if the production
+    /// code called `env` or `env_remove` on it, so a key that is present with
+    /// `None` really was removed rather than merely left alone.
+    fn resolved_env(extra_env: &[(&str, &str)]) -> HashMap<String, Option<String>> {
+        let extra_env: Vec<(String, String)> = extra_env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let mut cmd = Command::new("agent");
+        apply_git_identity_env(&mut cmd, &extra_env);
+        cmd.get_envs()
+            .filter_map(|(key, value)| {
+                let key = key.to_str()?.to_owned();
+                let value = match value {
+                    Some(value) => Some(value.to_str()?.to_owned()),
+                    None => None,
+                };
+                Some((key, value))
+            })
+            .collect()
+    }
+
+    /// Presence-sensitive view of the four identity variables.
+    fn identity_env(extra_env: &[(&str, &str)]) -> HashMap<String, Option<String>> {
+        let env = resolved_env(extra_env);
+        GIT_IDENTITY_VARS
+            .iter()
+            .map(|name| ((*name).to_owned(), env.get(*name).cloned().unwrap_or(None)))
+            .collect()
+    }
+
+    fn assert_removed(env: &HashMap<String, Option<String>>, name: &str) {
+        assert_eq!(
+            env.get(name),
+            Some(&None),
+            "{name} must be removed so an inherited value cannot win"
+        );
+    }
+
+    #[test]
+    fn test_unconfigured_identity_vars_are_removed() {
+        let env = identity_env(&[("GIT_CONFIG_COUNT", "2")]);
+        for name in GIT_IDENTITY_VARS {
+            assert_removed(&env, name);
+        }
+    }
+
+    #[test]
+    fn test_operator_configured_identity_is_kept() {
+        // The regression: an operator who set these on the agent had them
+        // silently dropped, so commits landed under the harness identity.
+        let env = identity_env(&[
+            ("GIT_CONFIG_COUNT", "2"),
+            ("GIT_AUTHOR_NAME", "Ada"),
+            ("GIT_AUTHOR_EMAIL", "ada@example.com"),
+            ("GIT_COMMITTER_NAME", "Ada"),
+            ("GIT_COMMITTER_EMAIL", "ada@example.com"),
+        ]);
+        assert_eq!(env["GIT_AUTHOR_NAME"], Some("Ada".to_owned()));
+        assert_eq!(env["GIT_AUTHOR_EMAIL"], Some("ada@example.com".to_owned()));
+        assert_eq!(env["GIT_COMMITTER_NAME"], Some("Ada".to_owned()));
+        assert_eq!(
+            env["GIT_COMMITTER_EMAIL"],
+            Some("ada@example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_configuring_one_identity_var_leaves_the_others_removed() {
+        // Only the names the operator set are kept; the rest still cannot
+        // leak an ambient value.
+        let env = identity_env(&[
+            ("GIT_CONFIG_COUNT", "2"),
+            ("GIT_AUTHOR_EMAIL", "ada@example.com"),
+        ]);
+        assert_eq!(env["GIT_AUTHOR_EMAIL"], Some("ada@example.com".to_owned()));
+        for name in GIT_IDENTITY_VARS {
+            if name == "GIT_AUTHOR_EMAIL" {
+                continue;
+            }
+            assert_removed(&env, name);
+        }
+    }
+
+    #[test]
+    fn test_unrelated_keys_are_never_touched() {
+        // A key that merely shares the GIT_ prefix is not an identity var, so
+        // this function must neither set nor remove it. acp.rs applies
+        // extra_env itself; identity handling must not widen or narrow that.
+        let env = resolved_env(&[("GIT_CONFIG_COUNT", "2"), ("GIT_EDITOR", "vim")]);
+        assert_eq!(
+            env.get("GIT_EDITOR"),
+            None,
+            "a key that merely shares the GIT_ prefix is not an identity var"
+        );
+    }
+
+    #[test]
+    fn test_last_configured_value_wins_like_command_env() {
+        let env = identity_env(&[
+            ("GIT_CONFIG_COUNT", "2"),
+            ("GIT_AUTHOR_NAME", "first"),
+            ("GIT_AUTHOR_NAME", "second"),
+        ]);
+        assert_eq!(env["GIT_AUTHOR_NAME"], Some("second".to_owned()));
     }
 }

@@ -556,15 +556,9 @@ impl AcpClient {
         cmd.env_remove("NOSTR_PRIVATE_KEY");
         if extra_env.iter().any(|(name, _)| name == "GIT_CONFIG_COUNT") {
             // Native shells inherit these overrides, while buzz-agent clears
-            // them for MCP. Let both paths use the harness's agent identity.
-            for name in [
-                "GIT_AUTHOR_NAME",
-                "GIT_AUTHOR_EMAIL",
-                "GIT_COMMITTER_NAME",
-                "GIT_COMMITTER_EMAIL",
-            ] {
-                cmd.env_remove(name);
-            }
+            // them for MCP. Let both paths use the harness's agent identity,
+            // except for a value the operator set for this agent on purpose.
+            crate::git::apply_git_identity_env(cmd.as_std_mut(), extra_env);
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
