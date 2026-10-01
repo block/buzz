@@ -66,6 +66,10 @@ jobs:
               - 'scripts/normative-corpus.json'
               - 'justfile'
             desktop:
+              - 'scripts/generate-macos-icon.py'
+              - 'scripts/macos-icon.sh'
+              - 'bin/uv'
+              - 'bin/.uv-*.pkg'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
