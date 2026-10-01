@@ -105,6 +105,9 @@ test("communities-stale-more: a late page from an earlier search leaves the curr
       cursors.push(cursor ?? null);
       if (cursor === "a2") return late.promise;
       if (cursor === "b2") return bPage.promise;
+      if (cursor === "b3") {
+        return Promise.resolve({ items: [community(6)], nextCursor: null });
+      }
       return Promise.resolve(
         query === "b"
           ? { items: [community(4)], nextCursor: "b2" }
