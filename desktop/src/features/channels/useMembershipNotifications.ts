@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { refreshChannelsWhenIdle } from "@/features/channels/refreshChannelsWhenIdle";
 import { getChannelIdFromTags } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -9,19 +10,41 @@ import {
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
 } from "@/shared/constants/kinds";
+import {
+  createTrailingDebounce,
+  type TrailingDebounce,
+} from "@/shared/lib/trailingDebounce";
 
 const MEMBERSHIP_NOTIFICATION_RETRY_BASE_MS = 1_000;
 const MEMBERSHIP_NOTIFICATION_RETRY_MAX_MS = 30_000;
+const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
 
 export function useMembershipNotifications(currentPubkey?: string) {
   const queryClient = useQueryClient();
   const normalizedCurrentPubkey = currentPubkey?.trim().toLowerCase() ?? "";
+  const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
+  if (channelsInvalidateRef.current === null) {
+    channelsInvalidateRef.current = createTrailingDebounce(() => {
+      refreshChannelsWhenIdle({
+        // Scope the gate to the list query itself. A prefix match would also
+        // count ["channels", id, "detail"] and ["channels", id, "members"] —
+        // the very fetches this handler kicks off — so the list refresh would
+        // be held closed by its own siblings and re-armed indefinitely.
+        isFetching: () =>
+          queryClient.isFetching({ queryKey: channelsQueryKey, exact: true }),
+        invalidate: () => {
+          void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        },
+        reArm: () => channelsInvalidateRef.current?.trigger(),
+      });
+    }, CHANNELS_INVALIDATE_DEBOUNCE_MS);
+  }
 
   const handleMembershipNotification = React.useEffectEvent(
     (event: RelayEvent) => {
       const channelId = getChannelIdFromTags(event.tags);
 
-      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      channelsInvalidateRef.current?.trigger();
       if (!channelId) {
         return;
       }
@@ -99,6 +122,7 @@ export function useMembershipNotifications(currentPubkey?: string) {
       if (retryTimeout !== undefined) {
         window.clearTimeout(retryTimeout);
       }
+      channelsInvalidateRef.current?.cancel();
       if (dispose) {
         void dispose().catch(() => {});
       }
