@@ -4628,7 +4628,7 @@ mod off_mode_precedence_tests {
             // hitting the absent-verifier 503.  Without this, Case 3 sends
             // `Bearer !!!not-valid-base64!!!` which passes `extract_bearer_token`
             // (scheme/cardinality checks only) and then trips the absent-verifier
-            // check at nip_fi_http.rs:332-335 → 503, not 403.
+            // check in `nip_fi_core::evaluate_attached_assertion` → 503, not 403.
             // [FI-TRACE-DENIAL-ORACLE: verifier required for all crypto cases]
             let state = {
                 use buzz_auth::{

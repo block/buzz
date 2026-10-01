@@ -6,9 +6,9 @@ mod admission;
 mod build_info;
 mod rejection;
 
-/// NIP-FI session admission gate — per-connection effect-permit and quiescence barrier.
 /// Shared NIP-FI assertion evaluation, denial rendering, and key pairing.
 pub(crate) mod nip_fi_core;
+/// NIP-FI session admission gate — per-connection effect-permit and quiescence barrier.
 pub(crate) mod nip_fi_gate;
 pub(crate) mod nip_fi_session;
 /// NIP-FI test hooks — production barriers for deterministic B1/B2 witnesses.
