@@ -203,7 +203,9 @@ test("keeps an open status draft when the saved status expires", async ({
   await seedMockStatus(page, {
     text: "Original draft",
     emoji: "📝",
-    expiresAt: nowSeconds + 5 * 60,
+    // Stay below the 120-second status polling backstop so a refetch cannot
+    // hide the expired status in place of the expiration timer.
+    expiresAt: nowSeconds + 60,
     createdAt: nowSeconds,
   });
   await page.getByTestId("profile-popover-set-status").click();
@@ -221,8 +223,12 @@ test("keeps an open status draft when the saved status expires", async ({
   await expect(dialog.getByRole("alert")).toHaveCount(0);
 
   // Expire the saved status only after the open dialog has a live, dirty
-  // baseline. Run the real expiration timer rather than racing dialog setup.
-  await page.clock.fastForward(301_000);
+  // baseline. Pause one second before the deadline so incidental renders that
+  // also re-check expiry run while the status is still valid, then run only
+  // the final second on a paused clock: the expiration timer must hide it.
+  await page.clock.pauseAt((nowSeconds + 59) * 1_000);
+  await expect(page.getByTestId("sidebar-profile-user-status")).toBeVisible();
+  await page.clock.runFor(1_500);
   await expect(page.getByTestId("sidebar-profile-user-status")).toHaveCount(0, {
     timeout: 5_000,
   });
