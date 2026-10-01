@@ -160,6 +160,10 @@ run_unit_tests() {
   run_test_step "buzz-acp unit tests" \
     cargo test -p buzz-acp --lib -- --nocapture
 
+  # NIP-GS commit/tag signing program using Nostr secp256k1 keys (infra-free).
+  run_test_step "git-sign-nostr unit tests" \
+    cargo test -p git-sign-nostr -- --nocapture
+
   # Mirror the relay filters from `just test-unit`: the three handler modules,
   # storage-snapshot helpers, readiness and router unit suites, and the single
   # scoped admission regression in state::tests, plus the REQ lifecycle tests.
