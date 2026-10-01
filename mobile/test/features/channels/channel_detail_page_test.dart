@@ -1,11 +1,20 @@
 import 'dart:async';
+
+import '../profile/presence_snapshot_test.dart'
+    show PresenceTestRelay, presenceEvent;
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
-    show RenderParagraph, ScrollDirection, SemanticsAction;
+    show
+        RenderParagraph,
+        RenderRepaintBoundary,
+        ScrollDirection,
+        SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -44,6 +53,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
@@ -67,6 +77,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'channel_detail_page_test/presence_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -203,6 +214,7 @@ NostrEvent _edit({
 
 Widget _buildTestable({
   required List<NostrEvent> messages,
+  PresenceCacheNotifier? presenceCache,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
@@ -273,6 +285,8 @@ Widget _buildTestable({
         () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
       ),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      if (presenceCache != null)
+        presenceCacheProvider.overrideWith(() => presenceCache),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
@@ -476,6 +490,7 @@ double? effectiveFontSizeForText(
 
 void main() {
   threadReplyRefreshTests();
+  presenceTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -643,6 +658,101 @@ void main() {
       },
     );
 
+    for (final profile in [false, true]) {
+      testWidgets('presence observation failure is unknown: profile=$profile', (
+        tester,
+      ) async {
+        final relay = PresenceTestRelay();
+        final semantics = tester.ensureSemantics();
+        final dm = Channel(
+          id: _channelId,
+          name: 'DM',
+          channelType: 'dm',
+          visibility: 'private',
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          participants: const ['Self', 'Alice'],
+          participantPubkeys: const ['self', 'alice'],
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: dm,
+            relaySessionNotifier: relay,
+            home: profile ? const UserProfileSheet(pubkey: 'alice') : null,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        void check(String label) {
+          if (profile) {
+            expect(find.text(label), findsOneWidget);
+            expect(find.bySemanticsLabel('Presence: $label'), findsOneWidget);
+            expect(find.bySemanticsLabel(label), findsNothing);
+          } else {
+            expect(
+              tester
+                  .widget<Text>(
+                    find.byKey(const ValueKey('dm-header-presence')),
+                  )
+                  .data,
+              label,
+            );
+            expect(
+              tester
+                  .widget<MaskedAvatarBadge>(
+                    find.byKey(const ValueKey('dm-header-avatar')),
+                  )
+                  .badge,
+              label == 'Unknown' ? isNull : isNotNull,
+            );
+          }
+          if (label != 'Offline') expect(find.text('Offline'), findsNothing);
+        }
+
+        check('Unknown');
+        expect(relay.queries.single.authors, ['alice']);
+        relay.results.removeAt(0).complete([
+          presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+        ]);
+        await tester.pumpAndSettle();
+        check('Online');
+        await tester.pump(const Duration(seconds: 60));
+        final stale = relay.results.removeAt(0);
+        relay.emit(presenceEvent('alice', 'offline', timestamp: 10));
+        await tester.pump();
+        check('Online');
+        stale.complete([]);
+        await tester.pumpAndSettle();
+        check('Online');
+        relay.results.removeAt(0).complete([
+          presenceEvent('relay', 'away', subject: 'alice', timestamp: 20),
+        ]);
+        await tester.pumpAndSettle();
+        check('Away');
+        await tester.pump(const Duration(seconds: 60));
+        relay.results.removeAt(0).completeError(Exception('unavailable'));
+        await tester.pumpAndSettle();
+        check('Unknown');
+        await tester.pump(const Duration(seconds: 60));
+        relay.results.removeAt(0).complete([]);
+        await tester.pumpAndSettle();
+        check('Offline');
+        relay.emit(presenceEvent('alice', 'online', timestamp: 21));
+        await tester.pumpAndSettle();
+        check('Online');
+        relay.emit(presenceEvent('alice', 'offline', timestamp: 22));
+        await tester.pumpAndSettle();
+        check('Offline');
+        semantics.dispose();
+      });
+    }
+
     testWidgets('uses the shared 32px masked presence avatar in DM headers', (
       tester,
     ) async {
@@ -663,6 +773,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
           channel: dmChannel,
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
@@ -802,6 +913,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
           channel: dmChannel,
           loadChannelBotPubkeys: () async => const {'bot'},
         ),
@@ -15123,6 +15235,10 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
         }
       };
     }
+    if (!filter.kinds.contains(39002)) {
+      onStatusChanged(RelaySubscriptionStatus.ready);
+      return () {};
+    }
     _membershipListener = onEvent;
     _membershipStatusListener = onStatusChanged;
     onStatusChanged(RelaySubscriptionStatus.ready);
@@ -15325,8 +15441,9 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
 
 class _FakeProfileNotifier extends ProfileNotifier {
   @override
-  Future<UserProfile?> build() async =>
-      const UserProfile(pubkey: 'self', displayName: 'Self');
+  // Fixed fixture identity must be available before DM presence is tracked.
+  Future<UserProfile?> build() =>
+      SynchronousFuture(const UserProfile(pubkey: 'self', displayName: 'Self'));
 }
 
 class _FakeChannelStarsNotifier extends ChannelStarsNotifier {
