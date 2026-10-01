@@ -571,6 +571,7 @@ class ComposeBar extends HookConsumerWidget {
           context,
           names: [for (final candidate in scan.outside) candidate.label],
           canInvite: scan.canAddMembers,
+          isDm: scan.isDm,
         );
         if (choice == null) return; // Dismissed — keep the draft, send nothing.
         outgoing.resolveOutsideChoice(choice, scan.outside);

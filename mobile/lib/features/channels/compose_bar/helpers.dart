@@ -335,14 +335,20 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
   BuildContext context, {
   required List<String> names,
   required bool canInvite,
+  bool isDm = false,
 }) {
   final verb = names.length == 1 ? 'is' : 'are';
+  final place = isDm ? 'DM' : 'channel';
   return showBuzzDialog<_NonMemberMentionChoice>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Mention people outside this channel?'),
+      title: Text('Mention people outside this $place?'),
       content: Text(
-        canInvite
+        isDm
+            ? '${names.join(', ')} $verb not in this DM. People cannot be '
+                  'added to a DM. You can still send. They will not be '
+                  'notified.'
+            : canInvite
             ? '${names.join(', ')} $verb not in this channel. Invite them to '
                   'the channel, or send without inviting them.'
             : '${names.join(', ')} $verb not in this channel. '
@@ -496,16 +502,20 @@ class _NonMemberMentionScan {
   final List<MentionCandidate> outside;
   final bool canAddMembers;
 
+  /// Whether the destination is a DM, which names its own prompt copy.
+  final bool isDm;
+
   const _NonMemberMentionScan({
     required this.channelId,
     required this.outside,
     required this.canAddMembers,
+    required this.isDm,
   });
 }
 
 /// Resolves which mentioned identities are non-members, and whether this
-/// identity may add them (see [Channel.canAddMembers]). DMs are skipped: their
-/// participant set is fixed at creation.
+/// identity may add them (see [Channel.canAddMembers]). A DM's participant set
+/// is fixed at creation, so nobody outside it can be added.
 Future<_NonMemberMentionScan> _scanNonMemberMentions(
   WidgetRef ref, {
   required String channelId,
@@ -516,17 +526,19 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
     channelId: channelId,
     outside: const [],
     canAddMembers: true,
+    isDm: false,
   );
   if (selectedMentions.isEmpty) return none;
 
   final channel = (await ref.read(
     channelsProvider.future,
   )).firstWhere((candidate) => candidate.id == channelId);
-  if (channel.isDm) return none;
 
   final members = await ref.read(channelMembersProvider(channelId).future);
   final memberPubkeys = {
     for (final member in members) member.pubkey.toLowerCase(),
+    if (channel.isDm)
+      for (final pubkey in channel.participantPubkeys) pubkey.toLowerCase(),
   };
   String? selfRole;
   if (currentPubkey != null) {
@@ -551,6 +563,7 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
     channelId: channelId,
     outside: outside,
     canAddMembers: channel.canAddMembers(selfRole),
+    isDm: channel.isDm,
   );
 }
 

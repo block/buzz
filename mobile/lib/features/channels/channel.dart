@@ -80,6 +80,11 @@ class Channel {
 
   bool get isStream => channelType == 'stream';
   bool get isForum => channelType == 'forum';
+
+  /// Streams, forums and DMs can @mention people outside them. Sending asks
+  /// first; an outside person who is not added becomes a reference, which
+  /// does not notify them. Nobody can be added to a DM.
+  bool get mentionsOutsidePeople => isStream || isForum || isDm;
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
   bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;

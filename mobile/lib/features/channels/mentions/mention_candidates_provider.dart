@@ -131,8 +131,8 @@ final mentionHistoryProvider =
     );
 
 /// Ranked mention candidates for a channel + query, by the portable mention
-/// rules: channel members, the agents offered here, and (in streams and
-/// forums only) people from a community directory search. A multi-word
+/// rules: channel members, the agents offered here, and (in streams, forums
+/// and DMs) people from a community directory search. A multi-word
 /// query that continues no known name, including the names its search
 /// found, is prose: it has no choices.
 final mentionCandidatesProvider = Provider.family
@@ -160,10 +160,9 @@ final mentionCandidatesProvider = Provider.family
       final channel = channels
           .where((candidate) => candidate.id == args.channelId)
           .firstOrNull;
-      // Archived channels take no mentions. DMs never add directory people.
+      // Archived channels take no mentions.
       if (channel?.isArchived == true) return const [];
-      final directory =
-          channel != null && (channel.isStream || channel.isForum);
+      final directory = channel?.mentionsOutsidePeople ?? false;
       final settled = ref.watch(_settledSearchesProvider);
 
       final sharedChannelIds = {
@@ -253,7 +252,7 @@ IdentityNames mentionPickerNames(
 
 /// Whether the directory search for this chooser failed. The chooser keeps
 /// the error and a retry instead of closing (portable mention rules,
-/// section 2). DMs and archived channels never search.
+/// section 2). Archived channels never search.
 final mentionSearchFailedProvider = Provider.family
     .autoDispose<bool, MentionChooserArgs>((ref, args) {
       final channel = (ref.watch(channelsProvider).asData?.value ?? const [])
@@ -261,7 +260,7 @@ final mentionSearchFailedProvider = Provider.family
           .firstOrNull;
       if (channel == null ||
           channel.isArchived ||
-          !(channel.isStream || channel.isForum)) {
+          !channel.mentionsOutsidePeople) {
         return false;
       }
       final search = ref.watch(mentionUserSearchProvider(args.query));
