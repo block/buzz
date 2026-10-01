@@ -62,6 +62,8 @@ import {
   adminReadErrorCode,
   adminRouteUnsupported,
   type AsyncState,
+  formatAbsoluteTimestamp,
+  formatTimestamp,
   preserveRequestIdOnError,
   UNSUPPORTED_BROWSING,
 } from "./AdminConsolePanelHelpers";
@@ -338,7 +340,9 @@ function MemberState({ member }: { member: AdminMemberDetailDto }) {
       ? "Not on the community roster"
       : `Role: ${member.role}`,
     member.banned ? "Currently banned" : null,
-    member.mutedUntil ? `Timed out until ${member.mutedUntil}` : null,
+    member.mutedUntil
+      ? `Timed out until ${formatAbsoluteTimestamp(member.mutedUntil)}`
+      : null,
     member.isStaff ? "Relay staff" : null,
   ].filter(Boolean);
   return (
@@ -361,7 +365,7 @@ function EventPreview({ event }: { event: AdminEventPreviewDto }) {
       <p className="whitespace-pre-wrap break-words">{event.content}</p>
       {event.deletedAt && (
         <p className="text-muted-foreground">
-          Already deleted {event.deletedAt}.
+          Already deleted {formatTimestamp(event.deletedAt)}.
         </p>
       )}
     </div>

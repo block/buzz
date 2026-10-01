@@ -242,17 +242,24 @@ export function ErrorMessage({ message }: { message: string }) {
 
 // ── Timestamp formatter ───────────────────────────────────────────────────
 
-export function formatTimestamp(raw: string | null | undefined): string {
-  if (!raw) return "—";
+/** Absolute local time; use for future instants, where a relative label misleads. */
+export function formatAbsoluteTimestamp(raw: string): string {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return raw;
-  const absolute = date.toLocaleString(undefined, {
+  return date.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+export function formatTimestamp(raw: string | null | undefined): string {
+  if (!raw) return "—";
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  const absolute = formatAbsoluteTimestamp(raw);
   const rel = formatRelativeTime(Math.floor(date.getTime() / 1000));
   // Render relative label with the absolute value inline in parentheses.
   return `${rel} (${absolute})`;
