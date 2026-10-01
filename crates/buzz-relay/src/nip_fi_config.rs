@@ -172,12 +172,12 @@ impl NipFiCommunities {
         let mut by_host = BTreeMap::new();
         for (idx, entry) in entries.into_iter().enumerate() {
             let host = canonical_authority(&entry.canonical_uri)
-                .map(normalize_host)
+                .map(str::to_owned)
                 .ok_or_else(|| {
                     format!(
                         "community at index {idx}: canonical_uri must be \
                      https://<host>[:port] in lowercase, with no path, query, \
-                     fragment, or userinfo"
+                     fragment, userinfo, trailing dot, or default port"
                     )
                 })?;
             if let Some(i) = entry
@@ -223,6 +223,9 @@ impl NipFiCommunities {
 /// byte-for-byte. The round trip rejects anything the parser would repair:
 /// whitespace, control characters, backslashes, uppercase, userinfo, path,
 /// query, fragment, a redundant default `:443`, and non-canonical IPv6.
+/// The authority must also already be Host-normalized, which rejects a
+/// trailing dot and `:80`, so the Host map key is the exact non-empty `aud`
+/// authority and each community has one valid `aud` spelling.
 fn canonical_authority(uri: &str) -> Option<&str> {
     let authority = uri.strip_prefix("https://")?;
     let parsed = url::Url::parse(uri).ok()?;
@@ -231,7 +234,7 @@ fn canonical_authority(uri: &str) -> Option<&str> {
         Some(port) => format!("{host}:{port}"),
         None => host.to_owned(),
     };
-    (reserialized == authority).then_some(authority)
+    (reserialized == authority && normalize_host(authority) == authority).then_some(authority)
 }
 
 // ── Relay-level NIP-FI config ─────────────────────────────────────────────────
@@ -1387,6 +1390,10 @@ mod tests {
             "https://a.relay.test\\path",
             "https://a.relay.test:443",
             "https://[0:0::1]",
+            "https://.",
+            "https://.:80",
+            "https://a.relay.test.",
+            "https://a.relay.test:80",
         ] {
             let err = enforce_with_communities(serde_json::json!([community_entry(
                 uri,
@@ -1501,6 +1508,29 @@ mod tests {
                 &["https://issuer.test", "https://issuer-b.test"]
             )]))
             .expect(uri);
+        }
+    }
+
+    #[test]
+    fn enforce_empty_or_whitespace_host_resolves_to_no_community() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        // `https://.` would normalize to an empty Host key if startup let it
+        // through, so whichever configs boot must never match a blank Host.
+        for uri in ["https://a.relay.test", "https://."] {
+            let Ok(cfg) = enforce_with_communities(serde_json::json!([community_entry(
+                uri,
+                &["https://issuer.test", "https://issuer-b.test"]
+            )])) else {
+                continue;
+            };
+            assert!(cfg.communities.any_host.is_none());
+            for host in ["", " "] {
+                assert!(
+                    cfg.communities.resolve(host).is_none(),
+                    "{uri}: Host {host:?} must resolve to no community"
+                );
+            }
         }
     }
 
