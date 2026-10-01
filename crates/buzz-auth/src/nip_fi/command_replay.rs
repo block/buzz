@@ -6,9 +6,8 @@
 //! cross-pod fence is an atomic set-if-absent in shared state (Redis).
 //!
 //! The claim is taken after the command is fully authenticated (so a forgery
-//! cannot burn a legitimate `jti`) and released if the local deny-entry
-//! insertion then fails for capacity, so a `503 deny set full` leaves the
-//! command retryable.
+//! cannot burn a legitimate `jti`) and after this pod has reserved its local
+//! deny-entry slot (so a `503 deny set full` never consumes the command).
 
 use std::{future::Future, pin::Pin};
 
@@ -36,13 +35,6 @@ pub trait CommandReplayGuard: Send + Sync {
         jti: &'a str,
         ttl_secs: u64,
     ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>>;
-
-    /// Release a claim this caller took whose command then failed locally.
-    fn release<'a>(
-        &'a self,
-        issuer: &'a str,
-        jti: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send + 'a>>;
 }
 
 /// Redis key for a command replay claim:
@@ -79,18 +71,6 @@ impl CommandReplayGuard for InMemoryCommandReplayGuard {
     ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
         let key = command_replay_key(issuer, jti);
         Box::pin(async move { Ok(self.0.lock().expect("replay set").insert(key)) })
-    }
-
-    fn release<'a>(
-        &'a self,
-        issuer: &'a str,
-        jti: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send + 'a>> {
-        let key = command_replay_key(issuer, jti);
-        Box::pin(async move {
-            self.0.lock().expect("replay set").remove(&key);
-            Ok(())
-        })
     }
 }
 

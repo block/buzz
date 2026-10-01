@@ -2766,16 +2766,6 @@ mod route_integration_tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.try_claim(issuer, jti, ttl_secs)
         }
-
-        fn release<'a>(
-            &'a self,
-            issuer: &'a str,
-            jti: &'a str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), buzz_auth::AuthError>> + Send + 'a>,
-        > {
-            self.inner.release(issuer, jti)
-        }
     }
 
     /// A command whose signature does not verify but which carries a real
@@ -2852,16 +2842,6 @@ mod route_integration_tests {
                     "simulated Redis outage".into(),
                 ))
             })
-        }
-
-        fn release<'a>(
-            &'a self,
-            _issuer: &'a str,
-            _jti: &'a str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), buzz_auth::AuthError>> + Send + 'a>,
-        > {
-            Box::pin(async { Ok(()) })
         }
     }
 
