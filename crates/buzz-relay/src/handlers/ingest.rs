@@ -6594,15 +6594,16 @@ mod postgres_tests {
         assert!(!bystander_socket.cancellation_token().is_cancelled());
     }
 
-    /// A ban commits, but the owned-agent lookup fails: `revoke_live_access`
-    /// reports the failure, still closes the owner, and keeps retrying until
-    /// the agent's socket closes once the lookup recovers. An unrelated
-    /// socket stays open.
-    /// Mutation: log and swallow the lookup error (no retry) → the agent's
-    /// socket never closes → RED.
+    /// Revoking an owner closes the sockets of agents admitted under that
+    /// owner even when the owned-agent lookup fails: each socket recorded its
+    /// owner at admission, so the disconnect needs no database read. A
+    /// bystander's socket stays open. This proves the pod-local match; the
+    /// same command reaches other pods over the conn-control channel.
+    /// Mutation: match only the principal in the disconnect → the agent's
+    /// sockets stay open → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn failed_agent_lookup_during_revoke_still_closes_agent() {
+    async fn owner_revoke_closes_recorded_agent_sockets_without_a_lookup() {
         use crate::state::CommunityConnectionControl;
         use sqlx::postgres::PgConnectOptions;
         use tokio_util::sync::CancellationToken;
@@ -6613,7 +6614,7 @@ mod postgres_tests {
         let admin = sqlx::PgPool::connect(&db_url)
             .await
             .expect("connect test Postgres");
-        let schema = format!("revoke_retry_{}", Uuid::new_v4().simple());
+        let schema = format!("revoke_owner_{}", Uuid::new_v4().simple());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL);"
@@ -6630,24 +6631,48 @@ mod postgres_tests {
             .expect("schema pool");
         let state = build_canvas_ingest_state(&db_url, &pool).await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
-        let tenant = TenantContext::resolved(community, "revoke-retry.test".to_string());
+        let tenant = TenantContext::resolved(community, "revoke-owner.test".to_string());
         let (owner, agent, bystander) = (
             nostr::Keys::generate(),
             nostr::Keys::generate(),
             nostr::Keys::generate(),
         );
-        let bound = |keys: &nostr::Keys| {
+        let bound = |keys: &nostr::Keys, owner: Option<&nostr::Keys>| {
             let control = CommunityConnectionControl::new(CancellationToken::new());
             control.bind_pubkey(keys.public_key().to_bytes());
+            if let Some(owner) = owner {
+                control.bind_owner(owner.public_key().to_bytes());
+            }
             let guard =
                 state
                     .community_connections
                     .register(Uuid::new_v4(), community, control.clone());
             (control, guard)
         };
-        let (owner_socket, _g1) = bound(&owner);
-        let (agent_socket, _g2) = bound(&agent);
-        let (bystander_socket, _g3) = bound(&bystander);
+        let (owner_socket, _g1) = bound(&owner, None);
+        let (agent_audio, _g2) = bound(&agent, Some(&owner));
+        let (bystander_socket, _g3) = bound(&bystander, None);
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let (ctrl, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+        let agent_root = CancellationToken::new();
+        let agent_root_id = Uuid::new_v4();
+        state.conn_manager.register(
+            agent_root_id,
+            tx,
+            ctrl,
+            None,
+            agent_root.clone(),
+            community,
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            3,
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(agent_root_id, agent.public_key().to_bytes().to_vec());
+        state
+            .conn_manager
+            .set_admitted_owner(agent_root_id, owner.public_key().to_bytes());
 
         state
             .db
@@ -6668,40 +6693,19 @@ mod postgres_tests {
                 "blocked: you are banned from this community",
             )
             .await;
-        assert!(revoked.is_err(), "the failed agent lookup is reported");
+        assert!(
+            revoked.is_err(),
+            "the failed agent lookup is still reported"
+        );
         assert!(owner_socket.cancellation_token().is_cancelled());
-        assert!(!agent_socket.cancellation_token().is_cancelled());
-
-        // The lookup recovers: the agent's owner link becomes readable.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL);"
-        )))
-        .execute(&admin)
-        .await
-        .expect("restore users table");
-        for keys in [&owner, &agent] {
-            state
-                .db
-                .ensure_user(community, keys.public_key().as_bytes())
-                .await
-                .expect("ensure user");
-        }
-        assert!(state
-            .db
-            .set_agent_owner(
-                community,
-                agent.public_key().as_bytes(),
-                owner.public_key().as_bytes()
-            )
-            .await
-            .expect("link agent"));
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            agent_socket.cancellation_token().cancelled(),
-        )
-        .await
-        .expect("the retry closes the agent's socket");
+        assert!(
+            agent_audio.cancellation_token().is_cancelled(),
+            "the agent's audio socket closes by its recorded owner"
+        );
+        assert!(
+            agent_root.is_cancelled(),
+            "the agent's root socket closes by its recorded owner"
+        );
         assert!(!bystander_socket.cancellation_token().is_cancelled());
         let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(&admin)

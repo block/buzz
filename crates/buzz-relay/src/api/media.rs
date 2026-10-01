@@ -4306,9 +4306,12 @@ mod tests {
 
         /// Upload, GET and HEAD pass proof admission, then only the
         /// restriction lookup fails: each answers 503 (unavailable), not the
-        /// 403 a real ban or non-member gets, in both NIP-FI modes.
-        /// Mutation: map every membership-step refusal to
-        /// `RelayMembershipRequired` → 403 → RED.
+        /// 403 a real ban or non-member gets. Enforce sends the canonical
+        /// NIP-FI `authorization unavailable` bytes; Off keeps the legacy JSON.
+        /// HEAD carries the same status and headers with an empty body.
+        /// Mutations: map every membership-step refusal to
+        /// `RelayMembershipRequired` → 403 → RED; map a failed lookup to
+        /// `ServiceUnavailable` → Enforce gets legacy JSON → RED.
         #[test]
         #[ignore = "requires Postgres"]
         fn failed_restriction_lookup_is_503_not_403() {
@@ -4346,11 +4349,22 @@ mod tests {
                         "HEAD",
                     ),
                 ] {
-                    assert_eq!(
-                        response.0,
+                    let (content_type, body): (&str, &[u8]) = match (assertion_for, context) {
+                        (true, "HEAD") => ("text/plain; charset=utf-8", b""),
+                        (true, _) => ("text/plain; charset=utf-8", b"authorization unavailable\n"),
+                        (false, "HEAD") => ("application/json", b""),
+                        (false, _) => (
+                            "application/json",
+                            br#"{"error":"media service temporarily unavailable"}"#,
+                        ),
+                    };
+                    assert_exact_response(
+                        &response,
                         StatusCode::SERVICE_UNAVAILABLE,
-                        "{context} (NIP-FI {assertion_for}); body {:?}",
-                        response.2
+                        content_type,
+                        None,
+                        body,
+                        &format!("{context} (NIP-FI {assertion_for})"),
                     );
                 }
                 let _ = rt.block_on(
