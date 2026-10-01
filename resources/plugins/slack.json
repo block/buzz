@@ -1,0 +1,13 @@
+{
+  "id": "slack-reader",
+  "name": "Slack Reader",
+  "description": "Index engineering discussions, decision threads, and design rationale from Slack channels.",
+  "version": "1.0.0",
+  "category": "connector",
+  "enabled": false,
+  "icon": "message-square",
+  "settings": {
+    "channels": ["#engineering", "#architecture"]
+  },
+  "source": "builtin"
+}

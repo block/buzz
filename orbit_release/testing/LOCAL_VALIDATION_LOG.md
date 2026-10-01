@@ -169,3 +169,31 @@ Notes:
 Follow-up: Advance to Feature 07 or run `just ci` for full workspace validation.
 ```
 
+```text
+Date: 2026-10-01
+Feature: 07 - MCP Server Tools & Settings Configuration
+Build/commit: local-build-f07
+Automated tests:
+  - buzz-mcp::context_arbiter::tests (2 tests: test_fence_untrusted_context, test_secret_redaction_in_fenced_context) -> PASS
+  - buzz-mcp::tests::mcp_tools_test (3 test cases: TC-F07-001, TC-F07-002, TC-F07-003) -> PASS
+  - desktop::ui::pluginsMcpNav.test.mjs (4 tests: valid section, descriptors, App nav group wiring, follows agents) -> PASS
+  - desktop::ui::settingsNavGroups.test.mjs + settings tests suite (103 unit tests) -> PASS (zero regressions)
+  - desktop cargo check (buzz-desktop Tauri IPC backend: 8 commands compiled with 0 errors) -> PASS
+  - desktop frontend typecheck (npx tsc --noEmit: 0 errors) -> PASS
+Manual tests:
+  - Verified JSON-RPC stdio handshake and tool invocation for all 8 standardized `orbit.*` tools (`orbit.search_context`, `orbit.store_memory`, `orbit.get_project_context`, `orbit.recall_session`, `orbit.get_file_history`, `orbit.mark_decision`, `orbit.get_index_stats`, `orbit.delete_memory`).
+  - Verified Context Arbiter delimiter fencing: retrieved text is securely wrapped in `<orbit_untrusted_context source="...">` tags and untrusted instruction injection is neutralised.
+  - Verified outbound secret redaction: sensitive credentials (`sk-proj-...`) are masked into `[REDACTED:OPENAI_KEY]` before context generation.
+  - Verified per-tool execution policies (`Auto-Approve`, `Confirm-on-Execute`, `Disabled`) persisted to `~/.orbit/mcp_servers.json`.
+  - Verified live connection test in Add Custom MCP Server modal calculates latency and previews discovered tool schema.
+  - Verified plugin marketplace cards with toggle state and bundled default manifests in `resources/plugins/`.
+Environment: Windows 11, Rust 1.88, rmcp 0.1, tauri 2.11, React 19, Tailwind CSS
+Result: PASS
+Notes:
+  - Tier 1 Frontend: `PluginsMcpSettingsPanel.tsx`, `AddCustomMcpServerModal.tsx`, wired into `SettingsPanels.tsx` and `SettingsView.tsx` under `"Plugins & MCP"`.
+  - Tier 2 Desktop Backend: `desktop/src-tauri/src/commands/mcp_config.rs` with 8 IPC commands (`list_mcp_servers`, `save_mcp_server`, `delete_mcp_server`, `test_mcp_connection`, `list_plugins`, `toggle_plugin`, `get_tool_policies`, `set_tool_policy`), subprocess supervisor with timeouts, and buffer caps.
+  - Tier 3 Core Crates: `buzz-mcp` exposing standardized `orbit.*` tools via `rmcp`, `buzz-dev-mcp` with developer tools (`shell`, `read_file`, `edit_file`), Context Arbiter, and JSONL audit logging (`~/.orbit/audit.log`).
+  - Tier 4 Packaging: `desktop/src-tauri/tauri.conf.json` external binaries configured, bundled plugin manifests in `resources/plugins/` (`github.json`, `slack.json`, `postgres.json`, `jira.json`, `web_search.json`).
+Follow-up: Feature 07 complete. Ready for Feature 08 or end-to-end integration.
+```
+

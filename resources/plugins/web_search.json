@@ -1,0 +1,13 @@
+{
+  "id": "web-search-scraper",
+  "name": "Web Search & Scraper",
+  "description": "Live documentation search and real-time package API reference lookup for agents.",
+  "version": "1.0.0",
+  "category": "search",
+  "enabled": true,
+  "icon": "globe",
+  "settings": {
+    "max_search_results": 5
+  },
+  "source": "builtin"
+}

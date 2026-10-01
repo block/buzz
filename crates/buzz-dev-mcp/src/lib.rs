@@ -83,6 +83,17 @@ impl DevMcp {
     }
 
     #[tool(
+        name = "edit_file",
+        description = "Atomic find-and-replace edit in a file (alias for str_replace). old_str must occur exactly once unless replace_all is true, in which case all occurrences are replaced. Returns a unified diff. Path resolved relative to workdir (defaults to server cwd)."
+    )]
+    async fn edit_file(
+        &self,
+        Parameters(p): Parameters<str_replace::StrReplaceParams>,
+    ) -> Result<String, ErrorData> {
+        str_replace::run(&self.state, p)
+    }
+
+    #[tool(
         name = "todo",
         description = "Session checklist only for work that must continue across turns or survive context compaction. Do not use for work you can finish in the current turn. Omit `todos` to read; provide the full {text, done} list to replace it. Open items let the _Stop hook advise against ending."
     )]

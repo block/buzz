@@ -71,7 +71,14 @@ export const settingsNavGroups: Array<{
   },
   {
     label: "App",
-    sections: ["agents", "compute", "experimental", "mobile", "updates"],
+    sections: [
+      "agents",
+      "plugins-mcp",
+      "compute",
+      "experimental",
+      "mobile",
+      "updates",
+    ],
   },
 ];
 

@@ -9,6 +9,6 @@
 | TC-F07-003 | Delete memory | Invoke delete tool on a fixture memory. | Delete propagates through the memory/storage policy. |
 
 ## Status
-- [ ] Automated coverage implemented where appropriate
-- [ ] Manual local validation completed
-- [ ] Evidence recorded
+- [x] Automated coverage implemented where appropriate
+- [x] Manual local validation completed
+- [x] Evidence recorded

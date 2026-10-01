@@ -1302,6 +1302,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "buzz-ai",
+ "buzz-audit",
+ "buzz-core",
+ "buzz-db",
+ "buzz-plugins",
+ "buzz-recall",
+ "buzz-search",
+ "chrono",
+ "clap",
+ "futures-util",
+ "rmcp 1.8.0",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [

@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
   BellRing,
+  Blocks,
   Bot,
   ChevronDown,
   Cpu,
@@ -68,6 +69,7 @@ import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeS
 import { MobilePairingCard } from "./MobilePairingCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { AgentsSettingsPanel } from "./AgentsSettingsPanel";
+import { PluginsMcpSettingsPanel } from "./PluginsMcpSettingsPanel";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { AdminConsoleSettingsCard } from "@/features/admin-console/AdminConsoleSettingsCard";
 import {
@@ -87,6 +89,7 @@ export type SettingsSection =
   | "voice"
   | "experimental"
   | "agents"
+  | "plugins-mcp"
   | "channel-templates"
   | "compute"
   | "appearance"
@@ -107,6 +110,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "voice",
   "experimental",
   "agents",
+  "plugins-mcp",
   "channel-templates",
   "compute",
   "appearance",
@@ -181,6 +185,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Agents",
     icon: Bot,
     featureGate: "managed-agents",
+  },
+  {
+    value: "plugins-mcp",
+    label: "Plugins & MCP",
+    icon: Blocks,
   },
   {
     value: "channel-templates",
@@ -834,6 +843,8 @@ export function renderSettingsSection(
       return <ExperimentalFeaturesCard />;
     case "agents":
       return <AgentsSettingsPanel />;
+    case "plugins-mcp":
+      return <PluginsMcpSettingsPanel />;
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":

@@ -1,0 +1,14 @@
+{
+  "id": "github-connector",
+  "name": "GitHub Connector",
+  "description": "Sync repositories, pull requests, issues, and commit history into Orbit memory graph.",
+  "version": "1.0.0",
+  "category": "connector",
+  "enabled": true,
+  "icon": "github",
+  "settings": {
+    "auto_sync": true,
+    "sync_interval_mins": 30
+  },
+  "source": "builtin"
+}

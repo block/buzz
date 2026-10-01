@@ -1,0 +1,13 @@
+{
+  "id": "postgres-schema-explorer",
+  "name": "PostgreSQL Schema Explorer",
+  "description": "Map database tables, column constraints, and foreign key relations into the knowledge graph.",
+  "version": "1.0.0",
+  "category": "database",
+  "enabled": false,
+  "icon": "database",
+  "settings": {
+    "ssl_mode": "prefer"
+  },
+  "source": "builtin"
+}

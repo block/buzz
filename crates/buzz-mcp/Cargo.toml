@@ -1,0 +1,43 @@
+[package]
+name = "buzz-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "buzz_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-mcp"
+path = "src/main.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-db = { workspace = true }
+buzz-search = { workspace = true }
+buzz-ai = { workspace = true }
+buzz-recall = { workspace = true }
+buzz-plugins = { workspace = true }
+buzz-audit = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+rmcp = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+axum = { workspace = true }
+tower-http = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

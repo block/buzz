@@ -1,0 +1,13 @@
+{
+  "id": "jira-issue-tracker",
+  "name": "Jira Issue Tracker",
+  "description": "Link user stories, tickets, and acceptance criteria to code modifications and decisions.",
+  "version": "1.0.0",
+  "category": "issue-tracker",
+  "enabled": false,
+  "icon": "ticket",
+  "settings": {
+    "project_keys": ["ORBIT", "ENG"]
+  },
+  "source": "builtin"
+}
