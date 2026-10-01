@@ -754,6 +754,55 @@ export function useMediaUpload({
     [queueFiles, shouldQueueFile, uploadFiles],
   );
 
+  /**
+   * Upload a File that only exists after an async read (native clipboard
+   * paste). The slot and the epoch are claimed synchronously so the send gate
+   * closes and the draft is pinned at paste time; otherwise a paste followed
+   * immediately by Enter sends with no attachment and the image lands on the
+   * next draft.
+   */
+  const uploadDeferredFile = React.useCallback(
+    async (readFile: () => Promise<File | null>) => {
+      setUploadingCount((c) => c + 1);
+      const epoch = uploadEpochRef.current;
+      const previewId = reserveUploadingPreview();
+      let file: File | null = null;
+      try {
+        file = await readFile();
+      } catch (err) {
+        onUploadError(err, previewId);
+        return;
+      }
+      if (!file || isUploadStale(epoch)) {
+        finishUpload(previewId);
+        return;
+      }
+      if (shouldQueueFile(file)) {
+        finishUpload(previewId);
+        queueFiles([file]);
+        return;
+      }
+      try {
+        const descriptor = await uploadMediaFile(
+          file,
+          uploadProgressId(previewId),
+        );
+        onUploaded(descriptor, previewId, epoch);
+      } catch (err) {
+        onUploadError(err, previewId);
+      }
+    },
+    [
+      finishUpload,
+      isUploadStale,
+      onUploaded,
+      onUploadError,
+      queueFiles,
+      reserveUploadingPreview,
+      shouldQueueFile,
+    ],
+  );
+
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
     async (file: File) => {
@@ -934,6 +983,7 @@ export function useMediaUpload({
       setPendingImeta,
       setUploadState,
       toggleQueuedAttachmentSpoiler,
+      uploadDeferredFile,
       uploadEditedAttachment,
       uploadFile,
       uploadingCount,
@@ -961,6 +1011,7 @@ export function useMediaUpload({
       revertAttachment,
       setPendingImeta,
       toggleQueuedAttachmentSpoiler,
+      uploadDeferredFile,
       uploadEditedAttachment,
       uploadFile,
       uploadingCount,

@@ -6,6 +6,20 @@ import { hasMentionClipboardHtml } from "@/features/messages/lib/normalizeMentio
 import { handleMentionClipboardPaste } from "@/features/messages/lib/mentionClipboardPaste";
 import type { BindPastedMentionIdentities } from "@/features/messages/lib/mentionPasteBinding";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
+import {
+  clipboardImageFile,
+  isPasteShortcut,
+  shouldReadNativeClipboardImage,
+} from "@/features/messages/lib/nativeClipboardImage";
+import { readImageFromSystemClipboard } from "@/shared/api/tauriMedia";
+
+/** How long after Ctrl/Cmd+V a paste event still counts as keyboard-initiated. */
+const PASTE_SHORTCUT_WINDOW_MS = 1000;
+
+async function readClipboardImageFile(): Promise<File | null> {
+  const png = await readImageFromSystemClipboard();
+  return png ? clipboardImageFile(png) : null;
+}
 
 export function useComposerPasteHandler(options: {
   editor: Editor | null;
@@ -18,15 +32,26 @@ export function useComposerPasteHandler(options: {
   setPendingImeta: (
     update: (current: BlobDescriptor[]) => BlobDescriptor[],
   ) => void;
+  uploadDeferredFile: (
+    readFile: () => Promise<File | null>,
+  ) => Promise<unknown>;
   uploadFile: (file: File) => Promise<unknown>;
 }) {
   const uploadFileRef = React.useRef(options.uploadFile);
   uploadFileRef.current = options.uploadFile;
+  const uploadDeferredFileRef = React.useRef(options.uploadDeferredFile);
+  uploadDeferredFileRef.current = options.uploadDeferredFile;
+  const pasteShortcutAtRef = React.useRef(0);
   const bindMentionIdentitiesRef = React.useRef(options.bindMentionIdentities);
   bindMentionIdentitiesRef.current = options.bindMentionIdentities;
   React.useEffect(() => {
     const editor = options.editor;
     if (!editor) return;
+    const dom = editor.view.dom;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isPasteShortcut(event)) pasteShortcutAtRef.current = Date.now();
+    };
+    dom.addEventListener("keydown", onKeyDown, true);
     editor.setOptions({
       editorProps: {
         ...editor.options.editorProps,
@@ -76,11 +101,21 @@ export function useComposerPasteHandler(options: {
               view,
             });
           }
+          const keyboardInitiated =
+            Date.now() - pasteShortcutAtRef.current < PASTE_SHORTCUT_WINDOW_MS;
+          if (
+            shouldReadNativeClipboardImage(clipboardData, keyboardInitiated)
+          ) {
+            event.preventDefault();
+            void uploadDeferredFileRef.current(readClipboardImageFile);
+            return true;
+          }
           if ((clipboardData?.getData("text/plain") ?? "").includes("\n"))
             options.scrollToBottom();
           return false;
         },
       },
     });
+    return () => dom.removeEventListener("keydown", onKeyDown, true);
   }, [options.editor, options.scrollToBottom, options.setPendingImeta]);
 }

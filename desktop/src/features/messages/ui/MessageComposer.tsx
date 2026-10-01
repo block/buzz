@@ -803,6 +803,7 @@ function MessageComposerImpl({
     bindMentionIdentities: mentions.bindPastedMentionIdentities,
     scrollToBottom: scrollComposerToBottom,
     setPendingImeta: voiceNote.setPendingImetaWhenIdle,
+    uploadDeferredFile: voiceNote.uploadDeferredFileWhenIdle,
     uploadFile: voiceNote.uploadFileWhenIdle,
   });
   const sendDisabled =

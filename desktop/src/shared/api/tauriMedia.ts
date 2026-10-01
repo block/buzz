@@ -142,6 +142,16 @@ export async function readTextFromSystemClipboard(): Promise<string> {
   return clipboard.readText();
 }
 
+/** Read a clipboard image as PNG bytes, or `null` when the clipboard has none. */
+export async function readImageFromSystemClipboard(): Promise<ArrayBuffer | null> {
+  // Mirrors readTextFromSystemClipboard: E2E installs Tauri's mocked IPC in a
+  // browser page where isTauri() stays false, so the packaged-app path must be
+  // exercised there too or this fallback is untestable.
+  if (!isTauri() && import.meta.env.MODE !== "e2e") return null;
+  const bytes = await invokeTauri<ArrayBuffer>("read_clipboard_image");
+  return bytes.byteLength > 0 ? bytes : null;
+}
+
 /** Write text through the native clipboard after an asynchronous workflow. */
 export async function copyTextToSystemClipboard(
   text: string,
