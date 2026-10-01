@@ -65,9 +65,9 @@ final class NotificationService: UNNotificationServiceExtension {
       finish(request.content)
       return
     }
-    // The gateway payload is a fixed constant without `sound`; a NIP-PL
-    // `default` class notification is a standard alert, so it plays the
-    // default sound (still subject to the user's ringer and app settings).
+    // The public APNs profile carries no class or sound (NIP-PL), and mobile
+    // leases are all `default`, so every wake is presented as a standard
+    // alert with the default sound (still subject to ringer and app settings).
     content.sound = .default
     bestAttemptContent = content
     var cleanUserInfo = content.userInfo
