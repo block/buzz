@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HttpClient;
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -44,6 +45,7 @@ class RelaySocket {
   final void Function(Object? error) _onDisconnected;
 
   WebSocketChannel? _channel;
+  HttpClient? _connectingClient;
   StreamSubscription<dynamic>? _subscription;
   SocketState _state = SocketState.disconnected;
   Completer<void>? _authCompleter;
@@ -69,22 +71,37 @@ class RelaySocket {
     if (_state != SocketState.disconnected) return;
     _state = SocketState.connecting;
 
+    final client = HttpClient();
+    _connectingClient = client;
+    final WebSocketChannel channel;
     try {
-      _channel = IOWebSocketChannel.connect(
+      channel = IOWebSocketChannel.connect(
         Uri.parse(_wsUrl),
         pingInterval: debugPingInterval,
+        customClient: client,
       );
-      await _channel!.ready;
+      _channel = channel;
+      await channel.ready;
     } catch (e) {
-      _state = SocketState.disconnected;
-      _onDisconnected(e);
+      // Explicit disconnect/dispose already retired this attempt. It must not
+      // notify the session or overwrite a newer connection's state.
+      if (identical(_connectingClient, client)) {
+        _channel = null;
+        _state = SocketState.disconnected;
+        _onDisconnected(e);
+      }
       return;
+    } finally {
+      // Retire this attempt's HTTP transport. A successful upgrade has already
+      // detached its socket, so it remains open for authentication.
+      client.close(force: true);
+      if (identical(_connectingClient, client)) _connectingClient = null;
     }
 
-    // The channel may have been disposed while we were awaiting ready
-    // (e.g. provider rebuild triggered dispose() concurrently).
-    if (_channel == null) {
-      _state = SocketState.disconnected;
+    if (!identical(_channel, channel)) {
+      // Cancellation can race with a completed upgrade. That socket is no
+      // longer owned by the HTTP client, so close the retired channel too.
+      unawaited(channel.sink.close());
       return;
     }
 
@@ -133,21 +150,28 @@ class RelaySocket {
 
   /// Gracefully close the connection.
   Future<void> disconnect() async {
+    final wasConnecting = _state == SocketState.connecting;
     _resetConnection();
     final channel = _channel;
     _channel = null;
-    if (channel != null) {
+    // Before ready, the channel has no WebSocket to close. Its sink's close
+    // future may never settle; _resetConnection has closed the HTTP client.
+    if (channel != null && !wasConnecting) {
       await channel.sink.close();
     }
   }
 
   void dispose() {
+    final wasConnecting = _state == SocketState.connecting;
     _resetConnection();
-    _channel?.sink.close();
+    if (!wasConnecting) _channel?.sink.close();
     _channel = null;
   }
 
   void _resetConnection() {
+    final client = _connectingClient;
+    _connectingClient = null;
+    client?.close(force: true);
     _state = SocketState.disconnected;
     _subscription?.cancel();
     _subscription = null;
