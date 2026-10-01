@@ -6,10 +6,15 @@
 //! must agree on: extracting the `Nostr-Federated-Identity` bearer, verifying
 //! it, mapping failures to a [`DenialClass`], rendering the exact HTTP denial,
 //! and the key-pairing predicate. [FI-TRACE-AUTHORITY-UNIFORM]
+//!
+//! The admin disconnect route also uses [`extract_bearer_token`] and
+//! [`http_denial`] for its command JWT, so its transport failures render
+//! exactly like an assertion's.
 
 use axum::{
     body::Body,
     http::{HeaderMap, Response, StatusCode},
+    response::IntoResponse,
 };
 use buzz_auth::{
     DenialClass, VerifiedAssertion, VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER,
@@ -115,15 +120,19 @@ fn ascii_whitespace(c: char) -> bool {
 ///   closed contract.  No other fields are added that depend on the private
 ///   condition. [FI-TRACE-DENIAL-ORACLE]
 pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
+    // Every status and header value is a fixed constant, so the fallbacks are
+    // unreachable; they keep the response a denial rather than panicking.
+    let status =
+        StatusCode::from_u16(class.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder()
-        .status(StatusCode::from_u16(class.http_status()).expect("valid status"))
+        .status(status)
         .header("Content-Type", class.content_type());
     if let Some(challenge) = class.www_authenticate() {
         builder = builder.header("WWW-Authenticate", challenge);
     }
     builder
         .body(Body::from(class.http_body()))
-        .expect("valid denial response")
+        .unwrap_or_else(|_| status.into_response())
 }
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{HeaderMap, Response, StatusCode},
+    response::IntoResponse,
 };
 use serde::Deserialize;
 use tracing::{debug, warn};
@@ -542,7 +543,7 @@ fn plain_response(status: StatusCode, body: &'static str) -> Response<Body> {
         .status(status)
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(Body::from(body))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+        .unwrap_or_else(|_| status.into_response())
 }
 
 /// Render a command rejection with its spec-exact status and body.
