@@ -9678,6 +9678,40 @@ mod build_mcp_servers_tests {
             entries.iter().any(|(key, _)| key == "nostr.keyfile"),
             "{entries:?}"
         );
+        assert_eq!(value_of("BUZZ_GIT_IDENTITY").as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn for_config_replaces_persona_git_identity_with_resolved_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = test_config();
+        config
+            .persona_env_vars
+            .push(("BUZZ_GIT_IDENTITY".into(), "stale".into()));
+        let restore = EnvRestore {
+            saved: std::env::vars_os()
+                .filter(|(name, _)| name == "BUZZ_GIT_IDENTITY")
+                .collect(),
+            fixture: vec!["BUZZ_GIT_IDENTITY".into()],
+        };
+        std::env::set_var("BUZZ_GIT_IDENTITY", "user");
+        let _git = git::GitEnvironment::for_config(&mut config).unwrap();
+        drop(restore);
+        let modes: Vec<_> = config
+            .persona_env_vars
+            .iter()
+            .filter(|(name, _)| name == "BUZZ_GIT_IDENTITY")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(modes, ["user"]);
+        let servers = build_mcp_servers(&config);
+        let forwarded: Vec<_> = servers[0]
+            .env
+            .iter()
+            .filter(|entry| entry.name == "BUZZ_GIT_IDENTITY")
+            .map(|entry| entry.value.as_str())
+            .collect();
+        assert_eq!(forwarded, ["user"]);
     }
 
     #[test]

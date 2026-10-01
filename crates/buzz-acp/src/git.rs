@@ -98,6 +98,12 @@ impl GitEnvironment {
         // CLI flags must work even when the caller did not export these variables.
         env.push(("BUZZ_PRIVATE_KEY".into(), secret.to_string()));
         env.push(("BUZZ_RELAY_URL".into(), relay_url.to_owned()));
+        // MCP children start from a cleared env; forward the resolved mode so a
+        // nested harness keeps it instead of defaulting to `agent`.
+        env.push((
+            GIT_IDENTITY_ENV.into(),
+            if agent { "agent" } else { "user" }.into(),
+        ));
         Ok(Self { _dir: dir, env })
     }
 }
@@ -378,7 +384,11 @@ pub(crate) fn is_managed_env(name: &str) -> bool {
     name.starts_with("GIT_CONFIG_")
         || matches!(
             name,
-            "PATH" | "GIT_TERMINAL_PROMPT" | "BUZZ_PRIVATE_KEY" | "BUZZ_RELAY_URL"
+            "PATH"
+                | "GIT_TERMINAL_PROMPT"
+                | "BUZZ_PRIVATE_KEY"
+                | "BUZZ_RELAY_URL"
+                | GIT_IDENTITY_ENV
         )
 }
 
