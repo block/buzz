@@ -1,5 +1,6 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import { getStorageItem } from "@/shared/lib/safeStorage";
+import { readmitRelay } from "@/features/agents/managedAgentRelayCleanup";
 import { migrateLegacyCommunityStorage } from "./communityStorage";
 
 const BUZZ_COMMUNITIES_KEY = "buzz-communities";
@@ -77,15 +78,25 @@ function shouldWriteLegacyCommunities({
 export function applyLegacyCommunityStorage(
   legacyStorage: LegacyCommunityStorageSnapshot,
   storage: Storage = window.localStorage,
-): void {
+): string[] {
   const currentCommunitiesRaw = storage.getItem(BUZZ_COMMUNITIES_KEY);
   const shouldWriteCommunities = shouldWriteLegacyCommunities({
     currentCommunitiesRaw,
     legacyCommunitiesRaw: legacyStorage.workspaces,
   });
 
+  let introducedRelayUrls: string[] = [];
   if (shouldWriteCommunities && legacyStorage.workspaces) {
     storage.setItem(BUZZ_COMMUNITIES_KEY, legacyStorage.workspaces);
+    const currentRelayUrls = new Set(
+      (parseCommunityList(currentCommunitiesRaw) ?? []).map((c) => c.relayUrl),
+    );
+    introducedRelayUrls = (parseCommunityList(legacyStorage.workspaces) ?? [])
+      .map((c) => c.relayUrl)
+      .filter(
+        (url): url is string =>
+          typeof url === "string" && !currentRelayUrls.has(url),
+      );
   }
 
   const currentActiveCommunityId = storage.getItem(BUZZ_ACTIVE_COMMUNITY_KEY);
@@ -102,6 +113,8 @@ export function applyLegacyCommunityStorage(
       storage.setItem(key, completion.value);
     }
   }
+
+  return introducedRelayUrls;
 }
 
 /**
@@ -129,13 +142,27 @@ export async function migrateLegacyCommunityStorageBeforeRender(): Promise<void>
     return;
   }
 
+  let introducedRelayUrls: string[];
   try {
-    applyLegacyCommunityStorage(
+    introducedRelayUrls = applyLegacyCommunityStorage(
       await invokeTauri<LegacyCommunityStorageSnapshot>(
         "get_legacy_workspace_storage",
       ),
     );
   } catch (error) {
     console.warn("Failed to read legacy Sprout community storage.", error);
+    return;
   }
+  // A webview reload keeps the native process, so a relay removed earlier in
+  // this session stays refused unless the migration re-admits it here.
+  await Promise.all(
+    introducedRelayUrls.map((relayUrl) =>
+      readmitRelay(relayUrl).catch((error) => {
+        console.error(
+          "[communities] re-admitting local agents on a migrated relay failed:",
+          error,
+        );
+      }),
+    ),
+  );
 }
