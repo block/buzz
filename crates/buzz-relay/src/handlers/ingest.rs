@@ -843,13 +843,9 @@ pub(crate) async fn check_channel_write(
     state: &AppState,
     auth: &IngestAuth,
     ch_id: Uuid,
-) -> Result<(), String> {
-    check_token_channel_access(auth, ch_id)?;
-    let channel = state
-        .db
-        .get_channel_for_event_write(tenant.community(), ch_id)
-        .await
-        .ok();
+) -> Result<(), IngestError> {
+    check_token_channel_access(auth, ch_id).map_err(IngestError::Rejected)?;
+    let channel = load_channel_for_write(tenant, state, ch_id).await?;
     check_channel_membership(
         tenant,
         state,
@@ -857,11 +853,32 @@ pub(crate) async fn check_channel_write(
         &auth.pubkey().to_bytes(),
         channel.as_ref(),
     )
-    .await?;
+    .await
+    .map_err(IngestError::Rejected)?;
     if channel.is_some_and(|ch| ch.archived_at.is_some()) {
-        return Err("invalid: channel is archived".into());
+        return Err(IngestError::Rejected("invalid: channel is archived".into()));
     }
     Ok(())
+}
+
+/// Load the channel row for the write gates. A missing row is `Ok(None)`, and
+/// callers keep their missing-row behavior. Any other lookup error is returned
+/// as an internal error, so the write is denied instead of silently skipping
+/// the archive check.
+async fn load_channel_for_write(
+    tenant: &TenantContext,
+    state: &AppState,
+    ch_id: Uuid,
+) -> Result<Option<buzz_db::channel::ChannelRecord>, IngestError> {
+    match state
+        .db
+        .get_channel_for_event_write(tenant.community(), ch_id)
+        .await
+    {
+        Ok(channel) => Ok(Some(channel)),
+        Err(buzz_db::DbError::ChannelNotFound(_)) => Ok(None),
+        Err(e) => Err(IngestError::Internal(format!("error: database error: {e}"))),
+    }
 }
 
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
@@ -2638,11 +2655,7 @@ async fn ingest_event_inner(
     // it later in this request); each gate keeps its existing missing-row
     // behavior.
     let channel_row = match channel_id {
-        Some(ch_id) => state
-            .db
-            .get_channel_for_event_write(tenant.community(), ch_id)
-            .await
-            .ok(),
+        Some(ch_id) => load_channel_for_write(tenant, state, ch_id).await?,
         None => None,
     };
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
@@ -3516,6 +3529,41 @@ mod postgres_tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// A channel lookup failure must deny the write. Before, the error became
+    /// "no row", which skipped the archive check while a cached membership
+    /// still authorized the write.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn check_channel_write_denies_when_channel_lookup_fails() {
+        let state = crate::state::tests::test_state_with_database_url(
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+        let tenant = TenantContext::resolved(community, "archive.test");
+        let keys = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        state.membership_cache.insert(
+            (community, channel_id, keys.public_key().to_bytes().to_vec()),
+            true,
+        );
+        let auth = IngestAuth::Nip42 {
+            pubkey: keys.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+
+        let result = check_channel_write(&tenant, &state, &auth, channel_id).await;
+
+        match result {
+            Err(IngestError::Internal(err)) => {
+                assert!(err.starts_with("error: database error"), "{err}")
+            }
+            other => panic!("a failed channel lookup must deny as internal, got {other:?}"),
+        }
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
@@ -6217,6 +6265,281 @@ mod postgres_tests {
         }
         state.nip98_replay = Arc::new(AlwaysFresh);
         Arc::new(state)
+    }
+
+    async fn role_sql(admin: &sqlx::PgPool, q: String) -> Result<(), sqlx::Error> {
+        sqlx::query(sqlx::AssertSqlSafe(q))
+            .execute(admin)
+            .await
+            .map(|_| ())
+    }
+
+    async fn create_role(admin: &sqlx::PgPool, role: &str) -> Result<(), sqlx::Error> {
+        role_sql(admin, format!("CREATE ROLE {role} NOLOGIN")).await
+    }
+
+    async fn drop_role(admin: &sqlx::PgPool, role: &str) -> Result<(), sqlx::Error> {
+        role_sql(admin, format!("DROP OWNED BY {role}")).await?;
+        role_sql(admin, format!("DROP ROLE {role}")).await
+    }
+
+    /// A pool whose connections run as `role`, which can do everything ingest
+    /// needs except `SELECT` on `channels`.
+    async fn channel_blind_pool(
+        admin: &sqlx::PgPool,
+        db_url: &str,
+        role: &str,
+    ) -> Result<sqlx::PgPool, sqlx::Error> {
+        for q in [
+            format!("GRANT USAGE ON SCHEMA public TO {role}"),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
+            ),
+            format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
+            format!("REVOKE SELECT ON channels FROM {role}"),
+            format!("GRANT {role} TO CURRENT_USER"),
+        ] {
+            role_sql(admin, q).await?;
+        }
+        let set_role = format!("SET ROLE {role}");
+        sqlx::postgres::PgPoolOptions::new()
+            .after_connect(move |conn, _| {
+                let set_role = set_role.clone();
+                Box::pin(async move {
+                    sqlx::query(sqlx::AssertSqlSafe(set_role))
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .connect(db_url)
+            .await
+    }
+
+    /// Main ingest wiring for the archive gate: when only the channel lookup
+    /// fails, a kind-9 post by a (cached) member of an archived channel is
+    /// denied and not stored. The control run, with a working lookup, is denied
+    /// for the archive reason, proving the post reaches that gate.
+    ///
+    /// The lookup failure comes from a least-privilege role that can do
+    /// everything ingest needs except `SELECT` on `channels`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_global_ingest_denies_post_when_channel_lookup_fails() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Tag};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let admin = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+
+        let role = format!("archive_probe_{}", Uuid::new_v4().simple());
+        create_role(&admin, &role)
+            .await
+            .expect("create restricted role");
+
+        // Everything between creating and dropping the server-wide role is
+        // fallible, so a setup failure still reaches the cleanup below.
+        let outcome = async {
+            let restricted = channel_blind_pool(&admin, &db_url, &role).await?;
+            let healthy = build_canvas_ingest_state(&db_url, &admin).await;
+            let failing = build_canvas_ingest_state(&db_url, &restricted).await;
+
+            let host = format!("archive-lookup-{}.test", Uuid::new_v4().simple());
+            let community = healthy
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?
+                .id;
+            let tenant = TenantContext::resolved(community, &host);
+            let author = Keys::generate();
+            let channel_id = Uuid::new_v4();
+            healthy
+                .db
+                .create_channel_with_id(
+                    community,
+                    channel_id,
+                    &format!("archive-lookup-{}", channel_id.simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    author.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            healthy
+                .db
+                .archive_channel(community, channel_id)
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            let post = |content: &str| {
+                EventBuilder::new(Kind::Custom(9), content)
+                    .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+                    .sign_with_keys(&author)
+                    .expect("sign post")
+            };
+            let auth = || IngestAuth::Http {
+                pubkey: author.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            let member_key = (
+                community,
+                channel_id,
+                author.public_key().to_bytes().to_vec(),
+            );
+
+            // Control: a working lookup reaches the archive gate.
+            healthy.membership_cache.insert(member_key.clone(), true);
+            let control =
+                ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
+
+            // Only the channel lookup fails: the post must be denied and not stored.
+            failing.membership_cache.insert(member_key, true);
+            let event = post("lookup fails");
+            let event_id = event.id.to_bytes().to_vec();
+            let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
+            let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE id = $1")
+                .bind(&event_id)
+                .fetch_one(&admin)
+                .await?;
+            restricted.close().await;
+            Ok::<_, sqlx::Error>((control, denied, stored))
+        }
+        .await;
+
+        drop_role(&admin, &role)
+            .await
+            .expect("drop restricted role");
+
+        let (control, denied, stored) = outcome.expect("test setup");
+        match control {
+            Err(IngestError::Rejected(reason)) => {
+                assert_eq!(reason, "invalid: channel is archived")
+            }
+            Err(other) => panic!("control must be denied as archived, got {other:?}"),
+            Ok(_) => panic!("control must be denied as archived, got accepted"),
+        }
+        match denied {
+            Err(IngestError::Internal(reason)) => assert!(
+                reason.starts_with("error: database error") && reason.contains("channels"),
+                "{reason}"
+            ),
+            Err(other) => panic!("a failed channel lookup must deny the post, got {other:?}"),
+            Ok(_) => panic!("a failed channel lookup must deny the post, got accepted"),
+        }
+        assert_eq!(stored, 0, "denied post must not be stored");
+    }
+
+    /// An artifact move whose source-channel lookup fails is an internal
+    /// error, not a client rejection carrying the database error text.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_global_artifact_move_source_lookup_failure_is_internal() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Tag};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let admin = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let role = format!("archive_probe_{}", Uuid::new_v4().simple());
+        create_role(&admin, &role)
+            .await
+            .expect("create restricted role");
+
+        let outcome = async {
+            let restricted = channel_blind_pool(&admin, &db_url, &role).await?;
+            let healthy = build_canvas_ingest_state(&db_url, &admin).await;
+            let failing = build_canvas_ingest_state(&db_url, &restricted).await;
+            let db_err = |e: buzz_db::DbError| sqlx::Error::Protocol(e.to_string());
+
+            let host = format!("artifact-move-{}.test", Uuid::new_v4().simple());
+            let community = healthy
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .map_err(db_err)?
+                .id;
+            let tenant = TenantContext::resolved(community, &host);
+            let author = Keys::generate();
+            let [source, target] = [Uuid::new_v4(), Uuid::new_v4()];
+            for channel in [source, target] {
+                healthy
+                    .db
+                    .create_channel_with_id(
+                        community,
+                        channel,
+                        &format!("artifact-move-{}", channel.simple()),
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        author.public_key().to_bytes().as_slice(),
+                        None,
+                    )
+                    .await
+                    .map_err(db_err)?;
+            }
+
+            let artifact = Uuid::new_v4().to_string();
+            let revision = |home: Uuid, op: &str, prev: Option<String>| {
+                let mut tags = vec![
+                    vec!["ar".to_string(), "1".into()],
+                    vec!["d".into(), artifact.clone()],
+                    vec!["h".into(), home.to_string()],
+                    vec!["type".into(), "buzz.task".into()],
+                    vec!["op".into(), op.into()],
+                    vec!["title".into(), "Task".into()],
+                ];
+                tags.extend(prev.map(|p| vec!["prev".into(), p]));
+                EventBuilder::new(Kind::Custom(45010), "")
+                    .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+                    .sign_with_keys(&author)
+                    .expect("sign revision")
+            };
+            let create = revision(source, "create", None);
+            let env = buzz_core::artifact::validate(&create).expect("valid create");
+            healthy
+                .db
+                .accept_artifact(community, &create, &env, None, &healthy.relay_keypair)
+                .await
+                .map_err(db_err)?;
+
+            let auth = IngestAuth::Http {
+                pubkey: author.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            failing.membership_cache.insert(
+                (community, source, author.public_key().to_bytes().to_vec()),
+                true,
+            );
+            let moved = revision(target, "move", Some(create.id.to_hex()));
+            let result = super::super::artifact::accept(&failing, &tenant, &moved, &auth).await;
+            restricted.close().await;
+            Ok::<_, sqlx::Error>(result)
+        }
+        .await;
+
+        drop_role(&admin, &role)
+            .await
+            .expect("drop restricted role");
+        match outcome.expect("test setup") {
+            Err(IngestError::Internal(reason)) => {
+                assert!(reason.starts_with("error: database error"), "{reason}")
+            }
+            Err(other) => panic!("a failed source lookup must be internal, got {other:?}"),
+            Ok(_) => panic!("a failed source lookup must deny the move, got accepted"),
+        }
     }
 
     /// End-to-end CAS dispatch wiring: a tagged write inserts, a stale same-head

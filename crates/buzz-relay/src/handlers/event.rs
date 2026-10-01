@@ -174,6 +174,32 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    // Owner-only kinds (kind:30622 DM visibility, kind:44200 agent turn
+    // metrics) reach only the pubkey named in their `p` tag. Same predicate as
+    // the pull paths, applied here so local and Redis delivery share it — a
+    // kindless `ids:[…]` subscription can otherwise match these events.
+    let kind = event_kind_u32(&stored_event.event);
+    let matches = if kind == buzz_core::kind::KIND_DM_VISIBILITY
+        || kind == buzz_core::kind::KIND_AGENT_TURN_METRIC
+    {
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .is_some_and(|pk| {
+                        buzz_core::filter::reader_authorized_for_event(
+                            &stored_event.event,
+                            &hex::encode(pk),
+                        )
+                    })
+            })
+            .collect()
+    } else {
+        matches
+    };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -234,10 +260,8 @@ pub async fn filter_fanout_by_access(
 ///
 /// All relay-local live fan-out routes through here. The two exceptions are
 /// `dispatch_persistent_event` (persistent ingest) and `fan_out_pubsub_event`
-/// (Redis cross-node), which call `filter_fanout_by_access` inline: the former
-/// layers an additional per-recipient DM-visibility-owner gate on top, the
-/// latter skips local echoes — both are equivalent to this helper plus their
-/// own extra step.
+/// (Redis cross-node), which call `filter_fanout_by_access` inline so the same
+/// access gate applies; the latter additionally skips local echoes.
 pub(crate) async fn fan_out_event_to_local_subscribers(
     state: &AppState,
     community_id: CommunityId,
@@ -456,40 +480,9 @@ async fn dispatch_persistent_event_inner(
             return 0;
         }
     };
-    // For viewer-private events (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics), live fan-out must reach only the owner — a kindless `ids:[…]`
-    // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
-    // are gated separately by reader_authorized_for_event.
-    let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC;
-    let private_event_owner: Option<String> = owner_only_kind
-        .then(|| {
-            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-            stored_event
-                .event
-                .tags
-                .filter(nostr::TagKind::SingleLetter(p))
-                .find_map(|t| t.content().map(|s| s.to_string()))
-        })
-        .flatten();
-    // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
-    // filter_fanout_by_access, applied to `matches` above before this loop. The
-    // DM visibility owner gate is an additional delivery fence, so build shared
-    // frames only after applying it to the already access-filtered recipient set.
     let recipients: Vec<_> = matches
         .iter()
-        .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = private_event_owner {
-                let is_owner = state
-                    .conn_manager
-                    .pubkey_for(*target_conn_id)
-                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-                if !is_owner {
-                    return None;
-                }
-            }
-            Some((*target_conn_id, sub_id.as_str()))
-        })
+        .map(|(target_conn_id, sub_id)| (*target_conn_id, sub_id.as_str()))
         .collect();
     let frames = fanout_frame_cache(recipients.iter().map(|(_, sub_id)| *sub_id), &event_json);
     let drop_count = send_fanout_frames(state, recipients, &frames);
@@ -2014,6 +2007,126 @@ mod tests {
             serde_json::from_value(v[2].clone()).expect("nostr event")
         }
 
+        /// Owner-only kinds arriving over Redis reach only the `p`-tagged owner,
+        /// even through a kindless `ids:[…]` subscription on a foreign
+        /// connection, and fail closed when no owner is tagged.
+        #[tokio::test]
+        async fn pubsub_owner_only_kinds_reach_only_the_owner() {
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let state = test_state().await;
+                let owner = Keys::generate();
+                let stranger = Keys::generate();
+                let tagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let untagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let ids_sub = |who: &Keys| {
+                    register_global_sub(
+                        &state,
+                        "ids",
+                        Filter::new().ids([tagged.id, untagged.id]),
+                        Some(who.public_key().to_bytes().to_vec()),
+                    )
+                    .1
+                };
+                let mut owner_rx = ids_sub(&owner);
+                let mut stranger_rx = ids_sub(&stranger);
+
+                for event in [tagged.clone(), untagged] {
+                    fan_out_pubsub_event(
+                        &state,
+                        ChannelEvent {
+                            community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                            topic: EventTopic::Global,
+                            event,
+                        },
+                    )
+                    .await;
+                }
+
+                let delivered =
+                    event_from_ws_message(owner_rx.try_recv().expect("owner delivered"));
+                assert_eq!(delivered.id, tagged.id, "kind {kind}");
+                assert!(
+                    owner_rx.try_recv().is_err(),
+                    "kind {kind}: untagged event must not deliver"
+                );
+                assert!(
+                    stranger_rx.try_recv().is_err(),
+                    "kind {kind}: stranger must not receive"
+                );
+            }
+        }
+
+        /// Same-pod dispatch applies the owner-only gate: owner-only kinds
+        /// published on this pod reach only the `p`-tagged owner, never a
+        /// foreign kindless `ids:[…]` subscription, and no one when untagged.
+        #[tokio::test]
+        async fn dispatch_owner_only_kinds_reach_only_the_owner() {
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let state = test_state().await;
+                let tenant = buzz_core::tenant::TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                    "dispatch.test",
+                );
+                let owner = Keys::generate();
+                let stranger = Keys::generate();
+                let tagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let untagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let ids_sub = |who: &Keys| {
+                    register_global_sub(
+                        &state,
+                        "ids",
+                        Filter::new().ids([tagged.id, untagged.id]),
+                        Some(who.public_key().to_bytes().to_vec()),
+                    )
+                    .1
+                };
+                let mut owner_rx = ids_sub(&owner);
+                let mut stranger_rx = ids_sub(&stranger);
+
+                for event in [tagged.clone(), untagged] {
+                    let author = event.pubkey.to_hex();
+                    super::super::dispatch_persistent_event_inner(
+                        &tenant,
+                        &state,
+                        &buzz_core::StoredEvent::new(event, None),
+                        kind,
+                        &author,
+                        false,
+                        None,
+                    )
+                    .await;
+                }
+
+                let delivered =
+                    event_from_ws_message(owner_rx.try_recv().expect("owner delivered"));
+                assert_eq!(delivered.id, tagged.id, "kind {kind}");
+                assert!(
+                    owner_rx.try_recv().is_err(),
+                    "kind {kind}: untagged event must not deliver"
+                );
+                assert!(
+                    stranger_rx.try_recv().is_err(),
+                    "kind {kind}: stranger must not receive"
+                );
+            }
+        }
+
         #[tokio::test]
         async fn global_presence_pubsub_event_fans_out_to_local_subscribers() {
             let state = test_state().await;
@@ -2624,6 +2737,41 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        /// The shared gate used by same-pod dispatch and Redis delivery keeps
+        /// only the `p`-tagged owner for owner-only kinds.
+        #[tokio::test]
+        async fn owner_only_kinds_keep_only_the_owner() {
+            let state = test_state().await;
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let owner = Keys::generate();
+            let owner_conn = register_conn(&state, Some(owner.public_key().to_bytes().to_vec()));
+            let stranger_conn = register_conn(&state, Some(vec![9u8; 32]));
+            let anon_conn = register_conn(&state, None);
+            let matches = vec![
+                (owner_conn, "s".to_string()),
+                (stranger_conn, "s".to_string()),
+                (anon_conn, "s".to_string()),
+            ];
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let event = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let out = filter_fanout_by_access(
+                    &state,
+                    community_id,
+                    &StoredEvent::new(event, None),
+                    matches.clone(),
+                    None,
+                )
+                .await;
+                assert_eq!(out, vec![(owner_conn, "s".to_string())], "kind {kind}");
+            }
         }
 
         #[tokio::test]

@@ -132,7 +132,7 @@ These are guidelines, not a fixed procedure — apply judgment to the task in fr
 - After selecting a repository or worktree, read its root `AGENTS.md` and any path-local `AGENTS.md` files that apply before planning or editing. The workspace-level file is team context; it does not replace repository-owned instructions.
 - Treat repository-owned product, architecture, and vision documents as design constraints, not optional background. Read the relevant documents before making non-trivial plans, and surface any intentional conflict with them.
 - Make file changes in a worktree, not on the default branch. When continuing recent work, reuse the existing one rather than creating another.
-- Before committing, read the repo-local git `user.name` / `user.email`; if email is empty, stop and ask. Include the trailers the repo requires.
+- The runtime sets your git commit identity and signing. Don't override them with `user.*` config, `-c user.*`, `--author` or another signing key. Add co-author or sign-off trailers only when the repository or the person you're working for requires them. If a repository requires a different commit author, tell the person running you instead of overriding the identity; they can switch your commits to their own git identity with `BUZZ_GIT_IDENTITY=user`.
 
 ## Autonomy
 

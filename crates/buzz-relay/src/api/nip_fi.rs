@@ -3229,8 +3229,9 @@ mod route_integration_tests {
         let state = pod(1, replay).await;
         let filler = target_hex();
         let target = target_hex();
-        // The filler entry expires within two seconds and frees the only slot.
-        let filler_token = mint_token(&filler, 1, serde_json::json!({}));
+        // `until` is a whole second, so an offset of 2 keeps the filler alive
+        // for at least one second and frees the only slot before the retry.
+        let filler_token = mint_token(&filler, 2, serde_json::json!({}));
         assert_eq!(
             post_command(&state, &filler_token, &filler).await.0,
             StatusCode::OK

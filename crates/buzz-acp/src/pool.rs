@@ -2426,6 +2426,9 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    // Thread conversation context requires the canonical root to distinguish
+    // concurrent threads in the same channel's activity.
+    let observer_thread_root = source.scope().and_then(SessionScope::root_event_id);
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2437,16 +2440,17 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
-    agent.acp.observe(
-        "turn_started",
-        serde_json::json!({
-            "source": match &source {
-                PromptSource::Channel(_) => "channel",
-                PromptSource::Heartbeat => "heartbeat",
-            },
-            "triggeringEventIds": triggering_event_ids,
-        }),
-    );
+    let mut turn_started_payload = serde_json::json!({
+        "source": match &source {
+            PromptSource::Channel(_) => "channel",
+            PromptSource::Heartbeat => "heartbeat",
+        },
+        "triggeringEventIds": triggering_event_ids,
+    });
+    if let Some(root) = observer_thread_root {
+        turn_started_payload["threadRootEventId"] = serde_json::json!(root);
+    }
+    agent.acp.observe("turn_started", turn_started_payload);
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -2481,6 +2485,7 @@ pub async fn run_prompt_task(
             turn_id.clone(),
             turn_started_at.clone(),
         ),
+        observer_thread_root.map(str::to_owned),
         ctx.turn_liveness_interval,
         Arc::clone(&liveness_state),
     );
@@ -5109,6 +5114,7 @@ async fn run_turn_liveness(
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
     mut context: observer::ObserverContext,
+    thread_root_event_id: Option<String>,
     interval: Duration,
     state: Arc<Mutex<LivenessState>>,
 ) {
@@ -5136,12 +5142,11 @@ async fn run_turn_liveness(
             return;
         }
         context.session_id = guard.session_id.clone();
-        observer.emit(
-            "turn_liveness",
-            agent_index,
-            &context,
-            serde_json::json!({}),
-        );
+        let payload = match &thread_root_event_id {
+            Some(root) => serde_json::json!({ "threadRootEventId": root }),
+            None => serde_json::json!({}),
+        };
+        observer.emit("turn_liveness", agent_index, &context, payload);
         drop(guard);
     }
 }
@@ -7049,6 +7054,124 @@ mod tests {
             pubkey: "author".into(),
             timestamp: "2026-08-09T00:00:00Z".into(),
             content: content.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_prompt_task_observes_thread_root_only_for_thread_scope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let root = "a".repeat(64);
+        for (scope, expected_root) in [
+            (thread_scope(channel_id, &root), Some(root.as_str())),
+            (conv(channel_id), None),
+        ] {
+            let acp = AcpClient::spawn("bash", &["-c".into(), "exec sleep 30".into()], &[], false)
+                .await
+                .expect("spawn observer test ACP process");
+            let mut agent = OwnedAgent {
+                index: 0,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                desired_model_request_id: None,
+                desired_model_pending_ack: false,
+                startup_effort: None,
+                agent_name: "observer-test-agent".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 1,
+            };
+            let observer = observer::ObserverHandle::in_process();
+            let mut observer_rx = observer.subscribe();
+            agent.acp.set_observer(Some(observer.clone()), 0);
+            let batch = FlushBatch {
+                channel_id,
+                scope,
+                events: vec![],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.turn_liveness_interval = Duration::from_millis(10);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind channel context server");
+            ctx.rest_client.base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                request_tx.send(()).unwrap();
+                // Hold the real lookup open until a liveness frame is observed.
+                let _ = release_rx.await;
+                socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            ctx.channel_info = ChannelInfoResolver::new(
+                HashMap::from([(
+                    channel_id,
+                    crate::relay::ChannelInfo {
+                        name: "test-channel".into(),
+                        channel_type: "stream".into(),
+                        description: None,
+                    },
+                )]),
+                ctx.rest_client.clone(),
+            );
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+            let prompt = tokio::spawn(run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::new(ctx),
+                result_tx,
+                None,
+                "observer-test-turn".into(),
+            ));
+            let liveness = tokio::time::timeout(Duration::from_secs(5), async {
+                request_rx.await.expect("channel context lookup started");
+                loop {
+                    let event = observer_rx.recv().await.expect("observer frame");
+                    if event.kind == "turn_liveness" {
+                        return event;
+                    }
+                }
+            })
+            .await;
+            // Release the fixture and shut down ACP before asserting the frame.
+            release_tx.send(()).unwrap();
+            prompt.await.expect("prompt task completed");
+            server.await.expect("channel context server completed");
+            let mut result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::ProjectContextIndeterminate(_)
+            ));
+            result.agent.acp.shutdown().await;
+            let starts: Vec<_> = observer
+                .snapshot()
+                .into_iter()
+                .filter(|event| event.kind == "turn_started")
+                .collect();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(
+                starts[0].payload.get("threadRootEventId"),
+                expected_root.map(serde_json::Value::from).as_ref(),
+                "turn start must identify only the canonical thread scope"
+            );
+            let liveness = liveness.expect("liveness during channel context lookup");
+            assert_eq!(
+                liveness.payload.get("threadRootEventId"),
+                expected_root.map(serde_json::Value::from).as_ref(),
+                "production liveness wiring must identify only the canonical thread scope"
+            );
         }
     }
 
@@ -9291,6 +9414,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                     Some(observer.clone()),
                     Some(0),
                     context,
+                    None,
                     Duration::from_secs(10),
                     Arc::clone(&state),
                 )),
@@ -9341,6 +9465,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
+                None,
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9393,6 +9518,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
+                None,
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9435,6 +9561,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(observer.clone()),
             Some(0),
             context,
+            None,
             Duration::ZERO,
             open_liveness_state(),
         );
@@ -9458,6 +9585,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             None,
             None,
             context,
+            None,
             Duration::from_secs(10),
             open_liveness_state(),
         );
@@ -9497,6 +9625,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(observer.clone()),
             Some(0),
             context,
+            None,
             Duration::from_secs(10),
             state,
         );
