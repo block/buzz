@@ -3,6 +3,7 @@ use tauri::State;
 
 use crate::{
     app_state::AppState,
+    commands::channels::channel_metadata_filter,
     events,
     models::ChannelInfo,
     nostr_convert,
@@ -66,11 +67,7 @@ pub(crate) async fn open_dm_with_scope(
     let metadata = query_relay_at_with_keys(
         state,
         &api_base_url,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [ack.channel_id],
-            "limit": 1
-        })],
+        &[channel_metadata_filter(&[&ack.channel_id])],
         &keys,
         None,
     )

@@ -1319,7 +1319,7 @@ async fn save_rejects_an_unrelated_content_type() {
 #[test]
 fn restrictions_url_names_the_active_relay_authority() {
     let state = relay_state("wss://Community.Example.com:8443/ws");
-    let pubkey = routes::HexPubkey::parse(&"ab".repeat(32)).unwrap();
+    let pubkey = routes::Hex64::parse(&"ab".repeat(32)).unwrap();
     let url = restrictions_url(
         "https://admin.example.com",
         &routes::AdminRoute::MemberBanDelete { pubkey },
@@ -1372,7 +1372,7 @@ fn restrictions_url_rejects_a_caller_relay_that_no_longer_matches() {
     // The list loaded from relay A; the native relay has since switched to B.
     // Every restriction route must fail before building a request URL.
     let state = relay_state("wss://relay-b.example.com");
-    let pubkey = routes::HexPubkey::parse(&"ab".repeat(32)).unwrap();
+    let pubkey = routes::Hex64::parse(&"ab".repeat(32)).unwrap();
     for route in [
         routes::AdminRoute::MemberRestrictionsList,
         routes::AdminRoute::MemberBanDelete {
@@ -1387,3 +1387,6 @@ fn restrictions_url_rejects_a_caller_relay_that_no_longer_matches() {
         }
     }
 }
+
+#[path = "direct_action_tests.rs"]
+mod direct_action;

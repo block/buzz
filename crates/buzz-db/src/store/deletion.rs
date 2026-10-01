@@ -351,6 +351,8 @@ pub enum OwnerDeletionAdmission {
     NotArchived,
     /// The community is already quiescing, fenced, or deleted.
     LifecycleConflict,
+    /// The asserted community UUID does not match the host's community.
+    CommunityIdMismatch,
     /// The request UUID targets different intent, or another active request exists.
     RequestConflict,
     /// The owner acknowledgement contract is not supported.
@@ -880,8 +882,13 @@ impl DeletionStore {
     /// The owner's consent arrives as the calling operator's assertion: the
     /// operator authenticated the owner and collected the acknowledgement
     /// upstream. This layer records that provenance and checks that
-    /// `owner_pubkey` is still the community's owner; it never verifies an
+    /// `owner_pubkey` is the community's sole current owner; it never verifies an
     /// owner-signed attestation.
+    ///
+    /// `expected_community_id`, when present, must name the host's community.
+    /// It is checked only after sole-owner authority is proven (so non-owners
+    /// see the same not-found as an unknown host) and, on replay, only against
+    /// a stored request for the same host.
     pub async fn admit_owner_request(
         &self,
         normalized_community_host: &str,
@@ -889,6 +896,7 @@ impl DeletionStore {
         mediating_operator_pubkey: &str,
         acknowledgement_version: i32,
         request_id: Uuid,
+        expected_community_id: Option<Uuid>,
     ) -> Result<OwnerDeletionAdmission> {
         if acknowledgement_version != OWNER_DELETION_ACKNOWLEDGEMENT_VERSION {
             return Ok(OwnerDeletionAdmission::UnsupportedAcknowledgementVersion);
@@ -910,6 +918,12 @@ impl DeletionStore {
             .await?
         {
             let existing = row_to_request(row)?;
+            if existing.community_host == normalized_community_host
+                && expected_community_id.is_some_and(|id| id != *existing.community_id.as_uuid())
+            {
+                tx.rollback().await?;
+                return Ok(OwnerDeletionAdmission::CommunityIdMismatch);
+            }
             let converges = existing.community_host == normalized_community_host
                 && existing.request_origin == DeletionRequestOrigin::Owner
                 && existing.owner_pubkey.as_deref() == Some(owner_pubkey.as_str())
@@ -942,18 +956,22 @@ impl DeletionStore {
             return Ok(OwnerDeletionAdmission::LifecycleConflict);
         }
 
-        let owner_exists = sqlx::query_scalar::<_, String>(
+        let current_owners: Vec<String> = sqlx::query_scalar(
             "SELECT pubkey FROM relay_members \
-             WHERE community_id = $1 AND pubkey = $2 AND role = 'owner' FOR UPDATE",
+             WHERE community_id = $1 AND role = 'owner' ORDER BY pubkey FOR UPDATE",
         )
         .bind(community_id)
-        .bind(&owner_pubkey)
-        .fetch_optional(&mut *tx)
-        .await?
-        .is_some();
-        if !owner_exists {
+        .fetch_all(&mut *tx)
+        .await?;
+        if current_owners.len() != 1 || current_owners.first() != Some(&owner_pubkey) {
             tx.rollback().await?;
             return Ok(OwnerDeletionAdmission::NotFoundOrNotOwner);
+        }
+        // Only after sole-owner authority is proven, so non-owners still see the
+        // same 404 as an unknown host whatever `community_id` they assert.
+        if expected_community_id.is_some_and(|id| id != community_id) {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::CommunityIdMismatch);
         }
         if target
             .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
@@ -1524,7 +1542,7 @@ impl DeletionStore {
             || !owner_authority_matches
         {
             return Err(DbError::DeletionSafety(format!(
-                "owner deletion {} community is no longer archived under the admitted owner",
+                "owner deletion {} community archive, lifecycle, or sole-owner authority drifted",
                 token.request_id
             )));
         }
@@ -4701,7 +4719,7 @@ mod postgres_tests {
         let request_id = Uuid::new_v4();
 
         let admitted = store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit archived owner request");
         let OwnerDeletionAdmission::Accepted(request) = admitted else {
@@ -4745,7 +4763,7 @@ mod postgres_tests {
 
         assert_eq!(
             store
-                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
                 .await
                 .expect("non-archived admission result"),
             OwnerDeletionAdmission::NotArchived
@@ -4756,7 +4774,7 @@ mod postgres_tests {
             .expect("owned community");
         assert_eq!(
             store
-                .admit_owner_request(&host, &outsider, operator, 1, Uuid::new_v4())
+                .admit_owner_request(&host, &outsider, operator, 1, Uuid::new_v4(), None)
                 .await
                 .expect("non-owner admission result"),
             OwnerDeletionAdmission::NotFoundOrNotOwner
@@ -4769,11 +4787,59 @@ mod postgres_tests {
         );
         assert!(matches!(
             store
-                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
                 .await
                 .expect("current-owner admission result"),
             OwnerDeletionAdmission::Accepted(_)
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_rejects_legacy_co_owners_without_persisting_a_request() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let extra_owner = "f".repeat(64);
+        assert!(
+            extra_owner > owner,
+            "extra owner must sort after the admitted owner"
+        );
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(community.as_uuid())
+        .bind(&extra_owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed legacy co-owner");
+
+        assert_eq!(
+            store
+                .admit_owner_request(
+                    &host,
+                    &owner,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    1,
+                    Uuid::new_v4(),
+                    None,
+                )
+                .await
+                .expect("legacy co-owner admission result"),
+            OwnerDeletionAdmission::NotFoundOrNotOwner,
+        );
+        let request_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count deletion requests");
+        assert_eq!(request_count, 0, "failed admission must not persist intent");
+        assert_eq!(
+            membership_roles(&db, community).await.len(),
+            2,
+            "failed admission must not alter either legacy owner",
+        );
     }
 
     #[tokio::test]
@@ -4786,7 +4852,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         assert!(matches!(
             store
-                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
                 .await
                 .expect("admit owner request"),
             OwnerDeletionAdmission::Accepted(_)
@@ -4815,6 +4881,7 @@ mod postgres_tests {
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     1,
                     Uuid::new_v4(),
+                    None,
                 )
                 .await
                 .expect("admit owner deletion")
@@ -4917,6 +4984,7 @@ mod postgres_tests {
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         1,
                         request_id,
+                        None,
                     )
                     .await
             }
@@ -4969,6 +5037,7 @@ mod postgres_tests {
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         1,
                         request_id,
+                        None,
                     )
                     .await
             }
@@ -5018,6 +5087,7 @@ mod postgres_tests {
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         1,
                         request_id,
+                        None,
                     )
                     .await
             }
@@ -5057,7 +5127,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         let OwnerDeletionAdmission::Accepted(first) = store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("first admission")
         else {
@@ -5076,7 +5146,7 @@ mod postgres_tests {
             .expect("advance request");
 
         let OwnerDeletionAdmission::Accepted(replayed) = store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("replay admission")
         else {
@@ -5086,7 +5156,7 @@ mod postgres_tests {
         assert_eq!(replayed.stage, DeletionStage::Inventoried);
         assert_eq!(
             store
-                .admit_owner_request(&other_host, &other_owner, operator, 1, request_id)
+                .admit_owner_request(&other_host, &other_owner, operator, 1, request_id, None)
                 .await
                 .expect("retargeting result"),
             OwnerDeletionAdmission::RequestConflict
@@ -5101,8 +5171,8 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         let (first, second) = tokio::join!(
-            store.admit_owner_request(&host, &owner, operator, 1, request_id),
-            store.admit_owner_request(&host, &owner, operator, 1, request_id),
+            store.admit_owner_request(&host, &owner, operator, 1, request_id, None),
+            store.admit_owner_request(&host, &owner, operator, 1, request_id, None),
         );
         let accepted_id = |result: Result<OwnerDeletionAdmission>| {
             let OwnerDeletionAdmission::Accepted(request) = result.expect("admission") else {
@@ -5132,7 +5202,7 @@ mod postgres_tests {
         let new_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let OwnerDeletionAdmission::Accepted(_) = store
-            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
             .await
             .expect("admit owner request")
         else {
@@ -5188,7 +5258,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         let OwnerDeletionAdmission::Accepted(request) = store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request")
         else {
@@ -5269,7 +5339,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request");
         let claim = store
@@ -5385,7 +5455,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         let OwnerDeletionAdmission::Accepted(owner_request) = store
-            .admit_owner_request(&owner_host, &owner, operator, 1, request_id)
+            .admit_owner_request(&owner_host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request")
         else {
@@ -5460,7 +5530,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request");
         sqlx::query(
@@ -5496,7 +5566,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request");
         let claim = store
@@ -5563,7 +5633,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request");
         let pending_quota = db
@@ -5727,7 +5797,7 @@ mod postgres_tests {
             let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
             let request_id = Uuid::new_v4();
             store
-                .admit_owner_request(&host, &owner, operator, 1, request_id)
+                .admit_owner_request(&host, &owner, operator, 1, request_id, None)
                 .await
                 .expect("admit owner request");
             let claim = store
@@ -5794,6 +5864,216 @@ mod postgres_tests {
         );
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum OwnerPreparationAuthorityDrift {
+        ReplacedSoleOwner,
+        ExtraCoOwner,
+        InactiveDeletionState,
+        DeletedAtSet,
+    }
+
+    async fn assert_owner_preparation_rejects_authority_drift(
+        drift: OwnerPreparationAuthorityDrift,
+    ) {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit sole owner's intent");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner submission")
+            .expect("owner submission is preparable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+        let extra_owner = "f".repeat(64);
+        assert!(
+            extra_owner > owner,
+            "extra owner must sort after admitted owner"
+        );
+
+        match drift {
+            OwnerPreparationAuthorityDrift::ReplacedSoleOwner => {
+                sqlx::query(
+                    "UPDATE relay_members SET role = 'member' \
+                     WHERE community_id = $1 AND pubkey = $2 AND role = 'owner'",
+                )
+                .bind(community.as_uuid())
+                .bind(&owner)
+                .execute(&db.pool)
+                .await
+                .expect("remove admitted owner's authority");
+                sqlx::query(
+                    "INSERT INTO relay_members (community_id, pubkey, role) \
+                     VALUES ($1, $2, 'owner')",
+                )
+                .bind(community.as_uuid())
+                .bind(&extra_owner)
+                .execute(&db.pool)
+                .await
+                .expect("install different sole owner");
+            }
+            OwnerPreparationAuthorityDrift::ExtraCoOwner => {
+                sqlx::query(
+                    "INSERT INTO relay_members (community_id, pubkey, role) \
+                     VALUES ($1, $2, 'owner')",
+                )
+                .bind(community.as_uuid())
+                .bind(&extra_owner)
+                .execute(&db.pool)
+                .await
+                .expect("install later-sorting legacy co-owner");
+            }
+            OwnerPreparationAuthorityDrift::InactiveDeletionState
+            | OwnerPreparationAuthorityDrift::DeletedAtSet => {
+                let mut tx = db.pool.begin().await.expect("open fixture transaction");
+                sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true)")
+                    .bind(community.as_uuid().to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("scope fixture to this community");
+                sqlx::query("SELECT set_config('buzz.deletion_fence_generation', '0', true)")
+                    .execute(&mut *tx)
+                    .await
+                    .expect("scope fixture generation");
+                let statement = match drift {
+                    OwnerPreparationAuthorityDrift::InactiveDeletionState => {
+                        "UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1"
+                    }
+                    OwnerPreparationAuthorityDrift::DeletedAtSet => {
+                        "UPDATE communities SET deleted_at = now() WHERE id = $1"
+                    }
+                    _ => unreachable!("matched only lifecycle fixture variants"),
+                };
+                sqlx::query(statement)
+                    .bind(community.as_uuid())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("establish independent lifecycle drift");
+                tx.commit().await.expect("commit fixture drift");
+            }
+        }
+
+        let current_owners: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM relay_members WHERE community_id = $1 AND role = 'owner' \
+             ORDER BY pubkey",
+        )
+        .bind(community.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("inspect current owners");
+        let (archived_at, deletion_state, deleted_at): (
+            Option<DateTime<Utc>>,
+            String,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT archived_at, deletion_state, deleted_at FROM communities WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect lifecycle fixture");
+        assert!(archived_at.is_some(), "archive guard must remain satisfied");
+        match drift {
+            OwnerPreparationAuthorityDrift::ReplacedSoleOwner => {
+                assert_eq!(current_owners, vec![extra_owner]);
+                assert_eq!(deletion_state, "active");
+                assert!(deleted_at.is_none());
+            }
+            OwnerPreparationAuthorityDrift::ExtraCoOwner => {
+                assert_eq!(current_owners, vec![owner, extra_owner]);
+                assert_eq!(deletion_state, "active");
+                assert!(deleted_at.is_none());
+            }
+            OwnerPreparationAuthorityDrift::InactiveDeletionState => {
+                assert_eq!(current_owners, vec![owner]);
+                assert_eq!(deletion_state, "quiescing");
+                assert!(deleted_at.is_none());
+            }
+            OwnerPreparationAuthorityDrift::DeletedAtSet => {
+                assert_eq!(current_owners, vec![owner]);
+                assert_eq!(deletion_state, "active");
+                assert!(deleted_at.is_some());
+            }
+        }
+
+        let before = store
+            .get(request_id)
+            .await
+            .expect("request before preparation");
+        assert_eq!(before.stage, DeletionStage::Submitted);
+        assert!(before.inventory_digest.is_none());
+        let failure = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect_err("drift must prevent automatic approval");
+        assert!(
+            matches!(failure, DbError::DeletionSafety(_))
+                && failure.to_string().contains("sole-owner authority drifted"),
+            "{failure}"
+        );
+        assert_eq!(
+            store
+                .get(request_id)
+                .await
+                .expect("request after rejection"),
+            before
+        );
+        let approvals: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_approvals WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count approvals after rejection");
+        assert_eq!(approvals, 0, "no digest-bound approval may be recorded");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_different_sole_owner_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::ReplacedSoleOwner,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_later_co_owner_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::ExtraCoOwner,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_inactive_state_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::InactiveDeletionState,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_deleted_at_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::DeletedAtSet,
+        )
+        .await;
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn stale_owner_preparation_generation_cannot_freeze_or_approve() {
@@ -5802,7 +6082,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request");
         let stale = store
@@ -5854,7 +6134,7 @@ mod postgres_tests {
         let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let request_id = Uuid::new_v4();
         store
-            .admit_owner_request(&host, &owner, operator, 1, request_id)
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
             .await
             .expect("admit owner request");
         let claim = store
@@ -5921,7 +6201,7 @@ mod postgres_tests {
         .is_some());
         assert!(matches!(
             store
-                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4())
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
                 .await
                 .expect("fresh owner request after recovery abort"),
             OwnerDeletionAdmission::Accepted(_)

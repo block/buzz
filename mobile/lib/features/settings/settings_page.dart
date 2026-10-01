@@ -13,6 +13,7 @@ import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/push/push_bridge.dart';
+import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';
