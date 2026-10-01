@@ -4602,6 +4602,7 @@ mod try_native_steer_fallback_log_tests {
                 event: event.clone(),
                 received_at: std::time::Instant::now(),
                 prompt_tag: "mention".into(),
+                edit: None,
             }),
             "queued event must be accepted before the steer attempt"
         );
