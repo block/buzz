@@ -7221,7 +7221,11 @@ async function handleGetPresence(
 
 async function handleEnsureStarterChannels(
   config: E2eConfig | undefined,
-): Promise<RawChannelWithMembership[]> {
+): Promise<{
+  channels: RawChannelWithMembership[];
+  joined_channel_ids: string[];
+  error: null;
+}> {
   const starterChannelError =
     config?.mock?.ensureStarterChannelsErrors?.shift();
   if (starterChannelError) {
@@ -7229,6 +7233,7 @@ async function handleEnsureStarterChannels(
   }
 
   const currentPubkey = getMockMemberPubkey(config);
+  const joinedChannelIds: string[] = [];
   const ensureMember = (channel: MockChannel) => {
     if (
       channel.members.some(
@@ -7242,6 +7247,7 @@ async function handleEnsureStarterChannels(
     channel.members.push(createCurrentMember(config, "member"));
     syncMockChannel(channel);
     touchMockChannel(channel);
+    joinedChannelIds.push(channel.id);
   };
 
   for (const channelName of [
@@ -7261,7 +7267,11 @@ async function handleEnsureStarterChannels(
     ensureMember(channel);
   }
 
-  return listMockChannels(config);
+  return {
+    channels: listMockChannels(config),
+    joined_channel_ids: joinedChannelIds,
+    error: null,
+  };
 }
 
 async function handleCreateChannel(
@@ -12257,7 +12267,12 @@ export function maybeInstallE2eTauriMocks() {
           (request.channelId !== mockHuddle.state.parent_channel_id &&
             request.channelId !== mockHuddle.state.ephemeral_channel_id)
         ) {
-          return { matched_active_huddle: false, added: [] };
+          return {
+            matched_active_huddle: false,
+            added: [],
+            changed_channel_ids: [],
+            error: null,
+          };
         }
 
         const existingAgents = new Set(
@@ -12277,7 +12292,13 @@ export function maybeInstallE2eTauriMocks() {
         if (added.length > 0) {
           await emitMockHuddleState();
         }
-        return { matched_active_huddle: true, added };
+        return {
+          matched_active_huddle: true,
+          added,
+          changed_channel_ids:
+            added.length > 0 ? [mockHuddle.state.ephemeral_channel_id] : [],
+          error: null,
+        };
       }
       case "add_agent_to_huddle": {
         const error = activeConfig?.mock?.addAgentToHuddleError;

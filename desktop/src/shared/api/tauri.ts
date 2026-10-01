@@ -244,7 +244,7 @@ export class TauriInvokeError extends Error {
   }
 }
 
-function toTauriError(error: unknown): Error {
+export function toTauriError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }

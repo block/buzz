@@ -9,8 +9,15 @@
  * land a pre-change list.
  */
 
-/** Comfortably above the relay's replica-lag ceiling (1s in production). */
-const WRITER_READ_WINDOW_MS = 5_000;
+/**
+ * Just over the relay's hard staleness ceiling: a replica may serve a read
+ * only while its last verified sync is within the configured budget, and the
+ * budget is clamped to `FENCE_STALENESS` (30s, in
+ * crates/buzz-db/src/runtime/replica_fence.rs). Past this, no supported
+ * setting can return a pre-change list. Must move with `FENCE_STALENESS`.
+ * Measured on the monotonic clock so a wall-clock jump can't shorten it.
+ */
+const WRITER_READ_WINDOW_MS = 31_000;
 
 const writerReadDeadlines = new Map<string, number>();
 const listeners = new Set<(channelId: string) => void>();
@@ -20,7 +27,7 @@ const listeners = new Set<(channelId: string) => void>();
  * the writer for the window, and listeners (the app's roster cache) refresh.
  */
 export function noteChannelMembershipChange(channelId: string) {
-  const now = Date.now();
+  const now = performance.now();
   for (const [id, deadline] of writerReadDeadlines) {
     if (deadline <= now) writerReadDeadlines.delete(id);
   }
@@ -29,12 +36,20 @@ export function noteChannelMembershipChange(channelId: string) {
 }
 
 export function shouldReadChannelMembersFromWriter(channelId: string) {
-  return (writerReadDeadlines.get(channelId) ?? 0) > Date.now();
+  return (writerReadDeadlines.get(channelId) ?? 0) > performance.now();
 }
 
+/**
+ * Subscribes to membership changes, first replaying every channel whose
+ * window is still open so a change recorded before registration still
+ * refreshes a roster cached before it.
+ */
 export function onChannelMembershipChange(
   listener: (channelId: string) => void,
 ): () => void {
+  for (const channelId of writerReadDeadlines.keys()) {
+    if (shouldReadChannelMembersFromWriter(channelId)) listener(channelId);
+  }
   listeners.add(listener);
   return () => {
     listeners.delete(listener);

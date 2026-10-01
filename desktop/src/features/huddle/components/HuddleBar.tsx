@@ -646,6 +646,9 @@ export function HuddleBar({
                 "add_agent_to_huddle",
                 { agentPubkey: pubkey },
               );
+              if (barState?.ephemeral_channel_id) {
+                noteChannelMembershipChange(barState.ephemeral_channel_id);
+              }
               // The agent may also have been added to the parent channel.
               if (result.parent_added && barState?.parent_channel_id) {
                 noteChannelMembershipChange(barState.parent_channel_id);
@@ -728,6 +731,9 @@ export function HuddleBar({
                   await invoke("remove_agent_from_huddle", {
                     agentPubkey: pubkey,
                   });
+                  if (barState?.ephemeral_channel_id) {
+                    noteChannelMembershipChange(barState.ephemeral_channel_id);
+                  }
                   setState((prev) => {
                     if (!prev) return prev;
                     return {

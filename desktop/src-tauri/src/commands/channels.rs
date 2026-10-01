@@ -249,6 +249,7 @@ async fn ensure_starter_channel_memberships(
     state: &AppState,
     keys: &nostr::Keys,
     channels: &mut [ChannelInfo],
+    joined_channel_ids: &mut Vec<String>,
 ) -> Result<(), String> {
     for spec in STARTER_CHANNELS {
         let Some(channel) = channels
@@ -266,6 +267,7 @@ async fn ensure_starter_channel_memberships(
         let builder = events::build_join(channel_uuid)?;
         submit_event_with_keys(builder, state, keys, None).await?;
         channel.is_member = true;
+        joined_channel_ids.push(channel.id.clone());
     }
 
     Ok(())
@@ -373,10 +375,20 @@ pub async fn create_channel(
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
 }
 
+/// Starter channels plus the joins that landed. A join failure is reported in
+/// `error` rather than as the command error so that the joins accepted before
+/// it are still reported; the frontend rethrows `error` unchanged.
+#[derive(serde::Serialize)]
+pub struct StarterChannelsResult {
+    channels: Vec<ChannelInfo>,
+    joined_channel_ids: Vec<String>,
+    error: Option<String>,
+}
+
 #[tauri::command]
 pub async fn ensure_starter_channels(
     state: State<'_, AppState>,
-) -> Result<Vec<ChannelInfo>, String> {
+) -> Result<StarterChannelsResult, String> {
     let mut existing_channels =
         fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
     let relay_scope = relay_api_base_url_with_override(&state);
@@ -444,8 +456,20 @@ pub async fn ensure_starter_channels(
         return Err("starter channels created but metadata not yet available".to_string());
     }
 
-    ensure_starter_channel_memberships(&state, &creator_keys, &mut existing_channels).await?;
-    Ok(existing_channels)
+    let mut joined_channel_ids = Vec::new();
+    let error = ensure_starter_channel_memberships(
+        &state,
+        &creator_keys,
+        &mut existing_channels,
+        &mut joined_channel_ids,
+    )
+    .await
+    .err();
+    Ok(StarterChannelsResult {
+        channels: existing_channels,
+        joined_channel_ids,
+        error,
+    })
 }
 
 #[derive(serde::Deserialize)]

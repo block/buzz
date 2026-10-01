@@ -14,7 +14,7 @@ import {
   noteChannelMembershipChange,
   shouldReadChannelMembersFromWriter,
 } from "@/shared/api/channelMembershipWrites";
-import { invokeTauri } from "@/shared/api/tauri";
+import { invokeTauri, toTauriError } from "@/shared/api/tauri";
 
 export type RawChannel = {
   id: string;
@@ -174,12 +174,32 @@ export async function createChannel(
 }
 
 export async function ensureStarterChannels(): Promise<Channel[]> {
-  // May join the caller to each starter channel.
-  const channels = (
-    await invokeTauri<RawChannel[]>("ensure_starter_channels")
-  ).map(fromRawChannel);
-  for (const channel of channels) noteChannelMembershipChange(channel.id);
-  return channels;
+  // Joins that landed are reported even when a later join fails.
+  const result = await invokeTauri<{
+    channels: RawChannel[];
+    joined_channel_ids: string[];
+    error: string | null;
+  }>("ensure_starter_channels");
+  for (const id of result.joined_channel_ids) noteChannelMembershipChange(id);
+  if (result.error !== null) throw toTauriError(result.error);
+  return result.channels.map(fromRawChannel);
+}
+
+/**
+ * Enrolls channel agents into the active Huddle. Native sync can add them to
+ * the Huddle's ephemeral and parent channels, whichever `channelId` names, so
+ * it reports every channel it changed, including before a failure.
+ */
+export async function syncAgentsToActiveHuddle(
+  channelId: string,
+  agentPubkeys: string[],
+): Promise<void> {
+  const result = await invokeTauri<{
+    changed_channel_ids: string[];
+    error: string | null;
+  }>("sync_agents_to_active_huddle", { channelId, agentPubkeys });
+  for (const id of result.changed_channel_ids) noteChannelMembershipChange(id);
+  if (result.error !== null) throw toTauriError(result.error);
 }
 
 export type OpenDmInput = {
