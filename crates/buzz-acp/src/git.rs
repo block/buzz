@@ -75,7 +75,15 @@ impl GitEnvironment {
         ));
         env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
         // CLI flags must work even when the caller did not export these variables.
-        env.push(("BUZZ_PRIVATE_KEY".into(), secret.to_string()));
+        //
+        // The buzz CLI reads its key from BUZZ_PRIVATE_KEY_FILE (a path, not a
+        // secret) rather than a raw BUZZ_PRIVATE_KEY value — this is the same
+        // keyfile already written above for git's nostr.keyfile config (`info`
+        // is derived from this same `keys`, so it's the identical secret).
+        // Putting the raw key in env would let any shell tool a model runs
+        // (buzz-dev-mcp's `shell` tool spawns children without env_clear())
+        // read it straight out via `env`/`/proc/self/environ`.
+        env.push(("BUZZ_PRIVATE_KEY_FILE".into(), info.keyfile_path.clone()));
         env.push(("BUZZ_RELAY_URL".into(), relay_url.to_owned()));
         Ok(Self { _dir: dir, env })
     }
@@ -270,7 +278,7 @@ pub(crate) fn is_managed_env(name: &str) -> bool {
     name.starts_with("GIT_CONFIG_")
         || matches!(
             name,
-            "PATH" | "GIT_TERMINAL_PROMPT" | "BUZZ_PRIVATE_KEY" | "BUZZ_RELAY_URL"
+            "PATH" | "GIT_TERMINAL_PROMPT" | "BUZZ_PRIVATE_KEY_FILE" | "BUZZ_RELAY_URL"
         )
 }
 

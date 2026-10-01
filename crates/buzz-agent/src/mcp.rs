@@ -81,7 +81,9 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     // Git config/keyfile paths arrive explicitly in session/new mcpServers[].env.
-    "BUZZ_PRIVATE_KEY",
+    // BUZZ_PRIVATE_KEY_FILE is a path, not a secret — the raw key never
+    // reaches this list (see buzz-acp/src/git.rs::GitEnvironment::install()).
+    "BUZZ_PRIVATE_KEY_FILE",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
     // Agent display name for tools. On the
