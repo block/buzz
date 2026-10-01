@@ -961,6 +961,7 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::nip_fi_core::tests::ScriptedVerifier;
     use crate::readiness::DependencyReport;
 
     struct ScriptedDependencyEvaluator {
@@ -3686,35 +3687,12 @@ mod tests {
 
     // ── Characterization: HTTP guard evaluation contract ─────────────────────
 
-    /// Verifier returning a fixed result and counting calls.
-    struct GuardScriptedVerifier {
-        result: Result<Option<nostr::PublicKey>, buzz_auth::VerifierError>,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-    impl buzz_auth::VerifyAssertion for GuardScriptedVerifier {
-        fn verify_assertion(
-            &self,
-            _token: &str,
-        ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.result.map(|key| {
-                buzz_auth::VerifiedAssertion::for_test(
-                    key,
-                    vec![chrono::Utc::now() + chrono::Duration::hours(1)],
-                )
-            })
-        }
-    }
-
     const GUARD_PROTECTED_PATH: &str = "/workflows/wf/runs";
 
     async fn guard_state_with(
         result: Result<Option<nostr::PublicKey>, buzz_auth::VerifierError>,
-    ) -> (Arc<AppState>, Arc<GuardScriptedVerifier>) {
-        let verifier = Arc::new(GuardScriptedVerifier {
-            result,
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        });
+    ) -> (Arc<AppState>, Arc<ScriptedVerifier>) {
+        let verifier = Arc::new(ScriptedVerifier::new(result));
         let mut state = (*nip_fi_enforce_state().await).clone();
         state.nip_fi_verifier = Some(verifier.clone());
         (Arc::new(state), verifier)
@@ -3763,7 +3741,7 @@ mod tests {
                 "{err:?}"
             );
             assert_eq!(
-                verifier.calls.load(std::sync::atomic::Ordering::SeqCst),
+                verifier.calls(),
                 1,
                 "guard verifies exactly once and the handler never runs: {err:?}"
             );
@@ -3808,6 +3786,6 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(verifier.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(verifier.calls(), 1);
     }
 }

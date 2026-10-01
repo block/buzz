@@ -136,14 +136,41 @@ pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct FixedVerifier(Result<Option<nostr::PublicKey>, VerifierError>);
-    impl VerifyAssertion for FixedVerifier {
+    /// Verifier returning a fixed result and counting calls.
+    ///
+    /// Lives here, next to the shared evaluator, so the crate has one NIP-FI
+    /// verifier fixture. Shared with the `nip_fi_http`, `nip_fi_upgrade`, and
+    /// `router` tests.
+    pub(crate) struct ScriptedVerifier {
+        result: Result<Option<nostr::PublicKey>, VerifierError>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedVerifier {
+        /// A verifier that answers every call with `result`, where `Ok(key)`
+        /// becomes an assertion for `key` expiring in an hour.
+        pub(crate) fn new(result: Result<Option<nostr::PublicKey>, VerifierError>) -> Self {
+            Self {
+                result,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        /// How many times `verify_assertion` has run.
+        pub(crate) fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl VerifyAssertion for ScriptedVerifier {
         fn verify_assertion(&self, _token: &str) -> Result<VerifiedAssertion, VerifierError> {
-            self.0.map(|key| {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.map(|key| {
                 VerifiedAssertion::for_test(
                     key,
                     vec![chrono::Utc::now() + chrono::Duration::hours(1)],
@@ -160,7 +187,7 @@ mod tests {
 
     #[test]
     fn missing_header_is_transport_missing_evidence() {
-        let v = FixedVerifier(Ok(None));
+        let v = ScriptedVerifier::new(Ok(None));
         assert_eq!(
             evaluate_attached_assertion(&HeaderMap::new(), Some(&v)).unwrap_err(),
             AssertionRejection::Transport(DenialClass::MissingEvidence)
@@ -194,7 +221,7 @@ mod tests {
             VerifierError::KeySourceUnavailable,
             VerifierError::InvalidSignatureOrClaims,
         ] {
-            let v = FixedVerifier(Err(err));
+            let v = ScriptedVerifier::new(Err(err));
             let rejection =
                 evaluate_attached_assertion(&headers("Bearer a.b.c"), Some(&v)).unwrap_err();
             assert_eq!(rejection, AssertionRejection::Verifier(err));

@@ -432,6 +432,7 @@ mod tests {
     #![allow(clippy::result_large_err)]
     use super::*;
     use crate::nip_fi_core::extract_bearer_token;
+    use crate::nip_fi_core::tests::ScriptedVerifier;
     use axum::http::StatusCode;
     use buzz_auth::CLIENT_ATTACHED_HEADER;
 
@@ -1211,37 +1212,6 @@ mod tests {
     // These pin the HTTP admission half of the shared evaluator contract, so a
     // refactor that moves evaluation or pairing elsewhere cannot change a
     // status, a body, or which step runs first.
-
-    /// Verifier returning a fixed result and counting calls.
-    struct ScriptedVerifier {
-        result: Result<Option<PublicKey>, buzz_auth::VerifierError>,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-    impl ScriptedVerifier {
-        fn new(result: Result<Option<PublicKey>, buzz_auth::VerifierError>) -> Self {
-            Self {
-                result,
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-        fn calls(&self) -> usize {
-            self.calls.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-    impl VerifyAssertion for ScriptedVerifier {
-        fn verify_assertion(
-            &self,
-            _token: &str,
-        ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.result.map(|key| {
-                buzz_auth::VerifiedAssertion::for_test(
-                    key,
-                    vec![Utc::now() + chrono::Duration::hours(1)],
-                )
-            })
-        }
-    }
 
     fn bearer_headers(value: &'static str) -> HeaderMap {
         let mut headers = HeaderMap::new();
