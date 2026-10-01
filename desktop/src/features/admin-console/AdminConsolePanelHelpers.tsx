@@ -9,6 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AlertCircle, LoaderCircle } from "lucide-react";
 import { formatRelativeTime } from "../forum/lib/time";
+import { CommunityBadge } from "./AdminConsoleCommunityBadge";
 
 // ── Generic async state ───────────────────────────────────────────────────
 
@@ -16,7 +17,7 @@ export type AsyncState<T> =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "ok"; data: T }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; error?: unknown };
 
 /**
  * Async load hook with effect-local active-flag cancellation.
@@ -52,6 +53,7 @@ export function useAsyncLoad<T>(
         setState({
           status: "error",
           message: e instanceof Error ? e.message : String(e),
+          error: e,
         });
       },
     );
@@ -156,6 +158,35 @@ export function adminMutationNotSent(e: unknown): boolean {
     );
   }
   return false;
+}
+
+export const UNSUPPORTED_BROWSING =
+  "This relay doesn't support community browsing yet.";
+
+/**
+ * Whether a relay answered a new route the way a relay without it does: a
+ * complete, empty 404/405. Reads the native `bodyEmpty` bit (set from the
+ * received bytes by both `AdminMutationError` and `AdminReadError`), never
+ * the message text.
+ */
+export function adminRouteUnsupported(e: unknown): boolean {
+  const status = adminMutationRelayStatus(e);
+  const payload =
+    e && typeof e === "object" && "payload" in e
+      ? (e as { payload: { bodyEmpty?: unknown } | null }).payload
+      : null;
+  return (
+    (status === 404 || status === 405) &&
+    adminMutationBodyComplete(e) &&
+    payload?.bodyEmpty === true
+  );
+}
+
+/** The `code` of a structured `AdminReadError`, or `null`. */
+export function adminReadErrorCode(e: unknown): string | null {
+  if (!adminMutationBodyComplete(e)) return null;
+  const code = (e as { payload?: { code?: unknown } }).payload?.code;
+  return typeof code === "string" ? code : null;
 }
 
 /**
@@ -358,17 +389,14 @@ export function groupByCommunity<
 /**
  * Render community-grouped rows under per-community headings.
  *
- * A single community collapses to a flat list (no redundant heading); two or
- * more render a labelled section each. `renderItem` produces the row for one
- * entry — the caller owns row markup so navigation/testids are unchanged.
+ * Each group is headed by its community badge, which opens that community's
+ * page and sits outside the row buttons. `renderItem` produces the row for
+ * one entry — the caller owns row markup so navigation/testids are unchanged.
  */
 export function CommunityGroupedList<
   T extends { communityId: string | null; communityHost: string | null },
 >({ items, renderItem }: { items: T[]; renderItem: (item: T) => ReactNode }) {
   const groups = useMemo(() => groupByCommunity(items), [items]);
-  if (groups.length <= 1) {
-    return <ul className="space-y-1">{items.map(renderItem)}</ul>;
-  }
   return (
     <div className="space-y-4">
       {groups.map((group) => (
@@ -377,7 +405,10 @@ export function CommunityGroupedList<
             className="mb-1.5 text-xs font-semibold text-muted-foreground"
             data-testid="community-group-host"
           >
-            {group.communityHost}
+            <CommunityBadge
+              host={group.items[0].communityHost || group.communityId}
+              id={group.items[0].communityId}
+            />
           </h4>
           <ul className="space-y-1">{group.items.map(renderItem)}</ul>
         </section>

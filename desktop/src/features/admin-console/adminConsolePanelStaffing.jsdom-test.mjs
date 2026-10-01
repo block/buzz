@@ -18,7 +18,9 @@ import {
   mutationReject,
   makeQueryClient,
   mountPanel,
+  mountCommunityPanel,
   mountStaffingPanel,
+  TEST_COMMUNITY,
   settle,
   CM_ORIGIN,
   CM_PUBKEY,
@@ -42,7 +44,7 @@ test("canMutate-false-staffing: staffing add/remove absent in disabled mode", as
     pubkey: CM_PUBKEY,
     canMutate: false,
     role: "operator",
-    initialTab: "staffing",
+    initialTab: "operators",
   });
   try {
     await doRender();
@@ -288,7 +290,7 @@ test("staffing-tab-reset-on-role-downgrade: panel shows reports content after op
               origin,
               pubkey,
               role,
-              initialTab: "staffing",
+              initialTab: "operators",
             }),
           ),
         ),
@@ -349,7 +351,7 @@ test("staffing-tab-reset-on-role-downgrade: panel shows reports content after op
       "reports tab button must be visible after reset",
     );
     const staffingTabBtn = container.querySelector(
-      "[data-testid='admin-tab-staffing']",
+      "[data-testid='admin-tab-operators']",
     );
     assert.equal(
       staffingTabBtn,
@@ -603,7 +605,7 @@ test("staffing-role-change-success: role selector change calls putAdminOperator 
     pubkey,
     canMutate: true,
     role: "operator",
-    initialTab: "staffing",
+    initialTab: "operators",
   });
   await doRender();
   await settle(30);
@@ -1031,10 +1033,10 @@ test("restrictions-empty: restrictions section shows 'no active bans or timeouts
     Promise.resolve({ items: [], nextCursor: null }),
   );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1077,7 +1079,11 @@ test("restrictions-unknown-host-is-an-error: an unresolved community host shows 
     );
   });
 
-  const { container, doRender, unmount } = mountStaffingPanel(origin, pubkey);
+  const { container, doRender, unmount } = mountCommunityPanel(
+    origin,
+    pubkey,
+    "restrictions",
+  );
   await doRender();
   await settle(30);
 
@@ -1098,9 +1104,9 @@ test("restrictions-unknown-host-is-an-error: an unresolved community host shows 
     );
     assert.equal(listCalls.length >= 1, true);
     assert.equal(
-      "communityId" in listCalls[0],
-      false,
-      "no client community id is sent",
+      listCalls[0].communityHost,
+      TEST_COMMUNITY.host,
+      "the list names the page's community, not the active relay's",
     );
   } finally {
     await unmount();
@@ -1120,10 +1126,10 @@ test("restrictions-rows: banned and timed-out members render with correct button
     }),
   );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1175,7 +1181,7 @@ test("restrictions-lift-ban-cancel: cancel does not invoke admin_lift_ban", asyn
   const bannedPubkey = "07".repeat(32);
 
   const liftCalls = [];
-  setIpcHandler("admin_lift_ban", (args) => {
+  setIpcHandler("admin_lift_restriction", ({ intent: args }) => {
     liftCalls.push(args);
     return Promise.resolve();
   });
@@ -1183,10 +1189,10 @@ test("restrictions-lift-ban-cancel: cancel does not invoke admin_lift_ban", asyn
     Promise.resolve({ items: [makeBanRecord(bannedPubkey)], nextCursor: null }),
   );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1246,7 +1252,7 @@ test("restrictions-lift-ban-confirm: confirming lift-ban calls admin_lift_ban wi
   const liftCalls = [];
   let remainingItems = [makeBanRecord(bannedPubkey)];
 
-  setIpcHandler("admin_lift_ban", (args) => {
+  setIpcHandler("admin_lift_restriction", ({ intent: args }) => {
     liftCalls.push(args);
     remainingItems = [];
     return Promise.resolve();
@@ -1255,10 +1261,10 @@ test("restrictions-lift-ban-confirm: confirming lift-ban calls admin_lift_ban wi
     Promise.resolve({ items: [...remainingItems], nextCursor: null }),
   );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1296,15 +1302,17 @@ test("restrictions-lift-ban-confirm: confirming lift-ban calls admin_lift_ban wi
       bannedPubkey,
       `admin_lift_ban must receive the banned pubkey; got: ${liftCalls[0]?.pubkey}`,
     );
-    assert.equal(
-      "communityId" in (liftCalls[0] ?? {}),
-      false,
-      "admin_lift_ban must not send a client community id; the native command derives the relay host",
-    );
-    assert.equal(
-      liftCalls[0]?.expectedRelay,
-      TEST_RELAY_WS_URL,
-      "admin_lift_ban carries the relay the list loaded from",
+    assert.deepEqual(
+      liftCalls[0],
+      {
+        origin,
+        communityHost: TEST_COMMUNITY.host,
+        expectedRelay: TEST_RELAY_WS_URL,
+        expectedSigner: pubkey,
+        kind: "ban",
+        pubkey: bannedPubkey,
+      },
+      "a lift freezes the page's host and the list's relay and signer",
     );
 
     // After the lift the list refreshes and the row must be gone.
@@ -1330,7 +1338,7 @@ test("restrictions-lift-timeout-confirm: confirming clear-timeout calls admin_li
   const liftCalls = [];
   let remainingItems = [makeTimeoutRecord(timedOutPubkey)];
 
-  setIpcHandler("admin_lift_timeout", (args) => {
+  setIpcHandler("admin_lift_restriction", ({ intent: args }) => {
     liftCalls.push(args);
     remainingItems = [];
     return Promise.resolve();
@@ -1339,10 +1347,10 @@ test("restrictions-lift-timeout-confirm: confirming clear-timeout calls admin_li
     Promise.resolve({ items: [...remainingItems], nextCursor: null }),
   );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1380,7 +1388,7 @@ test("restrictions-lift-timeout-confirm: confirming clear-timeout calls admin_li
     assert.equal(
       "communityId" in (liftCalls[0] ?? {}),
       false,
-      "admin_lift_timeout must not send a client community id; the native command derives the relay host",
+      "a lift sends no client community id",
     );
 
     // Row must be gone after list refresh.
@@ -1417,7 +1425,7 @@ test("restrictions-lift-409-treated-as-success: a 409 (already gone) refreshes t
   // Using a flag instead of a counter avoids races from multiple initial loads
   // (AdminConsolePanel\'s generation-bump useEffect causes 2 loads on mount).
   let liftAttempted = false;
-  setIpcHandler("admin_lift_ban", () => {
+  setIpcHandler("admin_lift_restriction", () => {
     liftAttempted = true;
     return mutationReject(
       'admin API error: {"error":{"code":"conflict","message":"no active ban for this member"}}',
@@ -1432,10 +1440,10 @@ test("restrictions-lift-409-treated-as-success: a 409 (already gone) refreshes t
     }),
   );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1501,10 +1509,10 @@ test("restrictions-load-more: second page is fetched with the cursor and appende
     );
   });
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
@@ -1561,11 +1569,11 @@ test("restrictions-load-more-stale-error: a failed old page does not survive a s
           nextCursor: lifted ? null : "next",
         }),
   );
-  setIpcHandler("admin_lift_ban", () => {
+  setIpcHandler("admin_lift_restriction", () => {
     lifted = true;
     return Promise.resolve();
   });
-  const m = mountStaffingPanel(origin, pubkey, [], {});
+  const m = mountCommunityPanel(origin, pubkey, "restrictions");
   try {
     await m.doRender();
     await settle(30);
@@ -1616,12 +1624,14 @@ test("restrictions-relay-changed: a removal rejected for a changed relay shows t
   setIpcHandler("admin_list_restrictions", () =>
     Promise.resolve({ items: [makeBanRecord(bannedPubkey)], nextCursor: null }),
   );
-  setIpcHandler("admin_lift_ban", () => mutationReject(scopeError, null));
+  setIpcHandler("admin_lift_restriction", () =>
+    mutationReject(scopeError, null),
+  );
 
-  const { container, doRender, unmount } = mountStaffingPanel(
+  const { container, doRender, unmount } = mountCommunityPanel(
     origin,
     pubkey,
-    [],
+    "restrictions",
   );
   await doRender();
   await settle(50);
