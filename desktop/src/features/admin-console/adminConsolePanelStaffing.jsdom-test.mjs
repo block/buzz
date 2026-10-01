@@ -26,6 +26,7 @@ import {
   CM_PUBKEY,
   CM_OP_PUBKEY,
   TEST_RELAY_WS_URL,
+  deferred,
 } from "./adminConsolePanelTestHelpers.jsdom.mjs";
 
 afterEach(resetTestState);
@@ -1325,6 +1326,83 @@ test("restrictions-lift-ban-confirm: confirming lift-ban calls admin_lift_ban wi
       null,
       "banned member row must be gone after ban is lifted",
     );
+  } finally {
+    await unmount();
+  }
+});
+
+test("restrictions-lift-frozen-during-reload: a lift confirmed while the list reloads keeps its row's relay and signer", async () => {
+  // Mutation: build the intent from the current list state at confirm time
+  // instead of freezing it at row selection → RED (empty relay and signer).
+  const origin = "https://admin-restrictions-concurrent.example.com";
+  const pubkey = "18".repeat(32);
+  const first = "31".repeat(32);
+  const second = "32".repeat(32);
+  const firstLift = deferred();
+  const reload = deferred();
+  const liftCalls = [];
+  let listCalls = 0;
+  setIpcHandler("admin_lift_restriction", ({ intent }) => {
+    liftCalls.push(intent);
+    return liftCalls.length === 1 ? firstLift.promise : Promise.resolve();
+  });
+  setIpcHandler("admin_list_restrictions", () => {
+    listCalls += 1;
+    return listCalls === 1
+      ? Promise.resolve({
+          items: [makeBanRecord(first), makeBanRecord(second)],
+          nextCursor: null,
+        })
+      : reload.promise;
+  });
+  const { container, doRender, unmount } = mountCommunityPanel(
+    origin,
+    pubkey,
+    "restrictions",
+  );
+  await doRender();
+  await settle(50);
+  const click = async (el) => {
+    assert.ok(el, "element present");
+    await act(async () => {
+      fireEvent.click(el);
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  };
+  const confirm = () =>
+    document.body.querySelector(
+      "[data-testid='restrictions-lift-ban-confirm']",
+    );
+  try {
+    await click(
+      container.querySelector(
+        `[data-testid='restrictions-lift-ban-btn-${first}']`,
+      ),
+    );
+    await click(confirm()); // first lift in flight
+    await click(
+      container.querySelector(
+        `[data-testid='restrictions-lift-ban-btn-${second}']`,
+      ),
+    );
+    await act(async () => {
+      firstLift.resolve();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    assert.ok(listCalls >= 2, "the first lift started a list reload");
+    await click(confirm()); // confirmed while the reload is pending
+    assert.equal(liftCalls.length, 2);
+    assert.deepEqual(liftCalls[1], {
+      origin,
+      communityHost: TEST_COMMUNITY.host,
+      expectedRelay: TEST_RELAY_WS_URL,
+      expectedSigner: pubkey,
+      kind: "ban",
+      pubkey: second,
+    });
+    await act(async () => {
+      reload.resolve({ items: [], nextCursor: null });
+    });
   } finally {
     await unmount();
   }

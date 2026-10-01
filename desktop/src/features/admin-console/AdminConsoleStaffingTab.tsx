@@ -172,13 +172,12 @@ export function RestrictionsSection({
   const [listGen, setListGen] = useState(0);
   const [liftError, setLiftError] = useState<string | null>(null);
   const [workingPubkey, setWorkingPubkey] = useState<string | null>(null);
-  /** Row and restriction pending a lift confirmation. */
-  const [pendingLift, setPendingLift] = useState<{
-    row: AdminMemberRestrictionDto;
-    kind: AdminLiftIntent["kind"];
-  } | null>(null);
+  /** The lift awaiting confirmation, frozen from the list its row came from. */
+  const [pendingLift, setPendingLift] = useState<AdminLiftIntent | null>(null);
 
   const listState: AsyncState<{
+    origin: string;
+    communityHost: string;
     relay: string;
     signer: string;
     items: AdminMemberRestrictionDto[];
@@ -187,6 +186,8 @@ export function RestrictionsSection({
     async () => {
       const relay = await getRelayWsUrl();
       return {
+        origin,
+        communityHost,
         relay,
         signer: pubkey,
         ...(await listAdminRestrictions(origin, communityHost, relay)),
@@ -195,24 +196,14 @@ export function RestrictionsSection({
     [origin, communityHost],
     generation + listGen,
   );
-  const loadedRelay = listState.status === "ok" ? listState.data.relay : "";
-  const loadedSigner = listState.status === "ok" ? listState.data.signer : "";
-
   const handleConfirmLift = async () => {
     if (!pendingLift) return;
-    const { row, kind } = pendingLift;
+    const intent = pendingLift;
     setPendingLift(null);
     setLiftError(null);
-    setWorkingPubkey(row.pubkey);
+    setWorkingPubkey(intent.pubkey);
     try {
-      await liftAdminRestriction({
-        origin,
-        communityHost,
-        expectedRelay: loadedRelay,
-        expectedSigner: loadedSigner,
-        kind,
-        pubkey: row.pubkey,
-      });
+      await liftAdminRestriction(intent);
       setListGen((g) => g + 1);
     } catch (e) {
       // 409 = nothing active any more — a soft success (already gone).
@@ -257,16 +248,30 @@ export function RestrictionsSection({
         ? extra.nextCursor
         : listState.data.nextCursor
       : null;
+  // Rows render only from a loaded list, so its context is always present.
+  const freezeLift = (memberPubkey: string, kind: AdminLiftIntent["kind"]) => {
+    if (listState.status !== "ok") return;
+    const { origin, communityHost, relay, signer } = listState.data;
+    setPendingLift({
+      origin,
+      communityHost,
+      expectedRelay: relay,
+      expectedSigner: signer,
+      kind,
+      pubkey: memberPubkey,
+    });
+  };
 
   const handleLoadMore = async () => {
-    if (!nextCursor) return;
+    if (!nextCursor || listState.status !== "ok") return;
+    const loaded = listState.data;
     const gen = loadGen;
     setMoreRequest({ gen, busy: true, error: null });
     try {
       const page = await listAdminRestrictions(
-        origin,
-        communityHost,
-        loadedRelay,
+        loaded.origin,
+        loaded.communityHost,
+        loaded.relay,
         nextCursor,
       );
       if (loadGenRef.current !== gen) return;
@@ -304,9 +309,10 @@ export function RestrictionsSection({
                 : "clear the active timeout"}{" "}
               for{" "}
               <span className="font-mono">
-                {pendingLift ? truncatePubkey(pendingLift.row.pubkey) : ""}
+                {pendingLift ? truncatePubkey(pendingLift.pubkey) : ""}
               </span>{" "}
-              in <code>{communityHost}</code>. They will be able to post again.
+              in <code>{pendingLift?.communityHost}</code>. They will be able to
+              post again.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -375,7 +381,7 @@ export function RestrictionsSection({
                   <Button
                     data-testid={`restrictions-lift-ban-btn-${row.pubkey}`}
                     disabled={isWorking}
-                    onClick={() => setPendingLift({ row, kind: "ban" })}
+                    onClick={() => freezeLift(row.pubkey, "ban")}
                     size="sm"
                     type="button"
                     variant="outline"
@@ -391,7 +397,7 @@ export function RestrictionsSection({
                   <Button
                     data-testid={`restrictions-lift-timeout-btn-${row.pubkey}`}
                     disabled={isWorking}
-                    onClick={() => setPendingLift({ row, kind: "timeout" })}
+                    onClick={() => freezeLift(row.pubkey, "timeout")}
                     size="sm"
                     type="button"
                     variant="outline"
