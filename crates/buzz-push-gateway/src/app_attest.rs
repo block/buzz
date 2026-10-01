@@ -705,6 +705,44 @@ mod tests {
     }
 
     #[test]
+    fn assertion_parts_rejects_malformed_maps() {
+        fn map(entries: &[(&str, &[u8])], indefinite: bool) -> Vec<u8> {
+            let mut data = [0u8; 256];
+            let mut encoder =
+                minicbor::Encoder::new(minicbor::encode::write::Cursor::new(data.as_mut_slice()));
+            if indefinite {
+                encoder.begin_map().unwrap();
+            } else {
+                encoder.map(entries.len() as u64).unwrap();
+            }
+            for (key, value) in entries {
+                encoder.str(key).unwrap().bytes(value).unwrap();
+            }
+            if indefinite {
+                encoder.end().unwrap();
+            }
+            let length = encoder.writer().position();
+            data[..length].to_vec()
+        }
+        let auth = [0u8; 37];
+        let sig = [1u8; 8];
+        let good = [("authenticatorData", &auth[..]), ("signature", &sig[..])];
+        assert!(assertion_parts(&map(&good, false)).is_ok());
+        for bad in [
+            map(
+                &[("authenticatorData", &auth[..36]), ("signature", &sig)],
+                false,
+            ),
+            map(&[("authenticatorData", &auth)], false),
+            map(&[good[0], good[1], ("extra", &sig)], false),
+            map(&[good[0], good[0], good[1]], false),
+            map(&good, true),
+        ] {
+            assert!(assertion_parts(&bad).is_err());
+        }
+    }
+
+    #[test]
     #[allow(clippy::assertions_on_constants, unexpected_cfgs)]
     fn gateway_test_build_does_not_define_testing_feature() {
         assert!(!cfg!(feature = "testing"));
