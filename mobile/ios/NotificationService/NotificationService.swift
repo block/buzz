@@ -65,6 +65,10 @@ final class NotificationService: UNNotificationServiceExtension {
       finish(request.content)
       return
     }
+    // The gateway payload is a fixed constant without `sound`; a NIP-PL
+    // `default` class notification is a standard alert, so it plays the
+    // default sound (still subject to the user's ringer and app settings).
+    content.sound = .default
     bestAttemptContent = content
     var cleanUserInfo = content.userInfo
     cleanUserInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
@@ -153,6 +157,7 @@ final class NotificationService: UNNotificationServiceExtension {
     fallback.subtitle = ""
     fallback.body = "Open Buzz to view this message."
     fallback.threadIdentifier = ""
+    fallback.sound = .default
     var userInfo = fallback.userInfo
     userInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
     fallback.userInfo = userInfo
