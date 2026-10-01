@@ -37,10 +37,24 @@ float seedAt(float step) {
   return 7.0;
 }
 
+// A small Gaussian kernel broadens the fuzzy edge at phone size without
+// adding a separate blur pass or softening the surrounding onboarding UI.
+float softAlpha(vec2 uv) {
+  vec2 d = vec2(9.0) / vec2(777.0, 326.0);
+  float alpha = texture(uWordmark, uv).a * 0.25;
+  alpha += (texture(uWordmark, uv + vec2(d.x, 0.0)).a
+          + texture(uWordmark, uv - vec2(d.x, 0.0)).a
+          + texture(uWordmark, uv + vec2(0.0, d.y)).a
+          + texture(uWordmark, uv - vec2(0.0, d.y)).a) * 0.125;
+  alpha += (texture(uWordmark, uv + d).a
+          + texture(uWordmark, uv - d).a
+          + texture(uWordmark, uv + vec2(d.x, -d.y)).a
+          + texture(uWordmark, uv + vec2(-d.x, d.y)).a) * 0.0625;
+  return alpha;
+}
+
 void main() {
   vec2 uv = FlutterFragCoord().xy / uSize;
-  // The PNG already contains the website's soft edges. Animate only its
-  // displacement and grain, avoiding a live multi-pass blur on mobile.
   vec2 p = uv * vec2(777.0, 326.0) * 0.68;
   float phase = uPhase * 4.0;
   float a = seedAt(floor(phase));
@@ -50,7 +64,7 @@ void main() {
     vec2(fractalNoise(p, a), fractalNoise(p + 43.7, a)),
     vec2(fractalNoise(p, b), fractalNoise(p + 43.7, b)), blend);
   vec2 displaced = uv + (textureNoise - 0.5) * 14.4 / vec2(777.0, 326.0);
-  float alpha = texture(uWordmark, clamp(displaced, 0.0, 1.0)).a;
+  float alpha = softAlpha(clamp(displaced, 0.0, 1.0));
   float grain = clamp((textureNoise.x + textureNoise.y) * 0.99, 0.0, 1.0);
   alpha = (alpha + alpha * grain * (1.0 - alpha)) * uColor.a;
   fragColor = vec4(uColor.rgb * alpha, alpha);
