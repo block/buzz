@@ -9543,15 +9543,134 @@ mod build_mcp_servers_tests {
         }
     }
 
-    #[test]
-    fn session_new_forwards_complete_git_block_without_duplicate_names() {
-        let mut config = test_config();
+    /// Run `GitEnvironment::install` with `vars` set and the runner's own
+    /// `GIT_CONFIG*` / `BUZZ_GIT_IDENTITY` hidden, so an agent session's
+    /// inherited identity cannot leak into the result. Caller holds `ENV_LOCK`.
+    fn install_git_with_env(
+        config: &Config,
+        vars: &[(String, String)],
+    ) -> anyhow::Result<git::GitEnvironment> {
+        let saved: Vec<_> = std::env::vars_os()
+            .filter(|(name, _)| {
+                name.to_str().is_some_and(|name| {
+                    name.starts_with("GIT_CONFIG") || name == "BUZZ_GIT_IDENTITY"
+                })
+            })
+            .collect();
+        for (name, _) in &saved {
+            std::env::remove_var(name);
+        }
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
         let git = git::GitEnvironment::install(
             &config.keys,
             &config.relay_url,
             &std::env::current_exe().unwrap(),
+        );
+        for (name, _) in vars {
+            std::env::remove_var(name);
+        }
+        for (name, value) in saved {
+            std::env::set_var(name, value);
+        }
+        git
+    }
+
+    #[test]
+    fn invalid_git_identity_mode_fails_install() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let err = install_git_with_env(
+            &test_config(),
+            &[("BUZZ_GIT_IDENTITY".into(), "human".into())],
         )
-        .unwrap();
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("BUZZ_GIT_IDENTITY"), "{err}");
+    }
+
+    #[test]
+    fn user_mode_mcp_block_drops_inherited_identity_and_signing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let inherited = [
+            ("user.name", "Inherited Agent"),
+            ("USER.EMAIL", "inherited@example.invalid"),
+            ("user.signingKey", "inherited-key"),
+            ("GPG.Format", "openpgp"),
+            ("GPG.x509.PROGRAM", "inherited-signer"),
+            ("commit.gpgsign", "true"),
+            ("TAG.GPGSIGN", "true"),
+            ("Include.Path", "/tmp/identity.inc"),
+            ("INCLUDEIF.gitdir:/.PATH", "/tmp/identity.inc"),
+            ("Author.Name", "Inherited Author"),
+            ("Author.Email", "author@example.invalid"),
+            ("COMMITTER.name", "Inherited Committer"),
+            ("committer.EMAIL", "committer@example.invalid"),
+            ("gpg.X509.program", "distinct-subsection"),
+            ("core.abbrev", "12"),
+        ];
+        let mut vars = vec![
+            ("BUZZ_GIT_IDENTITY".into(), "user".into()),
+            ("GIT_CONFIG_COUNT".into(), inherited.len().to_string()),
+        ];
+        for (i, (key, value)) in inherited.iter().enumerate() {
+            vars.push((format!("GIT_CONFIG_KEY_{i}"), key.to_string()));
+            vars.push((format!("GIT_CONFIG_VALUE_{i}"), value.to_string()));
+        }
+        let mut config = test_config();
+        let git = install_git_with_env(&config, &vars).unwrap();
+        config.persona_env_vars.extend(git.env.iter().cloned());
+        let servers = build_mcp_servers(&config);
+        let env = &servers[0].env;
+        let value_of = |name: &str| {
+            env.iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.value.clone())
+        };
+        let count: usize = value_of("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+        let entries: Vec<(String, String)> = (0..count)
+            .map(|i| {
+                (
+                    value_of(&format!("GIT_CONFIG_KEY_{i}")).unwrap(),
+                    value_of(&format!("GIT_CONFIG_VALUE_{i}")).unwrap(),
+                )
+            })
+            .collect();
+        for (key, _) in &inherited[..13] {
+            assert!(
+                !entries.iter().any(|(forwarded, _)| forwarded == key),
+                "{key} leaked: {entries:?}"
+            );
+        }
+        for survivor in [
+            ("gpg.X509.program", "distinct-subsection"),
+            ("core.abbrev", "12"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|(key, value)| (key.as_str(), value.as_str()) == survivor),
+                "{survivor:?} must survive unchanged: {entries:?}"
+            );
+        }
+        for absent in ["user.name", "user.email", "gpg.format", "commit.gpgSign"] {
+            assert!(
+                !entries.iter().any(|(key, _)| key == absent),
+                "user mode must not set {absent}: {entries:?}"
+            );
+        }
+        assert!(
+            entries.iter().any(|(key, _)| key == "nostr.keyfile"),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn session_new_forwards_complete_git_block_without_duplicate_names() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = test_config();
+        let git = install_git_with_env(&config, &[]).unwrap();
         config.persona_env_vars.extend(git.env.iter().cloned());
         let servers = build_mcp_servers(&config);
         let env = &servers[0].env;

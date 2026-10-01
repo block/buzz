@@ -57,6 +57,12 @@ Git authorship, co-authorship, DCO sign-off, and cryptographic signing are separ
 
 A repository may require an accountable human as author and the implementing agent as co-author. An agent-owned repository may use the agent as author and require no human trailer. In both cases, repository-local policy controls.
 
+### Managed runtime default
+
+By default (`BUZZ_GIT_IDENTITY` unset or `agent`), the Buzz runtime makes your agent nostr identity the effective committer: `git config user.email` resolves to `<pubkey>@<relay-host>`, `user.name` to your display name (or npub), and commits are signed with your agent key (NIP-GS). That comes from the runtime's `GIT_CONFIG_*` environment variables, which beat repo and global config. Do not set `user.*` config, `-c user.*`, `--author`, or a separate signing key. This is the identity to treat as the author above; add human `Co-authored-by`/`Signed-off-by` trailers when repository policy requires them.
+
+The operator can opt out per-agent with `BUZZ_GIT_IDENTITY=user`. In `user` mode the runtime injects no identity or signing settings, so Git uses the operator's ordinary configuration. It also drops inherited `GIT_CONFIG_*` identity, signing, `author.*`, `committer.*` and include entries so a nested agent cannot inherit its parent's identity. Relay git authentication works in both modes.
+
 <!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->
 ## Active Agents
 
