@@ -26,8 +26,8 @@
 //! ## Carrier / precedence
 //!
 //! Per NIP-FI.md §Client-attached transport:
-//! - Assertion: `Nostr-Federated-Identity: Bearer <compact-JWS>` (this
-//!   module's responsibility).
+//! - Assertion: `Nostr-Federated-Identity: Bearer <compact-JWS>` (extracted
+//!   and verified by [`crate::nip_fi_core`]).
 //! - Nostr proof: `Authorization: Nostr <base64-event>` (NIP-98, owned by
 //!   the NIP-98 closure passed to `admit_nip_fi_http`).
 //! - `Authorization` is RESERVED for NIP-98; the assertion MUST NOT appear
@@ -453,6 +453,7 @@ mod tests {
     use super::*;
     use crate::nip_fi_core::extract_bearer_token;
     use crate::nip_fi_core::test_support::{communities, host_headers};
+    use crate::nip_fi_core::tests::ScriptedVerifier;
     use axum::http::StatusCode;
     use buzz_auth::CLIENT_ATTACHED_HEADER;
 
@@ -1249,38 +1250,6 @@ mod tests {
     // refactor that moves evaluation or pairing elsewhere cannot change a
     // status, a body, or which step runs first.
 
-    /// Verifier returning a fixed result and counting calls.
-    struct ScriptedVerifier {
-        result: Result<Option<PublicKey>, buzz_auth::VerifierError>,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-    impl ScriptedVerifier {
-        fn new(result: Result<Option<PublicKey>, buzz_auth::VerifierError>) -> Self {
-            Self {
-                result,
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-        fn calls(&self) -> usize {
-            self.calls.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-    impl VerifyAssertion for ScriptedVerifier {
-        fn verify_assertion(
-            &self,
-            _token: &str,
-            _community: &buzz_auth::CommunityBinding,
-        ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.result.map(|key| {
-                buzz_auth::VerifiedAssertion::for_test(
-                    key,
-                    vec![Utc::now() + chrono::Duration::hours(1)],
-                )
-            })
-        }
-    }
-
     fn bearer_headers(value: &'static str) -> HeaderMap {
         let mut headers = host_headers();
         headers.insert(CLIENT_ATTACHED_HEADER, HeaderValue::from_static(value));
@@ -1398,7 +1367,9 @@ mod tests {
 
     // Pins: NIP-98 proof runs before assertion extraction. A failed NIP-98
     // proof with a missing assertion header is 401 from the NIP-98 step and
-    // the verifier never runs.
+    // the verifier never runs. This is the reverse of NIP-FI.md §Admission
+    // procedure. On guarded routes clients still see the spec order, because
+    // the router's assertion guard verifies the assertion before the handler.
     // Mutation: moving assertion evaluation ahead of the NIP-98 closure makes
     // the verifier run (call count 1) for a valid-looking header.
     #[test]

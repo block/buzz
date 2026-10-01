@@ -42,6 +42,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{HeaderMap, Response, StatusCode},
+    response::IntoResponse,
 };
 use serde::Deserialize;
 use tracing::{debug, warn};
@@ -542,7 +543,7 @@ fn plain_response(status: StatusCode, body: &'static str) -> Response<Body> {
         .status(status)
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(Body::from(body))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+        .unwrap_or_else(|_| status.into_response())
 }
 
 /// Render a command rejection with its spec-exact status and body.
@@ -2790,6 +2791,100 @@ mod route_integration_tests {
             "AuthorizationUnavailable",
         )
         .await;
+    }
+
+    /// `buzz_nip_fi_disconnect_capacity_rejections_total` counts exactly the
+    /// `DenySetFull` rejections and no other command-error arm.
+    ///
+    /// `#[test]` with a current-thread runtime, not `#[tokio::test]`:
+    /// `metrics::with_local_recorder` is thread-local and takes a sync closure,
+    /// so each request runs to completion on this thread inside its own
+    /// recorder's scope.
+    #[test]
+    fn capacity_rejection_counter_counts_only_deny_set_full() {
+        use axum::body::Bytes;
+
+        fn capacity_rejections_during(
+            rt: &tokio::runtime::Runtime,
+            request: impl std::future::Future<Output = (StatusCode, Bytes)>,
+        ) -> ((StatusCode, Bytes), u64) {
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let response = metrics::with_local_recorder(&recorder, || rt.block_on(request));
+            let count = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .find(|(key, ..)| {
+                    key.key().name() == "buzz_nip_fi_disconnect_capacity_rejections_total"
+                })
+                .map_or(0, |(.., value)| match value {
+                    metrics_util::debugging::DebugValue::Counter(n) => n,
+                    other => panic!("capacity rejections must be a counter, got {other:?}"),
+                });
+            (response, count)
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        let state = rt.block_on(build_test_state(1));
+
+        let t = target_hex();
+        let tampered = format!("{}X", mint_token(&t, 300, serde_json::json!({})));
+        let intruder = mint_token(&t, 300, serde_json::json!({"sub": "intruder@example.com"}));
+        let far_until = mint_token(&t, 10 * 365 * 24 * 3600, serde_json::json!({}));
+        for (why, token, status, body) in [
+            (
+                "EvidenceRejected",
+                tampered,
+                StatusCode::FORBIDDEN,
+                "evidence rejected\n",
+            ),
+            (
+                "AuthorizationDenied",
+                intruder,
+                StatusCode::FORBIDDEN,
+                "authorization denied\n",
+            ),
+            (
+                "UntilExceedsCeiling",
+                far_until,
+                StatusCode::BAD_REQUEST,
+                "bad request\n",
+            ),
+        ] {
+            let (response, count) =
+                capacity_rejections_during(&rt, post_command(&state, &token, &t));
+            assert_eq!(
+                response,
+                (status, Bytes::from_static(body.as_bytes())),
+                "{why}"
+            );
+            assert_eq!(count, 0, "{why} must not count as a capacity rejection");
+        }
+
+        // Fill the capacity-1 deny set, then the next distinct target is full.
+        let t = target_hex();
+        let (filled, _) = rt.block_on(post_command(
+            &state,
+            &mint_token(&t, 300, serde_json::json!({})),
+            &t,
+        ));
+        assert_eq!(filled, StatusCode::OK, "control: slot filled");
+        let t = target_hex();
+        let token = mint_token(&t, 300, serde_json::json!({}));
+        let (response, count) = capacity_rejections_during(&rt, post_command(&state, &token, &t));
+        assert_eq!(
+            response,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from_static(b"deny set full\n")
+            ),
+            "DenySetFull"
+        );
+        assert_eq!(count, 1, "DenySetFull must count one capacity rejection");
     }
 
     // ── Cross-pod command replay fence ───────────────────────────────────────
