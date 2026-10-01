@@ -7059,6 +7059,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_prompt_task_observes_thread_root_only_for_thread_scope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let channel_id = Uuid::new_v4();
         let root = "a".repeat(64);
         for (scope, expected_root) in [
@@ -7083,6 +7085,7 @@ mod tests {
                 protocol_version: 1,
             };
             let observer = observer::ObserverHandle::in_process();
+            let mut observer_rx = observer.subscribe();
             agent.acp.set_observer(Some(observer.clone()), 0);
             let batch = FlushBatch {
                 channel_id,
@@ -7092,7 +7095,25 @@ mod tests {
                 cancel_reason: None,
             };
             let mut ctx = make_prompt_context_no_owner();
-            // Known metadata plus an unreachable project lookup stops before ACP setup.
+            ctx.turn_liveness_interval = Duration::from_millis(10);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind channel context server");
+            ctx.rest_client.base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                request_tx.send(()).unwrap();
+                // Hold the real lookup open until a liveness frame is observed.
+                let _ = release_rx.await;
+                socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
             ctx.channel_info = ChannelInfoResolver::new(
                 HashMap::from([(
                     channel_id,
@@ -7105,7 +7126,7 @@ mod tests {
                 ctx.rest_client.clone(),
             );
             let (result_tx, mut result_rx) = mpsc::unbounded_channel();
-            run_prompt_task(
+            let prompt = tokio::spawn(run_prompt_task(
                 agent,
                 Some(batch),
                 None,
@@ -7113,8 +7134,21 @@ mod tests {
                 result_tx,
                 None,
                 "observer-test-turn".into(),
-            )
+            ));
+            let liveness = tokio::time::timeout(Duration::from_secs(5), async {
+                request_rx.await.expect("channel context lookup started");
+                loop {
+                    let event = observer_rx.recv().await.expect("observer frame");
+                    if event.kind == "turn_liveness" {
+                        return event;
+                    }
+                }
+            })
             .await;
+            // Release the fixture and shut down ACP before asserting the frame.
+            release_tx.send(()).unwrap();
+            prompt.await.expect("prompt task completed");
+            server.await.expect("channel context server completed");
             let mut result = result_rx.recv().await.expect("prompt result");
             assert!(matches!(
                 result.outcome,
@@ -7131,6 +7165,12 @@ mod tests {
                 starts[0].payload.get("threadRootEventId"),
                 expected_root.map(serde_json::Value::from).as_ref(),
                 "turn start must identify only the canonical thread scope"
+            );
+            let liveness = liveness.expect("liveness during channel context lookup");
+            assert_eq!(
+                liveness.payload.get("threadRootEventId"),
+                expected_root.map(serde_json::Value::from).as_ref(),
+                "production liveness wiring must identify only the canonical thread scope"
             );
         }
     }
@@ -9478,7 +9518,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
-                Some("a".repeat(64)),
+                None,
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9502,9 +9542,6 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             .filter(|e| e.kind == "turn_liveness")
             .collect();
         assert_eq!(pings.len(), 2);
-        assert!(pings
-            .iter()
-            .all(|ping| ping.payload["threadRootEventId"] == "a".repeat(64)));
         assert_eq!(
             pings[0].session_id, None,
             "pre-resolution ping must not carry a session ID"
