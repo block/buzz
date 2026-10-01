@@ -206,9 +206,13 @@ pub(crate) async fn admitted_owner(
         .get_agent_channel_policy(community, pubkey.as_bytes())
         .await
     {
-        Ok(row) => Ok(row
-            .and_then(|(_, owner)| owner)
-            .and_then(|owner| owner.try_into().ok())),
+        Ok(row) => {
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::after_stored_owner_read(community).await;
+            Ok(row
+                .and_then(|(_, owner)| owner)
+                .and_then(|owner| owner.try_into().ok()))
+        }
         Err(e) => {
             warn!(pubkey = %pubkey.to_hex(), error = %e, "stored agent owner lookup failed, denying");
             Err(AdmissionDenial {
@@ -627,18 +631,15 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // `final_admission_denial`), then refuse if a disconnect already
             // cancelled this socket. No await separates the last check from
             // `authenticate`.
-            let owner =
-                match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
-                    Ok(owner) => owner,
-                    Err(denial) => {
-                        deny_admission(&conn, &event_id_hex, denial);
-                        return;
-                    }
-                };
-            // Owner before pubkey: a disconnect of the agent's ownerless
-            // sockets must never see this socket bound without its owner.
-            if let Some(owner) = owner {
-                state.conn_manager.set_admitted_owner(conn_id, owner);
+            // A proven owner is recorded before the pubkey, so this socket's
+            // own link never finds it bound ownerless. Without one, the pubkey
+            // is bound before the stored-owner read: a concurrent link either
+            // finds this socket bound and closes it, or commits before the
+            // read and is recorded here.
+            if let Some(owner) = nip_oa_owner {
+                state
+                    .conn_manager
+                    .set_admitted_owner(conn_id, owner.to_bytes());
             }
             // The bind carries the admitting NIP-FI issuer, so a concurrent
             // `disconnect_nip_fi` scan that sees the pubkey also sees its
@@ -650,6 +651,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .as_ref()
                     .map(|a| a.identity().issuer().to_owned()),
             );
+            match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
+                Ok(Some(owner)) => state.conn_manager.set_admitted_owner(conn_id, owner),
+                Ok(None) => {}
+                Err(denial) => {
+                    deny_admission(&conn, &event_id_hex, denial);
+                    return;
+                }
+            }
             let denial = match final_admission_denial(
                 &state,
                 conn.tenant.community(),
@@ -1928,6 +1937,63 @@ mod tests {
                 "the socket admitted with its owner stays"
             );
             assert!(!watcher.cancel.is_cancelled(), "the bystander stays");
+        }
+
+        /// An untagged AUTH that read a NULL stored owner just before a
+        /// concurrent owner link commits must not end up admitted ownerless:
+        /// either the link's disconnect closes it, or it carries the owner.
+        /// Otherwise an owner revoke whose agent lookup fails, leaving only
+        /// the owner match, misses it.
+        ///
+        /// Mutation: bind the pubkey after the stored-owner read → the link
+        /// finds nothing bound, the socket is admitted ownerless and survives
+        /// the owner match → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn owner_link_racing_untagged_auth_cannot_leave_it_ownerless() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent) = (Keys::generate(), Keys::generate());
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "race-untagged");
+            let event = signed_auth(&agent, "race-untagged", None);
+
+            let (arrived, release) =
+                crate::nip_fi_test_hooks::stored_owner_read_hook::arm(community);
+            let auth = tokio::spawn(handle_auth(event, Arc::clone(&conn), Arc::clone(&state)));
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+                .await
+                .expect("AUTH reaches the stored-owner read")
+                .expect("hook armed");
+
+            // The owner link commits through the shared owner writer, which
+            // HTTP `POST /events` also uses, and runs its disconnect now.
+            assert!(
+                crate::api::relay_members::materialize_nip_oa_owner(
+                    &state,
+                    &conn.tenant,
+                    &agent.public_key(),
+                    &owner.public_key(),
+                )
+                .await,
+                "the owner link commits"
+            );
+            release.notify_one();
+            auth.await.expect("AUTH task");
+
+            // Revoking the owner with the agent lookup failing leaves only the
+            // owner match.
+            state.disconnect_pubkey_local(
+                community,
+                &owner.public_key().to_bytes(),
+                &"0".repeat(64),
+                "blocked: you are banned from this community",
+                false,
+            );
+            assert!(
+                conn.cancel.is_cancelled(),
+                "the racing socket is closed or carries its owner"
+            );
         }
 
         async fn auth_test_state_real_db_expect() -> std::sync::Arc<crate::state::AppState> {

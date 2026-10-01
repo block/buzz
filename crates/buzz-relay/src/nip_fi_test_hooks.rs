@@ -232,6 +232,10 @@ make_hook!(
     after_deny_set_check_passed
 );
 
+// `handlers/auth.rs::admitted_owner`, after the stored-owner read returns and
+// before the caller records it. A test links the owner here to race admission.
+make_hook!(stored_owner_read_hook, after_stored_owner_read);
+
 // ── Publication-attempt counter ────────────────────────────────────────────
 // `before_event_publish`: fires immediately before `state.pubsub.publish_event`
 // in `dispatch_persistent_event_inner`. Used by W2: after handle_event returns

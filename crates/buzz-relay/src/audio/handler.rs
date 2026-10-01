@@ -812,13 +812,19 @@ pub(crate) async fn handle_active_audio_connection(
     // applies (see `final_admission_denial`), before any huddle lease. A ban
     // or removal whose disconnect ran before the bind is seen by these fresh
     // reads; one that runs after it cancels this socket (`check_cancel!`).
+    // Same order as root AUTH: a proven owner before the pubkey; otherwise
+    // the pubkey before the stored-owner read, so a concurrent owner link
+    // either closes this socket or is seen by the read.
+    if let Some(owner) = nip_oa_owner {
+        control.bind_owner(owner.to_bytes());
+    }
+    control.bind_pubkey(pubkey.to_bytes());
     let owner =
         crate::handlers::auth::admitted_owner(&state, tenant.community(), pubkey, nip_oa_owner)
             .await;
     if let Ok(Some(owner)) = owner {
         control.bind_owner(owner);
     }
-    control.bind_pubkey(pubkey.to_bytes());
     let denial = match owner {
         Err(denial) => Some(denial),
         Ok(_) => {
