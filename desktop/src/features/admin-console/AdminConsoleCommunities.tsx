@@ -9,7 +9,7 @@
  * derived from the active relay.
  */
 
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { ArrowLeft, LoaderCircle } from "lucide-react";
 import { Button } from "@/shared/ui/button";
 import { listAdminCommunities, type AdminCommunityDto } from "./api";
@@ -43,17 +43,23 @@ export function CommunitiesTab({
   const { open, connectedHost } = useCommunityNav();
   const [query, setQuery] = useState("");
   const q = useDeferredValue(query.trim().toLowerCase());
+  // One identity per search transition, so A→B→A is three searches and a
+  // page requested under an earlier one can never land under a later one.
+  const key = `${origin}\n${q}\n${generation}`;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new identity per key change is the point
+  const search = useMemo(() => ({}), [key]);
+  const searchRef = useRef(search);
+  searchRef.current = search;
   const [more, setMore] = useState<{
-    key: string;
+    search: object;
     items: AdminCommunityDto[];
     nextCursor: string | null;
   } | null>(null);
   const [moreState, setMoreState] = useState<{
-    key: string;
+    search: object;
     busy: boolean;
     error: string | null;
   } | null>(null);
-  const key = `${origin}\n${q}\n${generation}`;
 
   const first = useAsyncLoad(
     () => listAdminCommunities(origin, q),
@@ -83,8 +89,8 @@ export function CommunitiesTab({
     );
   }
 
-  const extra = more?.key === key ? more : null;
-  const moreStatus = moreState?.key === key ? moreState : null;
+  const extra = more?.search === search ? more : null;
+  const moreStatus = moreState?.search === search ? moreState : null;
   const pinnedRow = pinned.status === "ok" ? pinned.data : null;
   const items =
     first.status === "ok"
@@ -100,17 +106,19 @@ export function CommunitiesTab({
 
   const loadMore = async () => {
     if (!nextCursor) return;
-    setMoreState({ key, busy: true, error: null });
+    setMoreState({ search, busy: true, error: null });
     try {
       const page = await listAdminCommunities(origin, q, nextCursor);
+      if (searchRef.current !== search) return;
       setMore((prev) => ({
-        key,
-        items: [...(prev?.key === key ? prev.items : []), ...page.items],
+        search,
+        items: [...(prev?.search === search ? prev.items : []), ...page.items],
         nextCursor: page.nextCursor,
       }));
-      setMoreState({ key, busy: false, error: null });
+      setMoreState({ search, busy: false, error: null });
     } catch (e) {
-      setMoreState({ key, busy: false, error: adminErrorMessage(e) });
+      if (searchRef.current !== search) return;
+      setMoreState({ search, busy: false, error: adminErrorMessage(e) });
     }
   };
 

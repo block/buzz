@@ -7,6 +7,7 @@ import {
   act,
   CM_ORIGIN,
   CM_PUBKEY,
+  deferred,
   fireEvent,
   makeOpenReportFixtures,
   mountCommunityPanel,
@@ -87,6 +88,71 @@ test("communities-directory: the connected community is pinned by exact host and
     assert.ok(q(c, "community-not-connected"), "warns it isn't connected");
   } finally {
     await unmount();
+  }
+});
+
+test("communities-stale-more: a late page from an earlier search leaves the current search's pages alone", async () => {
+  // Mutation: drop either searchRef check in loadMore → RED (B's second page
+  // vanishes, or B shows A's error).
+  for (const settleA of ["resolve", "reject"]) {
+    const late = deferred();
+    const bPage = deferred();
+    const cursors = [];
+    setIpcHandler("admin_connected_community_host", () =>
+      Promise.resolve(null),
+    );
+    setIpcHandler("admin_list_communities", ({ q: query, cursor }) => {
+      cursors.push(cursor ?? null);
+      if (cursor === "a2") return late.promise;
+      if (cursor === "b2") return bPage.promise;
+      return Promise.resolve(
+        query === "b"
+          ? { items: [community(4)], nextCursor: "b2" }
+          : { items: [community(1)], nextCursor: "a2" },
+      );
+    });
+    const { container: c, unmount } = await mountCommunities();
+    const search = async (text) => {
+      await act(async () => {
+        fireEvent.change(q(c, "communities-search-input"), {
+          target: { value: text },
+        });
+      });
+      await settle();
+    };
+    try {
+      await search("a");
+      await click(q(c, "communities-load-more")); // A's page 2 stays pending
+      await search("b");
+      await click(q(c, "communities-load-more")); // B's page 2 in flight
+      await act(async () => {
+        if (settleA === "resolve") {
+          late.resolve({ items: [community(2)], nextCursor: null });
+        } else {
+          late.reject(new Error("admin API error: stale page"));
+        }
+      });
+      await settle();
+      assert.ok(
+        q(c, "communities-load-more").disabled,
+        `B's request is still busy (${settleA})`,
+      );
+      await act(async () => {
+        bPage.resolve({ items: [community(5)], nextCursor: "b3" });
+      });
+      await settle();
+      const hosts = [
+        ...c.querySelectorAll("[data-testid^='community-row-']"),
+      ].map((el) => el.dataset.testid.replace("community-row-", ""));
+      assert.deepEqual(hosts, ["c4.example.com", "c5.example.com"], settleA);
+      assert.doesNotMatch(c.textContent, /stale page/, settleA);
+      const more = q(c, "communities-load-more");
+      assert.ok(more && !more.disabled, `B can still load more (${settleA})`);
+      await click(more);
+      assert.equal(cursors.at(-1), "b3", `B keeps its cursor (${settleA})`);
+    } finally {
+      await unmount();
+    }
   }
 });
 
