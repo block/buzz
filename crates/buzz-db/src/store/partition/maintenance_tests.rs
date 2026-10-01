@@ -195,6 +195,103 @@ fn advancement_crosses_the_year_boundary() {
 }
 
 #[test]
+fn create_kill_switch_also_stops_advancement() {
+    let advance_only = PartitionMaintenancePolicy {
+        create_enabled: false,
+        advance_enabled: true,
+    };
+    assert_eq!(
+        plan_maintenance(&repaired_audit(false), advance_only),
+        MaintenancePlan::Disabled
+    );
+}
+
+#[test]
+fn advancement_is_capped_at_the_supported_horizon() {
+    // The horizon ends in March 2027, so a catch-all from April 2017 needs
+    // exactly the maximum number of monthlies and one from March 2017 needs one more.
+    let from = |lower| {
+        let mut audit = repaired_audit(false);
+        audit.children[1].lower = Some(PartitionBound::Finite(lower));
+        plan_maintenance(&audit, ADVANCE)
+    };
+    let MaintenancePlan::Apply(change) = from(month(2017, 4)) else {
+        panic!("expected advancement at the cap");
+    };
+    assert_eq!(change.create.len(), MAX_PARTITION_MONTHS_AHEAD as usize);
+    match from(month(2017, 3)) {
+        MaintenancePlan::Refuse(reason) => assert!(reason.contains("more than"), "{reason}"),
+        plan => panic!("expected refusal past the cap, got {plan:?}"),
+    }
+}
+
+/// `buzz_partition_create_attempts_total` counts keyed by their `outcome` label.
+fn create_attempts(result: &TableMaintenance) -> std::collections::BTreeMap<String, u64> {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        emit_maintenance_metrics(&repaired_audit(false), result)
+    });
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == "buzz_partition_create_attempts_total")
+        .map(|(key, _, _, value)| {
+            let outcome = key
+                .key()
+                .labels()
+                .find(|label| label.key() == "outcome")
+                .map(|label| label.value().to_string())
+                .expect("outcome label");
+            let metrics_util::debugging::DebugValue::Counter(count) = value else {
+                panic!("create attempts must be a counter");
+            };
+            (outcome, count)
+        })
+        .collect()
+}
+
+#[test]
+fn only_ddl_failures_count_as_create_errors() {
+    let MaintenancePlan::Apply(change) = plan_maintenance(&repaired_audit(false), ADVANCE) else {
+        panic!("expected advancement");
+    };
+    let failed = |outcome| TableMaintenance::failed(outcome, Some(change.clone()), String::new());
+    let covered = ("skipped_covered".to_string(), 4);
+
+    for outcome in [
+        PartitionMaintenanceOutcome::LockTimeout,
+        PartitionMaintenanceOutcome::Deadline,
+    ] {
+        assert_eq!(
+            create_attempts(&failed(outcome)),
+            [covered.clone()].into(),
+            "{outcome:?}"
+        );
+    }
+    for outcome in [
+        PartitionMaintenanceOutcome::Error,
+        PartitionMaintenanceOutcome::OperatorRequired,
+    ] {
+        assert_eq!(
+            create_attempts(&failed(outcome)),
+            [covered.clone(), ("error".to_string(), 3)].into(),
+            "{outcome:?}"
+        );
+    }
+    let advanced = TableMaintenance {
+        outcome: PartitionMaintenanceOutcome::Advanced,
+        change: Some(change.clone()),
+        error: None,
+    };
+    assert_eq!(
+        create_attempts(&advanced),
+        [covered, ("created".to_string(), 3)].into()
+    );
+}
+
+#[test]
 fn outcome_labels_are_stable() {
     use PartitionMaintenanceOutcome::*;
     assert_eq!(
@@ -455,7 +552,11 @@ mod postgres_tests {
         let (pool, admin, schema) = scratch_pool().await;
         seed_repaired_layout(&pool, true).await;
         let before = catalog_snapshot(&pool).await;
-        let holder = hold_lock(&pool, "SELECT count(*) FROM communities").await;
+        let holder = hold_lock(
+            &pool,
+            "INSERT INTO communities(id) VALUES (gen_random_uuid())",
+        )
+        .await;
 
         let started = Instant::now();
         let result = maintain(&pool).await;
@@ -468,11 +569,121 @@ mod postgres_tests {
                     && message.contains("delivery_log lock_timeout")),
             "{result:?}"
         );
-        // NOWAIT: no 2s wait per table while a counterpart reader is active.
+        // NOWAIT: no 2s wait per table while a counterpart writer is active.
         assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
         assert_eq!(catalog_snapshot(&pool).await, before);
 
         assert_advanced(&maintain(&pool).await.expect("advance after release"));
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn counterpart_reader_does_not_block_advancement() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, true).await;
+        let holder = hold_lock(&pool, "SELECT count(*) FROM communities").await;
+
+        let result = maintain(&pool).await;
+        drop(holder);
+
+        assert_advanced(&result.expect("advance beside a counterpart reader"));
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_checking_a_foreign_key_behind_maintenance_does_not_deadlock() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, true).await;
+        // An in-flight insert: the parent first, then the foreign-key check.
+        let mut writer = hold_lock(&pool, "LOCK TABLE ONLY events IN ROW EXCLUSIVE MODE").await;
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *writer)
+            .await
+            .expect("writer backend pid");
+
+        let maintenance = tokio::spawn({
+            let pool = pool.clone();
+            async move { maintain(&pool).await }
+        });
+        let mut queued = false;
+        for _ in 0..50 {
+            queued = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(writer_pid)
+            .fetch_one(&admin)
+            .await
+            .expect("check queued maintenance");
+            if queued {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(queued, "maintenance never queued behind the writer");
+
+        // Maintenance waits on the parent holding no counterpart lock, so the
+        // writer's key check proceeds instead of entering a lock cycle.
+        let started = Instant::now();
+        sqlx::query("SELECT id FROM communities FOR KEY SHARE")
+            .fetch_all(&mut *writer)
+            .await
+            .expect("foreign-key check behind queued maintenance");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        writer.commit().await.expect("commit writer");
+
+        assert_advanced(
+            &maintenance
+                .await
+                .expect("maintenance task")
+                .expect("advance after the writer commits"),
+        );
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deadlock_victim_is_classified_as_a_lock_timeout() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_parents(&pool).await;
+        let mut first = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS EXCLUSIVE MODE").await;
+        let mut second = hold_lock(
+            &pool,
+            "LOCK TABLE ONLY delivery_log IN ACCESS EXCLUSIVE MODE",
+        )
+        .await;
+        let first_waits = sqlx::query("LOCK TABLE ONLY delivery_log IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *first);
+        let second_waits = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sqlx::query("LOCK TABLE ONLY events IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *second)
+                .await
+        };
+        let (first_result, second_result) = tokio::join!(first_waits, second_waits);
+        let victim = first_result
+            .err()
+            .or(second_result.err())
+            .expect("one session is the deadlock victim");
+        assert_eq!(
+            victim
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("40P01"),
+            "{victim:?}"
+        );
+        assert_eq!(
+            classify_error(&DbError::from(victim)),
+            PartitionMaintenanceOutcome::LockTimeout
+        );
+        drop((first, second));
         drop_schema(&admin, &schema).await;
     }
 
@@ -687,6 +898,7 @@ mod postgres_tests {
             let result = maintain_table(
                 &pool,
                 table_audit,
+                plan_maintenance(table_audit, ADVANCE),
                 PARTITION_MANAGER_MONTHS_AHEAD as i32,
                 ADVANCE,
                 fixed_now(),
@@ -701,6 +913,62 @@ mod postgres_tests {
             );
         }
         assert_eq!(catalog_snapshot(&pool).await, advanced);
+
+        // The losing runner reports the layout the winner committed.
+        let reported = maintain_audited(
+            &pool,
+            stale,
+            PARTITION_MANAGER_MONTHS_AHEAD,
+            ADVANCE,
+            fixed_now(),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("losing runner");
+        assert_advanced(&reported);
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replan_that_finds_only_disabled_work_is_skipped_disabled() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, false).await;
+        sqlx::query("DROP TABLE events_p_future_next")
+            .execute(&pool)
+            .await
+            .expect("drop catch-all");
+        // Creation is planned for the uncovered months, but a catch-all appears
+        // before the lock and advancing it is disabled.
+        let stale = audit_partition_catalog_at(&pool, PARTITION_MANAGER_MONTHS_AHEAD, fixed_now())
+            .await
+            .expect("stale audit");
+        let events = stale.tables.iter().find(|t| t.table == "events").unwrap();
+        create_child(
+            &pool,
+            "events",
+            "events_p_future_next",
+            "'2027-01-01'",
+            "MAXVALUE",
+        )
+        .await;
+        let before = catalog_snapshot(&pool).await;
+
+        let result = maintain_table(
+            &pool,
+            events,
+            plan_maintenance(events, CREATE_ONLY),
+            PARTITION_MANAGER_MONTHS_AHEAD as i32,
+            CREATE_ONLY,
+            fixed_now(),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            (result.outcome, result.error.as_deref()),
+            (PartitionMaintenanceOutcome::SkippedDisabled, None)
+        );
+        assert_eq!(catalog_snapshot(&pool).await, before);
         drop_schema(&admin, &schema).await;
     }
 

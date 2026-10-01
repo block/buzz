@@ -461,19 +461,8 @@ async fn audit_partition_catalog_report_at_with_timeout(
     }
 }
 
-/// Audit first, then create only months proven to be uncovered.
-///
-/// Covered ranges are never probed with DDL, and a catch-all is never
-/// advanced; see [`maintain_partitions`]. Failures are aggregated across
-/// managed parents before an error is returned.
-pub async fn ensure_future_partitions(
-    pool: &PgPool,
-    months_ahead: u32,
-    create_enabled: bool,
-) -> Result<PartitionAudit> {
-    ensure_future_partitions_at(pool, months_ahead, create_enabled, Utc::now()).await
-}
-
+/// Create-only maintenance at a fixed clock, for tests of month creation.
+#[cfg(test)]
 async fn ensure_future_partitions_at(
     pool: &PgPool,
     months_ahead: u32,
@@ -534,7 +523,7 @@ async fn audit_table_once(
 /// catalog, so the audit can be retried.
 fn is_concurrent_drop(error: &DbError) -> bool {
     match error {
-        DbError::NotFound(_) => true,
+        DbError::PartitionDroppedMidAudit(_) => true,
         // `relation_contains_rows` names a leaf that no longer exists.
         DbError::Sqlx(sqlx::Error::Database(database)) => {
             database.code().as_deref() == Some("42P01")
@@ -573,16 +562,6 @@ impl Db {
     #[datastore_span(name = "audit_partitions_report", system = "postgresql")]
     pub async fn audit_partitions_report(&self, months_ahead: u32) -> PartitionAuditReport {
         audit_partition_catalog_report(&self.pool, months_ahead).await
-    }
-
-    /// Ensures monthly partitions exist for the next N months when creation is enabled.
-    #[datastore_span(name = "ensure_future_partitions", system = "postgresql")]
-    pub async fn ensure_future_partitions(
-        &self,
-        months_ahead: u32,
-        create_enabled: bool,
-    ) -> Result<PartitionAudit> {
-        ensure_future_partitions(&self.pool, months_ahead, create_enabled).await
     }
 
     /// Issues the bounded partition DDL `policy` permits, then returns a fresh audit.
@@ -724,9 +703,7 @@ async fn audit_table_on(
             .into_iter()
             .collect::<Option<Vec<String>>>()
             .ok_or_else(|| {
-                DbError::NotFound(format!(
-                    "a sibling of partition {name} was dropped mid-audit"
-                ))
+                DbError::PartitionDroppedMidAudit(format!("a sibling of partition {name}"))
             })?;
         if detach_pending {
             pending_roots.insert(root_child_relation_oid);
@@ -736,7 +713,7 @@ async fn audit_table_on(
             && !detach_pending;
         let expression: String = row
             .try_get::<Option<String>, _>("bound")?
-            .ok_or_else(|| DbError::NotFound(format!("partition {name} was dropped mid-audit")))?;
+            .ok_or_else(|| DbError::PartitionDroppedMidAudit(format!("partition {name}")))?;
         let is_default = expression.trim() == "DEFAULT";
         let own_range = parse_range_bounds(&expression);
         let is_catch_all = own_range.as_ref().is_some_and(|(lower, upper)| {
@@ -1579,6 +1556,20 @@ mod tests {
             .errors
             .iter()
             .all(|error| error.error.contains("months_ahead must be at most 120")));
+    }
+
+    #[test]
+    fn only_a_mid_audit_drop_is_retried() {
+        assert!(is_concurrent_drop(&DbError::PartitionDroppedMidAudit(
+            "partition events_p2026_09".to_string()
+        )));
+        assert!(!is_concurrent_drop(&DbError::NotFound("row".to_string())));
+        assert!(!is_concurrent_drop(&DbError::InvalidData(
+            "bound".to_string()
+        )));
+        assert!(!is_concurrent_drop(&DbError::Sqlx(
+            sqlx::Error::PoolTimedOut
+        )));
     }
 
     #[test]

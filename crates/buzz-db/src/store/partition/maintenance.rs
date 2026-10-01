@@ -7,9 +7,9 @@
 //!
 //! 1. holds a schema-scoped advisory lock, so concurrent relays produce one
 //!    winner and `skipped_locked` losers;
-//! 2. locks foreign-key counterparts, then the parent, then the catch-all, in
-//!    the order proven by the manual repair runbook, failing fast on
-//!    contention instead of queueing traffic behind the parent;
+//! 2. locks the parent, then foreign-key counterparts, then the catch-all, in
+//!    the order writers take them, waiting only on the parent and failing fast
+//!    on any other contention;
 //! 3. re-audits under those locks and refuses if the plan changed; and
 //! 4. re-audits the changed catalog and verifies index and constraint
 //!    inheritance before commit.
@@ -53,9 +53,10 @@ const MAINTENANCE_LOCK_NAMESPACE: &str = "buzz.partition_maintenance:";
 /// Which automatic partition DDL the manager may issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PartitionMaintenancePolicy {
-    /// Create months that no partition covers.
+    /// Create months that no partition covers. Off stops all automatic DDL.
     pub create_enabled: bool,
     /// Replace an empty right-edge catch-all with dedicated monthlies.
+    /// Takes effect only while `create_enabled` is on.
     pub advance_enabled: bool,
 }
 
@@ -97,13 +98,6 @@ impl PartitionMaintenanceOutcome {
             Self::Deadline => "deadline",
             Self::Error => "error",
         }
-    }
-
-    fn is_failure(self) -> bool {
-        matches!(
-            self,
-            Self::OperatorRequired | Self::LockTimeout | Self::Deadline | Self::Error
-        )
     }
 }
 
@@ -162,6 +156,7 @@ enum LockedAttempt {
     Committed(MaintenanceChange),
     SkippedLocked,
     Unchanged,
+    Disabled,
     Refused(String),
 }
 
@@ -220,7 +215,8 @@ fn plan_maintenance(
         .iter()
         .any(|month| month.kind == MonthCoverageKind::CoveredByCatchAll);
     let create = policy.create_enabled && !uncovered.is_empty();
-    let advance = policy.advance_enabled && catch_all_covered;
+    // Advancement creates monthlies, so the create kill switch stops it too.
+    let advance = policy.create_enabled && policy.advance_enabled && catch_all_covered;
     if !create && !advance {
         return if uncovered.is_empty() && !catch_all_covered {
             MaintenancePlan::Noop
@@ -293,7 +289,7 @@ fn plan_maintenance(
         };
         let mut month = lower;
         while month < new_lower {
-            if months.len() > MAX_PARTITION_MONTHS_AHEAD as usize {
+            if months.len() >= MAX_PARTITION_MONTHS_AHEAD as usize {
                 return MaintenancePlan::Refuse(format!(
                     "catch-all {} would require more than {MAX_PARTITION_MONTHS_AHEAD} monthlies",
                     child.name
@@ -349,13 +345,38 @@ async fn maintain_partitions_with_deadline(
     now: DateTime<Utc>,
     table_deadline: Duration,
 ) -> Result<PartitionAudit> {
-    let horizon = validated_months_ahead(months_ahead)?;
     let audit = audit_partition_catalog_at(pool, months_ahead, now).await?;
+    maintain_audited(pool, audit, months_ahead, policy, now, table_deadline).await
+}
+
+/// Maintain each table described by `audit`, which may be stale by now.
+async fn maintain_audited(
+    pool: &PgPool,
+    audit: PartitionAudit,
+    months_ahead: u32,
+    policy: PartitionMaintenancePolicy,
+    now: DateTime<Utc>,
+    table_deadline: Duration,
+) -> Result<PartitionAudit> {
+    let horizon = validated_months_ahead(months_ahead)?;
     let mut errors = Vec::new();
-    let mut committed = false;
+    // Any table that planned DDL may have found the catalog changed under the
+    // lock, so the opening audit no longer describes it.
+    let mut stale = false;
     for table_audit in &audit.tables {
         let table = table_audit.table;
-        let result = maintain_table(pool, table_audit, horizon, policy, now, table_deadline).await;
+        let plan = plan_maintenance(table_audit, policy);
+        stale |= matches!(plan, MaintenancePlan::Apply(_));
+        let result = maintain_table(
+            pool,
+            table_audit,
+            plan,
+            horizon,
+            policy,
+            now,
+            table_deadline,
+        )
+        .await;
         emit_maintenance_metrics(table_audit, &result);
         match (&result.error, result.outcome) {
             (Some(error), outcome) => errors.push(format!("{table} {}: {error}", outcome.as_str())),
@@ -363,7 +384,6 @@ async fn maintain_partitions_with_deadline(
                 None,
                 PartitionMaintenanceOutcome::Created | PartitionMaintenanceOutcome::Advanced,
             ) => {
-                committed = true;
                 info!(
                     table,
                     outcome = result.outcome.as_str(),
@@ -383,7 +403,7 @@ async fn maintain_partitions_with_deadline(
             "partition maintenance failed: {}",
             errors.join("; ")
         )))
-    } else if committed {
+    } else if stale {
         audit_partition_catalog_at(pool, months_ahead, now).await
     } else {
         Ok(audit)
@@ -393,12 +413,13 @@ async fn maintain_partitions_with_deadline(
 async fn maintain_table(
     pool: &PgPool,
     audit: &PartitionTableAudit,
+    plan: MaintenancePlan,
     months_ahead: i32,
     policy: PartitionMaintenancePolicy,
     now: DateTime<Utc>,
     table_deadline: Duration,
 ) -> TableMaintenance {
-    let change = match plan_maintenance(audit, policy) {
+    let change = match plan {
         MaintenancePlan::Noop => return TableMaintenance::done(PartitionMaintenanceOutcome::Noop),
         MaintenancePlan::Disabled => {
             return TableMaintenance::done(PartitionMaintenanceOutcome::SkippedDisabled)
@@ -452,14 +473,19 @@ async fn maintain_table(
     .await;
     let Ok(attempt) = attempt else {
         // The abandoned transaction may still be open on the server. Close the
-        // session instead of returning it to the pool so PostgreSQL rolls back.
+        // session instead of returning it to the pool so PostgreSQL rolls back
+        // whatever did not commit. The deadline can fire after COMMIT was sent,
+        // so the change may have landed; the next audit reports the truth. The
+        // backend keeps its locks until its in-flight statement ends, which
+        // `statement_timeout` bounds.
         connection.close_on_drop();
         drop(connection);
         return TableMaintenance::failed(
             PartitionMaintenanceOutcome::Deadline,
             Some(change),
             format!(
-                "exceeded the {}ms maintenance deadline and rolled back",
+                "exceeded the {}ms maintenance deadline; the attempt was abandoned and the \
+                 server rolls back any uncommitted work",
                 table_deadline.as_millis()
             ),
         );
@@ -474,6 +500,9 @@ async fn maintain_table(
             TableMaintenance::done(PartitionMaintenanceOutcome::SkippedLocked)
         }
         Ok(LockedAttempt::Unchanged) => TableMaintenance::done(PartitionMaintenanceOutcome::Noop),
+        Ok(LockedAttempt::Disabled) => {
+            TableMaintenance::done(PartitionMaintenanceOutcome::SkippedDisabled)
+        }
         Ok(LockedAttempt::Refused(reason)) => TableMaintenance::failed(
             PartitionMaintenanceOutcome::OperatorRequired,
             Some(change),
@@ -516,9 +545,13 @@ async fn apply_change(
     let serialized = audit_table_on(&mut transaction, table, months_ahead, now).await?;
     let expected = match plan_maintenance(&serialized, policy) {
         MaintenancePlan::Apply(change) => change,
-        MaintenancePlan::Noop | MaintenancePlan::Disabled => {
+        MaintenancePlan::Noop => {
             transaction.rollback().await?;
             return Ok(LockedAttempt::Unchanged);
+        }
+        MaintenancePlan::Disabled => {
+            transaction.rollback().await?;
+            return Ok(LockedAttempt::Disabled);
         }
         MaintenancePlan::Refuse(reason) => {
             transaction.rollback().await?;
@@ -542,17 +575,9 @@ async fn apply_change(
         transaction.rollback().await?;
         return Ok(LockedAttempt::Refused(reason));
     }
-    // Counterparts first: detaching or dropping a child removes foreign-key
-    // action triggers from each referenced table under ACCESS EXCLUSIVE. Taking
-    // those locks after the parent could deadlock, and waiting for them would
-    // queue that table's traffic, so fail immediately instead.
-    for counterpart in &parent.counterparts {
-        lock(
-            &mut transaction,
-            &format!("LOCK TABLE ONLY {counterpart} IN ACCESS EXCLUSIVE MODE NOWAIT"),
-        )
-        .await?;
-    }
+    // Parent first, in the order writers lock: an insert takes the parent and
+    // then the foreign-key counterparts its constraint check reads. Waiting on
+    // a counterpart while holding the parent could deadlock with such a writer.
     // ONLY: without it PostgreSQL locks every historical child in turn.
     lock(
         &mut transaction,
@@ -562,6 +587,17 @@ async fn apply_change(
         ),
     )
     .await?;
+    // Attaching a partition adds its foreign key under SHARE ROW EXCLUSIVE on
+    // each referenced table. Taking that mode up front still admits readers and
+    // the `FOR KEY SHARE` checks of other writers, and fails at once rather
+    // than queue the counterpart's own writers behind this transaction.
+    for counterpart in &parent.counterparts {
+        lock(
+            &mut transaction,
+            &format!("LOCK TABLE ONLY {counterpart} IN SHARE ROW EXCLUSIVE MODE NOWAIT"),
+        )
+        .await?;
+    }
     // Blocks direct child inserts that bypass the parent. Never wait on a
     // child while holding the parent.
     if let Some(catch_all) = &expected.catch_all {
@@ -579,9 +615,13 @@ async fn apply_change(
     let locked = audit_table_on(&mut transaction, table, months_ahead, now).await?;
     match plan_maintenance(&locked, policy) {
         MaintenancePlan::Apply(change) if change == expected => {}
-        MaintenancePlan::Noop | MaintenancePlan::Disabled => {
+        MaintenancePlan::Noop => {
             transaction.rollback().await?;
             return Ok(LockedAttempt::Unchanged);
+        }
+        MaintenancePlan::Disabled => {
+            transaction.rollback().await?;
+            return Ok(LockedAttempt::Disabled);
         }
         MaintenancePlan::Refuse(reason) => {
             transaction.rollback().await?;
@@ -960,7 +1000,8 @@ async fn verify_inheritance(
 fn classify_error(error: &DbError) -> PartitionMaintenanceOutcome {
     match error {
         DbError::Sqlx(sqlx::Error::Database(database)) => match database.code().as_deref() {
-            Some("55P03") => PartitionMaintenanceOutcome::LockTimeout,
+            // A deadlock victim lost a lock race; the next pass retries.
+            Some("55P03" | "40P01") => PartitionMaintenanceOutcome::LockTimeout,
             Some("57014" | "25P03") => PartitionMaintenanceOutcome::Deadline,
             _ => PartitionMaintenanceOutcome::Error,
         },
@@ -983,14 +1024,21 @@ fn emit_maintenance_metrics(audit: &PartitionTableAudit, result: &TableMaintenan
         .as_ref()
         .map(|change| change.create.as_slice())
         .unwrap_or_default();
-    let month_outcome = if result.outcome.is_failure() {
-        "error"
-    } else {
-        "created"
+    // `error` means DDL or collision failure. Lock and deadline outcomes are
+    // transient and only `buzz_partition_maintenance_runs_total` records them.
+    let month_outcome = match result.outcome {
+        PartitionMaintenanceOutcome::Error | PartitionMaintenanceOutcome::OperatorRequired => {
+            Some("error")
+        }
+        PartitionMaintenanceOutcome::LockTimeout | PartitionMaintenanceOutcome::Deadline => None,
+        _ => Some("created"),
     };
     for month in &audit.months {
         let outcome = if changed.contains(&month.start) {
-            month_outcome
+            let Some(outcome) = month_outcome else {
+                continue;
+            };
+            outcome
         } else if month.kind == MonthCoverageKind::Uncovered {
             continue;
         } else {

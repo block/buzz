@@ -206,10 +206,12 @@ pub struct Config {
     pub metrics_port: u16,
     /// Interval between read-only partition catalog audits.
     pub partition_audit_interval: Duration,
-    /// Whether the partition manager may create uncovered monthly partitions.
+    /// Whether the partition manager may issue any partition DDL. Off also
+    /// disables catch-all advancement.
     pub partition_manager_create_enabled: bool,
     /// Whether the partition manager may replace an empty right-edge catch-all
     /// with dedicated monthlies. Also enables periodic (not only startup) DDL.
+    /// Requires `partition_manager_create_enabled`.
     pub partition_manager_advance_enabled: bool,
 
     /// When true, NIP-42 pubkey-only authentication (no API token) is
