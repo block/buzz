@@ -166,7 +166,7 @@ pub async fn disconnect(
             {
                 let pubsub = Arc::clone(&state.pubsub);
                 let msg = nip_fi_disconnect_message(&cmd);
-                tokio::spawn(async move {
+                state.nip_fi_publish_tasks.spawn(async move {
                     if let Err(e) = pubsub.publish_nip_fi_disconnect(&msg).await {
                         // [FI-TRACE-PRIVACY-NONPUBLIC]: no iss or pubkey in logs
                         tracing::warn!("nip-fi: cross-pod propagation publish failed: {e}");
@@ -2665,11 +2665,21 @@ mod route_integration_tests {
             }
         }
 
-        /// Publications for the target so far.  First sends an accepted
-        /// sentinel command through `via` and waits for its publication, a
-        /// positive control proving the publisher and this collector both
-        /// work before the target count is read.
+        /// Publications for the target so far.
+        ///
+        /// Barrier: wait until every publish `via` has spawned has finished,
+        /// so each earlier `PUBLISH` is complete.  Then send an accepted
+        /// sentinel command and read up to its publication.  It is published
+        /// strictly after the earlier ones and Redis delivers in publish
+        /// order, so the read drains them all; it is also a positive control
+        /// that the publisher and this collector both work.
         async fn count(&mut self, via: &Arc<AppState>) -> usize {
+            let tasks = &via.nip_fi_publish_tasks;
+            tasks.close();
+            tokio::time::timeout(std::time::Duration::from_secs(10), tasks.wait())
+                .await
+                .expect("spawned publishes did not finish within 10s");
+            tasks.reopen();
             let sentinel = nostr::Keys::generate().public_key();
             let token = mint_token(&sentinel.to_hex(), 300, serde_json::json!({}));
             let (status, _) = post_command(via, &token, &sentinel.to_hex()).await;
