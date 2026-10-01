@@ -12,8 +12,11 @@ use axum::{
     http::{HeaderMap, Response, StatusCode},
 };
 use buzz_auth::{
-    DenialClass, VerifiedAssertion, VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER,
+    CommunityBinding, DenialClass, VerifiedAssertion, VerifierError, VerifyAssertion,
+    CLIENT_ATTACHED_HEADER,
 };
+
+use crate::nip_fi_config::NipFiCommunities;
 
 // ── Assertion evaluation ──────────────────────────────────────────────────────
 
@@ -39,18 +42,37 @@ impl AssertionRejection {
     }
 }
 
-/// Extract and verify the attached assertion.
+/// Resolve the community served at the request `Host` — enforce-mode
+/// admission step 1, before any evidence is examined (NIP-FI.md:266-268).
+///
+/// An absent, unreadable, or unmapped Host is `authorization_unavailable`.
+/// This makes mapped and unmapped Hosts distinguishable (401/403 vs 503) in
+/// enforce mode, unlike the tenant binder's generic 404; the spec requires it,
+/// and Hosts are DNS-visible anyway.
+pub(crate) fn resolve_community<'a>(
+    headers: &HeaderMap,
+    communities: &'a NipFiCommunities,
+) -> Result<&'a CommunityBinding, DenialClass> {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|host| communities.resolve(host))
+        .ok_or(DenialClass::AuthorizationUnavailable)
+}
+
+/// Extract and verify the attached assertion for `community`.
 ///
 /// Transport extraction runs before the verifier-presence check, so a
 /// malformed header is `evidence_rejected` even while no verifier exists.
 pub(crate) fn evaluate_attached_assertion(
     headers: &HeaderMap,
+    community: &CommunityBinding,
     verifier: Option<&dyn VerifyAssertion>,
 ) -> Result<VerifiedAssertion, AssertionRejection> {
     let token = extract_bearer_token(headers).map_err(AssertionRejection::Transport)?;
     let verifier = verifier.ok_or(AssertionRejection::VerifierUnavailable)?;
     verifier
-        .verify_assertion(token)
+        .verify_assertion(token, community)
         .map_err(AssertionRejection::Verifier)
 }
 
@@ -126,14 +148,81 @@ pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
         .expect("valid denial response")
 }
 
+/// Fixtures for tests that drive an enforce-mode adapter against one mapped
+/// community.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::nip_fi_config::NipFiCommunities;
+
+    /// The test community's Host and canonical URI.
+    pub(crate) const TEST_HOST: &str = "relay.example";
+    pub(crate) const TEST_COMMUNITY_URI: &str = "https://relay.example";
+
+    /// One community at [`TEST_COMMUNITY_URI`] authorizing `issuers`.
+    pub(crate) fn communities_for(issuers: &[&str]) -> NipFiCommunities {
+        NipFiCommunities::for_test(TEST_COMMUNITY_URI, issuers)
+    }
+
+    /// The test community authorizing a placeholder issuer, for verifier
+    /// doubles that ignore the binding.
+    pub(crate) fn communities() -> NipFiCommunities {
+        communities_for(&["https://issuer.test"])
+    }
+
+    /// Every issuer the crate's enforce-mode fixtures configure.
+    const FIXTURE_ISSUERS: &[&str] = &[
+        "https://issuer.example",
+        "https://issuer.test",
+        "https://idp.test.example.com",
+        "https://idp-b.test.example.com",
+        "https://nip-fi-deny-test.example.com",
+        "https://git-pack-test.issuer.invalid",
+        "https://nip-fi-settings-test.invalid",
+    ];
+
+    /// One community expecting `aud`, authorizing every fixture issuer, and
+    /// served at every Host — for handler fixtures on per-test unique Hosts.
+    pub(crate) fn any_host(aud: &str) -> NipFiCommunities {
+        NipFiCommunities::for_test_any_host(aud, FIXTURE_ISSUERS)
+    }
+
+    /// The binding a fixture community expecting `aud` presents.
+    pub(crate) fn binding(aud: &str) -> CommunityBinding {
+        any_host(aud).resolve(TEST_HOST).expect("served").clone()
+    }
+
+    /// Request headers addressed to [`TEST_HOST`].
+    pub(crate) fn host_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static(TEST_HOST),
+        );
+        headers
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::communities;
     use super::*;
     use axum::http::HeaderValue;
 
+    fn community() -> CommunityBinding {
+        communities()
+            .resolve(super::test_support::TEST_HOST)
+            .expect("mapped")
+            .clone()
+    }
+
     struct FixedVerifier(Result<Option<nostr::PublicKey>, VerifierError>);
     impl VerifyAssertion for FixedVerifier {
-        fn verify_assertion(&self, _token: &str) -> Result<VerifiedAssertion, VerifierError> {
+        fn verify_assertion(
+            &self,
+            _token: &str,
+            _community: &CommunityBinding,
+        ) -> Result<VerifiedAssertion, VerifierError> {
             self.0.map(|key| {
                 VerifiedAssertion::for_test(
                     key,
@@ -153,7 +242,7 @@ mod tests {
     fn missing_header_is_transport_missing_evidence() {
         let v = FixedVerifier(Ok(None));
         assert_eq!(
-            evaluate_attached_assertion(&HeaderMap::new(), Some(&v)).unwrap_err(),
+            evaluate_attached_assertion(&HeaderMap::new(), &community(), Some(&v)).unwrap_err(),
             AssertionRejection::Transport(DenialClass::MissingEvidence)
         );
     }
@@ -163,7 +252,7 @@ mod tests {
         // A comma-joined value is otherwise well-formed, so only the comma
         // check separates it from the missing-verifier outcome.
         for value in ["junk", "Bearer a.b.c,d.e.f"] {
-            let err = evaluate_attached_assertion(&headers(value), None).unwrap_err();
+            let err = evaluate_attached_assertion(&headers(value), &community(), None).unwrap_err();
             assert_eq!(
                 err,
                 AssertionRejection::Transport(DenialClass::EvidenceRejected),
@@ -174,7 +263,8 @@ mod tests {
 
     #[test]
     fn missing_verifier_is_authorization_unavailable() {
-        let err = evaluate_attached_assertion(&headers("Bearer a.b.c"), None).unwrap_err();
+        let err =
+            evaluate_attached_assertion(&headers("Bearer a.b.c"), &community(), None).unwrap_err();
         assert_eq!(err, AssertionRejection::VerifierUnavailable);
         assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
     }
@@ -187,7 +277,8 @@ mod tests {
         ] {
             let v = FixedVerifier(Err(err));
             let rejection =
-                evaluate_attached_assertion(&headers("Bearer a.b.c"), Some(&v)).unwrap_err();
+                evaluate_attached_assertion(&headers("Bearer a.b.c"), &community(), Some(&v))
+                    .unwrap_err();
             assert_eq!(rejection, AssertionRejection::Verifier(err));
             assert_eq!(rejection.denial_class(), err.denial_class());
         }

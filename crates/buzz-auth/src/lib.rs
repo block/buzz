@@ -48,13 +48,14 @@ pub use scope::{parse_scopes, Scope};
 pub use nip_fi::{
     command_replay_key, validate_nip_fi_config, AssertionKeySet, AssertionPolicyId,
     CanonicalCapabilities, ClientSubjectPosture, CommandError, CommandIssuerPolicy,
-    CommandPolicyError, CommandReplayGuard, CommandResult, CommandVerifier, ConfidentialAssertion,
-    CrossPodMergeResult, DenialClass, DenySetFull, FederatedAssertionVerifier, FederatedIdentity,
-    FederatedIdentityDiscovery, FreshnessClass, HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig,
-    IssuerKeySource, IssuerPolicy, IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher,
-    JwksSourceContract, NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource,
-    RevalidationDependencies, SubjectClass, SubjectClassContract, TokenClass, TransportContractId,
-    VerifiedAssertion, VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP,
+    CommandPolicyError, CommandReplayGuard, CommandResult, CommandVerifier, CommunityBinding,
+    CommunityBindingError, ConfidentialAssertion, CrossPodMergeResult, DenialClass, DenySetFull,
+    FederatedAssertionVerifier, FederatedIdentity, FederatedIdentityDiscovery, FreshnessClass,
+    HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig, IssuerKeySource, IssuerPolicy,
+    IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher, JwksSourceContract,
+    NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource, RevalidationDependencies,
+    SubjectClass, SubjectClassContract, TokenClass, TransportContractId, VerifiedAssertion,
+    VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP,
     MAX_COMMAND_AGE_SECONDS, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 

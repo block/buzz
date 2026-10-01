@@ -5002,6 +5002,8 @@ mod postgres_tests {
         config.require_auth_token = true;
         config.require_relay_membership = false;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
         // Pin the GIF provider absent: `Config::from_env()` imports
         // `BUZZ_KLIPY_API_KEY`, and the GIF positive control's exact 404
         // (`gifs.rs` "GIF search is not configured") depends on `klipy = None`.
@@ -6496,6 +6498,8 @@ mod postgres_tests {
             config.require_auth_token = true;
             config.require_relay_membership = false;
             config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://relay.example");
 
             let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
                 .await
@@ -6627,7 +6631,10 @@ mod postgres_tests {
             .nip_fi_verifier
             .as_deref()
             .expect("verifier injected")
-            .verify_assertion(BAD_SIG_TOKEN);
+            .verify_assertion(
+                BAD_SIG_TOKEN,
+                &crate::nip_fi_core::test_support::binding(TEST_AUDIENCE),
+            );
         assert!(
             verifier_check.is_err(),
             "pre-condition: the bad-sig token MUST be rejected by the verifier; \
@@ -6887,6 +6894,8 @@ mod postgres_tests {
             config.require_auth_token = true;
             config.require_relay_membership = false;
             config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://relay.example");
 
             let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
                 .await
@@ -7012,7 +7021,10 @@ mod postgres_tests {
                 .nip_fi_verifier
                 .as_deref()
                 .expect("verifier injected")
-                .verify_assertion(&valid_assertion)
+                .verify_assertion(
+                    &valid_assertion,
+                    &crate::nip_fi_core::test_support::binding(TEST_AUDIENCE)
+                )
                 .is_ok(),
             "pre-condition: valid assertion must be accepted by the verifier"
         );
@@ -7052,7 +7064,10 @@ mod postgres_tests {
                 .nip_fi_verifier
                 .as_deref()
                 .expect("verifier injected")
-                .verify_assertion(&same_key_assertion)
+                .verify_assertion(
+                    &same_key_assertion,
+                    &crate::nip_fi_core::test_support::binding(TEST_AUDIENCE)
+                )
                 .is_ok(),
             "pre-condition: same-key assertion must be accepted"
         );

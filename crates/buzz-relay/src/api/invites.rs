@@ -1908,6 +1908,8 @@ mod postgres_tests {
         let mut config = (*state.config).clone();
         config.require_auth_token = true;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
         state.config = Arc::new(config);
         if !with_verifier {
             return Arc::new(state);

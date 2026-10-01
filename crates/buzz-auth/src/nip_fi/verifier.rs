@@ -26,6 +26,7 @@
 //!   expiry is expired.
 
 use super::assertion::{CanonicalCapabilities, RevalidationDependencies, VerifiedAssertion};
+use super::community::CommunityBinding;
 use super::config::{
     is_asymmetric_algorithm, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerRegistry,
     SubjectClass, TokenClass, TransportContractId, MAX_CLIENT_ID_BYTES, MAX_JWKS_KEYS,
@@ -285,14 +286,22 @@ impl IssuerKeySource for StaticIssuerKeySource {
 /// The sealed `IssuerKeySource` trait still constrains who can build a real
 /// verifier — this trait only erases the `S` type parameter at the storage boundary.
 pub trait VerifyAssertion: Send + Sync {
-    /// Verify one compact JWS assertion.  Semantics identical to
-    /// [`FederatedAssertionVerifier::verify`].
-    fn verify_assertion(&self, token: &str) -> Result<VerifiedAssertion, VerifierError>;
+    /// Verify one compact JWS assertion presented to `community`.  Semantics
+    /// identical to [`FederatedAssertionVerifier::verify`].
+    fn verify_assertion(
+        &self,
+        token: &str,
+        community: &CommunityBinding,
+    ) -> Result<VerifiedAssertion, VerifierError>;
 }
 
 impl<S: IssuerKeySource + Send + Sync> VerifyAssertion for FederatedAssertionVerifier<S> {
-    fn verify_assertion(&self, token: &str) -> Result<VerifiedAssertion, VerifierError> {
-        self.verify(token)
+    fn verify_assertion(
+        &self,
+        token: &str,
+        community: &CommunityBinding,
+    ) -> Result<VerifiedAssertion, VerifierError> {
+        self.verify(token, community)
     }
 }
 
@@ -316,18 +325,39 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         }
     }
 
+    /// Test shorthand: verify for a community whose expected `aud` is `aud`
+    /// and which authorizes every registered issuer.
+    #[cfg(test)]
+    pub(crate) fn verify_for_aud(
+        &self,
+        token: &str,
+        aud: &str,
+    ) -> Result<VerifiedAssertion, VerifierError> {
+        let issuers = self.registry.all_policies().map(|p| p.issuer().to_owned());
+        let community =
+            CommunityBinding::new(aud.to_owned(), issuers).expect("non-empty test registry");
+        self.verify(token, &community)
+    }
+
     /// The registry this verifier selects policies from.
     pub const fn registry(&self) -> &IssuerRegistry {
         &self.registry
     }
 
-    /// Verify one compact JWS and mint a sealed [`VerifiedAssertion`].
+    /// Verify one compact JWS presented to `community` and mint a sealed
+    /// [`VerifiedAssertion`].
     ///
-    /// The caller supplies only the token. The key snapshot is resolved
+    /// The selected issuer must be on the community's allowlist before any
+    /// key-source lookup, and `aud` must equal the community's expected `aud`
+    /// (NIP-FI.md:227-248). The caller supplies only the token and community. The key snapshot is resolved
     /// internally from the trusted [`IssuerKeySource`] by the token's
     /// signature-authenticated `iss`, so no caller can inject or relabel key
     /// material for another issuer.
-    pub fn verify(&self, token: &str) -> Result<VerifiedAssertion, VerifierError> {
+    pub fn verify(
+        &self,
+        token: &str,
+        community: &CommunityBinding,
+    ) -> Result<VerifiedAssertion, VerifierError> {
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(VerifierError::MalformedToken);
         }
@@ -352,6 +382,12 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             .registry
             .policy_for_issuer(&signed_issuer)
             .ok_or(VerifierError::UnknownIssuer)?;
+        // AssertIssuerAuthorized: an issuer not authorized for this community
+        // is indistinguishable from an unknown one, and is rejected before
+        // the key-source (JWKS) dependency is touched (NIP-FI.md:123, :235).
+        if !community.authorizes(policy.issuer()) {
+            return Err(VerifierError::UnknownIssuer);
+        }
 
         if !policy.algorithms().contains(&header.algorithm) {
             return Err(VerifierError::UnsupportedAlgorithm);
@@ -392,7 +428,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         // parse, so the two parses can never disagree on an accepted token.
         let mut validation = Validation::new(header.algorithm);
         validation.set_issuer(&[policy.issuer()]);
-        validation.set_audience(policy.audiences());
+        validation.set_audience(&[community.expected_aud()]);
         validation.set_required_spec_claims(&["exp", "iat", "iss", "aud"]);
         validation.validate_exp = false;
         validation.validate_nbf = false;

@@ -384,12 +384,12 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
 
         // ── Step 3: validate pure claims ──────────────────────────────────────
 
-        // aud: at least one of the policy audiences must match.
+        // aud: at least one of the issuer's command audiences must match.
         let aud_ok = match claims.get("aud") {
-            Some(Value::String(s)) => base_policy.audiences().iter().any(|a| a == s),
+            Some(Value::String(s)) => base_policy.command_audiences().iter().any(|a| a == s),
             Some(Value::Array(arr)) => arr.iter().any(|v| {
                 v.as_str()
-                    .map(|s| base_policy.audiences().iter().any(|a| a == s))
+                    .map(|s| base_policy.command_audiences().iter().any(|a| a == s))
                     .unwrap_or(false)
             }),
             _ => false,
@@ -589,7 +589,7 @@ fn verify_jwt_signature(
 
     let mut validation = Validation::new(algorithm);
     validation.set_issuer(&[policy.issuer()]);
-    validation.set_audience(policy.audiences());
+    validation.set_audience(policy.command_audiences());
     validation.set_required_spec_claims(&["exp", "iat", "iss", "aud"]);
     validation.validate_exp = false;
     validation.validate_nbf = false;

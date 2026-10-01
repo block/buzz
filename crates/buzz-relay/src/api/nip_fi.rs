@@ -1843,6 +1843,7 @@ mod route_integration_tests {
             jwks_configs: jwks_configs.clone(),
             command_configs: cmd_configs.clone(),
             max_connection_lifetime_secs: 3600,
+            communities: crate::nip_fi_core::test_support::any_host(TEST_AUD),
         };
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
@@ -1906,7 +1907,8 @@ mod route_integration_tests {
         let key = nostr::Keys::generate();
         let token = mint_assertion_token(&key.public_key().to_hex());
         let verifier = state.nip_fi_verifier.as_deref().unwrap();
-        let result = verifier.verify_assertion(&token);
+        let result =
+            verifier.verify_assertion(&token, &crate::nip_fi_core::test_support::binding(TEST_AUD));
         assert!(
             result.is_ok(),
             "assertion verifier must read the warmed shared source; got: {result:?}"
@@ -2279,6 +2281,8 @@ mod route_integration_tests {
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.test.example.com");
         config.nip_fi.registry.insert(issuer_policy(TEST_ISS));
         config.nip_fi.registry.insert(issuer_policy(OTHER_ISS));
         let mut state = build_test_app_state(1000, config).await;
@@ -2336,7 +2340,7 @@ mod route_integration_tests {
         iss: &str,
         key: &nostr::PublicKey,
     ) -> Result<(), axum::response::Response> {
-        let mut headers = HeaderMap::new();
+        let mut headers = crate::nip_fi_core::test_support::host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             format!("Bearer {}", mint_assertion_token_for(iss, &key.to_hex()))
@@ -2362,6 +2366,29 @@ mod route_integration_tests {
             .await
             .expect("body");
         assert_eq!(&body[..], b"authorization denied\n", "{why}");
+    }
+
+    // A valid community-A assertion presented on community B's Host is
+    // rejected on `aud`, even though B authorizes the same issuer.
+    #[tokio::test]
+    async fn http_admission_denies_community_a_assertion_on_community_b_host() {
+        let key = nostr::Keys::generate().public_key();
+        let mut state = (*http_enforce_state().await).clone();
+        assert!(
+            http_admit(&state, TEST_ISS, &key).is_ok(),
+            "control: the assertion is admitted on its own community"
+        );
+        Arc::make_mut(&mut state.config).nip_fi.communities =
+            crate::nip_fi_config::NipFiCommunities::for_test(
+                "https://relay.example",
+                &[TEST_ISS, OTHER_ISS],
+            );
+        let resp = http_admit(&state, TEST_ISS, &key).expect_err("A's aud on B's Host");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"evidence rejected\n");
     }
 
     #[tokio::test]

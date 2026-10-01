@@ -4440,6 +4440,8 @@ mod off_mode_precedence_tests {
 
             let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
             config.require_auth_token = false;
             config.require_relay_membership = false;
             // Pin relay_url to a ws:// value so git_expected_url() deterministically
@@ -4579,6 +4581,8 @@ mod off_mode_precedence_tests {
 
             let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
             config.require_auth_token = false;
             config.require_relay_membership = false;
             config.relay_url = "ws://nip-fi-git-pack-test.invalid".to_string();

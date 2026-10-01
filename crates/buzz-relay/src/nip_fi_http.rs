@@ -61,8 +61,10 @@ use chrono::{DateTime, Utc};
 use nostr::PublicKey;
 use std::fmt;
 
+use crate::nip_fi_config::NipFiCommunities;
 use crate::nip_fi_core::{
-    asserted_key_matches, evaluate_attached_assertion, http_denial, AssertionRejection,
+    asserted_key_matches, evaluate_attached_assertion, http_denial, resolve_community,
+    AssertionRejection,
 };
 
 // ── Deny-map seam ─────────────────────────────────────────────────────────────
@@ -275,6 +277,7 @@ impl<X> NipFiAdmission<X> {
 pub(crate) fn admit_nip_fi_http<D, X, F>(
     headers: &HeaderMap,
     extract_nip98: F,
+    communities: &NipFiCommunities,
     verifier: Option<&dyn VerifyAssertion>,
     mode: NipFiMode,
     deny_map: &D,
@@ -290,40 +293,41 @@ where
         return Err(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
-    // Step 2 — cardinality gate: Enforce mode requires exactly one Authorization
-    // field per NIP-FI.md:695-700.  Off mode preserves legacy first-value behavior
-    // (`.get()` silently takes the first) so no regression for Off deployments.
-    //
-    // Axum / hyper de-duplicates most header fields during HTTP/1.1 parsing, but
-    // RFC 7230 permits comma-separated combining or multiple header lines;
-    // `HeaderMap::get` silently takes only the FIRST value.  Rejecting duplicates
-    // closes the attack where a relay-aware adversary slips a second credential
-    // past the NIP-98 verifier.  [FI-INV-15]
-    if !matches!(mode, NipFiMode::Off) {
-        let auth_count = headers.get_all("authorization").iter().count();
-        if auth_count > 1 {
-            return Err(http_denial(DenialClass::EvidenceRejected));
-        }
-    }
-
-    // Step 3: run NIP-98 extraction (Off and Enforce).
-    let nip98_result = extract_nip98();
-
-    // Off mode: NIP-FI not required.  Return admission immediately.
-    // The NIP-98 closure already enforced whatever auth the surface required.
-    // [FI-INV-15 exemption]
+    // Off mode: NIP-FI not required.  Run the NIP-98 closure and propagate
+    // its result unchanged (legacy behavior) — no community resolution and no
+    // cardinality gate.  [FI-INV-15 exemption]
     if matches!(mode, NipFiMode::Off) {
-        // Off mode: propagate the closure result unchanged (legacy behavior).
         let Nip98Proof {
             pubkey: proven_pubkey,
             extra,
-        } = nip98_result?;
+        } = extract_nip98()?;
         return Ok(NipFiAdmission {
             proven_pubkey,
             assertion: None,
             extra,
         });
     }
+
+    // Enforce step 1 — the Host must map to a configured community, before
+    // any evidence (`Authorization`, NIP-98, assertion) is examined. Explicit
+    // here because some admitted routes are exempt from the router guard.
+    // [NIP-FI.md:266-268]
+    let community = resolve_community(headers, communities).map_err(http_denial)?;
+
+    // Step 2 — cardinality gate: Enforce mode requires exactly one Authorization
+    // field per NIP-FI.md:695-700.
+    //
+    // Axum / hyper de-duplicates most header fields during HTTP/1.1 parsing, but
+    // RFC 7230 permits comma-separated combining or multiple header lines;
+    // `HeaderMap::get` silently takes only the FIRST value.  Rejecting duplicates
+    // closes the attack where a relay-aware adversary slips a second credential
+    // past the NIP-98 verifier.  [FI-INV-15]
+    if headers.get_all("authorization").iter().count() > 1 {
+        return Err(http_denial(DenialClass::EvidenceRejected));
+    }
+
+    // Step 3: run NIP-98 extraction.
+    let nip98_result = extract_nip98();
 
     // Enforce mode: NIP-98 closure failure MUST
     // produce a NIP-FI DenialClass response, not a legacy JSON error.
@@ -346,12 +350,13 @@ where
     // Steps 4–8 — Enforce mode.
 
     // Steps 4–5: extract and verify the assertion.
-    let assertion = evaluate_attached_assertion(headers, verifier).map_err(|rejection| {
-        if let AssertionRejection::Verifier(e) = rejection {
-            tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
-        }
-        http_denial(rejection.denial_class())
-    })?;
+    let assertion =
+        evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
+            if let AssertionRejection::Verifier(e) = rejection {
+                tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
+            }
+            http_denial(rejection.denial_class())
+        })?;
 
     // Step 6: key pairing — assertion.asserted_key MUST equal proven NIP-98 key.
     // A claimless assertion (no nostr_pubkey) is also a denial.  [FI-INV-05]
@@ -417,9 +422,24 @@ where
 {
     let mode = state.config.nip_fi.mode;
     let verifier = state.nip_fi_verifier.as_deref();
+    let communities = &state.config.nip_fi.communities;
     match state.nip_fi_deny_map.as_deref() {
-        Some(deny_map) => admit_nip_fi_http(headers, extract_nip98, verifier, mode, deny_map),
-        None => admit_nip_fi_http(headers, extract_nip98, verifier, mode, &NoDenyMapConfigured),
+        Some(deny_map) => admit_nip_fi_http(
+            headers,
+            extract_nip98,
+            communities,
+            verifier,
+            mode,
+            deny_map,
+        ),
+        None => admit_nip_fi_http(
+            headers,
+            extract_nip98,
+            communities,
+            verifier,
+            mode,
+            &NoDenyMapConfigured,
+        ),
     }
 }
 
@@ -432,6 +452,7 @@ mod tests {
     #![allow(clippy::result_large_err)]
     use super::*;
     use crate::nip_fi_core::extract_bearer_token;
+    use crate::nip_fi_core::test_support::{communities, host_headers};
     use axum::http::StatusCode;
     use buzz_auth::CLIENT_ATTACHED_HEADER;
 
@@ -476,7 +497,7 @@ mod tests {
     // `assert_eq!(class, DenialClass::MissingEvidence)` assertion panic.
     #[test]
     fn missing_header_is_missing_evidence() {
-        let headers = HeaderMap::new();
+        let headers = host_headers();
         let class = extract_bearer_token(&headers).unwrap_err();
         assert_eq!(class, DenialClass::MissingEvidence);
     }
@@ -487,7 +508,7 @@ mod tests {
     // `unwrap_err()` panic.
     #[test]
     fn repeated_header_is_evidence_rejected() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.append(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer token1"),
@@ -503,7 +524,7 @@ mod tests {
     // Comma-combined → EvidenceRejected.
     #[test]
     fn comma_combined_is_evidence_rejected() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer a, Bearer b"),
@@ -515,7 +536,7 @@ mod tests {
     // Empty token after Bearer prefix → EvidenceRejected.
     #[test]
     fn empty_token_is_evidence_rejected() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(CLIENT_ATTACHED_HEADER, HeaderValue::from_static("Bearer "));
         let class = extract_bearer_token(&headers).unwrap_err();
         assert_eq!(class, DenialClass::EvidenceRejected);
@@ -524,7 +545,7 @@ mod tests {
     // Wrong prefix (non-Bearer) → EvidenceRejected.
     #[test]
     fn wrong_prefix_is_evidence_rejected() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Token xyz"),
@@ -536,7 +557,7 @@ mod tests {
     // Whitespace in token → EvidenceRejected.
     #[test]
     fn whitespace_in_token_is_evidence_rejected() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer foo bar"),
@@ -548,7 +569,7 @@ mod tests {
     // Valid Bearer token → extracted.
     #[test]
     fn valid_bearer_token_extracted() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer a.b.c"),
@@ -629,6 +650,7 @@ mod tests {
             fn verify_assertion(
                 &self,
                 _token: &str,
+                _community: &buzz_auth::CommunityBinding,
             ) -> Result<VerifiedAssertion, buzz_auth::VerifierError> {
                 Ok(VerifiedAssertion::new_for_test(self.0))
             }
@@ -644,7 +666,7 @@ mod tests {
         let pubkey_a = any_pubkey();
         let pubkey_b = any_pubkey();
         let verifier = FixedKeyVerifier(pubkey_a);
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer any.valid.looking.token"),
@@ -653,6 +675,7 @@ mod tests {
             admit_nip_fi_http(
                 &headers,
                 || Ok(Nip98Proof::new(proven, ())),
+                &communities(),
                 Some(&verifier as &dyn VerifyAssertion),
                 NipFiMode::Enforce,
                 deny_map,
@@ -693,12 +716,13 @@ mod tests {
     // Mutation evidence: returning Err from off mode makes `unwrap()` panic.
     #[test]
     fn off_mode_admits_unconditionally() {
-        let headers = HeaderMap::new(); // no assertion
+        let headers = host_headers(); // no assertion
         let expected_pubkey = any_pubkey();
         let ep = expected_pubkey;
         let outcome = admit_nip_fi_http(
             &headers,
             || Ok(Nip98Proof::new(ep, ())),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
@@ -715,12 +739,13 @@ mod tests {
     // returned Err is swallowed → `unwrap_err()` panics.
     #[test]
     fn off_mode_propagates_nip98_closure_failure() {
-        let headers = HeaderMap::new();
+        let headers = host_headers();
         let deny_resp = http_denial(DenialClass::MissingEvidence);
         let deny_status = deny_resp.status();
         let outcome = admit_nip_fi_http::<_, (), _>(
             &headers,
             || Err(deny_resp),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
@@ -747,11 +772,12 @@ mod tests {
     #[test]
     fn enforce_nip98_failure_absent_auth_yields_missing_evidence() {
         // Authorization header absent → NIP-98 closure fails → MissingEvidence (401).
-        let headers = HeaderMap::new(); // no Authorization header
+        let headers = host_headers(); // no Authorization header
         let legacy_resp = http_denial(DenialClass::EvidenceRejected); // would be 403 if propagated
         let outcome = admit_nip_fi_http::<_, (), _>(
             &headers,
             || Err(legacy_resp),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -768,7 +794,7 @@ mod tests {
     #[test]
     fn enforce_nip98_failure_present_auth_yields_evidence_rejected() {
         // Authorization header present (but NIP-98 fails) → EvidenceRejected (403).
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Nostr invalid_base64!!!"),
@@ -777,6 +803,7 @@ mod tests {
         let outcome = admit_nip_fi_http::<_, (), _>(
             &headers,
             || Err(legacy_resp),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -794,12 +821,13 @@ mod tests {
     fn off_mode_nip98_failure_propagates_legacy_response() {
         // Off mode: legacy response is returned unchanged ([FI-INV-15]).
         // If this test breaks, Off mode is remapping errors it should leave alone.
-        let headers = HeaderMap::new(); // no Authorization header
+        let headers = host_headers(); // no Authorization header
         let legacy_status = StatusCode::UNAUTHORIZED;
         let legacy_resp = http_denial(DenialClass::MissingEvidence);
         let outcome = admit_nip_fi_http::<_, (), _>(
             &headers,
             || Err(legacy_resp),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
@@ -833,10 +861,11 @@ mod tests {
             .header(CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(legacy_body.as_ref()))
             .unwrap();
-        let headers = HeaderMap::new();
+        let headers = host_headers();
         let outcome = admit_nip_fi_http::<_, (), _>(
             &headers,
             || Err(legacy_resp),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
@@ -880,6 +909,7 @@ mod tests {
             fn verify_assertion(
                 &self,
                 _token: &str,
+                _community: &buzz_auth::CommunityBinding,
             ) -> Result<VerifiedAssertion, buzz_auth::VerifierError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(VerifiedAssertion::new_for_test(any_pubkey()))
@@ -890,7 +920,7 @@ mod tests {
             headers.append("authorization", HeaderValue::from_static(value));
         };
         let with_bearer = || {
-            let mut headers = HeaderMap::new();
+            let mut headers = host_headers();
             headers.insert(
                 CLIENT_ATTACHED_HEADER,
                 HeaderValue::from_static("Bearer header.payload.signature"),
@@ -927,6 +957,7 @@ mod tests {
                             .unwrap())
                     }
                 },
+                &communities(),
                 Some(&verifier as &dyn VerifyAssertion),
                 NipFiMode::DenyProtected,
                 &AlwaysAdmitStubDenyMap,
@@ -965,11 +996,12 @@ mod tests {
     // missing-header path returns 403 instead of 401.
     #[test]
     fn enforce_missing_assertion_is_401() {
-        let headers = HeaderMap::new();
+        let headers = host_headers();
         let pubkey = any_pubkey();
         let outcome = admit_nip_fi_http(
             &headers,
             || Ok(Nip98Proof::new(pubkey, ())),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -992,7 +1024,7 @@ mod tests {
     // status assertion panic.
     #[test]
     fn enforce_no_verifier_returns_503() {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
@@ -1001,6 +1033,7 @@ mod tests {
         let outcome = admit_nip_fi_http(
             &headers,
             || Ok(Nip98Proof::new(pubkey, ())),
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -1043,6 +1076,7 @@ mod tests {
             fn verify_assertion(
                 &self,
                 _token: &str,
+                _community: &buzz_auth::CommunityBinding,
             ) -> Result<VerifiedAssertion, buzz_auth::VerifierError> {
                 Ok(VerifiedAssertion::new_for_test(self.0))
             }
@@ -1050,7 +1084,7 @@ mod tests {
         let verifier = PairingMockVerifier(pubkey_a);
 
         // NIP-98 closure returns key-B; assertion claims key-A → mismatch.
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(
             CLIENT_ATTACHED_HEADER,
             HeaderValue::from_static("Bearer any.valid.looking.token"),
@@ -1059,6 +1093,7 @@ mod tests {
         let outcome = admit_nip_fi_http(
             &headers,
             || Ok(Nip98Proof::new(pubkey_b, ())),
+            &communities(),
             Some(&verifier as &dyn VerifyAssertion),
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -1118,7 +1153,7 @@ mod tests {
         let closure_ran = std::sync::Arc::new(AtomicBool::new(false));
         let closure_ran_clone = closure_ran.clone();
         let pubkey = any_pubkey();
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.append(
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Nostr first.token"),
@@ -1134,6 +1169,7 @@ mod tests {
                 closure_ran_clone.store(true, Ordering::SeqCst);
                 Ok(Nip98Proof::new(pubkey, ()))
             },
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -1166,7 +1202,7 @@ mod tests {
         let closure_ran = std::sync::Arc::new(AtomicBool::new(false));
         let closure_ran_clone = closure_ran.clone();
         let pubkey = any_pubkey();
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.append(
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Nostr first.token"),
@@ -1183,6 +1219,7 @@ mod tests {
                 closure_ran_clone.store(true, Ordering::SeqCst);
                 Ok(Nip98Proof::new(pubkey, ()))
             },
+            &communities(),
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
@@ -1232,6 +1269,7 @@ mod tests {
         fn verify_assertion(
             &self,
             _token: &str,
+            _community: &buzz_auth::CommunityBinding,
         ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.result.map(|key| {
@@ -1244,7 +1282,7 @@ mod tests {
     }
 
     fn bearer_headers(value: &'static str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
+        let mut headers = host_headers();
         headers.insert(CLIENT_ATTACHED_HEADER, HeaderValue::from_static(value));
         headers
     }
@@ -1257,6 +1295,7 @@ mod tests {
         admit_nip_fi_http(
             headers,
             || Ok(Nip98Proof::new(proven, ())),
+            &communities(),
             verifier,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -1368,6 +1407,7 @@ mod tests {
         let outcome = admit_nip_fi_http::<_, (), _>(
             &bearer_headers("Bearer a.b.c"),
             || Err(http_denial(DenialClass::MissingEvidence)),
+            &communities(),
             Some(&verifier as &dyn VerifyAssertion),
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
@@ -1376,5 +1416,42 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, b"authentication required\n");
         assert_eq!(verifier.calls(), 0, "verifier must not run before NIP-98");
+    }
+
+    // Pins ruling: in enforce, Host resolution runs before NIP-98 and the
+    // assertion. An unmapped or absent Host is 503 with neither step run.
+    // Mutation: resolving after the NIP-98 closure makes the closure run.
+    #[test]
+    fn enforce_unmapped_host_is_503_before_nip98_and_verifier() {
+        let mut unmapped = bearer_headers("Bearer a.b.c");
+        unmapped.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_static("other.example"),
+        );
+        let mut absent = bearer_headers("Bearer a.b.c");
+        absent.remove(axum::http::header::HOST);
+        for headers in [unmapped, absent] {
+            let verifier = ScriptedVerifier::new(Ok(Some(any_pubkey())));
+            let closure_ran = std::cell::Cell::new(false);
+            let outcome = admit_nip_fi_http::<_, (), _>(
+                &headers,
+                || {
+                    closure_ran.set(true);
+                    Ok(Nip98Proof::new(any_pubkey(), ()))
+                },
+                &communities(),
+                Some(&verifier as &dyn VerifyAssertion),
+                NipFiMode::Enforce,
+                &AlwaysAdmitStubDenyMap,
+            );
+            let (status, body) = denial_parts(outcome);
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body, b"authorization unavailable\n");
+            assert!(
+                !closure_ran.get(),
+                "NIP-98 must not run for an unmapped Host"
+            );
+            assert_eq!(verifier.calls(), 0);
+        }
     }
 }

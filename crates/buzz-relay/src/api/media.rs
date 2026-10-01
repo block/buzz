@@ -2133,6 +2133,8 @@ mod tests {
             config.require_auth_token = false;
             config.require_relay_membership = false;
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://relay.example");
 
             let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
                 .await

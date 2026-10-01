@@ -11,6 +11,7 @@
 //! |---|---|---|
 //! | `BUZZ_NIP_FI_MODE` | No | `off` (default), `enforce`, or `deny_protected`. |
 //! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs (see [`IssuerEnvConfig`]). |
+//! | `BUZZ_NIP_FI_COMMUNITIES` | If enforce | JSON array mapping each community's canonical URI to its authorized issuers (see [`CommunityEnvConfig`]). |
 //! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
 //!
 //! Each `BUZZ_NIP_FI_ISSUERS` entry also carries the S4 command-API fields.
@@ -29,12 +30,15 @@
 //! Absent or empty `BUZZ_NIP_FI_MODE` defaults to `off`, keeping the relay
 //! backward-compatible until an operator explicitly enables enforcement.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use buzz_auth::{
-    validate_nip_fi_config, FreshnessClass, IssuerJwksConfig, IssuerPolicy, IssuerPolicyError,
-    IssuerRegistry, JwksSourceContract, NipFiMode, NipFiStartupError, TokenClass,
+    validate_nip_fi_config, CommunityBinding, FreshnessClass, IssuerJwksConfig, IssuerPolicy,
+    IssuerPolicyError, IssuerRegistry, JwksSourceContract, NipFiMode, NipFiStartupError,
+    TokenClass,
 };
+use buzz_core::tenant::normalize_host;
 use jsonwebtoken::Algorithm;
 
 use crate::config::ConfigError;
@@ -51,7 +55,7 @@ const MAX_CONNECTION_LIFETIME_SECS: u64 = 30 * 24 * 3600;
 /// [
 ///   {
 ///     "issuer": "https://login.example.com",
-///     "audiences": ["https://relay.example.com"],
+///     "command_audiences": ["https://relay.example.com"],
 ///     "token_class": "nip-fi+jwt",
 ///     "algorithms": ["ES256"],
 ///     "skew_seconds": 30,
@@ -70,8 +74,13 @@ const MAX_CONNECTION_LIFETIME_SECS: u64 = 30 * 24 * 3600;
 pub(super) struct IssuerEnvConfig {
     /// Exact `iss` value.
     pub issuer: String,
-    /// One or more accepted `aud` values.
-    pub audiences: Vec<String>,
+    /// One or more accepted `aud` values for S4 command JWTs. Assertion `aud`
+    /// is the community's canonical URI from `BUZZ_NIP_FI_COMMUNITIES`.
+    pub command_audiences: Vec<String>,
+    /// Removed field. Present only so a stale config fails loudly instead of
+    /// being silently ignored.
+    #[serde(default)]
+    pub audiences: Option<serde::de::IgnoredAny>,
     /// `"at+jwt"` or `"nip-fi+jwt"`.
     pub token_class: TokenClassEnvConfig,
     /// Algorithm names, e.g. `["ES256", "RS256"]`.
@@ -113,6 +122,115 @@ pub(super) enum TokenClassEnvConfig {
     AccessTokenAtJwt,
 }
 
+/// One entry in the `BUZZ_NIP_FI_COMMUNITIES` JSON array.
+///
+/// ```json
+/// [{ "canonical_uri": "https://acme.relay.example",
+///    "authorized_issuers": ["https://login.example.com"] }]
+/// ```
+/// `canonical_uri` is the community's exact assertion `aud` (NIP-FI.md:59) and
+/// must be `https://<authority>` with nothing after the authority; its
+/// authority is the request `Host` that selects the community.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CommunityEnvConfig {
+    pub canonical_uri: String,
+    pub authorized_issuers: Vec<String>,
+}
+
+/// The deployment's Host → community map (NIP-FI.md:193-197), resolved with
+/// no database access. Empty unless the mode is `enforce`.
+#[derive(Debug, Clone, Default)]
+pub struct NipFiCommunities {
+    by_host: BTreeMap<String, CommunityBinding>,
+    /// Test-only: one community served at every Host, for fixtures that
+    /// exercise enforce-mode handlers on per-test unique Hosts.
+    #[cfg(test)]
+    any_host: Option<CommunityBinding>,
+}
+
+impl NipFiCommunities {
+    /// The community served at `raw_host`, matched after the same
+    /// normalization the tenant binder applies.
+    pub fn resolve(&self, raw_host: &str) -> Option<&CommunityBinding> {
+        #[cfg(test)]
+        if let Some(binding) = &self.any_host {
+            return Some(binding);
+        }
+        self.by_host.get(&normalize_host(raw_host))
+    }
+
+    /// Validate the community entries against the configured issuers. Errors
+    /// name entries by index only, never by URI or issuer (NIP-FI.md:777-779).
+    fn from_entries(
+        entries: Vec<CommunityEnvConfig>,
+        configured: &BTreeSet<&str>,
+    ) -> Result<Self, String> {
+        if entries.is_empty() {
+            return Err("must contain at least one community".to_string());
+        }
+        let mut by_host = BTreeMap::new();
+        for (idx, entry) in entries.into_iter().enumerate() {
+            let host = canonical_authority(&entry.canonical_uri)
+                .map(normalize_host)
+                .ok_or_else(|| {
+                    format!(
+                        "community at index {idx}: canonical_uri must be \
+                     https://<host>[:port] in lowercase, with no path, query, \
+                     fragment, or userinfo"
+                    )
+                })?;
+            if let Some(i) = entry
+                .authorized_issuers
+                .iter()
+                .position(|iss| !configured.contains(iss.as_str()))
+            {
+                return Err(format!(
+                    "community at index {idx}: authorized issuer at index {i} \
+                     is not configured in BUZZ_NIP_FI_ISSUERS"
+                ));
+            }
+            let binding = CommunityBinding::new(entry.canonical_uri, entry.authorized_issuers)
+                .map_err(|e| format!("community at index {idx}: {e}"))?;
+            // One Host per canonical URI, so a unique Host also means a
+            // unique `aud`.
+            if by_host.insert(host, binding).is_some() {
+                return Err(format!(
+                    "community at index {idx}: canonical_uri maps to the same \
+                     Host as an earlier community"
+                ));
+            }
+        }
+        Ok(Self {
+            by_host,
+            ..Self::default()
+        })
+    }
+
+    /// Every community `aud` that authorizes `issuer`.
+    fn audiences_authorizing(&self, issuer: &str) -> Vec<String> {
+        self.by_host
+            .values()
+            .filter(|c| c.authorizes(issuer))
+            .map(|c| c.expected_aud().to_owned())
+            .collect()
+    }
+}
+
+/// The authority of a canonical community URI, or `None` unless the URI is
+/// exactly `https://<authority>` in lowercase with a valid host.
+fn canonical_authority(uri: &str) -> Option<&str> {
+    let authority = uri.strip_prefix("https://")?;
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@'])
+        || authority != authority.to_ascii_lowercase()
+    {
+        return None;
+    }
+    url::Url::parse(uri).ok()?.host()?;
+    Some(authority)
+}
+
 // ── Relay-level NIP-FI config ─────────────────────────────────────────────────
 
 /// The relay-level NIP-FI configuration produced by `Config::from_env`.
@@ -126,6 +244,8 @@ pub struct NipFiRelayConfig {
     pub mode: NipFiMode,
     /// Validated per-issuer assertion-policy registry.
     pub registry: IssuerRegistry,
+    /// Host → community map consulted before every enforce-mode verification.
+    pub communities: NipFiCommunities,
     /// Parallel JWKS configs for `ProductionJwksSource` construction.
     pub jwks_configs: Vec<IssuerJwksConfig>,
     /// Hard upper bound on a single connection lease, in seconds.
@@ -149,6 +269,7 @@ impl NipFiRelayConfig {
             return Ok(Self {
                 mode,
                 registry: IssuerRegistry::new(),
+                communities: NipFiCommunities::default(),
                 jwks_configs: Vec::new(),
                 max_connection_lifetime_secs: 0,
                 command_configs: Vec::new(),
@@ -208,7 +329,7 @@ impl NipFiRelayConfig {
             )
         })?;
 
-        let mut registry = IssuerRegistry::new();
+        let mut policies = Vec::with_capacity(issuer_entries.len());
         let mut jwks_configs = Vec::with_capacity(issuer_entries.len());
         let mut command_configs = Vec::new();
 
@@ -220,7 +341,7 @@ impl NipFiRelayConfig {
                     "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx}: {e}"
                 ))
             })?;
-            registry.insert(policy);
+            policies.push(policy);
             jwks_configs.push(jwks_config);
 
             // Extract S4 command fields if present.
@@ -301,6 +422,23 @@ impl NipFiRelayConfig {
             }
         }
 
+        let configured: BTreeSet<&str> = policies.iter().map(IssuerPolicy::issuer).collect();
+        let communities = parse_communities(&configured)?;
+        // Fold each issuer's community allowlist into its policy ID
+        // (NIP-FI.md:145), and reject an issuer no community authorizes
+        // (NIP-FI.md:183).
+        let mut registry = IssuerRegistry::new();
+        for (issuer_idx, policy) in policies.into_iter().enumerate() {
+            let audiences = communities.audiences_authorizing(policy.issuer());
+            if audiences.is_empty() {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx} is not \
+                     authorized by any community in BUZZ_NIP_FI_COMMUNITIES"
+                )));
+            }
+            registry.insert(policy.authorized_for_communities(audiences));
+        }
+
         // Delegate final validation to buzz-auth startup gate.
         validate_nip_fi_config(NipFiMode::Enforce, &registry, &jwks_configs).map_err(
             |e: NipFiStartupError| ConfigError::InvalidValue(format!("NIP-FI config invalid: {e}")),
@@ -309,11 +447,34 @@ impl NipFiRelayConfig {
         Ok(Self {
             mode,
             registry,
+            communities,
             jwks_configs,
             max_connection_lifetime_secs,
             command_configs,
         })
     }
+}
+
+/// Parse and validate `BUZZ_NIP_FI_COMMUNITIES` against `registry`.
+fn parse_communities(configured: &BTreeSet<&str>) -> Result<NipFiCommunities, ConfigError> {
+    let raw = std::env::var("BUZZ_NIP_FI_COMMUNITIES").unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_COMMUNITIES is not set; \
+             set it to a JSON array of {canonical_uri, authorized_issuers}"
+                .to_string(),
+        ));
+    }
+    let entries: Vec<CommunityEnvConfig> = serde_json::from_str(&raw).map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "BUZZ_NIP_FI_COMMUNITIES is not valid JSON: {:?} at line {} column {}",
+            e.classify(),
+            e.line(),
+            e.column(),
+        ))
+    })?;
+    NipFiCommunities::from_entries(entries, configured)
+        .map_err(|e| ConfigError::InvalidValue(format!("BUZZ_NIP_FI_COMMUNITIES: {e}")))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -374,6 +535,12 @@ fn parse_algorithm(s: &str) -> Result<Algorithm, String> {
 }
 
 fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConfig), String> {
+    if entry.audiences.is_some() {
+        return Err("\"audiences\" was removed: list command-JWT audiences in \
+             \"command_audiences\" and map assertion audiences per community in \
+             BUZZ_NIP_FI_COMMUNITIES"
+            .to_string());
+    }
     let algorithms: Vec<Algorithm> = entry
         .algorithms
         .iter()
@@ -407,7 +574,7 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
 
     let policy = IssuerPolicy::new(
         entry.issuer.clone(),
-        entry.audiences.clone(),
+        entry.command_audiences.clone(),
         token_class,
         FreshnessClass::OfflineJwt,
         algorithms,
@@ -442,6 +609,31 @@ impl NipFiRelayConfig {
     /// Returns `true` when the relay is in `Enforce` mode.
     pub fn is_enforce(&self) -> bool {
         matches!(self.mode, NipFiMode::Enforce)
+    }
+}
+
+#[cfg(test)]
+impl NipFiCommunities {
+    /// One community at `canonical_uri` authorizing `issuers`.
+    pub(crate) fn for_test(canonical_uri: &str, issuers: &[&str]) -> Self {
+        let entries = vec![CommunityEnvConfig {
+            canonical_uri: canonical_uri.to_owned(),
+            authorized_issuers: issuers.iter().map(|i| (*i).to_owned()).collect(),
+        }];
+        Self::from_entries(entries, &issuers.iter().copied().collect())
+            .expect("valid test community")
+    }
+
+    /// One community, expecting `aud` and authorizing `issuers`, served at
+    /// every Host.
+    pub(crate) fn for_test_any_host(aud: &str, issuers: &[&str]) -> Self {
+        let binding =
+            CommunityBinding::new(aud.to_owned(), issuers.iter().map(|i| (*i).to_owned()))
+                .expect("valid test community");
+        Self {
+            any_host: Some(binding),
+            ..Self::default()
+        }
     }
 }
 
@@ -486,9 +678,30 @@ mod tests {
         }
     }
 
+    /// Set `BUZZ_NIP_FI_ISSUERS` to `json` and, when it parses, map one
+    /// community authorizing every listed issuer.
+    fn set_issuers(json: impl AsRef<std::ffi::OsStr>) {
+        let json = json.as_ref();
+        std::env::set_var("BUZZ_NIP_FI_ISSUERS", json);
+        let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&json.to_string_lossy())
+        else {
+            return;
+        };
+        let issuers: Vec<_> = entries.iter().filter_map(|e| e.get("issuer")).collect();
+        std::env::set_var(
+            "BUZZ_NIP_FI_COMMUNITIES",
+            serde_json::json!([{
+                "canonical_uri": "https://relay.test",
+                "authorized_issuers": issuers,
+            }])
+            .to_string(),
+        );
+    }
+
     const NIP_FI_VARS: &[&str] = &[
         "BUZZ_NIP_FI_MODE",
         "BUZZ_NIP_FI_ISSUERS",
+        "BUZZ_NIP_FI_COMMUNITIES",
         "BUZZ_NIP_FI_MAXIMUM_ASSERTION_AGE_SECS",
         "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
     ];
@@ -578,7 +791,7 @@ mod tests {
     fn valid_enforce_issuer() -> serde_json::Value {
         serde_json::json!({
             "issuer": "https://issuer.test",
-            "audiences": ["https://relay.test"],
+            "command_audiences": ["https://relay.test"],
             "token_class": "nip-fi+jwt",
             "algorithms": ["ES256"],
             "skew_seconds": 30,
@@ -600,10 +813,7 @@ mod tests {
 
         // Success control: the complete fixture is accepted.
         let valid = valid_enforce_issuer();
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
-            serde_json::json!([valid]).to_string(),
-        );
+        set_issuers(serde_json::json!([valid]).to_string());
         NipFiRelayConfig::from_env().expect("complete Enforce issuer config must be accepted");
 
         // Same fixture minus only the per-issuer age bound.
@@ -612,10 +822,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("maximum_assertion_age_seconds");
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
-            serde_json::json!([missing_age]).to_string(),
-        );
+        set_issuers(serde_json::json!([missing_age]).to_string());
         let err = NipFiRelayConfig::from_env()
             .expect_err("Enforce issuer without maximum_assertion_age_seconds must fail closed");
         // The parser deliberately reports only the serde error class (never
@@ -678,7 +885,7 @@ mod tests {
         //   "invalid type: string \"SENTINEL_SKEW_VALUE_abc123xyz\", expected u64"
         let issuers_json = serde_json::json!([{
             "issuer": "https://issuer.test",
-            "audiences": ["https://relay.test"],
+            "command_audiences": ["https://relay.test"],
             "token_class": "nip-fi+jwt",
             "algorithms": ["ES256"],
             "skew_seconds": SENTINEL,   // wrong type: serde echoes this value
@@ -689,7 +896,7 @@ mod tests {
         }])
         .to_string();
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
-        std::env::set_var("BUZZ_NIP_FI_ISSUERS", &issuers_json);
+        set_issuers(&issuers_json);
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
 
         let err = NipFiRelayConfig::from_env().expect_err("wrong-typed field must fail");
@@ -717,7 +924,7 @@ mod tests {
         const SENTINEL_ALG: &str = "SENTINEL_ALGORITHM_HS256_SECRET";
         let issuers_json = serde_json::json!([{
             "issuer": "https://issuer.test",
-            "audiences": ["https://relay.test"],
+            "command_audiences": ["https://relay.test"],
             "token_class": "nip-fi+jwt",
             "algorithms": [SENTINEL_ALG],
             "skew_seconds": 30,
@@ -729,7 +936,7 @@ mod tests {
         .to_string();
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
-        std::env::set_var("BUZZ_NIP_FI_ISSUERS", &issuers_json);
+        set_issuers(&issuers_json);
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
 
         let err = NipFiRelayConfig::from_env().expect_err("unknown algorithm must fail");
@@ -753,7 +960,7 @@ mod tests {
         // An issuer config with an empty audiences list → IssuerPolicy::new fails.
         let issuers_json = serde_json::json!([{
             "issuer": SENTINEL_ISSUER,
-            "audiences": [],  // empty → IssuerPolicy::new must fail
+            "command_audiences": [],  // empty → IssuerPolicy::new must fail
             "token_class": "nip-fi+jwt",
             "algorithms": ["ES256"],
             "skew_seconds": 30,
@@ -765,7 +972,7 @@ mod tests {
         .to_string();
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
-        std::env::set_var("BUZZ_NIP_FI_ISSUERS", &issuers_json);
+        set_issuers(&issuers_json);
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
 
         let err = NipFiRelayConfig::from_env()
@@ -925,12 +1132,10 @@ mod tests {
         // The authorized_principals field is a string instead of an array,
         // which causes serde to emit a type-error that typically includes the
         // supplied value when formatted with `{e}` (the bug we are guarding).
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
-            format!(
-                r#"[{{
+        set_issuers(format!(
+            r#"[{{
                     "issuer": "https://idp.example.com",
-                    "audiences": ["https://relay.example.com"],
+                    "command_audiences": ["https://relay.example.com"],
                     "token_class": "nip-fi+jwt",
                     "algorithms": ["ES256"],
                     "maximum_assertion_age_seconds": 3600,
@@ -940,8 +1145,7 @@ mod tests {
                     "maximum_command_age_seconds": 30,
                     "authorized_principals": "{SENTINEL}"
                 }}]"#
-            ),
-        );
+        ));
 
         let err = NipFiRelayConfig::from_env().expect_err("malformed issuers must fail");
         let display_msg = err.to_string();
@@ -971,11 +1175,10 @@ mod tests {
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
         // issuer has command age but no principals
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
+        set_issuers(
             r#"[{
                 "issuer": "https://idp.example.com",
-                "audiences": ["https://relay.example.com"],
+                "command_audiences": ["https://relay.example.com"],
                 "token_class": "nip-fi+jwt",
                 "algorithms": ["ES256"],
                 "maximum_assertion_age_seconds": 3600,
@@ -1007,11 +1210,10 @@ mod tests {
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
         // All three S4 command fields absent — pure assertion/JWKS issuer.
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
+        set_issuers(
             r#"[{
                 "issuer": "https://idp.example.com",
-                "audiences": ["https://relay.example.com"],
+                "command_audiences": ["https://relay.example.com"],
                 "token_class": "nip-fi+jwt",
                 "algorithms": ["ES256"],
                 "maximum_assertion_age_seconds": 3600,
@@ -1037,11 +1239,10 @@ mod tests {
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
         // authorized_principals without maximum_command_age_seconds — orphan field.
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
+        set_issuers(
             r#"[{
                 "issuer": "https://idp.example.com",
-                "audiences": ["https://relay.example.com"],
+                "command_audiences": ["https://relay.example.com"],
                 "token_class": "nip-fi+jwt",
                 "algorithms": ["ES256"],
                 "maximum_assertion_age_seconds": 3600,
@@ -1072,11 +1273,10 @@ mod tests {
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
         // deny_set_capacity without maximum_command_age_seconds — orphan field.
-        std::env::set_var(
-            "BUZZ_NIP_FI_ISSUERS",
+        set_issuers(
             r#"[{
                 "issuer": "https://idp.example.com",
-                "audiences": ["https://relay.example.com"],
+                "command_audiences": ["https://relay.example.com"],
                 "token_class": "nip-fi+jwt",
                 "algorithms": ["ES256"],
                 "maximum_assertion_age_seconds": 3600,
@@ -1097,5 +1297,183 @@ mod tests {
             msg.contains("maximum_command_age_seconds"),
             "error names the missing dependency: {msg}"
         );
+    }
+
+    /// `from_env` in enforce mode over the valid issuer fixture plus a second
+    /// issuer, with `communities` as `BUZZ_NIP_FI_COMMUNITIES`.
+    fn enforce_with_communities(
+        communities: serde_json::Value,
+    ) -> Result<NipFiRelayConfig, String> {
+        let mut second = valid_enforce_issuer();
+        second["issuer"] = "https://issuer-b.test".into();
+        second["jwks_uri"] = "https://issuer-b.test/.well-known/jwks.json".into();
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            serde_json::json!([valid_enforce_issuer(), second]).to_string(),
+        );
+        std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", communities.to_string());
+        NipFiRelayConfig::from_env().map_err(|e| e.to_string())
+    }
+
+    fn community_entry(uri: &str, issuers: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "canonical_uri": uri, "authorized_issuers": issuers })
+    }
+
+    #[test]
+    fn enforce_communities_map_hosts_to_bindings() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let cfg = enforce_with_communities(serde_json::json!([
+            community_entry("https://a.relay.test", &["https://issuer.test"]),
+            community_entry("https://b.relay.test:8443", &["https://issuer-b.test"]),
+        ]))
+        .expect("valid communities");
+
+        let a = cfg
+            .communities
+            .resolve("A.Relay.Test")
+            .expect("Host a maps");
+        assert_eq!(a.expected_aud(), "https://a.relay.test");
+        assert!(a.authorizes("https://issuer.test") && !a.authorizes("https://issuer-b.test"));
+        let b = cfg
+            .communities
+            .resolve("b.relay.test:8443")
+            .expect("Host b maps");
+        assert_eq!(b.expected_aud(), "https://b.relay.test:8443");
+        assert!(cfg.communities.resolve("c.relay.test").is_none());
+    }
+
+    #[test]
+    fn enforce_without_communities_fails_closed() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        enforce_with_communities(serde_json::json!([])).expect_err("empty array");
+        std::env::remove_var("BUZZ_NIP_FI_COMMUNITIES");
+        let err = NipFiRelayConfig::from_env().expect_err("unset communities must fail");
+        assert!(
+            err.to_string()
+                .contains("BUZZ_NIP_FI_COMMUNITIES is not set"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn enforce_community_uri_must_be_https_authority_only() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        for uri in [
+            "http://a.relay.test",
+            "https://a.relay.test/",
+            "https://a.relay.test/path",
+            "https://a.relay.test?q",
+            "https://a.relay.test#f",
+            "https://user@a.relay.test",
+            "https://A.relay.test",
+            "https://",
+        ] {
+            let err = enforce_with_communities(serde_json::json!([community_entry(
+                uri,
+                &["https://issuer.test", "https://issuer-b.test"]
+            ),]))
+            .expect_err(uri);
+            assert!(
+                err.contains("community at index 0: canonical_uri must be"),
+                "{uri}: {err}"
+            );
+            assert!(
+                !err.contains("relay.test"),
+                "error must not echo the URI: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforce_communities_must_have_unique_hosts() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let err = enforce_with_communities(serde_json::json!([
+            community_entry("https://a.relay.test", &["https://issuer.test"]),
+            community_entry("https://a.relay.test", &["https://issuer-b.test"]),
+        ]))
+        .expect_err("duplicate Host");
+        assert!(
+            err.contains("community at index 1: canonical_uri maps to the same Host"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn enforce_community_issuers_must_be_configured() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let err = enforce_with_communities(serde_json::json!([community_entry(
+            "https://a.relay.test",
+            &[
+                "https://issuer.test",
+                "https://issuer-b.test",
+                "https://stranger.test"
+            ],
+        )]))
+        .expect_err("unconfigured issuer");
+        assert!(
+            err.contains("authorized issuer at index 2 is not configured"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("stranger"),
+            "error must not echo the issuer: {err}"
+        );
+        let err = enforce_with_communities(serde_json::json!([community_entry(
+            "https://a.relay.test",
+            &[],
+        )]))
+        .expect_err("empty allowlist");
+        assert!(
+            err.contains("community at index 0: empty authorized issuer set"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn enforce_issuer_in_no_community_fails_closed() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let err = enforce_with_communities(serde_json::json!([community_entry(
+            "https://a.relay.test",
+            &["https://issuer.test"],
+        )]))
+        .expect_err("issuer-b is in no community");
+        assert!(
+            err.contains("issuer at index 1 is not authorized by any community"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn enforce_issuer_rejects_removed_audiences_field() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let mut stale = valid_enforce_issuer();
+        stale["audiences"] = serde_json::json!(["https://relay.test"]);
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        set_issuers(serde_json::json!([stale]).to_string());
+        let err = NipFiRelayConfig::from_env().expect_err("stale audiences field");
+        assert!(
+            err.to_string().contains("\"audiences\" was removed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn deny_protected_ignores_invalid_communities() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        std::env::set_var("BUZZ_NIP_FI_MODE", "deny_protected");
+        std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", "not json");
+        let cfg = NipFiRelayConfig::from_env().expect("repair mode must still boot");
+        assert!(cfg.communities.resolve("a.relay.test").is_none());
     }
 }

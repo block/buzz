@@ -60,6 +60,8 @@ mod postgres_tests {
         config.require_auth_token = true;
         config.require_relay_membership = false;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.test");
 
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
             .await
@@ -234,6 +236,8 @@ mod postgres_tests {
         config.require_auth_token = true;
         config.require_relay_membership = false;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.test");
 
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
             .await
@@ -2103,7 +2107,10 @@ mod external_infra {
         ));
 
         let mut enforced_state = (*f.state).clone();
-        Arc::make_mut(&mut enforced_state.config).nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        let config = Arc::make_mut(&mut enforced_state.config);
+        config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.settings-test.invalid");
         enforced_state.nip_fi_verifier = Some(verifier);
         let enforced_state = Arc::new(enforced_state);
 
