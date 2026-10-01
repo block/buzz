@@ -18,7 +18,8 @@
 //! Fail-closed: any failure inserts no deny entry, closes no session and
 //! publishes nothing.  A failure after step 6's shared claim may leave that
 //! claim in place until its TTL (a guard error whose `SET` reply was lost, or a
-//! failed release); that is fail closed, since a retry is then denied.
+//! process stopped between claim and commit); that is fail closed, since a
+//! retry is then denied.
 
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};

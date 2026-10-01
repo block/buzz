@@ -56,8 +56,8 @@ pub struct DenySetFull;
 
 /// One issuer's worth of deny entries and jti deduplication state.
 ///
-/// The shard mutex is acquired once per `AtomicReserveJtiAndDenyEntry` call
-/// so both mutations happen under the same lock (both-or-neither atomicity).
+/// Reserve and commit each take the shard mutex separately; the pending slot
+/// held between them keeps the jti and deny entry both-or-neither.
 struct IssuerShard {
     /// Active deny entries: hex-encoded pubkey → until.
     entries: HashMap<String, DateTime<Utc>>,
@@ -224,8 +224,10 @@ impl IssuerShard {
         until: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<(), CapacityExceeded> {
-        // Overwriting an existing (active or expired) entry never grows the map.
+        // Overwriting an existing (active or expired) entry never grows the
+        // map, and a pending key already holds the slot this entry fills.
         if !self.entries.contains_key(pubkey_hex)
+            && !self.pending_keys.contains_key(pubkey_hex)
             && self.full_after_eviction(now, |s| s.entry_slots() >= s.capacity)
         {
             return Err(CapacityExceeded);
@@ -953,6 +955,69 @@ mod tests {
     //  (b) synthesize issuer-wide denial (set blocked) → missed-target and
     //      unrelated-key is_denied assertions fail
     //  (c) admit at exact equality (use <= instead of <) → equality assertion fails
+
+    #[test]
+    fn remote_merge_of_pending_key_uses_its_reserved_slot() {
+        // Another pod wins the shared claim for k while this pod's reservation
+        // for k is pending; the propagated deny must land and survive the
+        // local reservation being dropped, without exceeding capacity.
+        let now = Utc::now();
+        let until = now + Duration::seconds(300);
+        let (k, other) = (key(), key());
+        let m = NipFiDenyMap::new(
+            1,
+            vec![IssuerCapacity {
+                issuer: iss().to_owned(),
+                capacity: 1,
+            }],
+        );
+        let pending = m.reserve(iss(), "jti-local", &k, now).expect("slot free");
+
+        assert_eq!(
+            m.merge_cross_pod_deny(iss(), &k, until, now),
+            CrossPodMergeResult::Merged
+        );
+        drop(pending);
+
+        assert!(m.is_denied(iss(), &k, now), "the remote deny must survive");
+        assert_eq!(
+            m.merge_cross_pod_deny(iss(), &other, until, now),
+            CrossPodMergeResult::CapacityExceeded,
+            "k still holds the only slot"
+        );
+    }
+
+    #[test]
+    fn commit_after_remote_merge_of_pending_key_max_merges_into_one_entry() {
+        let now = Utc::now();
+        let (remote_until, local_until) =
+            (now + Duration::seconds(600), now + Duration::seconds(300));
+        let (k, other) = (key(), key());
+        let m = NipFiDenyMap::new(
+            1,
+            vec![IssuerCapacity {
+                issuer: iss().to_owned(),
+                capacity: 1,
+            }],
+        );
+        let pending = m.reserve(iss(), "jti-local", &k, now).expect("slot free");
+        assert_eq!(
+            m.merge_cross_pod_deny(iss(), &k, remote_until, now),
+            CrossPodMergeResult::Merged
+        );
+        pending.commit(local_until, local_until);
+
+        assert!(
+            m.is_denied(iss(), &k, local_until + Duration::seconds(1)),
+            "the later until wins"
+        );
+        assert!(!m.is_denied(iss(), &k, remote_until));
+        assert_eq!(
+            m.merge_cross_pod_deny(iss(), &other, remote_until, now),
+            CrossPodMergeResult::CapacityExceeded,
+            "still one entry"
+        );
+    }
 
     #[test]
     fn remote_merge_capacity_exceeded_preserves_active_entry_and_does_not_deny_missed_or_unrelated()

@@ -2667,19 +2667,17 @@ mod route_integration_tests {
 
         /// Publications for the target so far.
         ///
-        /// Barrier: wait until every publish `via` has spawned has finished,
-        /// so each earlier `PUBLISH` is complete.  Then send an accepted
+        /// Barrier: wait until every publish spawned by each pod in `drain`
+        /// (every pod that could have published) has finished, so each
+        /// earlier `PUBLISH` is complete.  Then send an accepted
         /// sentinel command and read up to its publication.  It is published
         /// strictly after the earlier ones and Redis delivers in publish
         /// order, so the read drains them all; it is also a positive control
         /// that the publisher and this collector both work.
-        async fn count(&mut self, via: &Arc<AppState>) -> usize {
-            let tasks = &via.nip_fi_publish_tasks;
-            tasks.close();
-            tokio::time::timeout(std::time::Duration::from_secs(10), tasks.wait())
-                .await
-                .expect("spawned publishes did not finish within 10s");
-            tasks.reopen();
+        async fn count(&mut self, drain: &[&Arc<AppState>], via: &Arc<AppState>) -> usize {
+            for state in drain {
+                drain_publishes(state).await;
+            }
             let sentinel = nostr::Keys::generate().public_key();
             let token = mint_token(&sentinel.to_hex(), 300, serde_json::json!({}));
             let (status, _) = post_command(via, &token, &sentinel.to_hex()).await;
@@ -2700,6 +2698,16 @@ mod route_integration_tests {
         }
     }
 
+    /// Wait until every publish `state` has spawned so far has finished.
+    async fn drain_publishes(state: &AppState) {
+        let tasks = &state.nip_fi_publish_tasks;
+        tasks.close();
+        tokio::time::timeout(std::time::Duration::from_secs(10), tasks.wait())
+            .await
+            .expect("spawned publishes did not finish within 10s");
+        tasks.reopen();
+    }
+
     async fn observe(
         enabled: bool,
         state: &AppState,
@@ -2713,12 +2721,17 @@ mod route_integration_tests {
 
     async fn assert_publishes(
         observer: &mut Option<PublishObserver>,
+        drain: &[&Arc<AppState>],
         via: &Arc<AppState>,
         expected: usize,
         what: &str,
     ) {
         if let Some(observer) = observer {
-            assert_eq!(observer.count(via).await, expected, "publications: {what}");
+            assert_eq!(
+                observer.count(drain, via).await,
+                expected,
+                "publications: {what}"
+            );
         }
     }
 
@@ -2736,7 +2749,14 @@ mod route_integration_tests {
 
         let (status, _) = post_command(&pod_a, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::OK, "first use is accepted on pod A");
-        assert_publishes(&mut publishes, &pod_a, 1, "accepted command").await;
+        assert_publishes(
+            &mut publishes,
+            &[&pod_a, &pod_b],
+            &pod_a,
+            1,
+            "accepted command",
+        )
+        .await;
 
         let (status, body) = post_command(&pod_b, &token, &key.to_hex()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "replay on pod B is denied");
@@ -2746,7 +2766,14 @@ mod route_integration_tests {
             "replay must not insert a deny entry on B"
         );
         on_b.assert_open("pod B after rejected replay");
-        assert_publishes(&mut publishes, &pod_b, 1, "rejected replay adds none").await;
+        assert_publishes(
+            &mut publishes,
+            &[&pod_a, &pod_b],
+            &pod_b,
+            1,
+            "rejected replay adds none",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2808,7 +2835,7 @@ mod route_integration_tests {
         assert_eq!(body.as_ref(), b"evidence rejected\n");
         assert!(!is_denied(&pod_a, &key), "forgery inserts no deny entry");
         on_a.assert_open("pod A after forgery");
-        assert_publishes(&mut publishes, &pod_a, 0, "forgery").await;
+        assert_publishes(&mut publishes, &[&pod_a, &pod_b], &pod_a, 0, "forgery").await;
         if let Some(guard) = claims {
             assert_eq!(
                 guard.claims.load(std::sync::atomic::Ordering::SeqCst),
@@ -2824,7 +2851,14 @@ mod route_integration_tests {
             "the legitimate command's jti was not burned by the forgery"
         );
         assert!(is_denied(&pod_b, &key));
-        assert_publishes(&mut publishes, &pod_b, 1, "accepted command").await;
+        assert_publishes(
+            &mut publishes,
+            &[&pod_a, &pod_b],
+            &pod_b,
+            1,
+            "accepted command",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2874,7 +2908,14 @@ mod route_integration_tests {
             Arc::new(buzz_auth::InMemoryCommandReplayGuard::default()),
         )
         .await;
-        assert_publishes(&mut publishes, &healthy, 0, "guard error").await;
+        assert_publishes(
+            &mut publishes,
+            &[&state, &healthy],
+            &healthy,
+            0,
+            "guard error",
+        )
+        .await;
     }
 
     #[tokio::test]
