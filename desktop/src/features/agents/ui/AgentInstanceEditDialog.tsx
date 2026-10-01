@@ -808,15 +808,11 @@ export function AgentInstanceEditDialog({
             onClick: () => {
               startMutation.mutate(result.agent.pubkey, {
                 onSuccess: () => toast.success(`${startedName} started.`),
-                onError: (error) => {
-                  // Its community was removed meanwhile: nothing to report.
-                  if (isRelayRemovedError(error)) return;
+                onError: (error) =>
+                  isRelayRemovedError(error) ||
                   toast.error(
-                    error instanceof Error
-                      ? `${startedName} failed to start: ${error.message}`
-                      : `${startedName} failed to start.`,
-                  );
-                },
+                    `${startedName} failed to start${error instanceof Error ? `: ${error.message}` : "."}`,
+                  ),
               });
             },
           },
