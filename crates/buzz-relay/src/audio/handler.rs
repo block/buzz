@@ -13160,12 +13160,14 @@ mod tests {
         }
 
         /// A delegated agent that has only ever authenticated on audio (no
-        /// prior `users` row or owner link) is closed when its owner is
-        /// revoked: audio admission records the owner link. A second member
-        /// on the same channel stays connected.
+        /// prior `users` row or owner link) gets its owner link stored, and
+        /// its socket records that owner, so revoking the owner closes it with
+        /// no database lookup. A second member on the same channel stays
+        /// connected.
         ///
-        /// Mutation: stop audio admission from recording the owner link →
-        /// the owner revoke finds no agent → the socket stays open → RED.
+        /// Mutations: stop audio admission from storing the owner link → the
+        /// link assertion fails → RED; drop `control.bind_owner` → the socket
+        /// stays open once the stored link is gone → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn owner_revoke_closes_audio_only_agent() {
@@ -13190,6 +13192,28 @@ mod tests {
             let (_bystander_client, bystander_server) =
                 open_admitted_audio_socket(&state, tenant.clone(), channel_id, &bystander, None)
                     .await;
+            assert!(
+                state
+                    .db
+                    .is_agent_owner(
+                        tenant.community(),
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner link read"),
+                "audio admission stores the owner link"
+            );
+            // Clear the stored link so only the owner the socket recorded at
+            // admission can reach it.
+            sqlx::query(
+                "UPDATE users SET agent_owner_pubkey = NULL WHERE community_id = $1 AND pubkey = $2",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(agent.public_key().to_bytes().as_slice())
+            .execute(state.db.pool())
+            .await
+            .expect("clear stored owner link");
 
             let closed = state
                 .revoke_live_access(

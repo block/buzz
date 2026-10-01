@@ -1598,6 +1598,146 @@ mod tests {
             );
         }
 
+        /// A roster removal whose disconnect runs while AUTH is paused must
+        /// refuse admission even when a lagging replica still lists the
+        /// member: the final check reads membership from the writer. A user
+        /// in another community, paused at the same point, is still admitted.
+        ///
+        /// Mutation: make `final_admission_denial` call the replica-routed
+        /// `check_relay_membership` → the removed socket is admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn removal_during_auth_is_not_undone_by_a_stale_replica() {
+            use sqlx::postgres::PgConnectOptions;
+            use std::sync::Arc;
+            let base = auth_test_state_real_db_expect().await;
+            let (removed_community, control_community) =
+                (seeded_community(&base).await, seeded_community(&base).await);
+            let (member, bystander) = (Keys::generate(), Keys::generate());
+
+            // The "replica": a schema whose relay_members still lists both.
+            let db_url = crate::test_support::database_url();
+            let schema = format!("stale_replica_{}", uuid::Uuid::new_v4().simple());
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE SCHEMA {schema}; \
+                 CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL);"
+            )))
+            .execute(base.db.pool())
+            .await
+            .expect("create replica schema");
+            let replica = sqlx::PgPool::connect_with(
+                db_url
+                    .parse::<PgConnectOptions>()
+                    .expect("database url")
+                    .options([("search_path", format!("{schema},public").as_str())]),
+            )
+            .await
+            .expect("replica pool");
+            for (community, keys) in [
+                (removed_community, &member),
+                (control_community, &bystander),
+            ] {
+                for pool in [base.db.pool(), &replica] {
+                    buzz_db::relay_members::add_relay_member(
+                        pool,
+                        community,
+                        &keys.public_key().to_hex(),
+                        "member",
+                        None,
+                    )
+                    .await
+                    .expect("seed member");
+                }
+            }
+            let mut db = buzz_db::Db::from_pools(base.db.pool().clone(), replica.clone());
+            db.fence().force_open_for_tests(chrono::Utc::now());
+            db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(60)));
+            let mut config = (*base.config).clone();
+            config.require_relay_membership = true;
+            let mut state = (*base).clone();
+            state.db = db;
+            state.config = Arc::new(config);
+            let state = Arc::new(state);
+
+            let (removed_conn, _removed_ctrl) =
+                registered_pending_conn(&state, removed_community, "stale-removed");
+            let (control_conn, _control_ctrl) =
+                registered_pending_conn(&state, control_community, "stale-control");
+            let mut paused = Vec::new();
+            for (conn, keys, challenge) in [
+                (&removed_conn, &member, "stale-removed"),
+                (&control_conn, &bystander, "stale-control"),
+            ] {
+                let (arrived, release) =
+                    crate::nip_fi_test_hooks::auth_commit_hook::arm(conn.tenant.community());
+                let handle = tokio::spawn(handle_auth(
+                    signed_auth(keys, challenge, None),
+                    Arc::clone(conn),
+                    Arc::clone(&state),
+                ));
+                tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+                    .await
+                    .expect("AUTH must pause after its policy reads")
+                    .expect("hook channel closed");
+                paused.push((handle, release));
+            }
+
+            // The removal commits on the writer only, and its disconnect runs
+            // while AUTH is paused.
+            state
+                .db
+                .remove_relay_member(removed_community, &member.public_key().to_hex())
+                .await
+                .expect("remove member");
+            assert!(
+                state
+                    .db
+                    .is_relay_member(removed_community, &member.public_key().to_hex())
+                    .await
+                    .expect("routed read"),
+                "precondition: the routed read still sees the stale replica row"
+            );
+            state
+                .revoke_live_access(
+                    &removed_conn.tenant.clone(),
+                    &member.public_key().to_bytes(),
+                    "stale-removal",
+                    "restricted: you were removed from this relay",
+                )
+                .await
+                .expect("revoke");
+
+            for (handle, release) in paused {
+                release.notify_one();
+                tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                    .await
+                    .expect("AUTH must finish")
+                    .expect("AUTH must not panic");
+            }
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(base.db.pool())
+                .await;
+
+            assert!(
+                !matches!(
+                    removed_conn.auth_state_snapshot(),
+                    AuthState::Authenticated(_)
+                ),
+                "a removal committed during AUTH must refuse admission"
+            );
+            assert!(
+                removed_conn.cancel.is_cancelled(),
+                "the refused socket closes"
+            );
+            assert!(
+                matches!(
+                    control_conn.auth_state_snapshot(),
+                    AuthState::Authenticated(_)
+                ),
+                "an unaffected community's member is still admitted"
+            );
+        }
+
         /// An agent whose owner link cannot be recorded (here: the agent is
         /// already linked to a different owner) is refused, because revoking
         /// its NIP-OA owner could not find it.
@@ -1649,6 +1789,89 @@ mod tests {
                 matches!(&refusal, WsMessage::Text(t) if t.contains(crate::handlers::auth::OWNER_LINK_ERROR)),
                 "refusal names the owner-link failure, got {refusal:?}"
             );
+        }
+
+        /// Root AUTH records each agent's owner on its socket — the proven
+        /// NIP-OA owner, or the stored owner link when the agent signs in
+        /// without a credential — so revoking the owner closes both agents
+        /// even after the stored links are gone. A bystander stays admitted.
+        ///
+        /// Mutations: drop `set_admitted_owner` from `handle_auth` → both
+        /// agents stay open → RED; ignore the stored link in
+        /// `admitted_owner` → the credential-less agent stays open → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn root_auth_records_owner_for_lookup_free_revoke() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, tagged, stored, bystander) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            for key in [&owner, &stored] {
+                state
+                    .db
+                    .ensure_user_for_authorization(community, key.public_key().as_bytes())
+                    .await
+                    .expect("seed user");
+            }
+            assert!(state
+                .db
+                .set_agent_owner_for_authorization(
+                    community,
+                    stored.public_key().as_bytes(),
+                    owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("seed stored owner link"));
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &tagged.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+
+            let mut conns = Vec::new();
+            for (keys, tag, challenge) in [
+                (&tagged, Some(auth_tag), "owner-tagged"),
+                (&stored, None, "owner-stored"),
+                (&bystander, None, "owner-bystander"),
+            ] {
+                let (conn, _ctrl) = registered_pending_conn(&state, community, challenge);
+                handle_auth(
+                    signed_auth(keys, challenge, tag),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                assert!(
+                    matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                    "{challenge} is admitted"
+                );
+                conns.push(conn);
+            }
+            sqlx::query("UPDATE users SET agent_owner_pubkey = NULL WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .execute(state.db.pool())
+                .await
+                .expect("clear stored owner links");
+
+            let tenant = conns[0].tenant.clone();
+            state
+                .revoke_live_access(
+                    &tenant,
+                    &owner.public_key().to_bytes(),
+                    "owner-revoke",
+                    "blocked: you are banned from this community",
+                )
+                .await
+                .expect("revoke");
+            assert!(conns[0].cancel.is_cancelled(), "the NIP-OA agent closes");
+            assert!(
+                conns[1].cancel.is_cancelled(),
+                "the stored-link agent closes"
+            );
+            assert!(!conns[2].cancel.is_cancelled(), "the bystander stays");
         }
 
         async fn auth_test_state_real_db_expect() -> std::sync::Arc<crate::state::AppState> {

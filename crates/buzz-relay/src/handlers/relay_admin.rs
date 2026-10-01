@@ -993,13 +993,19 @@ mod postgres_tests {
         cancel
     }
 
-    /// A NIP-43 self-leave ends access now: the member's root socket, their
-    /// audio socket, and their owned agent's socket all close. The same
-    /// member's socket in another community stays open.
-    /// Mutation: drop `revoke_live_access` from the leave path → RED.
-    #[tokio::test]
-    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-    async fn self_leave_closes_member_audio_and_agent_sockets() {
+    /// Live sockets around a NIP-43 self-leave: the member's root and audio
+    /// sockets, their owned agent's root and audio sockets, and the member's
+    /// root socket in another community.
+    struct SelfLeaveFixture {
+        state: std::sync::Arc<crate::state::AppState>,
+        tenant: buzz_core::tenant::TenantContext,
+        member: Keys,
+        closing: Vec<(&'static str, tokio_util::sync::CancellationToken)>,
+        other_community: tokio_util::sync::CancellationToken,
+        _guards: Vec<crate::state::CommunityConnectionGuard>,
+    }
+
+    async fn self_leave_fixture() -> SelfLeaveFixture {
         use crate::state::CommunityConnectionControl;
         use tokio_util::sync::CancellationToken;
 
@@ -1010,18 +1016,18 @@ mod postgres_tests {
             uuid::Uuid::new_v4().simple()
         );
         let (_, other_tenant) = workspace_profile_test_state(&other_host, true).await;
-        let (owner, agent) = (Keys::generate(), Keys::generate());
+        let (member, agent) = (Keys::generate(), Keys::generate());
         state
             .db
             .add_relay_member(
                 tenant.community(),
-                &owner.public_key().to_hex(),
+                &member.public_key().to_hex(),
                 "member",
                 None,
             )
             .await
             .expect("seed member");
-        for keys in [&owner, &agent] {
+        for keys in [&member, &agent] {
             state
                 .db
                 .ensure_user(tenant.community(), keys.public_key().as_bytes())
@@ -1033,54 +1039,193 @@ mod postgres_tests {
             .set_agent_owner(
                 tenant.community(),
                 agent.public_key().as_bytes(),
-                owner.public_key().as_bytes(),
+                member.public_key().as_bytes(),
             )
             .await
             .expect("link agent"));
 
-        let root = bound_root_socket(&state, tenant.community(), &owner);
-        let control_root = bound_root_socket(&state, other_tenant.community(), &owner);
-        let bound = |keys: &Keys| {
+        let mut guards = Vec::new();
+        let mut audio = |keys: &Keys| {
             let control = CommunityConnectionControl::new(CancellationToken::new());
             control.bind_pubkey(keys.public_key().to_bytes());
-            let guard = state.community_connections.register(
+            guards.push(state.community_connections.register(
                 uuid::Uuid::new_v4(),
                 tenant.community(),
                 control.clone(),
-            );
-            (control, guard)
+            ));
+            control.cancellation_token()
         };
-        let (audio, _g1) = bound(&owner);
-        let (agent_socket, _g2) = bound(&agent);
+        let closing = vec![
+            ("member audio", audio(&member)),
+            ("agent audio", audio(&agent)),
+            (
+                "member root",
+                bound_root_socket(&state, tenant.community(), &member),
+            ),
+            (
+                "agent root",
+                bound_root_socket(&state, tenant.community(), &agent),
+            ),
+        ];
+        let other_community = bound_root_socket(&state, other_tenant.community(), &member);
+        SelfLeaveFixture {
+            state,
+            tenant,
+            member,
+            closing,
+            other_community,
+            _guards: guards,
+        }
+    }
 
-        let leave = EventBuilder::new(
+    fn signed_leave(keys: &Keys) -> nostr::Event {
+        EventBuilder::new(
             Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
             "",
         )
         .tags([nostr::Tag::parse(["-"]).unwrap()])
-        .sign_with_keys(&owner)
-        .expect("sign leave");
+        .sign_with_keys(keys)
+        .expect("sign leave")
+    }
+
+    fn assert_left(f: &SelfLeaveFixture) {
+        for (name, socket) in &f.closing {
+            assert!(socket.is_cancelled(), "the {name} socket closes");
+        }
+        assert!(
+            !f.other_community.is_cancelled(),
+            "the member's socket in another community stays open"
+        );
+    }
+
+    /// A NIP-43 self-leave ends access now: the member's and their owned
+    /// agent's sockets close; the member's socket in another community stays.
+    /// Mutation: drop `revoke_live_access` from the leave path → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn self_leave_closes_member_audio_and_agent_sockets() {
+        let f = self_leave_fixture().await;
         let auth = crate::handlers::ingest::IngestAuth::Http {
-            pubkey: owner.public_key(),
+            pubkey: f.member.public_key(),
             scopes: vec![buzz_auth::Scope::ChannelsRead],
             auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
         };
-        crate::handlers::ingest::ingest_event(&state, &tenant, leave, auth)
+        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, signed_leave(&f.member), auth)
             .await
             .expect("member leaves");
+        assert_left(&f);
+    }
 
-        assert!(root.is_cancelled(), "the member's root socket closes");
+    /// A leave sent as `EVENT` over an authenticated WebSocket removes the
+    /// membership and closes the same sockets. Kind 28936 is in the ephemeral
+    /// range, so it must be routed to ingest, not the ephemeral fan-out.
+    /// Mutation: drop the leave exclusion from `handle_event`'s ephemeral
+    /// branch → `OK true`, membership kept, sockets open → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn websocket_self_leave_removes_membership_and_closes_sockets() {
+        let f = self_leave_fixture().await;
+        let auth = crate::connection::AuthState::Authenticated(buzz_auth::AuthContext {
+            pubkey: f.member.public_key(),
+            scopes: buzz_auth::Scope::all_known(),
+            channel_ids: None,
+            auth_method: buzz_auth::AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        });
+        let (mut conn, mut sent) = crate::connection::tests::test_conn_with_auth(auth);
+        std::sync::Arc::get_mut(&mut conn).unwrap().tenant = f.tenant.clone();
+        let leave = signed_leave(&f.member);
+        crate::handlers::event::handle_event(leave.clone(), conn, f.state.clone()).await;
+
+        let axum::extract::ws::Message::Text(ack) = sent.try_recv().expect("OK frame") else {
+            panic!("expected an OK frame");
+        };
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack[1], leave.id.to_hex());
+        assert_eq!(ack[2], true, "the leave is accepted: {ack}");
         assert!(
-            audio.cancellation_token().is_cancelled(),
-            "their audio socket closes"
+            !f.state
+                .db
+                .is_relay_member_writer(f.tenant.community(), &f.member.public_key().to_hex())
+                .await
+                .expect("membership read"),
+            "the membership row is gone"
+        );
+        assert_left(&f);
+    }
+
+    /// A direct ban (kind 9040) whose audit insert fails still closes the
+    /// banned member's socket, and the command still reports the failure.
+    /// A bystander stays connected.
+    /// Mutation: move `revoke_live_access` back after `insert_audit(...)?`
+    /// in `handle_ban` → the socket stays open → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn ban_closes_socket_even_when_audit_insert_fails() {
+        let host = format!("ban-audit-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target, bystander) = (Keys::generate(), Keys::generate(), Keys::generate());
+        for (keys, role) in [
+            (&owner, "owner"),
+            (&target, "member"),
+            (&bystander, "member"),
+        ] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .await
+                .expect("seed member");
+        }
+        let target_socket = bound_root_socket(&state, tenant.community(), &target);
+        let bystander_socket = bound_root_socket(&state, tenant.community(), &bystander);
+
+        // Audit inserts fail for this community only.
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let community = *tenant.community().as_uuid();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE FUNCTION fail_audit_{suffix}() RETURNS trigger AS $$ BEGIN \
+               IF NEW.community_id = '{community}' THEN RAISE EXCEPTION 'audit unavailable'; END IF; \
+               RETURN NEW; END $$ LANGUAGE plpgsql; \
+             CREATE TRIGGER fail_audit_{suffix} BEFORE INSERT ON moderation_actions \
+               FOR EACH ROW EXECUTE FUNCTION fail_audit_{suffix}();"
+        )))
+        .execute(state.db.pool())
+        .await
+        .expect("install audit-failure trigger");
+
+        let ban = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_MODERATION_BAN as u16),
+            "",
+        )
+        .tags([Tag::public_key(target.public_key())])
+        .sign_with_keys(&owner)
+        .expect("sign 9040");
+        let result =
+            crate::handlers::moderation_commands::handle_moderation_command(&tenant, &state, &ban)
+                .await;
+
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP TRIGGER fail_audit_{suffix} ON moderation_actions; \
+             DROP FUNCTION fail_audit_{suffix}();"
+        )))
+        .execute(state.db.pool())
+        .await;
+
+        let error = result.expect_err("the audit failure is reported");
+        assert!(
+            error.contains("audit"),
+            "reports the audit failure: {error}"
         );
         assert!(
-            agent_socket.cancellation_token().is_cancelled(),
-            "their agent's socket closes"
+            state
+                .db
+                .moderation_restriction_state(tenant.community(), target.public_key().as_bytes())
+                .await
+                .expect("restriction read")
+                .banned,
+            "the ban committed"
         );
-        assert!(
-            !control_root.is_cancelled(),
-            "another community's socket stays open"
-        );
+        assert!(target_socket.is_cancelled(), "the banned socket closes");
+        assert!(!bystander_socket.is_cancelled(), "the bystander stays");
     }
 }

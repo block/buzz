@@ -4126,54 +4126,101 @@ mod off_mode_precedence_tests {
         }
 
         /// A NIP-98-authenticated Git request whose restriction lookup fails
-        /// answers 503, not the 403 a real ban or non-member gets.
-        /// Mutation: treat every membership-step error as 403 → RED.
+        /// answers 503, not the 403 a real ban or non-member gets. Enforce sends
+        /// the canonical NIP-FI `authorization unavailable` bytes; Off keeps the
+        /// legacy text. Mutations: treat every membership-step error as 403, or
+        /// skip the Enforce mapping → RED.
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn failed_restriction_lookup_is_503_not_403() {
             use base64::Engine as _;
-            let Some(mut state) = off_mode_state().await else {
-                panic!("local Postgres not reachable");
-            };
-            let host = format!("git-ban-lookup-{}.test", uuid::Uuid::new_v4().simple());
-            state
-                .db
-                .ensure_configured_community(&host)
-                .await
-                .expect("ensure community");
-            let (db, admin, schema) = crate::test_support::restriction_lookup_failing_db().await;
-            Arc::get_mut(&mut state)
-                .expect("fixture state is uniquely owned")
-                .db = db;
-            let scheme = if state.config.relay_url.starts_with("wss://") {
-                "https"
-            } else {
-                "http"
-            };
-            let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
-            let event_json = serde_json::to_string(
-                &nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
-                    .tags([
-                        nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
-                        nostr::Tag::parse(["method", "GET"]).expect("method tag"),
-                    ])
-                    .sign_with_keys(&nostr::Keys::generate())
-                    .expect("sign NIP-98 event"),
-            )
-            .expect("serialize");
-            let auth = format!(
-                "Nostr {}",
-                base64::engine::general_purpose::STANDARD.encode(event_json)
-            );
-            let (status, _, body) = git_request(state, &host, Some(&auth)).await;
-            assert_eq!(
-                status,
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "body {body:?}"
-            );
-            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-                .execute(&admin)
-                .await;
+            struct AdmitAnyAssertion(nostr::PublicKey);
+            impl buzz_auth::VerifyAssertion for AdmitAnyAssertion {
+                fn verify_assertion(
+                    &self,
+                    _token: &str,
+                ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
+                {
+                    Ok(buzz_auth::VerifiedAssertion::new_for_test(self.0))
+                }
+            }
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Enforce] {
+                let Some(mut state) = off_mode_state().await else {
+                    panic!("local Postgres not reachable");
+                };
+                let host = format!("git-ban-lookup-{}.test", uuid::Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let (db, admin, schema) =
+                    crate::test_support::restriction_lookup_failing_db().await;
+                let keys = nostr::Keys::generate();
+                {
+                    let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
+                    s.db = db;
+                    Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion(keys.public_key())));
+                }
+                let scheme = if state.config.relay_url.starts_with("wss://") {
+                    "https"
+                } else {
+                    "http"
+                };
+                let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
+                let event_json = serde_json::to_string(
+                    &nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                        .tags([
+                            nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
+                            nostr::Tag::parse(["method", "GET"]).expect("method tag"),
+                        ])
+                        .sign_with_keys(&keys)
+                        .expect("sign NIP-98 event"),
+                )
+                .expect("serialize");
+                let auth = format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(event_json)
+                );
+                let req = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(GIT_PATH)
+                    .header("host", &host)
+                    .header("authorization", &auth)
+                    .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer any.valid.token")
+                    .body(axum::body::Body::empty())
+                    .expect("build request");
+                let resp = git_router(Arc::clone(&state))
+                    .oneshot(req)
+                    .await
+                    .expect("router oneshot");
+                let status = resp.status();
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                let expected: &[u8] = match mode {
+                    buzz_auth::NipFiMode::Off => b"authorization unavailable",
+                    _ => b"authorization unavailable\n",
+                };
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "{mode:?}: {body:?}"
+                );
+                assert_eq!(
+                    content_type.as_deref(),
+                    Some("text/plain; charset=utf-8"),
+                    "{mode:?}"
+                );
+                assert_eq!(body.as_ref(), expected, "{mode:?}");
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                    .execute(&admin)
+                    .await;
+            }
         }
 
         async fn git_request(
