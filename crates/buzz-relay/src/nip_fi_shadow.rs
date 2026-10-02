@@ -2,6 +2,22 @@
 //! never reaches admission, a connection, or a response. Labels are bounded:
 //! the community is its configured URI or `unmapped`, never the raw `Host`,
 //! and no token, claim, key, or issuer is logged. [FI-TRACE-PRIVACY-NONPUBLIC]
+//!
+//! # Metrics
+//!
+//! | Series | Labels | One increment per |
+//! |---|---|---|
+//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per session at its first successful NIP-42 AUTH |
+//! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
+//! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended |
+//! | `buzz_nip_fi_shadow_disconnect_total` | `route` (`admin`, `cross_pod`), `outcome` | disconnect-path event that moves a real disconnect counter in enforce |
+//!
+//! Denominators differ. A would-deny rate is the non-`admit` share of
+//! `buzz_nip_fi_shadow_total` for a route. A strict-proof rejection rate is
+//! `rejected` over `pass + rejected` of its own series, never over
+//! `buzz_nip_fi_shadow_total`: the side check runs once per proof, not once
+//! per admission verdict. A session-end rate divides by the `admit` count of
+//! `buzz_nip_fi_shadow_total` for the same `ws` or `audio` route.
 
 use axum::http::HeaderMap;
 use buzz_auth::DenialClass;
