@@ -155,12 +155,15 @@ pub async fn disconnect(
                 // logs, metrics, or traces.  Log only a count.
                 debug!(closed, "nip-fi disconnect: closed sessions");
             }
-            metrics::counter!("buzz_nip_fi_disconnect_total").increment(1);
-            metrics::counter!(
-                "buzz_nip_fi_sessions_closed_total",
-                "reason" => "admin_disconnect"
-            )
-            .increment(closed as u64);
+            let mode = state.config.nip_fi.mode;
+            count_disconnect_event(mode, "buzz_nip_fi_disconnect_total", "admin", "accepted", 1);
+            if !mode.observes_only() {
+                metrics::counter!(
+                    "buzz_nip_fi_sessions_closed_total",
+                    "reason" => "admin_disconnect"
+                )
+                .increment(closed as u64);
+            }
 
             // Cross-pod propagation: publish to global NIP-FI Redis channel
             // so remote pods can merge the deny entry and close their sessions.
@@ -173,8 +176,13 @@ pub async fn disconnect(
                     if let Err(e) = pubsub.publish_nip_fi_disconnect(channel, &msg).await {
                         // [FI-TRACE-PRIVACY-NONPUBLIC]: no iss or pubkey in logs
                         tracing::warn!("nip-fi: cross-pod propagation publish failed: {e}");
-                        metrics::counter!("buzz_nip_fi_disconnect_propagation_failures_total")
-                            .increment(1);
+                        count_disconnect_event(
+                            mode,
+                            "buzz_nip_fi_disconnect_propagation_failures_total",
+                            "admin",
+                            "propagation_failure",
+                            1,
+                        );
                     }
                 });
             }
@@ -184,7 +192,13 @@ pub async fn disconnect(
         Err(err) => {
             if err == CommandError::DenySetFull {
                 warn!("nip-fi disconnect: deny set full — command rejected, no sessions closed");
-                metrics::counter!("buzz_nip_fi_disconnect_capacity_rejections_total").increment(1);
+                count_disconnect_event(
+                    state.config.nip_fi.mode,
+                    "buzz_nip_fi_disconnect_capacity_rejections_total",
+                    "admin",
+                    "capacity",
+                    1,
+                );
             }
             command_denial(err)
         }
@@ -237,6 +251,24 @@ pub fn disconnect_subscribe_channels(mode: NipFiMode) -> &'static [&'static str]
         &[NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL]
     } else {
         &[NIP_FI_DISCONNECT_CHANNEL]
+    }
+}
+
+/// Count a disconnect-path event on its `real` counter, or in shadow on
+/// `buzz_nip_fi_shadow_disconnect_total{route, outcome}` instead, so a
+/// shadow pod never moves an enforce disconnect metric.
+pub fn count_disconnect_event(
+    mode: NipFiMode,
+    real: &'static str,
+    route: &'static str,
+    outcome: &'static str,
+    n: u64,
+) {
+    if mode.observes_only() {
+        let labels = [("route", route), ("outcome", outcome)];
+        metrics::counter!("buzz_nip_fi_shadow_disconnect_total", &labels).increment(n);
+    } else {
+        metrics::counter!(real).increment(n);
     }
 }
 
@@ -377,6 +409,13 @@ pub fn apply_nip_fi_disconnect(
         }
     };
 
+    let mode = state.config.nip_fi.mode;
+    // What a capacity or poison failsafe does to targeted sessions here.
+    let action = if mode.observes_only() {
+        "would-close recorded (shadow)"
+    } else {
+        "targeted sessions closed"
+    };
     match &merge_result {
         CrossPodMergeResult::Merged => {
             close_sessions("merged");
@@ -386,17 +425,21 @@ pub fn apply_nip_fi_disconnect(
         }
         CrossPodMergeResult::CapacityExceeded => {
             tracing::warn!(
-                "nip-fi cross-pod: deny set full for issuer — closing targeted sessions without map entry (capacity miss; issuer re-push is the recovery path)"
+                action,
+                "nip-fi cross-pod: deny set full for issuer — no map entry (capacity miss; issuer re-push is the recovery path)"
             );
             close_sessions("capacity-exceeded");
-            metrics::counter!("buzz_nip_fi_cross_pod_capacity_exceeded_total").increment(1);
+            let real = "buzz_nip_fi_cross_pod_capacity_exceeded_total";
+            count_disconnect_event(mode, real, "cross_pod", "capacity", 1);
         }
         CrossPodMergeResult::ShardPoisoned => {
             tracing::error!(
-                "nip-fi cross-pod: issuer shard is poisoned — sessions closed (fail-closed)"
+                action,
+                "nip-fi cross-pod: issuer shard is poisoned (fail-closed)"
             );
             close_sessions("poisoned shard failsafe");
-            metrics::counter!("buzz_nip_fi_cross_pod_shard_poison_total").increment(1);
+            let real = "buzz_nip_fi_cross_pod_shard_poison_total";
+            count_disconnect_event(mode, real, "cross_pod", "poison", 1);
         }
     }
 
@@ -2205,6 +2248,64 @@ mod route_integration_tests {
         );
     }
 
+    // Pins: the cross-pod capacity and poison failsafes count on the real
+    // counters only in enforce; a shadow pod counts them on its own shadow
+    // disconnect counter, never on an enforce series.
+    // Mutation: reverting either site to its raw counter adds a real series
+    // to the shadow run (or drops the shadow series).
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_pod_failsafe_counters_stay_off_enforce_series_in_shadow() {
+        for (mode, expected) in [
+            (
+                buzz_auth::NipFiMode::Enforce,
+                vec![
+                    "buzz_nip_fi_cross_pod_capacity_exceeded_total".to_owned(),
+                    "buzz_nip_fi_cross_pod_shard_poison_total".to_owned(),
+                ],
+            ),
+            (
+                buzz_auth::NipFiMode::Shadow,
+                vec![
+                    "buzz_nip_fi_shadow_disconnect_total cross_pod capacity".to_owned(),
+                    "buzz_nip_fi_shadow_disconnect_total cross_pod poison".to_owned(),
+                ],
+            ),
+        ] {
+            let with_mode = |state: Arc<crate::state::AppState>| {
+                let mut state = (*state).clone();
+                Arc::make_mut(&mut state.config).nip_fi.mode = mode;
+                state
+            };
+            let full = with_mode(cross_pod_state(1).await);
+            let poisoned = with_mode(cross_pod_state(10).await);
+            poisoned
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map present")
+                .poison_shard_for_test(TEST_ISS);
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            for state in [&full, &full, &poisoned] {
+                let key = nostr::Keys::generate().public_key();
+                apply_nip_fi_disconnect(state, &cross_pod_message(&key), chrono::Utc::now());
+            }
+            let mut series: Vec<String> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .map(|(key, ..)| {
+                    let key = key.key();
+                    let labels = key.labels().map(|l| format!(" {}", l.value()));
+                    format!("{}{}", key.name(), labels.collect::<String>())
+                })
+                .filter(|name| name.starts_with("buzz_nip_fi"))
+                .collect();
+            series.sort();
+            assert_eq!(series, expected, "{mode:?}");
+        }
+    }
+
     // ── Cross-pod consumer: rejection and ceiling clamp ──────────────────────
     //
     // Only malformed messages are rejected.  An `until` beyond the receiving
@@ -2838,6 +2939,72 @@ mod route_integration_tests {
             "AuthorizationUnavailable",
         )
         .await;
+    }
+
+    /// Pins: an admin disconnect counts its accept and its capacity rejection
+    /// on the real counters only in enforce; a shadow pod answers the same
+    /// way but counts both on its shadow disconnect counter.
+    /// Mutation: reverting either admin site to its raw counter puts a real
+    /// series in the shadow run.
+    #[test]
+    fn admin_disconnect_counters_stay_off_enforce_series_in_shadow() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        for (mode, expected) in [
+            (
+                NipFiMode::Enforce,
+                vec![
+                    "buzz_nip_fi_disconnect_capacity_rejections_total",
+                    "buzz_nip_fi_disconnect_total",
+                    "buzz_nip_fi_sessions_closed_total admin_disconnect",
+                ],
+            ),
+            (
+                NipFiMode::Shadow,
+                vec![
+                    "buzz_nip_fi_shadow_disconnect_total admin accepted",
+                    "buzz_nip_fi_shadow_disconnect_total admin capacity",
+                ],
+            ),
+        ] {
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = mode;
+            config.nip_fi.registry.insert(test_issuer_policy());
+            let state = Arc::new(rt.block_on(build_test_app_state(1, config)));
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let statuses = metrics::with_local_recorder(&recorder, || {
+                rt.block_on(async {
+                    let mut statuses = Vec::new();
+                    for _ in 0..2 {
+                        let t = target_hex();
+                        let token = mint_token(&t, 300, serde_json::json!({}));
+                        statuses.push(post_command(&state, &token, &t).await.0);
+                    }
+                    statuses
+                })
+            });
+            assert_eq!(
+                statuses,
+                [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE],
+                "{mode:?}"
+            );
+            let mut series: Vec<String> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .map(|(key, ..)| {
+                    let key = key.key();
+                    let labels = key.labels().map(|l| format!(" {}", l.value()));
+                    format!("{}{}", key.name(), labels.collect::<String>())
+                })
+                .filter(|name| name.starts_with("buzz_nip_fi"))
+                .collect();
+            series.sort();
+            assert_eq!(series, expected, "{mode:?}");
+        }
     }
 
     /// `buzz_nip_fi_disconnect_capacity_rejections_total` counts exactly the

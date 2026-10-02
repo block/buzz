@@ -1304,6 +1304,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // minimal and makes the exact production path testable end-to-end.
     {
         let state_for_nip_fi = Arc::clone(&state);
+        let nip_fi_mode = state.config.nip_fi.mode;
         tokio::spawn(async move {
             loop {
                 match nip_fi_disconnect_rx.recv().await {
@@ -1316,7 +1317,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                         );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_nip_fi_disconnect_lag_total").increment(n);
+                        buzz_relay::api::nip_fi::count_disconnect_event(
+                            nip_fi_mode,
+                            "buzz_nip_fi_disconnect_lag_total",
+                            "cross_pod",
+                            "lag",
+                            n,
+                        );
                         tracing::warn!("NIP-FI disconnect consumer lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
