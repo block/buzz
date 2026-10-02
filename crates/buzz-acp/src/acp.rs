@@ -2458,16 +2458,16 @@ async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> b
     version_cmd
         .arg("--version")
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    // Own group, like the adapter, so a timeout also kills a launcher's children.
+    #[cfg(unix)]
+    version_cmd.process_group(0);
     configure_no_window(&mut version_cmd);
-    let output =
-        tokio::time::timeout(std::time::Duration::from_secs(5), version_cmd.output()).await;
-    let version = match output {
-        Ok(Ok(out)) if out.status.success() => {
-            parse_claude_version(&String::from_utf8_lossy(&out.stdout))
-        }
-        _ => None,
+    let version = match version_cmd.spawn() {
+        Ok(child) => claude_version_within(child, std::time::Duration::from_secs(5)).await,
+        Err(_) => None,
     };
     let accepts = version.is_some_and(|v| v >= CLAUDE_THINKING_DISPLAY_MIN_VERSION);
     tracing::debug!(
@@ -2475,6 +2475,35 @@ async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> b
         "{executable:?} --version = {version:?}; thinking summaries requested: {accepts}"
     );
     accepts
+}
+
+/// Read at most a version line from `child` and require a clean exit within
+/// `limit`. On timeout the whole process group is killed.
+async fn claude_version_within(
+    mut child: tokio::process::Child,
+    limit: std::time::Duration,
+) -> Option<(u64, u64, u64)> {
+    use tokio::io::AsyncReadExt;
+    const MAX_VERSION_BYTES: u64 = 256;
+    let pid = child.id();
+    let probe = async {
+        let mut stdout = Vec::new();
+        let pipe = child.stdout.take()?;
+        pipe.take(MAX_VERSION_BYTES)
+            .read_to_end(&mut stdout)
+            .await
+            .ok()?;
+        child.wait().await.ok()?.success().then_some(stdout)
+    };
+    match tokio::time::timeout(limit, probe).await {
+        Ok(stdout) => parse_claude_version(&String::from_utf8_lossy(&stdout?)),
+        Err(_) => {
+            if !pid.is_some_and(kill_process_group) {
+                let _ = child.start_kill();
+            }
+            None
+        }
+    }
 }
 
 /// Suppress the console window that Windows otherwise allocates for every
@@ -3794,6 +3823,36 @@ mod tests {
         assert!(!claude_cli_accepts_thinking_display(&cmd).await);
         cmd.env("CLAUDE_CODE_EXECUTABLE", "");
         assert!(!claude_cli_accepts_thinking_display(&cmd).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_version_timeout_kills_launcher_children() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-hang-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let pidfile = dir.join("child.pid");
+        // A launcher that starts a child holding stdout open, then hangs.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 300 & echo $! > {}; wait", pidfile.display()))
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0);
+        let child = cmd.spawn().expect("spawn launcher");
+        let version = claude_version_within(child, std::time::Duration::from_millis(500)).await;
+        assert_eq!(version, None);
+        let grandchild = std::fs::read_to_string(&pidfile).expect("pidfile");
+        let grandchild = nix::unistd::Pid::from_raw(grandchild.trim().parse().expect("pid"));
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = nix::sys::signal::kill(grandchild, None).is_ok();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        std::fs::remove_dir_all(&dir).expect("remove dir");
+        assert!(!alive, "the launcher's child must not outlive the timeout");
     }
 
     /// Spawn a fake `claude-agent-acp` whose `CLAUDE_CODE_EXECUTABLE` is a
