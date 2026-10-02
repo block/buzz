@@ -903,6 +903,7 @@ async fn should_fire_workflow(
 
     let filter = match &def.trigger {
         TriggerDef::MessagePosted { filter }
+        | TriggerDef::ForumPosted { filter }
         | TriggerDef::ReactionAdded { filter, .. }
         | TriggerDef::DiffPosted { filter } => filter.as_ref(),
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
@@ -1036,9 +1037,12 @@ fn owner_authority_allows(role: Option<&str>, needs_elevated: bool) -> bool {
 
 /// Returns `true` if the trigger type matches the given event kind.
 fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
-    use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
+    use buzz_core::kind::{
+        KIND_FORUM_POST, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
+    };
     match trigger {
         TriggerDef::MessagePosted { .. } => kind_u32 == KIND_STREAM_MESSAGE,
+        TriggerDef::ForumPosted { .. } => kind_u32 == KIND_FORUM_POST,
         TriggerDef::ReactionAdded { .. } => kind_u32 == KIND_REACTION,
         TriggerDef::DiffPosted { .. } => kind_u32 == KIND_STREAM_MESSAGE_DIFF,
         // Schedule and Webhook triggers are not fired by channel events.
@@ -1354,6 +1358,23 @@ steps:
         assert!(!trigger_matches_event(
             &trigger,
             buzz_core::kind::KIND_REACTION
+        ));
+    }
+
+    #[test]
+    fn forum_posted_matches_forum_roots_only() {
+        let trigger = TriggerDef::ForumPosted { filter: None };
+        assert!(trigger_matches_event(
+            &trigger,
+            buzz_core::kind::KIND_FORUM_POST
+        ));
+        assert!(!trigger_matches_event(
+            &trigger,
+            buzz_core::kind::KIND_FORUM_COMMENT
+        ));
+        assert!(!trigger_matches_event(
+            &trigger,
+            buzz_core::kind::KIND_STREAM_MESSAGE
         ));
     }
 
