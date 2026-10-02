@@ -1,25 +1,26 @@
 import 'dart:async';
+import 'dart:math' show sqrt2;
+import 'dart:ui' show ImageFilter;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/tappable_flapping_bee.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
+import 'pairing_page/onboarding_wordmark.dart';
 import 'pairing_provider.dart';
 import 'pairing_qr_scanner.dart';
 
 part 'pairing_page/onboarding_background.dart';
+part 'pairing_page/onboarding_colors.dart';
+part 'pairing_page/onboarding_glass_button.dart';
 part 'pairing_page/pairing_welcome_view.dart';
-
-const _onboardingChartreuse = Color(0xFFD7D72E);
-const _onboardingShellBottom = Color(0xFFD7E7F6);
-const _onboardingCtaLabel = Color(0xFFD7E6F0);
-const _onboardingInk = Color(0xFF111111);
-const _onboardingMutedInk = Color(0xB3111111);
 
 class PairingPage extends HookConsumerWidget {
   /// When true, the pairing page is being used to add a new community
@@ -36,6 +37,7 @@ class PairingPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pairingState = ref.watch(pairingProvider);
+    final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
     final codeController = useTextEditingController();
     final fallbackScannerVisible = useState(false);
     final pairingCodeExpanded = useState(false);
@@ -83,32 +85,41 @@ class PairingPage extends HookConsumerWidget {
     }
 
     final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
-    final themedSystemOverlayStyle =
-        (context.theme.brightness == Brightness.dark
+    final onboardingSystemOverlayStyle =
+        (context._onboardingIsDark
                 ? SystemUiOverlayStyle.light
                 : SystemUiOverlayStyle.dark)
             .copyWith(statusBarColor: Colors.transparent);
     final pairingAppBar = addingCommunity
         ? AppBar(
-            foregroundColor: isVerifyingSas
-                ? context.colors.onSurface
-                : _onboardingInk,
-            systemOverlayStyle: isVerifyingSas
-                ? themedSystemOverlayStyle
-                : SystemUiOverlayStyle.dark.copyWith(
-                    statusBarColor: Colors.transparent,
+            foregroundColor: context._onboardingInk,
+            systemOverlayStyle: onboardingSystemOverlayStyle,
+            leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
+                ? Grid.quarter + iosGlassChannelHeaderLeadingWidth
+                : null,
+            leading: Theme.of(context).platform == TargetPlatform.iOS
+                ? Padding(
+                    padding: const EdgeInsets.only(left: Grid.quarter),
+                    child: IosGlassNavigationButton(
+                      key: const ValueKey('pairing-ios-glass-back'),
+                      icon: IosGlassNavigationIcon.back,
+                      semanticLabel: 'Back',
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      width: iosGlassChannelHeaderLeadingWidth,
+                      buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                      foregroundColor: context._onboardingInk,
+                    ),
+                  )
+                : IconButton(
+                    icon: const Icon(LucideIcons.arrowLeft),
+                    tooltip: 'Back',
+                    onPressed: () => Navigator.of(context).pop(),
                   ),
-            leading: IconButton(
-              icon: const Icon(LucideIcons.arrowLeft),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
             title: Text(
               identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
-              style: isVerifyingSas
-                  ? null
-                  : context.textTheme.titleMedium?.copyWith(
-                      color: _onboardingInk,
-                    ),
+              style: context.textTheme.titleMedium?.copyWith(
+                color: context._onboardingInk,
+              ),
             ),
           )
         : null;
@@ -116,20 +127,33 @@ class PairingPage extends HookConsumerWidget {
     final pairingScaffold = isVerifyingSas
         ? AnnotatedRegion<SystemUiOverlayStyle>(
             key: const Key('pairing-sas-system-overlay'),
-            value: themedSystemOverlayStyle,
-            child: Scaffold(
-              backgroundColor: context.colors.surface,
-              appBar: pairingAppBar,
-              body: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
-                  child: _SasVerificationView(
-                    sasCode: pairingState.sasCode ?? '------',
-                    confirmed: pairingState.userConfirmedSas,
-                    sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
-                    onConfirm: () =>
-                        ref.read(pairingProvider.notifier).confirmSas(),
-                    onDeny: () => ref.read(pairingProvider.notifier).denySas(),
+            value: onboardingSystemOverlayStyle,
+            child: _OnboardingBackground(
+              child: Scaffold(
+                backgroundColor: Colors.transparent,
+                body: SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
+                    child: _SasVerificationView(
+                      sasCode: pairingState.sasCode ?? '------',
+                      confirmed: pairingState.userConfirmedSas,
+                      sendsIdentityToDesktop:
+                          pairingState.sendsIdentityToDesktop,
+                      protectSensitiveActions:
+                          pairingState.protectSensitiveActions,
+                      biometricLabel: biometricProtectionLabel(
+                        defaultTargetPlatform,
+                        enrolledBiometrics.value ?? const [],
+                      ),
+                      errorMessage: pairingState.errorMessage,
+                      onProtectionChanged: (value) => ref
+                          .read(pairingProvider.notifier)
+                          .setProtectSensitiveActions(value),
+                      onConfirm: () =>
+                          ref.read(pairingProvider.notifier).confirmSas(),
+                      onDeny: () =>
+                          ref.read(pairingProvider.notifier).denySas(),
+                    ),
                   ),
                 ),
               ),
@@ -137,9 +161,7 @@ class PairingPage extends HookConsumerWidget {
           )
         : AnnotatedRegion<SystemUiOverlayStyle>(
             key: const Key('pairing-onboarding-system-overlay'),
-            value: SystemUiOverlayStyle.dark.copyWith(
-              statusBarColor: Colors.transparent,
-            ),
+            value: onboardingSystemOverlayStyle,
             child: _OnboardingBackground(
               child: Scaffold(
                 backgroundColor: Colors.transparent,
@@ -169,6 +191,7 @@ class PairingPage extends HookConsumerWidget {
           );
 
     final appSurface = PopScope(
+      key: const Key('pairing-pop-scope'),
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) {
           ref.read(pairingProvider.notifier).reset();
@@ -193,9 +216,17 @@ class PairingPage extends HookConsumerWidget {
 
 /// SAS verification screen shown during NIP-AB pairing.
 class _SasVerificationView extends StatelessWidget {
+  static const _digitSize = 54.0;
+  static const _digitGap = 6.0;
+  static const _digitGroupGap = 14.0;
+
   final String sasCode;
   final bool confirmed;
   final bool sendsIdentityToDesktop;
+  final bool protectSensitiveActions;
+  final String biometricLabel;
+  final String? errorMessage;
+  final ValueChanged<bool> onProtectionChanged;
   final VoidCallback onConfirm;
   final VoidCallback onDeny;
 
@@ -203,113 +234,182 @@ class _SasVerificationView extends StatelessWidget {
     required this.sasCode,
     required this.confirmed,
     required this.sendsIdentityToDesktop,
+    required this.protectSensitiveActions,
+    required this.biometricLabel,
+    required this.errorMessage,
+    required this.onProtectionChanged,
     required this.onConfirm,
     required this.onDeny,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
+    final verificationContent = Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        const Spacer(flex: 2),
-
-        Icon(LucideIcons.shieldCheck, size: 56, color: context.colors.primary),
-        const SizedBox(height: Grid.sm),
-
-        Text('Verify Security Code', style: context.textTheme.headlineSmall),
-        const SizedBox(height: Grid.xs),
-
         Text(
-          confirmed
-              ? 'Waiting for desktop to confirm...'
-              : 'Does your desktop app show this code?',
+          'Confirm desktop code',
           textAlign: TextAlign.center,
-          style: context.textTheme.bodyMedium?.copyWith(
-            color: context.colors.onSurfaceVariant,
+          style: context.textTheme.headlineSmall?.copyWith(
+            color: context._onboardingInk,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.4,
           ),
         ),
-
-        const SizedBox(height: Grid.lg),
-
-        // Large SAS code display
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20),
-          decoration: BoxDecoration(
-            color: context.colors.primaryContainer.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: context.colors.primary.withValues(alpha: 0.3),
-              width: 2,
-            ),
-          ),
-          child: Text(
-            '${sasCode.substring(0, 3)} ${sasCode.substring(3)}',
-            style: context.textTheme.displayMedium?.copyWith(
-              fontFamily: 'GeistMono',
-              fontWeight: FontWeight.w700,
-              letterSpacing: 8,
-              color: context.colors.primary,
-            ),
-          ),
-        ),
-
-        const SizedBox(height: Grid.lg),
-
+        const SizedBox(height: Grid.xxs),
         Text(
           sendsIdentityToDesktop
-              ? 'This sends your full Buzz identity to the desktop\nand grants it permanent access. Only confirm a\ndesktop you trust and a recovery you started.'
-              : 'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
+              ? 'Make sure the six-digit code matches on both devices. Your full Buzz identity will transfer to the desktop and grant it permanent access. Only continue if you started this recovery.'
+              : 'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device. Only continue if you started this pairing from your desktop.',
           textAlign: TextAlign.center,
-          style: context.textTheme.bodySmall?.copyWith(
-            color: context.colors.onSurfaceVariant,
+          style: context.textTheme.bodyMedium?.copyWith(
+            color: context._onboardingMutedInk,
           ),
         ),
+        const SizedBox(height: Grid.md),
+        Semantics(
+          label:
+              'Confirmation code ${sasCode.substring(0, 3)} ${sasCode.substring(3)}',
+          child: ExcludeSemantics(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var index = 0; index < sasCode.length; index++) ...[
+                    if (index > 0)
+                      SizedBox(width: index == 3 ? _digitGroupGap : _digitGap),
+                    Container(
+                      key: Key('pairing-sas-code-digit-${index + 1}'),
+                      width: _digitSize,
+                      padding: const EdgeInsets.symmetric(vertical: Grid.xs),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: context._onboardingInputSurface,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: context.colors.primary.withValues(alpha: 0.15),
+                        ),
+                      ),
+                      child: Text(
+                        sasCode[index],
+                        style: context.textTheme.displaySmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: context._onboardingInk,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: Grid.sm),
+        if (!sendsIdentityToDesktop)
+          CheckboxListTile(
+            key: const Key('protect-sensitive-actions-checkbox'),
+            value: protectSensitiveActions,
+            onChanged: confirmed
+                ? null
+                : (value) => onProtectionChanged(value ?? false),
+            activeColor: context._onboardingInk,
+            checkColor: context._onboardingCtaLabel,
+            side: BorderSide(color: context._onboardingInk),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            title: Text(
+              biometricLabel,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context._onboardingInk,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            subtitle: Text(
+              'For secure actions',
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context._onboardingMutedInk,
+              ),
+            ),
+          ),
+        if (errorMessage != null) ...[
+          const SizedBox(height: Grid.xs),
+          Text(
+            errorMessage!,
+            textAlign: TextAlign.center,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context._onboardingErrorInk,
+            ),
+          ),
+        ],
+      ],
+    );
 
-        const SizedBox(height: Grid.lg),
-
-        // Confirm / Deny buttons
-        if (confirmed)
-          Row(
+    final verificationActions = confirmed
+        ? Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               BuzzLoadingIndicator(
                 size: 24,
-                color: context.colors.primary,
+                color: context._onboardingInk,
                 semanticLabel: 'Connecting',
               ),
               const SizedBox(width: Grid.twelve),
               Text(
                 'Confirmed — waiting for desktop',
                 style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.onSurfaceVariant,
+                  color: context._onboardingMutedInk,
                 ),
               ),
             ],
           )
-        else
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: onDeny,
-                  icon: const Icon(LucideIcons.x),
-                  label: const Text('Cancel'),
-                ),
-              ),
-              const SizedBox(width: Grid.sm),
-              Expanded(
-                child: FilledButton.icon(
+        : SizedBox(
+            width: double.infinity,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                FilledButton.icon(
+                  style: context._onboardingButtonStyle,
                   onPressed: onConfirm,
                   icon: const Icon(LucideIcons.check),
-                  label: const Text('Codes Match'),
+                  label: const Text('Codes match'),
                 ),
-              ),
-            ],
-          ),
+                const SizedBox(height: Grid.xxs),
+                TextButton(
+                  style: context._onboardingSecondaryButtonStyle.copyWith(
+                    minimumSize: const WidgetStatePropertyAll(
+                      Size.fromHeight(48),
+                    ),
+                  ),
+                  onPressed: onDeny,
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          );
 
-        const Spacer(flex: 3),
+    return Column(
+      children: [
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final verticalPadding = Grid.sm * 2;
+              final minimumContentHeight =
+                  constraints.maxHeight > verticalPadding
+                  ? constraints.maxHeight - verticalPadding
+                  : 0.0;
+              return SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(vertical: Grid.sm),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: minimumContentHeight),
+                  child: Center(child: verificationContent),
+                ),
+              );
+            },
+          ),
+        ),
+        verificationActions,
+        const SizedBox(height: Grid.sm),
       ],
     );
   }

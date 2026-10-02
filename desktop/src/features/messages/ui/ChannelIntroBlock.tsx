@@ -16,6 +16,7 @@ export type ChannelIntro = {
   channelKindLabel: string;
   channelName: string;
   description?: string | null;
+  hideBeginning?: boolean;
   icon?: React.ReactNode;
 };
 
@@ -50,20 +51,22 @@ export function ChannelIntroBlock({
       <p className="mt-4 max-w-2xl truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
         #{intro.channelName}
       </p>
-      <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
-        This is the beginning of the{" "}
-        <span className="font-medium text-foreground">
-          {intro.channelKindLabel}
-        </span>
-        .
-      </p>
+      {intro.hideBeginning ? null : (
+        <p className="mt-1 max-w-2xl text-sm leading-5 text-muted-foreground">
+          This is the beginning of the{" "}
+          <span className="font-medium text-foreground">
+            {intro.channelKindLabel}
+          </span>
+          .
+        </p>
+      )}
       {intro.description ? (
-        <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
+        <p className="mt-2 max-w-xl whitespace-pre-line text-sm leading-5 text-muted-foreground">
           {intro.description}
         </p>
       ) : null}
       {intro.actions?.length ? (
-        <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto p-1">
+        <div className="mt-4 flex max-w-full flex-nowrap gap-2 overflow-x-auto p-1">
           {intro.actions.map((action) => {
             const hasDescription = Boolean(action.description);
 
@@ -72,8 +75,8 @@ export function ChannelIntroBlock({
                 className={cn(
                   "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                   hasDescription
-                    ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
-                    : "h-28 w-64 flex-col rounded-2xl p-4",
+                    ? "h-52 w-48 flex-col rounded-2xl p-3"
+                    : "h-24 w-56 flex-col rounded-2xl p-3",
                 )}
                 data-testid={action.testId}
                 key={action.label}
@@ -84,8 +87,8 @@ export function ChannelIntroBlock({
                   className={cn(
                     "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
                     hasDescription
-                      ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                      : "h-10 w-10 [&_svg]:h-4 [&_svg]:w-4",
+                      ? "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5"
+                      : "h-9 w-9 [&_svg]:h-4 [&_svg]:w-4",
                   )}
                   data-testid={
                     action.testId ? `${action.testId}-icon` : undefined
@@ -95,7 +98,7 @@ export function ChannelIntroBlock({
                 </span>
                 <span className="mt-auto min-w-0">
                   <span
-                    className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
+                    className="block whitespace-normal break-words text-sm font-medium leading-5 text-foreground"
                     data-testid={
                       action.testId ? `${action.testId}-title` : undefined
                     }

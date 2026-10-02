@@ -1,4 +1,6 @@
 use crate::managed_agents::known_acp_runtime;
+#[path = "cli_tests.rs"]
+mod cli_tests;
 
 // ── desktop binary name tests ───────────────────────────────────────────
 
@@ -262,7 +264,6 @@ fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
 }
 
 // ── persona fixture helpers ─────────────────────────────────────────
-
 fn persona_with_provider(
     id: &str,
     prompt: &str,
@@ -270,10 +271,13 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
         system_prompt: prompt.to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
@@ -284,6 +288,7 @@ fn persona_with_provider(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -414,10 +419,8 @@ fn agent_env_overrides_win_over_persona_env_at_spawn() {
 #[test]
 fn orphaned_agent_refused_at_spawn_boundary() {
     // Persona deleted: `spawn_agent_child` must refuse before any process
-    // side effect, not silently degrade to the record's stale overrides.
-    // `require_resolved` on the shared resolver is the pure predicate
-    // `spawn_agent_child` checks first — this pins the contract without
-    // needing a real `AppHandle`.
+    // side effect. `require_resolved` on the shared resolver is the pure
+    // predicate checked first — pins the contract without a real `AppHandle`.
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     record.env_vars = BTreeMap::from([("EXTRA".to_string(), "agent-value".to_string())]);
@@ -583,42 +586,50 @@ fn name_matches_interpreter_rejects_node_prefix() {
 }
 
 #[test]
-fn claude_spawn_uses_the_probed_cli_executable() {
-    let _guard = crate::managed_agents::lock_path_mutex();
-    let temp = tempfile::tempdir().expect("temp dir");
-    let cli = temp
-        .path()
-        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
-    std::fs::write(&cli, "").expect("write fake cli");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake cli executable");
-    }
-    let original_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", temp.path());
-
-    let mut command = std::process::Command::new("buzz-acp");
-    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
-
-    if let Some(path) = original_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-    assert!(command
-        .get_envs()
-        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
-}
-
-#[test]
 fn codex_spawn_does_not_set_a_claude_executable() {
     let mut command = std::process::Command::new("buzz-acp");
     super::configure_runtime_cli(&mut command, super::known_acp_runtime("codex-acp"));
     assert!(!command
         .get_envs()
         .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
+}
+
+#[test]
+fn custom_acp_command_keeps_relay_git_credentials() {
+    let helper = std::path::Path::new("/opt/buzz/git-credential-nostr");
+    let mut custom = std::process::Command::new("custom-acp");
+    super::apply_custom_acp_git_credentials(
+        &mut custom,
+        "custom-acp",
+        "nsec-test",
+        "wss://relay.example",
+        Some(helper),
+    );
+    let env: std::collections::HashMap<_, _> = custom
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+        .collect();
+    assert_eq!(env.get("NOSTR_PRIVATE_KEY"), Some(&"nsec-test"));
+    assert_eq!(env.get("GIT_CONFIG_COUNT"), Some(&"2"));
+    assert_eq!(
+        env.get("GIT_CONFIG_KEY_0"),
+        Some(&"credential.https://relay.example/git.helper")
+    );
+    assert_eq!(
+        env.get("GIT_CONFIG_VALUE_0"),
+        Some(&"/opt/buzz/git-credential-nostr")
+    );
+    assert_eq!(env.get("GIT_CONFIG_VALUE_1"), Some(&"true"));
+
+    let mut standard = std::process::Command::new("buzz-acp");
+    super::apply_custom_acp_git_credentials(
+        &mut standard,
+        super::super::DEFAULT_ACP_COMMAND,
+        "nsec-test",
+        "wss://relay.example",
+        Some(helper),
+    );
+    assert_eq!(standard.get_envs().count(), 0);
 }
 
 /// On Windows, `.cmd` and `.bat` batch shims must NOT be assigned to
@@ -1206,7 +1217,7 @@ fn receipt_invalid_when_process_not_running() {
     );
 }
 
-// ── Test helpers ────────────────────────────────────────────────────────────
+// ── Test helpers (spawn-key regressions: see `runtime/spawn_key.rs`) ───────
 
 fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
     serde_json::from_str(&format!(
@@ -1237,13 +1248,11 @@ fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
 
 fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
     use std::process::{Command, Stdio};
-    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
-    // `true` exits immediately with 0 — just a handle we need for type purposes.
-    //
-    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
-    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    // Spawn a real child so ManagedAgentProcess's Child field is satisfied;
+    // `true` exits immediately with 0. Absolute `/usr/bin/true` on unix (both
+    // macOS and Linux): parallel tests holding `lock_path_mutex` swap PATH to a
+    // tempdir, and a bare `true` lookup during that window fails NotFound
+    // (observed flake). Windows keeps the PATH lookup — no test there swaps it.
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
@@ -1256,13 +1265,14 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         .expect("spawn true for placeholder");
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
-        log_path: std::path::PathBuf::new(),
+        log_path: Default::default(),
         spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
             &minimal_record(&"cc".repeat(32)),
             &[],
             &[],
             "wss://relay.example",
             &Default::default(),
+            false,
         ),
         setup_mode: false,
         adapter_availability: None,

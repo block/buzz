@@ -10,10 +10,13 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
 fn local_in_app() -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: UUID.to_string(),
         display_name: "Local".to_string(),
         avatar_url: None,
         system_prompt: "local prompt".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("opus".to_string()),
         provider: Some("anthropic".to_string()),
@@ -24,6 +27,7 @@ fn local_in_app() -> AgentDefinition {
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -37,10 +41,13 @@ fn local_in_app() -> AgentDefinition {
 /// slug = Some(d-tag), empty env_vars, source_team None.
 fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
         system_prompt: "remote prompt".to_string(),
+        acp_command: None,
         runtime: Some("acp".to_string()),
         model: Some("sonnet".to_string()),
         provider: Some("openai".to_string()),
@@ -51,6 +58,7 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: Some(d_tag.to_string()),
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -63,13 +71,16 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
 #[test]
 fn in_app_persona_matches_existing_uuid_and_patches() {
     let mut personas = vec![local_in_app()];
-    apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound.acp_command = Some("buzz-janet-acp".to_string());
+    apply_inbound_persona(&mut personas, inbound);
 
     assert_eq!(personas.len(), 1, "no duplicate row");
     let p = &personas[0];
     // Projected fields patched.
     assert_eq!(p.display_name, "Remote");
     assert_eq!(p.system_prompt, "remote prompt");
+    assert_eq!(p.acp_command.as_deref(), Some("buzz-janet-acp"));
     assert_eq!(p.provider, Some("openai".to_string()));
     // Local identity + secrets + lineage preserved.
     assert_eq!(p.id, UUID);
@@ -88,12 +99,14 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     let mut local = local_in_app();
     local.respond_to = Some("owner-only".to_string());
     local.parallelism = Some(2);
+    local.session_policy = crate::managed_agents::AcpSessionPolicy::Channel;
     let mut personas = vec![local];
 
     let mut inbound = inbound_for(UUID, "Remote");
     inbound.respond_to = Some("allowlist".to_string());
     inbound.respond_to_allowlist = vec!["a".repeat(64)];
     inbound.parallelism = Some(8);
+    inbound.session_policy = crate::managed_agents::AcpSessionPolicy::Thread;
     apply_inbound_persona(&mut personas, inbound);
 
     assert_eq!(personas.len(), 1, "no duplicate row");
@@ -101,10 +114,20 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     assert_eq!(p.respond_to, Some("allowlist".to_string()));
     assert_eq!(p.respond_to_allowlist, vec!["a".repeat(64)]);
     assert_eq!(p.parallelism, Some(8));
+    assert_eq!(
+        p.session_policy,
+        crate::managed_agents::AcpSessionPolicy::Thread
+    );
     // A quad-absent inbound also applies (clears), same as prompt/model.
     apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
     assert_eq!(personas[0].respond_to, None);
     assert_eq!(personas[0].parallelism, None);
+    // The default channel policy also represents an inbound event that omitted
+    // session_policy, so it must clear a previously stored thread policy.
+    assert_eq!(
+        personas[0].session_policy,
+        crate::managed_agents::AcpSessionPolicy::Channel
+    );
 }
 
 #[test]
@@ -159,6 +182,8 @@ const AGENT_PUBKEY: &str = "agentpubkeyhex00000000000000000000000000000000000000
 /// event must NEVER be able to overwrite.
 fn local_agent() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: AGENT_PUBKEY.to_string(),
         name: "Local Agent".to_string(),
         persona_id: Some("persona-local".to_string()),
@@ -188,6 +213,7 @@ fn local_agent() -> ManagedAgentRecord {
             config: serde_json::json!({ "api_key": "localproviderkey" }),
         },
         backend_agent_id: Some("local-remote-id".to_string()),
+        provider_policy_pending: false,
         provider_binary_path: Some("/local/bin".to_string()),
         team_id: None,
         persona_team_dir: None,
@@ -211,10 +237,12 @@ fn local_agent() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -262,8 +290,13 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    let access_changed = apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
 
+    assert_eq!(
+        access_changed,
+        !crate::managed_agents::owner_only_access_build(),
+        "only an effective access change may trigger a runtime refresh"
+    );
     let a = &agents[0];
     // Secrets / harness / runtime — every one preserved from the local record.
     assert_eq!(
@@ -395,6 +428,8 @@ fn local_team() -> TeamRecord {
         instructions: None,
         persona_ids: vec!["p-local".to_string()],
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: Some(std::path::PathBuf::from("/local/team/dir")),
         is_symlink: true,
         symlink_target: Some("/external".to_string()),
@@ -542,6 +577,176 @@ fn inbound_team_no_match_inserts_idempotently() {
     // Re-receive stays idempotent.
     apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
     assert_eq!(teams.len(), 2, "re-receive of inserted team no-ops");
+}
+
+// ── Inbound team → membership propagation (commit_inbound_team wiring) ─────
+
+use std::cell::RefCell;
+
+/// A running instance of `persona_id`, optionally bound to a team.
+fn team_instance(seed: char, persona_id: &str, team_id: Option<&str>) -> ManagedAgentRecord {
+    let mut record = local_agent();
+    record.pubkey = seed.to_string().repeat(64);
+    record.name = persona_id.to_string();
+    record.persona_id = Some(persona_id.to_string());
+    record.team_id = team_id.map(str::to_string);
+    record
+}
+
+/// An inbound team edit that ADDS a persona must bind that persona's unbound
+/// running instances to the team — exactly like a local `update_team`. Without
+/// the propagation wiring the instance stays unbound (member in roster, not in
+/// behavior) until restart.
+#[test]
+fn inbound_team_add_binds_unbound_instance_through_wiring() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec!["p-existing".to_string()];
+    let existing = vec![
+        team_instance('a', "p-added", None),
+        team_instance('b', "p-existing", Some(TEAM_ID)),
+    ];
+    let saved = RefCell::new(None);
+
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        TeamEventContent {
+            name: "Team".to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: Some(vec!["p-existing".to_string(), "p-added".to_string()]),
+        },
+        |_| Ok(()),
+        || Ok(existing.clone()),
+        |records| {
+            *saved.borrow_mut() = Some(records.to_vec());
+            Ok(())
+        },
+    )
+    .expect("inbound add succeeds");
+
+    let saved = saved
+        .borrow()
+        .clone()
+        .expect("add must save the agent store");
+    assert_eq!(
+        saved[0].team_id.as_deref(),
+        Some(TEAM_ID),
+        "the added persona's unbound instance is bound to the team"
+    );
+    assert_eq!(
+        saved[1].team_id.as_deref(),
+        Some(TEAM_ID),
+        "an instance already on the team is untouched"
+    );
+}
+
+/// An inbound team edit that REMOVES a persona ("keep agents") must detach that
+/// persona's instances bound to this team, so a kept instance stops drawing the
+/// team's instructions at spawn.
+#[test]
+fn inbound_team_removal_detaches_instance_through_wiring() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec!["p-removed".to_string()];
+    let existing = vec![team_instance('a', "p-removed", Some(TEAM_ID))];
+    let saved = RefCell::new(None);
+
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        TeamEventContent {
+            name: "Team".to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: Some(vec![]),
+        },
+        |_| Ok(()),
+        || Ok(existing.clone()),
+        |records| {
+            *saved.borrow_mut() = Some(records.to_vec());
+            Ok(())
+        },
+    )
+    .expect("inbound removal succeeds");
+
+    let saved = saved
+        .borrow()
+        .clone()
+        .expect("removal must save the agent store");
+    assert_eq!(
+        saved[0].team_id, None,
+        "the removed persona's instance is detached from the team"
+    );
+}
+
+/// An inbound edit that omits `persona_ids` (a pre-always-publish client)
+/// preserves local membership, so the delta is empty and no instance is
+/// re-pointed — a metadata-only inbound edit must not disturb bindings.
+#[test]
+fn inbound_team_omitted_roster_leaves_bindings_untouched() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec!["p-a".to_string()];
+    let existing = vec![team_instance('a', "p-a", None)];
+    let saved = RefCell::new(None);
+
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content_omitting_optional_fields("Renamed"),
+        |_| Ok(()),
+        || Ok(existing.clone()),
+        |records| {
+            *saved.borrow_mut() = Some(records.to_vec());
+            Ok(())
+        },
+    )
+    .expect("inbound metadata-only edit succeeds");
+
+    assert!(
+        saved.borrow().is_none(),
+        "an empty membership delta writes nothing to the agent store"
+    );
+}
+
+/// A failing agent-store write after the authoritative `save_teams` is
+/// swallowed: the inbound reconcile still succeeds (boot repair is the retry),
+/// so a secondary-store hiccup never aborts an inbound event whose team write
+/// already landed.
+#[test]
+fn inbound_team_swallows_agent_store_failure() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec![];
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        TeamEventContent {
+            name: "Team".to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: Some(vec!["p-added".to_string()]),
+        },
+        |_| Ok(()),
+        || Err("agent store unreadable".to_string()),
+        |_| Ok(()),
+    )
+    .expect("inbound reconcile swallows secondary-store failure");
+}
+
+/// A `persist_teams` error propagates — the authoritative team write failing is
+/// a real reconcile failure, unlike best-effort agent IO.
+#[test]
+fn inbound_team_propagates_persist_teams_error() {
+    let mut teams = vec![local_team()];
+    let err = commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content("Team"),
+        |_| Err("disk full".to_string()),
+        || Ok(vec![]),
+        |_| Ok(()),
+    )
+    .expect_err("a failed team persist must propagate");
+    assert_eq!(err, "disk full");
 }
 
 // ── Tombstone (kind:5) consume ────────────────────────────────────────────
@@ -732,4 +937,57 @@ fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
     );
 
     assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
+}
+
+#[test]
+fn shared_transport_redaction_preserves_local_override_but_explicit_stock_resets() {
+    use crate::managed_agents::persona_events::{build_persona_event, persona_from_event};
+    let keys = nostr::Keys::generate();
+    let mut local = local_in_app();
+    local.acp_command = Some("/opt/custom-acp".into());
+    let mut published = local.clone();
+    published.shared = true;
+    let event = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    assert!(!event.content.contains("/opt/custom-acp"));
+    let mut personas = vec![local];
+    for _ in 0..2 {
+        apply_inbound_persona(&mut personas, persona_from_event(&event).unwrap());
+        assert_eq!(personas[0].acp_command.as_deref(), Some("/opt/custom-acp"));
+    }
+    let mut fresh_device = Vec::new();
+    apply_inbound_persona(&mut fresh_device, persona_from_event(&event).unwrap());
+    assert_eq!(fresh_device[0].acp_command, None);
+    // Redaction must not preserve a stale portable wrapper.
+    personas[0].acp_command = Some("buzz-old-acp".into());
+    apply_inbound_persona(&mut personas, persona_from_event(&event).unwrap());
+    assert_eq!(personas[0].acp_command, None);
+    // Stock is normalized to None by the store, but shared publication makes
+    // the reset explicit so it also replaces an owner's legacy local command.
+    personas[0].acp_command = Some("/opt/custom-acp".into());
+    published.acp_command = None;
+    let reset = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    apply_inbound_persona(&mut personas, persona_from_event(&reset).unwrap());
+    assert_eq!(personas[0].acp_command.as_deref(), Some("buzz-acp"));
+    // Non-catalog owner-sync keeps both legacy custom values and clears.
+    published.shared = false;
+    published.acp_command = Some("/opt/other-acp".into());
+    let custom = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    apply_inbound_persona(&mut personas, persona_from_event(&custom).unwrap());
+    assert_eq!(personas[0].acp_command.as_deref(), Some("/opt/other-acp"));
+    published.acp_command = None;
+    let clear = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    apply_inbound_persona(&mut personas, persona_from_event(&clear).unwrap());
+    assert_eq!(personas[0].acp_command, None);
 }

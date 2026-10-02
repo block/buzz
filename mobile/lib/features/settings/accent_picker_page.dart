@@ -21,7 +21,11 @@ class AccentPickerPage extends ConsumerWidget {
     final colorScheme = context.colors;
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Accent Color')),
+      useUtilitySurfaceTheme: true,
+      appBar: const FrostedAppBar(
+        centerTitle: true,
+        title: Text('Accent Color'),
+      ),
       body: ListView(
         padding: EdgeInsets.only(
           top: frostedAppBarHeight(context),

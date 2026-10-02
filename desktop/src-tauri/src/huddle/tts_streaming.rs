@@ -27,8 +27,7 @@ pub(super) fn streaming_emit_frames() -> Option<usize> {
 
 /// Playback context threaded through one streamed chunk.
 pub(super) struct StreamingPlayback<'a> {
-    pub(super) player: &'a rodio::Player,
-    pub(super) first_append: &'a mut bool,
+    pub(super) playback: &'a PlaybackCoordinator,
     pub(super) route_id: u64,
 }
 
@@ -52,11 +51,7 @@ pub(super) fn synthesize_streaming(
     append_audio: &mut dyn FnMut(PreparedModelAudio) -> bool,
 ) -> Option<&'static str> {
     let (cancel, voice_cancel, shutdown) = signals;
-    let StreamingPlayback {
-        player,
-        first_append,
-        route_id,
-    } = playback;
+    let StreamingPlayback { playback, route_id } = playback;
     let mut playback_audio = PlaybackChunkAudio::new();
     let mut delta_index = 0usize;
     let stream_result = engine.synth_chunk_streaming(text, style, emit_frames, &mut |samples| {
@@ -69,7 +64,7 @@ pub(super) fn synthesize_streaming(
         let chunk_index = delta_index;
         delta_index += 1;
         if let Some(prepared) =
-            playback_audio.push(samples, chunk_index, first_append, player.empty())
+            playback.prepare_audio(|empty| playback_audio.push(samples, chunk_index, empty))
         {
             if !append_audio(prepared) {
                 return false;
@@ -79,9 +74,8 @@ pub(super) fn synthesize_streaming(
     });
     match stream_result {
         Ok(true) => {
-            if let Some(prepared) = playback_audio.finish(first_append, player.empty()) {
+            if let Some(prepared) = playback.prepare_audio(|empty| playback_audio.finish(empty)) {
                 if !append_audio(prepared) {
-                    *first_append = true;
                     return Some("cancelled");
                 }
             }
@@ -91,7 +85,6 @@ pub(super) fn synthesize_streaming(
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=cancelled reason=stream_callback route_id={route_id}"
             );
-            *first_append = true;
             Some("cancelled")
         }
         Err(_) => {

@@ -55,7 +55,7 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         let mut hs = state.huddle()?;
         if let Some(ref p) = hs.stt_pipeline {
             if p.is_finished() {
-                hs.stt_pipeline = None;
+                hs.take_stt_pipeline();
             }
         }
         if let Some(ref p) = hs.tts_pipeline {
@@ -311,6 +311,8 @@ pub(crate) async fn maybe_start_stt_pipeline(
         stt_starting,
         ptt_active_for_stt,
         manual_mic_unmuted_for_stt,
+        human_floor,
+        output_device,
         old_stt,
     ) = {
         let mut hs = state.huddle()?;
@@ -325,7 +327,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         if hs.stt_pipeline.is_some() {
             hs.session_generation.fetch_add(1, Ordering::Release);
         }
-        let old = hs.stt_pipeline.take();
+        let old = hs.take_stt_pipeline();
         if let Some(ref p) = old {
             p.shutdown();
         }
@@ -346,6 +348,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
             stt_starting,
             ptt,
             manual_mic_unmuted,
+            hs.human_floor.clone(),
+            state
+                .huddle_audio
+                .output_device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             old,
         )
     };
@@ -353,7 +362,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, ptt_active_for_stt, manual_mic_unmuted_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+            human_floor,
+            output_device,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {
@@ -382,7 +397,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         {
             return Ok(false);
         }
-        hs.stt_pipeline = Some(Arc::clone(&pipeline));
+        hs.set_stt_pipeline(Arc::clone(&pipeline));
     }
 
     spawn_transcription_task(text_rx, channel_uuid, agent_pubkeys_arc, session_gen, state);
@@ -457,7 +472,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
     // Atomically check preconditions and claim the construction slot.
     // The sentinel prevents a second caller from starting construction
     // while we're building outside the lock.
-    let (tts_active, tts_cancel, tts_starting) = {
+    let (tts_active, tts_cancel, human_floor, tts_starting) = {
         let hs = state.huddle()?;
         if hs.tts_pipeline.is_some() {
             return Ok(false);
@@ -471,6 +486,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         (
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.tts_cancel),
+            hs.human_floor.clone(),
             Arc::clone(&hs.tts_starting),
         )
     };
@@ -484,6 +500,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
             model_dir,
             tts_active,
             tts_cancel,
+            human_floor,
             &initial_voice,
             output_device,
             app,

@@ -6,7 +6,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import 'profile_provider.dart';
-import 'user_profile.dart';
+import '../../shared/profile/user_profile.dart';
 
 /// Matches desktop's sidebar profile card, whose avatar is 32px.
 const _defaultAvatarSize = 32.0;

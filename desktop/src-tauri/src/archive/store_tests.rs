@@ -1,6 +1,6 @@
 //! Unit tests for `archive/store.rs`.
 //!
-//! Kept in a sibling file so `store.rs` stays under the 1000-line gate;
+//! Kept in a sibling file so `store.rs` stays under the 1500-line gate;
 //! `#[path]`-included from there.
 
 use super::*;
@@ -10,6 +10,9 @@ fn in_memory() -> Connection {
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "busy_timeout", 5000).unwrap();
     conn.execute_batch(SCHEMA).unwrap();
+    // Match production `open_archive_db`: apply every schema migration (incl.
+    // M4) so tests run against the same shape production connections see.
+    apply_schema_migrations(&conn).unwrap();
     conn
 }
 

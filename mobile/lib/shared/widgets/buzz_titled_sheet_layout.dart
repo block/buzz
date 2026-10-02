@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 import 'buzz_sheet_header.dart';
 import 'concentric_sheet_surface.dart';
 
 /// Shared solid sheet surface with a centered navigation row.
-class BuzzTitledSheetLayout extends StatelessWidget {
+class BuzzTitledSheetLayout extends HookWidget {
   const BuzzTitledSheetLayout({
     super.key,
     required this.title,
@@ -27,8 +28,32 @@ class BuzzTitledSheetLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isScrolledUnder = useState(false);
+    final pendingScrolledUnder = useRef<bool?>(null);
+    final scrollUpdateScheduled = useRef(false);
     final color = surfaceColor ?? context.colors.surface;
     final paintsSurface = !ConcentricSheetSurface.providesSurfaceOf(context);
+
+    void updateScrollUnder(bool next) {
+      if (scrollUpdateScheduled.value) {
+        pendingScrolledUnder.value =
+            (pendingScrolledUnder.value ?? false) || next;
+        return;
+      }
+      pendingScrolledUnder.value = next;
+      scrollUpdateScheduled.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        scrollUpdateScheduled.value = false;
+        final pending = pendingScrolledUnder.value;
+        pendingScrolledUnder.value = null;
+        if (!context.mounted ||
+            pending == null ||
+            pending == isScrolledUnder.value) {
+          return;
+        }
+        isScrolledUnder.value = pending;
+      });
+    }
 
     final sheet = SizedBox(
       width: double.infinity,
@@ -38,14 +63,41 @@ class BuzzTitledSheetLayout extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            BuzzSheetHeader(
-              title: title,
-              titleKey: titleKey,
-              leading: leading,
-              trailing: trailing,
-              showDragHandle: showDragHandle,
+            DecoratedBox(
+              key: const ValueKey('buzz-sheet-scroll-divider'),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    color: isScrolledUnder.value
+                        ? navigationDivider(context, 0.05)
+                        : Colors.transparent,
+                  ),
+                ),
+              ),
+              child: BuzzSheetHeader(
+                title: title,
+                titleKey: titleKey,
+                leading: leading,
+                trailing: trailing,
+                showDragHandle: showDragHandle,
+              ),
             ),
-            Flexible(child: child),
+            Flexible(
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification.depth != 0 ||
+                      notification.metrics.axis != Axis.vertical ||
+                      (notification is! ScrollUpdateNotification &&
+                          notification is! OverscrollNotification)) {
+                    return false;
+                  }
+                  final next = notification.metrics.extentBefore > 0.5;
+                  if (next != isScrolledUnder.value) updateScrollUnder(next);
+                  return false;
+                },
+                child: child,
+              ),
+            ),
           ],
         ),
       ),

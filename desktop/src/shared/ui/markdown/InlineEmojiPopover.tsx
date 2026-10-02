@@ -1,6 +1,11 @@
 import * as React from "react";
 
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/shared/ui/popover";
 
 export function InlineEmojiPopover({
   alt,
@@ -27,7 +32,10 @@ export function InlineEmojiPopover({
 
   const handleMouseEnter = React.useCallback(() => {
     clearTimers();
-    openTimeout.current = setTimeout(() => setOpen(true), 200);
+    openTimeout.current = setTimeout(
+      () => setOpen(true),
+      DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+    );
   }, [clearTimers]);
 
   const scheduleClose = React.useCallback(() => {

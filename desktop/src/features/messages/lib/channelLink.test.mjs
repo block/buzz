@@ -3,12 +3,23 @@ import test from "node:test";
 
 import { isChannelLink, parseChannelLink } from "./channelLink.ts";
 
+const CHANNEL_ID = "580ca78b-9dae-46f3-8854-bd671853ba32";
+const MESSAGE_ID =
+  "8455293f0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+
 test("parseChannelLink accepts the canonical channel path", () => {
+  assert.deepEqual(parseChannelLink(`buzz://channel/${CHANNEL_ID}`), {
+    ok: true,
+    value: { channelId: CHANNEL_ID },
+  });
+});
+
+test("parseChannelLink accepts a channel message path", () => {
   assert.deepEqual(
-    parseChannelLink("buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32"),
+    parseChannelLink(`buzz://channel/${CHANNEL_ID}/${MESSAGE_ID}`),
     {
       ok: true,
-      value: { channelId: "580ca78b-9dae-46f3-8854-bd671853ba32" },
+      value: { channelId: CHANNEL_ID, messageId: MESSAGE_ID },
     },
   );
 });
@@ -35,6 +46,10 @@ test("parseChannelLink rejects malformed channel links", () => {
     "buzz://channel",
     "buzz://channel/",
     "buzz://channel/one/two",
+    `buzz://channel/${CHANNEL_ID}/not-hex`,
+    `buzz://channel/${CHANNEL_ID}/${"a".repeat(63)}`,
+    `buzz://channel/${CHANNEL_ID}/${MESSAGE_ID}/extra`,
+    `buzz://channel/${CHANNEL_ID}/`,
     "buzz://channel/one?extra=true",
     "buzz://channel/one#fragment",
     "https://channel/one",

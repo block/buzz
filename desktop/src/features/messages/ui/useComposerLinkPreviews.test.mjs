@@ -70,18 +70,18 @@ test("composer input versions retain only active hrefs while re-entry advances",
     nextHrefVersion: 0,
   };
 
-  input = updateComposerLinkPreviewInput(input, `see ${HREF}`);
+  input = updateComposerLinkPreviewInput(input, `see ${HREF}`, null);
   const firstVersion = input.hrefVersions.get(HREF);
   assert.equal(input.hrefVersions.size, 1);
 
-  input = updateComposerLinkPreviewInput(input, `see ${secondHref}`);
+  input = updateComposerLinkPreviewInput(input, `see ${secondHref}`, null);
   assert.deepEqual(
     [...input.hrefVersions.keys()],
     [secondHref],
     "departed href history is pruned instead of retained for the composer lifetime",
   );
 
-  input = updateComposerLinkPreviewInput(input, `see ${HREF}`);
+  input = updateComposerLinkPreviewInput(input, `see ${HREF}`, null);
   assert.deepEqual([...input.hrefVersions.keys()], [HREF]);
   assert.ok(
     input.hrefVersions.get(HREF) > firstVersion,
@@ -159,6 +159,7 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
         nextHrefVersion: 0,
       },
       `see ${HREF}`,
+      null,
     );
     const { result, rerender, unmount } = renderHook(
       ({ content, hrefVersions }) =>
@@ -183,10 +184,11 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
     // href set equals the previous commit, but the update-boundary version has
     // advanced because the URL left and re-entered between those updates.
     await act(async () => {
-      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ", null);
       previewInput = updateComposerLinkPreviewInput(
         previewInput,
         `see ${HREF}`,
+        null,
       );
       rerender(previewInput);
     });
@@ -318,6 +320,7 @@ test("a removed blocked re-entry can later use metadata that resolved while abse
         nextHrefVersion: 0,
       },
       `see ${HREF}`,
+      null,
     );
     const { result, rerender, unmount } = renderHook(
       ({ content, hrefVersions }) =>
@@ -330,10 +333,11 @@ test("a removed blocked re-entry can later use metadata that resolved while abse
 
     // Re-enter the cached negative and wait until its forced refetch is in flight.
     await act(async () => {
-      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ", null);
       previewInput = updateComposerLinkPreviewInput(
         previewInput,
         `see ${HREF}`,
+        null,
       );
       rerender(previewInput);
     });
@@ -345,7 +349,7 @@ test("a removed blocked re-entry can later use metadata that resolved while abse
     // Remove the blocked href, then let its refetch populate healthy metadata
     // while no candidate is active.
     await act(async () => {
-      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ", null);
       rerender(previewInput);
     });
     await settle();
@@ -359,6 +363,7 @@ test("a removed blocked re-entry can later use metadata that resolved while abse
       previewInput = updateComposerLinkPreviewInput(
         previewInput,
         `see ${HREF}`,
+        null,
       );
       rerender(previewInput);
     });
@@ -486,6 +491,7 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
         nextHrefVersion: 0,
       },
       `see ${HREF}`,
+      null,
     );
     const { result, rerender, unmount } = renderHook(
       ({ content, hrefVersions }) =>
@@ -510,10 +516,11 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
 
     // 2. Fast gesture: clear then re-paste the SAME URL inside the debounce.
     await act(async () => {
-      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ", null);
       previewInput = updateComposerLinkPreviewInput(
         previewInput,
         `see ${HREF}`,
+        null,
       );
       rerender(previewInput);
     });
@@ -745,6 +752,108 @@ test("an abandoned concurrent render cannot invalidate the committed snapshot ta
     );
     assert.equal(latest.hasPendingSnapshots, false);
     view.unmount();
+  } finally {
+    cleanup();
+    ipcHandlers.clear();
+  }
+});
+
+// ── Composer clone-URL classification ────────────────────────────────────────
+//
+// A same-relay `/git/<owner>/<repo>` clone URL is a Buzz repository entity: the
+// renderer normalizes it onto `buzz://repo` and shows it as an inline chip, not
+// a standalone card. The composer must reach the same verdict from the same
+// active relay origin — without it the URL is classified as an external
+// generic-link, enters snapshot fetching, and shows a card the sent message
+// then contradicts.
+
+const CLONE_OWNER = "a".repeat(64);
+const RELAY_ORIGIN = "https://relay.example.com";
+const CLONE_HREF = `${RELAY_ORIGIN}/git/${CLONE_OWNER}/relay-tools.git`;
+
+test("composer input classifies a same-relay clone URL as a Buzz entity", async () => {
+  const { updateComposerLinkPreviewInput } = await import(
+    "./useComposerLinkPreviews.tsx"
+  );
+  const empty = {
+    content: "",
+    hrefs: new Set(),
+    hrefVersions: new Map(),
+    nextHrefVersion: 0,
+  };
+
+  assert.deepEqual(
+    [
+      ...updateComposerLinkPreviewInput(
+        empty,
+        `clone ${CLONE_HREF}`,
+        RELAY_ORIGIN,
+      ).hrefs,
+    ],
+    [],
+    "a same-relay clone URL is a chip-only entity, never a preview candidate",
+  );
+  // A different origin sharing the path shape stays an ordinary external link.
+  assert.deepEqual(
+    [
+      ...updateComposerLinkPreviewInput(
+        empty,
+        `clone ${CLONE_HREF}`,
+        "https://evil.example.com",
+      ).hrefs,
+    ],
+    [CLONE_HREF],
+  );
+});
+
+test("composer never fetches a snapshot for a same-relay clone URL", async () => {
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const { getCachedRelayOrigin } = await import("@/shared/lib/mediaUrl.ts");
+  const { resetLinkPreviewMetadataCache } = await import(
+    "@/shared/lib/useResolvedLinkPreviews.ts"
+  );
+  const { useComposerLinkPreviews } = await import(
+    "./useComposerLinkPreviews.tsx"
+  );
+
+  resetLinkPreviewMetadataCache();
+  ipcHandlers.clear();
+  ipcHandlers.set("get_relay_http_url", () => Promise.resolve(RELAY_ORIGIN));
+  let fetchCalls = 0;
+  ipcHandlers.set("fetch_link_preview_metadata", () => {
+    fetchCalls += 1;
+    return Promise.resolve(metadata());
+  });
+
+  try {
+    // The origin resolves asynchronously; the classification under test only
+    // exists once it is known, so wait for the shared cache to publish it.
+    const deadline = Date.now() + 5000;
+    while (getCachedRelayOrigin() !== RELAY_ORIGIN && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(getCachedRelayOrigin(), RELAY_ORIGIN);
+
+    const { result, unmount } = renderHook(() =>
+      useComposerLinkPreviews(`clone ${CLONE_HREF}`),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    assert.equal(
+      fetchCalls,
+      0,
+      "a Buzz repository entity must not enter external snapshot fetching",
+    );
+    assert.equal(result.current.previewList, null);
+    assert.deepEqual(result.current.getReadyTags(), []);
+    assert.deepEqual(result.current.getLiveCandidates(), []);
+    assert.equal(result.current.hasPendingSnapshots, false);
+    unmount();
   } finally {
     cleanup();
     ipcHandlers.clear();

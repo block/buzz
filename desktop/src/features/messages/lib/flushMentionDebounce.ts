@@ -23,6 +23,19 @@ export type FlushMentionDebounceResult =
   | { type: "match"; suggestion: MentionSuggestion; startIndex: number }
   | { type: "no-match" };
 
+export function isPlainSpace(
+  event: Pick<
+    KeyboardEvent,
+    "altKey" | "ctrlKey" | "isComposing" | "key" | "metaKey" | "shiftKey"
+  >,
+): boolean {
+  return (
+    event.key === " " &&
+    !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
+    !event.isComposing
+  );
+}
+
 /**
  * Cancel the pending debounce timer, re-detect the prefix query from the
  * latest editor state, rank candidates, and return the top suggestion — or
@@ -37,10 +50,12 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   searchableNamesLowerRef: React.RefObject<string[]>;
   candidates: readonly T[];
   activePersonaIds: ReadonlySet<string>;
+  agentProvenanceReady: boolean;
   channelType?: ChannelType | null;
   currentPubkey?: string | null;
   ownerProfiles?: UserProfileLookup;
   profiles?: UserProfileLookup;
+  requireExact?: boolean;
 }): FlushMentionDebounceResult | null {
   if (opts.debounceTimerRef.current !== null) {
     clearTimeout(opts.debounceTimerRef.current);
@@ -65,13 +80,25 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   );
 
   if (ranked.length === 0) {
-    return { type: "no-match" };
+    return opts.requireExact ? null : { type: "no-match" };
   }
 
-  const { candidate, label } = ranked[0];
+  const normalizedQuery = mention.query.trim().toLowerCase();
+  const exactMatch = opts.requireExact
+    ? ranked.find(({ label }) => label.trim().toLowerCase() === normalizedQuery)
+    : ranked[0];
+  const couldBeLongerName = opts.searchableNamesLowerRef.current.some((name) =>
+    name.trim().toLowerCase().startsWith(`${normalizedQuery} `),
+  );
+  if (!exactMatch || (opts.requireExact && couldBeLongerName)) {
+    return null;
+  }
+
+  const { candidate, label } = exactMatch;
   return {
     type: "match",
     suggestion: mapMentionCandidateToSuggestion({
+      agentProvenanceReady: opts.agentProvenanceReady,
       candidate,
       label,
       channelType: opts.channelType,

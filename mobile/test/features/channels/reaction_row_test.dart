@@ -3,8 +3,8 @@ import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -70,6 +70,7 @@ Future<ProviderContainer> _pumpRow(
       ],
       child: ReactionRow(
         messageId: messageId,
+        channelId: 'channel',
         reactions: reactions,
         onToggle: onToggle ?? (_) {},
         showAddButton: showAddButton,
@@ -90,7 +91,7 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
   Map<String, UserProfile> build() => _profiles;
 
   @override
-  Future<void> preload(Iterable<String> pubkeys) async {}
+  Future<bool> preload(List<String> pubkeys) async => true;
 }
 
 void main() {
@@ -321,6 +322,7 @@ void main() {
               home: Scaffold(
                 body: ReactionRow(
                   messageId: _messageId,
+                  channelId: 'channel',
                   reactions: [_reaction(reactedByCurrentUser: true)],
                   onToggle: (_) {},
                 ),
@@ -367,6 +369,7 @@ void main() {
               home: Scaffold(
                 body: ReactionRow(
                   messageId: _messageId,
+                  channelId: 'channel',
                   reactions: [_reaction()],
                   onToggle: (_) {},
                 ),

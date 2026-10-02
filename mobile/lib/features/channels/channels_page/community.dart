@@ -483,7 +483,7 @@ class _CommunityAvatar extends ConsumerWidget {
     super.key,
     required this.name,
     this.relayUrl,
-    this.size = _kTopSectionAvatarSize,
+    this.size = _kTopSectionCommunityAvatarSize,
   });
 
   @override

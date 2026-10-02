@@ -119,10 +119,25 @@ class _SliverChannelsList extends HookConsumerWidget {
     final streamChannels = visibleChannels
         .where((channel) => channel.isStream)
         .toList();
-    final dmChannels = sortDmChannelsByDisplayLabel(
-      visibleChannels.where((channel) => channel.isDm),
-      currentPubkey: currentPubkey,
+    final unsortedDms = visibleChannels.where((channel) => channel.isDm);
+    // Rebuild only when the DM order changes, not for every profile fetch.
+    final dmOrder = ref.watch(
+      identityNameSourcesProvider.select(
+        (names) => [
+          for (final channel in sortDmChannelsByDisplayLabel(
+            unsortedDms,
+            currentPubkey: currentPubkey,
+            names: names,
+          ))
+            channel.id,
+        ].join('\u0000'),
+      ),
     );
+    final dmRank = {
+      for (final (index, id) in dmOrder.split('\u0000').indexed) id: index,
+    };
+    final dmChannels = unsortedDms.toList()
+      ..sort((a, b) => dmRank[a.id]!.compareTo(dmRank[b.id]!));
 
     final starredExpanded = useState(true);
     final channelsExpanded = useState(true);

@@ -35,7 +35,7 @@ class _MentionSuggestions extends StatelessWidget {
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
             final candidate = suggestions[index];
-            final name = candidate.label;
+            final name = candidate.pickerLabel;
             final avatarUrl =
                 candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
@@ -47,12 +47,16 @@ class _MentionSuggestions extends StatelessWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  name[0].toUpperCase(),
+                  // Name-derived for named candidates; keyed to the hex
+                  // public key for unnamed ones so the compact-npub label
+                  // doesn't render `N` for everyone.
+                  candidate.initial,
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                isAgent: candidate.isAgent,
               ),
               title: Text(name, style: context.textTheme.titleSmall),
               subtitle: _MentionSuggestionInfo.build(

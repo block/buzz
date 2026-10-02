@@ -9,6 +9,7 @@ type AnimatedAvatarCameraPickerProps = {
   disabled?: boolean;
   iphoneDisabled: boolean;
   onSelectSource: (source: CameraSource) => void;
+  stacked?: boolean;
   testIdPrefix: string;
 };
 
@@ -18,10 +19,16 @@ export function AnimatedAvatarCameraPicker({
   disabled = false,
   iphoneDisabled,
   onSelectSource,
+  stacked = false,
   testIdPrefix,
 }: AnimatedAvatarCameraPickerProps) {
   return (
-    <div className="grid grid-cols-2 gap-3">
+    <div
+      className={cn(
+        "grid gap-3",
+        stacked ? "h-full grid-cols-1 grid-rows-2" : "grid-cols-2",
+      )}
+    >
       {[
         {
           disabled: iphoneDisabled,
@@ -43,7 +50,8 @@ export function AnimatedAvatarCameraPicker({
           <button
             aria-pressed={isSelected}
             className={cn(
-              "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,color,opacity] duration-[250ms] ease-out hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "relative flex flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,color,opacity] duration-[250ms] ease-out hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              stacked ? "h-full min-h-0" : "h-[120px]",
               isSelected &&
                 "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
               isDisabled && "cursor-not-allowed opacity-45 hover:bg-muted",

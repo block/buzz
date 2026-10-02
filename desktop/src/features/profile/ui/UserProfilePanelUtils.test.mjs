@@ -58,6 +58,8 @@ function persona(overrides = {}) {
     namePool: [],
     isBuiltIn: false,
     isActive: true,
+    respondTo: "owner-only",
+    respondToAllowlist: [],
     envVars: { NEW_KEY: "2" },
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
@@ -91,6 +93,42 @@ test("personaManagedAgentUpdate syncs edited persona identity to linked agent", 
     model: "new-model",
     envVars: { NEW_KEY: "2" },
   });
+});
+
+test("personaManagedAgentUpdate syncs definition access to the linked agent", () => {
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "anyone" }),
+      persona({ respondTo: "owner-only" }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "owner-only",
+    },
+  );
+
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "anyone" }),
+      persona({
+        respondTo: "allowlist",
+        respondToAllowlist: ["a".repeat(64)],
+      }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "allowlist",
+      respondToAllowlist: ["a".repeat(64)],
+    },
+  );
 });
 
 test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {

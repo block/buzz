@@ -19,10 +19,10 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
-import { formatModelDisplayName } from "@/features/agents/lib/formatAgentModelLabel";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
+import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { RestartDiffBadge } from "./RestartDiffBadge";
 
 export function ManagedAgentRow({
@@ -412,7 +412,7 @@ function RuntimeBlock({
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           {runtimeSource ? <span>{runtimeSource}</span> : null}
           {agent.model ? (
-            <span>{formatModelDisplayName(agent.model)}</span>
+            <span>{resolveModelLabel(agent.model, null, agent.provider)}</span>
           ) : null}
         </div>
       ) : null}

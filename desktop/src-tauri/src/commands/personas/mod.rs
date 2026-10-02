@@ -26,8 +26,42 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Validate the raw authored bytes before applying storage normalization.
+/// This ordering is security-relevant: prohibited edge characters must be
+/// rejected, never made invisible by trimming.
+fn normalize_description(value: Option<String>) -> Result<Option<String>, String> {
+    crate::managed_agents::validate_agent_description_text(value.as_deref())?;
+    Ok(trim_optional(value))
+}
+
+#[cfg(test)]
+mod description_normalization_tests {
+    use super::normalize_description;
+
+    #[test]
+    fn trims_visible_whitespace_and_collapses_blank_to_none() {
+        assert_eq!(
+            normalize_description(Some("  A careful agent.  ".to_string())).unwrap(),
+            Some("A careful agent.".to_string())
+        );
+        assert_eq!(
+            normalize_description(Some("   ".to_string())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_prohibited_characters_at_the_edges_before_trimming() {
+        for value in ["\nA careful agent.", "A careful agent.\n", "\u{feff}Agent"] {
+            assert!(normalize_description(Some(value.to_string())).is_err());
+        }
+    }
+}
+
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
+pub(in crate::commands) use pending::retain_persona_pending_at;
+pub(crate) use pending::tombstone_persona_at;
 pub(super) use pending::tombstone_persona_pending;
 mod create;
 pub use create::create_persona;
@@ -38,6 +72,8 @@ mod update;
 pub use update::update_persona;
 mod inbound;
 pub use inbound::reconcile_inbound_persona_event;
+#[cfg(test)]
+pub(crate) use inbound::retain_inbound_catalog_witness;
 
 #[tauri::command]
 pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, String> {
@@ -236,8 +272,9 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
+                // Tombstone + NIP-IA kind:9035 archive enqueue atomically; the
+                // archive's `persona_id` is derived from the retained 30177 head.
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);
-                super::agents::archive_managed_agent_pending(&app, &state, pk, Some(&id));
             }
             tombstone_persona_pending(&app, &state, &d_tag);
 

@@ -51,6 +51,7 @@ class CommunityStorage {
         relayUrl: legacyUrl,
         pubkey: legacyPubkey,
         nsec: legacyNsec,
+        sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );
 
       await _saveList([community]);
@@ -78,6 +79,9 @@ class CommunityStorage {
     }
     await _saveList(all);
   }
+
+  /// Replaces the complete stored community list in one secure-storage write.
+  Future<void> saveAll(List<Community> communities) => _saveList(communities);
 
   Future<void> remove(String id) async {
     final all = await loadAll();

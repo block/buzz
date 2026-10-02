@@ -14,13 +14,18 @@ class BuzzActionTile extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onTap,
+    this.iconWidget,
     this.isEnabled = true,
     this.isLoading = false,
     this.loadingSemanticLabel,
+    this.iconColor,
   });
 
   /// Icon shown when the tile is not loading.
   final IconData? icon;
+
+  /// Optional custom icon widget shown instead of [icon].
+  final Widget? iconWidget;
 
   /// Label shown below the icon.
   final String label;
@@ -37,45 +42,63 @@ class BuzzActionTile extends StatelessWidget {
   /// Accessibility label for the loading indicator.
   final String? loadingSemanticLabel;
 
+  /// Optional icon tint used to communicate a selected action state.
+  final Color? iconColor;
+
   @override
   Widget build(BuildContext context) {
     final canTap = isEnabled && !isLoading;
-    return GestureDetector(
-      onTap: canTap
-          ? () {
-              unawaited(HapticFeedback.lightImpact());
-              onTap();
-            }
-          : null,
-      behavior: HitTestBehavior.opaque,
-      child: Opacity(
-        opacity: isEnabled ? 1 : 0.5,
-        child: Container(
-          width: double.infinity,
-          height: 68 + (Grid.xxs * 2),
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.dialog),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (isLoading)
-                BuzzLoadingIndicator(
-                  size: 22,
-                  color: context.colors.onSurface,
-                  semanticLabel: loadingSemanticLabel ?? label,
-                )
-              else
-                Icon(icon, size: 22, color: context.colors.onSurface),
-              const SizedBox(height: Grid.xxs),
-              Text(
-                label,
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onSurface,
+    void handleTap() {
+      unawaited(HapticFeedback.lightImpact());
+      onTap();
+    }
+
+    return Semantics(
+      button: true,
+      enabled: canTap,
+      label: isLoading ? loadingSemanticLabel ?? label : label,
+      onTap: canTap ? handleTap : null,
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: canTap ? handleTap : null,
+        excludeFromSemantics: true,
+        behavior: HitTestBehavior.opaque,
+        child: Opacity(
+          opacity: isEnabled ? 1 : 0.5,
+          child: Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(minHeight: 68 + (Grid.xxs * 2)),
+            padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+            decoration: BoxDecoration(
+              color: context.colors.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(Radii.dialog),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (isLoading)
+                  BuzzLoadingIndicator(
+                    size: 22,
+                    color: context.colors.onSurface,
+                    semanticLabel: loadingSemanticLabel ?? label,
+                  )
+                else
+                  iconWidget ??
+                      Icon(
+                        icon,
+                        size: 22,
+                        color: iconColor ?? context.colors.onSurface,
+                      ),
+                const SizedBox(height: Grid.xxs),
+                Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onSurface,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

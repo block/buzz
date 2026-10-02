@@ -1,0 +1,41 @@
+nextest-version = "0.9.136"
+# The PostgreSQL lane uses a run-scoped desired-state template database and a
+# per-test wrapper, both of which require nextest's script support.
+experimental = ["setup-scripts", "wrapper-scripts"]
+
+[scripts.setup.postgres-template]
+# Bootstrap the desired-state source database once per nextest invocation.
+command = { command-line = "scripts/postgres-test-setup.sh", relative-to = "workspace-root" }
+slow-timeout = "60s"
+
+[scripts.wrapper.postgres-isolation]
+# Clone or create a unique database for each test process, then drop it on exit.
+command = { command-line = "scripts/postgres-test-wrapper.sh", relative-to = "workspace-root" }
+
+[profile.postgres-ci]
+# This structural convention keeps new PostgreSQL-backed tests discoverable
+# without maintaining an exact list of test names.
+default-filter = """
+(test(/postgres_tests::/) or binary(/^postgres_/))
+and not test(/(^|::)external_infra[^:]*::/)
+"""
+fail-fast = false
+# Eight workers was the fastest stable setting in the Blox benchmark while the
+# wrapper retained one database per concurrently running test process.
+test-threads = 8
+
+[test-groups.postgres-cluster-global]
+# These tests inspect cluster-wide activity or create least-privilege sessions,
+# so database-per-test isolation alone cannot make them independent.
+max-threads = 1
+
+[[profile.postgres-ci.overrides]]
+filter = "test(/cluster_global_/)"
+test-group = "postgres-cluster-global"
+
+[[profile.postgres-ci.scripts]]
+# Script filters are separate from default-filter: they attach the setup and
+# isolation wrapper to the same automatically discovered test set.
+filter = "(test(/postgres_tests::/) or binary(/^postgres_/)) and not test(/(^|::)external_infra[^:]*::/)"
+setup = "postgres-template"
+run-wrapper = "postgres-isolation"

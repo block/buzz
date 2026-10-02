@@ -15,10 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
-git-credential-nostr = { path = "../git-credential-nostr" }
-git-sign-nostr = { path = "../git-sign-nostr" }
 nostr = { workspace = true }
-zeroize = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }

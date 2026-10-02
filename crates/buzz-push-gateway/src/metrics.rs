@@ -41,16 +41,22 @@ pub fn install() -> Result<PrometheusHandle, BuildError> {
 
 /// Stable metric label for each sanitized delivery outcome. The mapping is total
 /// over the closed [`DeliveryOutcome`] enum, so the `outcome` label can only take
-/// these six values.
+/// these five values.
 fn outcome_label(outcome: DeliveryOutcome) -> &'static str {
     match outcome {
         DeliveryOutcome::Accepted => "accepted",
         DeliveryOutcome::InvalidEndpoint { .. } => "invalid_endpoint",
         DeliveryOutcome::Retry { .. } => "retry",
-        DeliveryOutcome::RefreshCredential => "refresh_credential",
         DeliveryOutcome::ConfigurationFault => "configuration_fault",
         DeliveryOutcome::PermanentRequestFault => "permanent_request_fault",
     }
+}
+
+/// Record entry into the concrete APNs HTTP send seam. This counter is kept
+/// separate from terminal outcomes so a control scrape can distinguish
+/// "transport never reached" from "APNs send returned an error".
+pub fn record_apns_send_attempt() {
+    metrics::counter!("push_gateway_apns_send_attempts_total").increment(1);
 }
 
 /// Record the terminal APNs outcome and its send round-trip latency.
@@ -58,11 +64,6 @@ pub fn record_apns_delivery(outcome: DeliveryOutcome, seconds: f64) {
     metrics::counter!("push_gateway_apns_deliveries_total", "outcome" => outcome_label(outcome))
         .increment(1);
     metrics::histogram!("push_gateway_apns_delivery_seconds").record(seconds);
-}
-
-/// Record that a cached provider credential was refreshed after APNs reported expiry.
-pub fn record_credential_refresh() {
-    metrics::counter!("push_gateway_apns_credential_refreshes_total").increment(1);
 }
 
 /// Delivery-admission result at the `authorize_delivery` seam.
@@ -126,7 +127,7 @@ mod tests {
     #[test]
     fn outcome_label_covers_every_variant_with_static_strings() {
         // Exhaustive over the closed enum; each arm is a compile-time constant,
-        // so the `outcome` label is structurally bounded to these six values.
+        // so the `outcome` label is structurally bounded to these five values.
         for (outcome, expected) in [
             (DeliveryOutcome::Accepted, "accepted"),
             (
@@ -141,7 +142,6 @@ mod tests {
                 },
                 "retry",
             ),
-            (DeliveryOutcome::RefreshCredential, "refresh_credential"),
             (DeliveryOutcome::ConfigurationFault, "configuration_fault"),
             (
                 DeliveryOutcome::PermanentRequestFault,
@@ -159,6 +159,7 @@ mod tests {
     fn recorder_renders_sanitized_bounded_series() {
         let handle = install().expect("recorder installs exactly once per test process");
 
+        record_apns_send_attempt();
         record_apns_delivery(DeliveryOutcome::Accepted, 0.012);
         record_apns_delivery(
             DeliveryOutcome::InvalidEndpoint {
@@ -166,7 +167,6 @@ mod tests {
             },
             0.030,
         );
-        record_credential_refresh();
         record_admission(Admission::Admitted);
         record_admission(Admission::Rejected);
         record_admission(Admission::Unavailable);
@@ -180,9 +180,9 @@ mod tests {
 
         // All expected series are present.
         for needle in [
+            "push_gateway_apns_send_attempts_total",
             "push_gateway_apns_deliveries_total",
             "push_gateway_apns_delivery_seconds",
-            "push_gateway_apns_credential_refreshes_total",
             "push_gateway_admissions_total",
             "push_gateway_delivery_errors_total",
             "push_gateway_reaper_failures_total",

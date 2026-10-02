@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'buzz_navigation_metrics.dart';
+import 'ios_glass_navigation_button.dart';
 
 /// A titled sheet header with balanced actions and an exactly centered title.
 class BuzzSheetHeader extends StatelessWidget {
@@ -33,7 +35,7 @@ class BuzzSheetHeader extends StatelessWidget {
         bottom: Grid.xs,
       ),
       child: SizedBox(
-        height: 56,
+        height: buzzNavigationRowHeight,
         child: Stack(
           alignment: Alignment.topCenter,
           children: [
@@ -75,18 +77,32 @@ class _SheetCloseButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    void closeSheet() {
+      unawaited(HapticFeedback.lightImpact());
+      Navigator.of(context).pop();
+    }
+
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        key: const ValueKey('buzz-sheet-ios-glass-close'),
+        icon: IosGlassNavigationIcon.close,
+        semanticLabel: 'Close sheet',
+        onPressed: closeSheet,
+        width: buzzNavigationActionSize,
+        height: buzzNavigationActionSize,
+        foregroundColor: context.colors.primary,
+      );
+    }
+
     return SizedBox.square(
-      dimension: 44,
+      dimension: buzzNavigationActionSize,
       child: IconButton(
         tooltip: 'Close sheet',
-        onPressed: () {
-          unawaited(HapticFeedback.lightImpact());
-          Navigator.of(context).pop();
-        },
+        onPressed: closeSheet,
         style: IconButton.styleFrom(
           padding: EdgeInsets.zero,
           backgroundColor: context.colors.surfaceContainerHighest,
-          foregroundColor: context.colors.onSurface,
+          foregroundColor: context.colors.primary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
