@@ -36,12 +36,18 @@ impl NipFiMode {
 
     /// Admission may deny on NIP-FI grounds; other modes admit as `Off`.
     pub const fn restricts(self) -> bool {
-        matches!(self, Self::Enforce | Self::DenyProtected)
+        match self {
+            Self::Enforce | Self::DenyProtected => true,
+            Self::Off | Self::Shadow => false,
+        }
     }
 
     /// The full enforce configuration is loaded and evidence is evaluated.
     pub const fn evaluates(self) -> bool {
-        matches!(self, Self::Enforce | Self::Shadow)
+        match self {
+            Self::Enforce | Self::Shadow => true,
+            Self::Off | Self::DenyProtected => false,
+        }
     }
 
     /// Evidence is evaluated and its verdict is authoritative.

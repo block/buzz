@@ -13,7 +13,7 @@ use axum::http::HeaderMap;
 use buzz_auth::{DenialClass, VerifiedAssertion};
 use nostr::PublicKey;
 
-use crate::nip_fi_shadow::WouldDeny;
+use crate::nip_fi_shadow::{Stage, WouldDeny};
 use crate::state::AppState;
 
 const PENDING: u8 = 0;
@@ -107,7 +107,7 @@ impl ShadowSession {
     /// NIP-42 key is not the asserted one, or the assertion has no key.
     pub(crate) fn observe_pairing(&self, pubkey: PublicKey) {
         if self.assertion.asserted_key() != Some(pubkey) {
-            self.decide(Err(("pairing", DenialClass::AuthorizationDenied)));
+            self.decide(Err((Stage::Pairing, DenialClass::AuthorizationDenied)));
         }
     }
 
@@ -122,7 +122,7 @@ impl ShadowSession {
             .registered()
             .insert(self.id, Arc::downgrade(self));
         self.decide(if deny_listed(state, &self.assertion) {
-            Err(("deny_set", DenialClass::AuthorizationDenied))
+            Err((Stage::DenySet, DenialClass::AuthorizationDenied))
         } else {
             Ok(())
         });
@@ -179,7 +179,7 @@ pub(crate) fn upgrade_denied(
 ) -> bool {
     let denied = deny_listed(state, assertion);
     if denied {
-        let verdict = Err(("deny_set", DenialClass::AuthorizationDenied));
+        let verdict = Err((Stage::DenySet, DenialClass::AuthorizationDenied));
         crate::nip_fi_shadow::record("ws", headers, &state.config.nip_fi.communities, verdict);
     }
     denied

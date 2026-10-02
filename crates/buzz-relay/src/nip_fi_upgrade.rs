@@ -72,10 +72,14 @@ pub(crate) fn check_nip_fi_at_upgrade(
         // observed until AUTH, where its admission verdict is recorded.
         if mode.observes_only() {
             let verdict = resolve_community(headers, communities)
-                .map_err(|class| ("community", class))
+                .map_err(|class| (crate::nip_fi_shadow::Stage::Community, class))
                 .and_then(|community| {
-                    evaluate_attached_assertion(headers, community, verifier)
-                        .map_err(|rejection| ("assertion", rejection.denial_class()))
+                    evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
+                        (
+                            crate::nip_fi_shadow::Stage::Assertion,
+                            rejection.denial_class(),
+                        )
+                    })
                 });
             match verdict {
                 Ok(assertion) => return NipFiUpgradeOutcome::Observed(assertion),

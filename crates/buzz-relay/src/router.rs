@@ -216,14 +216,19 @@ fn nip_fi_guard_steps(
 ) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
     let community =
         crate::nip_fi_core::resolve_community(headers, &state.config.nip_fi.communities)
-            .map_err(|class| ("community", class))?;
+            .map_err(|class| (crate::nip_fi_shadow::Stage::Community, class))?;
     crate::nip_fi_core::evaluate_attached_assertion(
         headers,
         community,
         state.nip_fi_verifier.as_deref(),
     )
     .map(drop)
-    .map_err(|rejection| ("assertion", rejection.denial_class()))
+    .map_err(|rejection| {
+        (
+            crate::nip_fi_shadow::Stage::Assertion,
+            rejection.denial_class(),
+        )
+    })
 }
 
 /// Paths the assertion guard never checks.

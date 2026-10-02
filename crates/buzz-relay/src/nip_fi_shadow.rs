@@ -9,7 +9,31 @@ use buzz_auth::DenialClass;
 use crate::nip_fi_config::NipFiCommunities;
 
 /// Which enforce step would have denied, and with which class.
-pub(crate) type WouldDeny = (&'static str, DenialClass);
+pub(crate) type WouldDeny = (Stage, DenialClass);
+
+/// The enforce step a would-deny stops at: the shadow `stage` label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stage {
+    Community,
+    Cardinality,
+    Nip98,
+    Assertion,
+    Pairing,
+    DenySet,
+}
+
+impl Stage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Community => "community",
+            Self::Cardinality => "cardinality",
+            Self::Nip98 => "nip98",
+            Self::Assertion => "assertion",
+            Self::Pairing => "pairing",
+            Self::DenySet => "deny_set",
+        }
+    }
+}
 
 /// Record one would-be enforce verdict for a request at `route`.
 pub(crate) fn record(
@@ -25,7 +49,7 @@ pub(crate) fn record(
 pub(crate) fn record_for(route: &'static str, community: String, verdict: Result<(), WouldDeny>) {
     let (stage, outcome) = match verdict {
         Ok(()) => ("admit", "admit"),
-        Err((stage, class)) => (stage, class_label(class)),
+        Err((stage, class)) => (stage.label(), class_label(class)),
     };
     emit(route, community, stage, outcome);
 }
@@ -90,8 +114,8 @@ const fn class_label(class: DenialClass) -> &'static str {
     }
 }
 
-/// In shadow mode only, record whether `strict` (a pure check) would reject.
-/// Its stage is always `strict_proof`: a pass is one proof, not an admit.
+/// In shadow mode only, record whether `strict` (a pure check) would reject,
+/// on its own counter: a pass is one proof, not an admission verdict.
 pub(crate) fn observe_strict_proof<E>(
     state: &crate::state::AppState,
     headers: &HeaderMap,
@@ -99,10 +123,15 @@ pub(crate) fn observe_strict_proof<E>(
     strict: impl FnOnce() -> Result<(), E>,
 ) {
     let nip_fi = &state.config.nip_fi;
-    if nip_fi.mode.observes_only() {
+    if nip_fi.mode.observes_only() && guard_denied() != Some(true) {
         let outcome = strict().map_or(class_label(DenialClass::EvidenceRejected), |()| "pass");
-        let community = community_label(headers, &nip_fi.communities);
-        emit(route, community, "strict_proof", outcome);
+        metrics::counter!(
+            "buzz_nip_fi_shadow_strict_proof_total",
+            "route" => route,
+            "outcome" => outcome,
+            "community" => community_label(headers, &nip_fi.communities)
+        )
+        .increment(1);
     }
 }
 
@@ -114,7 +143,7 @@ pub(crate) fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMa
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
         let verdict = match crate::nip_fi_core::resolve_community(headers, &nip_fi.communities) {
-            Err(class) => Err(("community", class)),
+            Err(class) => Err((Stage::Community, class)),
             Ok(_) if guard_denied() == Some(false) => Ok(()),
             Ok(_) => return,
         };
@@ -135,17 +164,22 @@ mod tests {
 
     /// `(community, stage, outcome)` labels of every shadow counter increment.
     fn shadow_counts(recorder: &DebuggingRecorder) -> Vec<(String, String, String)> {
+        counts_of(recorder, "buzz_nip_fi_shadow_total")
+    }
+
+    /// `(community, stage, outcome)` of every increment of `metric`; a
+    /// missing label reads `-`.
+    fn counts_of(recorder: &DebuggingRecorder, metric: &str) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
         for (key, _, _, value) in recorder.snapshotter().snapshot().into_vec() {
             let key = key.key();
-            if key.name() != "buzz_nip_fi_shadow_total" {
+            if key.name() != metric {
                 continue;
             }
             let label = |name| {
                 key.labels()
                     .find(|l| l.key() == name)
-                    .unwrap()
-                    .value()
+                    .map_or("-", |l| l.value())
                     .to_owned()
             };
             let DebugValue::Counter(n) = value else {
@@ -201,10 +235,11 @@ mod tests {
 
     // A NIP-98 event without a `payload` tag passes lax checks but fails the
     // strict one. Mutations: running the side check outside shadow,
-    // claiming the event in the replay guard, or recording a pass as
-    // `stage=admit` → RED.
+    // claiming the event in the replay guard, or recording either outcome on
+    // the admission counter → RED.
     #[tokio::test(flavor = "current_thread")]
     async fn strict_proof_side_check_records_only_in_shadow_and_spares_replay() {
+        const STRICT: &str = "buzz_nip_fi_shadow_strict_proof_total";
         use base64::Engine as _;
         let url = "https://relay.example/api/bridge";
         let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
@@ -249,18 +284,17 @@ mod tests {
                     .map(drop)
                 });
             });
-            let counts = shadow_counts(&recorder);
+            let counts = counts_of(&recorder, STRICT);
             assert_eq!(counts.len(), expected, "{mode:?}");
             assert!(
-                counts
-                    .iter()
-                    .all(|(_, stage, outcome)| stage == "strict_proof" && outcome == "rejected"),
+                counts.iter().all(|(.., outcome)| outcome == "rejected"),
                 "{mode:?}"
             );
+            assert!(shadow_counts(&recorder).is_empty(), "{mode:?}");
             assert_eq!(guard.0.load(Ordering::SeqCst), 0, "{mode:?}");
             if mode.observes_only() {
-                // Both outcomes stay `strict_proof`, never an admit that
-                // could be summed with whole-request verdicts.
+                // Both outcomes stay on the proof counter, never an admit
+                // that could be summed with whole-request verdicts.
                 let recorder = DebuggingRecorder::new();
                 metrics::with_local_recorder(&recorder, || {
                     super::observe_strict_proof(&state, &headers, "bridge", || Ok::<_, ()>(()));
@@ -269,63 +303,84 @@ mod tests {
                 let label = |outcome: &str| {
                     (
                         "https://relay.example".to_owned(),
-                        "strict_proof".to_owned(),
+                        "-".to_owned(),
                         outcome.to_owned(),
                     )
                 };
-                assert_eq!(shadow_counts(&recorder), [label("pass"), label("rejected")]);
+                let counts = counts_of(&recorder, STRICT);
+                assert_eq!(counts, [label("pass"), label("rejected")]);
+                assert!(shadow_counts(&recorder).is_empty());
             }
         }
     }
 
-    /// Mode semantics live in `NipFiMode`'s predicates. A raw `matches!` on a
-    /// mode elsewhere is how shadow silently inherits Off or Enforce
-    /// behavior, so production code must not contain one.
+    /// Mode semantics live in `NipFiMode`'s predicates. Naming a variant in
+    /// production code anywhere else (`==`, `matches!`, `if let`, or-patterns,
+    /// match arms) is how shadow silently inherits Off or Enforce behavior.
     #[test]
     fn nip_fi_mode_is_inspected_only_through_predicates() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        const ALLOWED: [&str; 2] = [
+            "buzz-auth/src/nip_fi/startup/mod.rs",
+            "buzz-relay/src/nip_fi_config.rs",
+        ];
+        let crates = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
         let mut offenders = Vec::new();
-        let mut dirs = vec![std::path::PathBuf::from(root)];
+        let mut dirs: Vec<_> = std::fs::read_dir(crates)
+            .expect("read crates dir")
+            .map(|e| e.expect("crates entry").path().join("src"))
+            .filter(|src| src.is_dir())
+            .collect();
         while let Some(dir) = dirs.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-                let path = entry.path();
+            for entry in std::fs::read_dir(&dir).expect("read source dir") {
+                let path = entry.expect("source entry").path();
                 if path.is_dir() {
-                    if !path.ends_with("target") {
-                        dirs.push(path);
-                    }
+                    dirs.push(path);
                     continue;
                 }
-                if path.extension().is_none_or(|e| e != "rs")
-                    || path.file_name().is_some_and(|n| n == "tests.rs")
-                    || path.ends_with("nip_fi/startup/mod.rs")
-                {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if !name.ends_with(".rs") || name == "tests.rs" || name.ends_with("_tests.rs") {
                     continue;
                 }
-                let text = std::fs::read_to_string(&path).unwrap();
-                let production = text.split("\n#[cfg(test)]\nmod ").next().unwrap();
-                let lines: Vec<&str> = production.lines().collect();
-                for (i, line) in lines.iter().enumerate() {
-                    if line.trim_start().starts_with("//") {
-                        continue;
-                    }
-                    if line.contains("matches!") && line.contains("NipFiMode::")
-                        || line.trim_start().starts_with("NipFiMode::") && line.contains(" | ")
-                        || line.contains("NipFiMode::")
-                            && line.contains("=>")
-                            && wildcard_follows(&lines[i + 1..])
+                let shown = path
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if ALLOWED.contains(&shown.as_str()) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source file");
+                for (i, line) in production_lines(&text).enumerate() {
+                    let code = line.split("//").next().unwrap_or_default();
+                    if ["Off", "Shadow", "Enforce", "DenyProtected"]
+                        .iter()
+                        .any(|v| code.contains(&format!("NipFiMode::{v}")))
                     {
-                        offenders.push(format!("{}:{}", path.display(), i + 1));
+                        offenders.push(format!("{shown}:{}", i + 1));
                     }
                 }
             }
         }
-        assert!(offenders.is_empty(), "raw NipFiMode matches: {offenders:?}");
+        assert!(
+            offenders.is_empty(),
+            "raw NipFiMode variants: {offenders:?}"
+        );
     }
 
-    /// A `_` arm shortly after a mode arm lets new modes fall through silently.
-    fn wildcard_follows(rest: &[&str]) -> bool {
-        rest.iter()
-            .take(4)
-            .any(|l| l.trim_start().starts_with("_ =>"))
+    /// Lines before the first inline `#[cfg(test)] mod x {`; an out-of-line
+    /// `#[cfg(test)] mod x;` declaration does not end production code.
+    fn production_lines(text: &str) -> impl Iterator<Item = &str> {
+        let mut lines = text.lines().peekable();
+        std::iter::from_fn(move || {
+            let line = lines.next()?;
+            let inline_test_mod = line.trim() == "#[cfg(test)]"
+                && lines.peek().is_some_and(|n| {
+                    n.trim_start().starts_with("mod ") && n.trim_end().ends_with('{')
+                });
+            (!inline_test_mod).then_some(line) // ends the iterator
+        })
     }
 }
