@@ -24,7 +24,7 @@ use crate::nip_fi_core::{
 pub(crate) enum NipFiUpgradeOutcome {
     /// Assertion validated successfully. Carry the result into the connection.
     Admitted(VerifiedAssertion),
-    /// Enforcement is off — no assertion required.
+    /// Off, or Shadow without a passing assertion — none is required.
     NotRequired,
     /// Shadow: the assertion passed and is only observed from here on.
     Observed(VerifiedAssertion),
@@ -421,7 +421,7 @@ mod tests {
         }
     }
 
-    // Off mode → NotRequired (no assertion needed — OSS default, no regression)
+    // Off → NotRequired (no assertion needed — OSS default, no regression)
     #[test]
     fn off_mode_returns_not_required() {
         let headers = host_headers(); // no assertion header

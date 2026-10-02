@@ -19,9 +19,10 @@
 //!
 //! ## Environment variables
 //!
-//! The command API is enabled when `BUZZ_NIP_FI_MODE=enforce`.  S4 fields are
-//! read from the same `BUZZ_NIP_FI_ISSUERS` JSON array as the assertion
-//! policy; in enforce mode every issuer entry must carry them:
+//! The command API is enabled when `BUZZ_NIP_FI_MODE` is `enforce` or
+//! `shadow` (shadow keeps the deny entry but closes no session).  S4 fields
+//! are read from the same `BUZZ_NIP_FI_ISSUERS` JSON array as the assertion
+//! policy; in both modes every issuer entry must carry them:
 //!
 //! ```json
 //! {
@@ -209,16 +210,16 @@ pub async fn disconnect(
 
 /// Per-issuer command configuration parsed from the `BUZZ_NIP_FI_ISSUERS` JSON.
 ///
-/// In enforce mode `maximum_command_age_seconds` and `authorized_principals`
-/// are required on every issuer and startup validation rejects any entry
-/// without them.  The fields remain `Option` for the off and `deny_protected`
+/// In enforce and shadow modes `maximum_command_age_seconds` and
+/// `authorized_principals` are required on every issuer and startup
+/// validation rejects any entry without them.  The fields remain `Option` for the off and `deny_protected`
 /// modes, which do not require them.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct CommandIssuerEnvConfig {
-    /// Maximum command JWT age in seconds, in `[1, 60]`.  Required in enforce mode.
+    /// Maximum command JWT age in seconds, in `[1, 60]`.  Required in enforce and shadow modes.
     pub maximum_command_age_seconds: Option<u64>,
     /// Non-empty list of authorized `sub` values, matched exactly
-    /// (case-sensitive).  Required in enforce mode.
+    /// (case-sensitive).  Required in enforce and shadow modes.
     pub authorized_principals: Option<Vec<String>>,
     /// Hard ceiling on live deny entries for this issuer; must be positive.
     /// Defaults to [`DEFAULT_DENY_SET_CAPACITY`] when absent.

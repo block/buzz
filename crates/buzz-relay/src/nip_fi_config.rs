@@ -97,9 +97,9 @@ pub(super) struct IssuerEnvConfig {
     /// Hard deadline for accepting a JWKS snapshot in seconds.
     pub jwks_hard_deadline_seconds: u64,
 
-    // ── S4 command-API fields (required in enforce mode) ──────────────────
+    // ── S4 command-API fields (required in enforce and shadow modes) ──────
     /// Maximum command JWT age in seconds; `0 < x ≤ 60`.  Required on every
-    /// issuer in enforce mode.
+    /// issuer in enforce and shadow modes.
     #[serde(default)]
     pub maximum_command_age_seconds: Option<u64>,
     /// Non-empty list of authorized `sub` values.  Required on every issuer

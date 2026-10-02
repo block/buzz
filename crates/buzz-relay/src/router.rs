@@ -49,7 +49,7 @@ use crate::state::AppState;
 //
 // What is guaranteed: in Enforce, this guard rejects a missing or invalid
 // assertion on every non-exempt route; in DenyProtected it returns 503
-// without verifying; in Off it is transparent.  Key pairing
+// without verifying; in Off and Shadow it is transparent.  Key pairing
 // (`asserted_key == proven_pubkey`) and the deny map run only in handlers
 // that call `admit_nip_fi_http_on_state`.  In Enforce, a handler that omits
 // the call and does its own NIP-98 is still subject to the assertion guard,
@@ -65,10 +65,10 @@ use crate::state::AppState;
 //   Enforce mode, which is intentional: the default is DENY; public status is
 //   explicit.
 //
-// ## Relationship to Off mode
+// ## Relationship to Off and Shadow
 //
-// When `NipFiMode::Off` the guard is fully transparent — no request is
-// touched.  [FI-INV-15]
+// When `NipFiMode::Off` or `NipFiMode::Shadow` the guard is fully transparent —
+// no request is touched; Shadow records its verdict elsewhere.  [FI-INV-15]
 //
 // ## What this guard checks (and does NOT check)
 //

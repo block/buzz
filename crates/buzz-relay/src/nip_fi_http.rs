@@ -248,9 +248,10 @@ impl<X> NipFiAdmission<X> {
 /// 2. Enforce mode: reject more than one `Authorization` field (403).
 /// 3. Run `extract_nip98` — the caller's NIP-98 extraction closure.  Returns
 ///    `(proven_pubkey, X)` on success, or a `Response` to emit on failure.
-///    Off mode returns `Ok(NipFiAdmission { proven_pubkey, assertion: None,
-///    extra: X })` here; Off-mode behavior is identical to pre-NIP-FI (no
-///    assertion requirement).  [FI-INV-15]
+///    Off and Shadow return `Ok(NipFiAdmission { proven_pubkey, assertion:
+///    None, extra: X })` here, identical to pre-NIP-FI (no assertion
+///    requirement); Shadow first records the verdict steps 4-7 would reach.
+///    [FI-INV-15]
 /// 4. Enforce mode: extract `Nostr-Federated-Identity: Bearer <JWS>`.
 /// 5. Verify assertion (signature, issuer, expiry, claims).
 /// 6. Assert `assertion.asserted_key == proven_pubkey`.  [FI-INV-05]
@@ -265,7 +266,7 @@ impl<X> NipFiAdmission<X> {
 /// - Absent `Authorization` header → `MissingEvidence` (401 "authentication required")
 /// - Present but malformed/invalid `Authorization` → `EvidenceRejected` (403)
 ///
-/// In Off mode the legacy response is returned unchanged ([FI-INV-15]).
+/// In Off and Shadow the legacy response is returned unchanged ([FI-INV-15]).
 /// [FI-TRACE-DENIAL-ORACLE]
 ///
 /// ## What the private constructor guarantees
@@ -274,15 +275,16 @@ impl<X> NipFiAdmission<X> {
 /// `NipFiAdmission` value is this function.  It does not force a handler to
 /// call this function.  In Enforce, a handler that skips it and runs its own
 /// NIP-98 is still subject to the router's assertion guard, but a request with
-/// a valid assertion passes without key pairing or a deny-map check.  Off skips
-/// the guard entirely; DenyProtected denies without verifying.
+/// a valid assertion passes without key pairing or a deny-map check.  Off and
+/// Shadow pass the guard unchanged; DenyProtected denies without verifying.
 ///
-/// ## Off-mode semantics
+/// ## Off and Shadow semantics
 ///
-/// In Off mode the NIP-98 closure is always called (step 3).  In Off mode the closure
+/// In Off and Shadow the NIP-98 closure is always called (step 3) and its
 /// result still gates entry — if NIP-98 auth is required for non-NIP-FI
-/// reasons (e.g. `require_auth_token`), the closure encodes that.  NIP-FI
-/// layers (assertion/pairing/deny) are skipped entirely.
+/// reasons (e.g. `require_auth_token`), the closure encodes that.  The NIP-FI
+/// layers (assertion/pairing/deny) never deny: Off skips them, Shadow
+/// evaluates them only to record the would-be verdict.
 ///
 /// [FI-TRACE-AUTHORITY-UNIFORM]
 // Response<Body> is intentionally large (axum's design); boxing it here

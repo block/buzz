@@ -190,8 +190,9 @@ impl PubSubManager {
     /// Starts the NIP-FI disconnect subscriber loop with automatic
     /// reconnection.  Runs forever — spawn this in a background task.
     ///
-    /// Every pod subscribes to this global channel; on receipt it merges the
-    /// deny entry and closes matching local sessions.
+    /// Subscribes to `channels`: every NIP-FI pod hears the enforce channel,
+    /// and a shadow pod also hears its own.  On receipt the pod merges the
+    /// deny entry; an enforce pod closes matching local sessions.
     pub async fn run_nip_fi_disconnect_subscriber(
         self: Arc<Self>,
         channels: &'static [&'static str],
