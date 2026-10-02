@@ -102,12 +102,6 @@ if ! docker exec buzz-minio mc alias set local http://localhost:9000 \
   exit 1
 fi
 
-upload_fixture "${search_image}" "${search_image_hash}" png image/png 2000x1172
-upload_fixture "${workspace_image}" "${workspace_image_hash}" png image/png 2000x1172
-upload_fixture "${quality_image}" "${quality_image_hash}" png image/png 2000x1172
-upload_fixture "${composer_diagnostics}" "${composer_diagnostics_hash}" txt text/plain ""
-upload_fixture "${workspace_diagnostics}" "${workspace_diagnostics_hash}" txt text/plain ""
-
 read -r -d '' sql <<'SQL' || true
 DO $$
 DECLARE
@@ -190,7 +184,8 @@ BEGIN
     body = EXCLUDED.body,
     tags = EXCLUDED.tags,
     event_created_at = EXCLUDED.event_created_at,
-    received_at = EXCLUDED.received_at;
+    received_at = EXCLUDED.received_at,
+    status = 'new';
 END $$;
 SQL
 
@@ -204,8 +199,6 @@ sql="${sql//__WORKSPACE_IMAGE_SIZE__/$(fixture_size "${workspace_image}")}"
 sql="${sql//__QUALITY_IMAGE_SIZE__/$(fixture_size "${quality_image}")}"
 sql="${sql//__COMPOSER_DIAGNOSTICS_SIZE__/$(fixture_size "${composer_diagnostics}")}"
 sql="${sql//__WORKSPACE_DIAGNOSTICS_SIZE__/$(fixture_size "${workspace_diagnostics}")}"
-
-run_psql -v ON_ERROR_STOP=1 -c "${sql}"
 
 # Multi-community data: two named communities plus filler so the directory
 # pages past 50, named members, one ban and one timeout per named community,
@@ -237,17 +230,45 @@ INSERT INTO seed_member VALUES
   (5, decode('2ad6553f16e40b22045a68ffe6ba31ae5f400470d0e6276f377d50fc23f936a3', 'hex'), 'Spam Account'),
   (6, decode('9eb3e44e539549ff1436b6f98b3b583b8f89326d1cbee78a4edaea042cd34057', 'hex'), 'Heated Debater');
 
-INSERT INTO communities (host)
-SELECT host FROM seed_community WHERE host <> 'localhost:3000'
-UNION ALL
-SELECT format('filler-%s.localhost:3000', lpad(n::text, 2, '0')) FROM generate_series(1, 50) n
-ON CONFLICT ((lower(host))) DO NOTHING;
-
 CREATE TEMP VIEW seeded AS
 SELECT s.*, c.id AS community_id
 FROM seed_community s
 JOIN communities c ON lower(c.host) = lower(s.host)
   OR (s.host = 'localhost:3000' AND c.id = :'local_community_id');
+
+-- Refuse to reset while the admin console has unfinished work on a fixture:
+-- forcing a processing report back to open strands its action, and a pending
+-- action could re-apply after the reset. Locking admin actions blocks new
+-- claims and direct actions until this transaction commits.
+LOCK TABLE relay_admin_actions IN SHARE ROW EXCLUSIVE MODE;
+CREATE TEMP TABLE seed_busy AS
+SELECT format('report %s in %s is %s', r.id, c.host, r.status) AS what
+FROM moderation_reports r JOIN communities c ON c.id = r.community_id
+WHERE (r.community_id = :'local_community_id'
+       AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000000__'
+    OR r.community_id IN (SELECT community_id FROM seeded)
+       AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000001__')
+  AND (r.status = 'processing' OR r.active_action_id IS NOT NULL)
+UNION ALL
+SELECT format('%s action %s in %s is %s', a.action, a.id, c.host, a.state)
+FROM relay_admin_actions a JOIN communities c ON c.id = a.report_community_id
+WHERE a.state IN ('pending', 'enforcing')
+  AND a.report_community_id IN (SELECT community_id FROM seeded)
+  AND (a.enforcement_target_pubkey IN (SELECT pubkey FROM seed_member)
+    OR a.enforcement_target_event_id IN (SELECT decode(event_id, 'hex') FROM seed_community));
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM seed_busy) THEN
+    RAISE EXCEPTION E'admin-seed refused, nothing was written: %\nFinish or cancel these in the admin console (Cancel & reopen for a failed report action), wait for pending actions to complete, then rerun just admin-seed.',
+      (SELECT string_agg(what, '; ') FROM seed_busy);
+  END IF;
+END $$;
+
+INSERT INTO communities (host)
+SELECT host FROM seed_community WHERE host <> 'localhost:3000'
+UNION ALL
+SELECT format('filler-%s.localhost:3000', lpad(n::text, 2, '0')) FROM generate_series(1, 50) n
+ON CONFLICT ((lower(host))) DO NOTHING;
 
 INSERT INTO channels (community_id, id, name, created_by)
 SELECT community_id, channel_id, 'seed-enforcement-channel', decode(repeat('3b', 32), 'hex') FROM seeded
@@ -263,13 +284,17 @@ SELECT s.community_id, encode(m.pubkey, 'hex'), 'member', NULL
 FROM seeded s JOIN seed_member m ON m.n = ANY (s.members)
 ON CONFLICT (community_id, pubkey) DO NOTHING;
 
+INSERT INTO channel_members (community_id, channel_id, pubkey)
+SELECT community_id, channel_id, (SELECT pubkey FROM seed_member WHERE n = author) FROM seeded
+ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET removed_at = NULL, removed_by = NULL;
+
 INSERT INTO community_bans (community_id, pubkey, banned, ban_reason, muted_until, mute_reason, actor_pubkey)
 SELECT s.community_id, m.pubkey, m.n = 5,
   CASE WHEN m.n = 5 THEN 'Seeded ban: repeated spam.' END,
   CASE WHEN m.n = 6 THEN now() + interval '1 day' END,
   CASE WHEN m.n = 6 THEN 'Seeded timeout: heated thread.' END,
   decode(repeat('3b', 32), 'hex')
-FROM seeded s JOIN seed_member m ON m.n IN (5, 6)
+FROM seeded s JOIN seed_member m ON m.n = ANY (s.members)
 ON CONFLICT (community_id, pubkey) DO UPDATE SET
   banned = EXCLUDED.banned, ban_expires_at = NULL, ban_reason = EXCLUDED.ban_reason,
   muted_until = EXCLUDED.muted_until, mute_reason = EXCLUDED.mute_reason, updated_at = now();
@@ -284,12 +309,13 @@ ON CONFLICT (community_id, created_at, id) DO UPDATE SET deleted_at = NULL;
 
 INSERT INTO moderation_reports (
   community_id, id, report_event_id, reporter_pubkey, target_kind,
-  target_event_id, target_pubkey, report_type, note, status, created_at
+  target_event_id, target_pubkey, channel_id, report_type, note, status, created_at
 )
 SELECT s.community_id, ('a11d0000-0000-4000-8000-0000000001' || lpad(r.n::text, 2, '0'))::uuid,
   decode(repeat(to_hex(96 + r.n), 32), 'hex'), decode(repeat('1c', 32), 'hex'),
   r.kind, CASE WHEN r.kind = 'event' THEN decode(s.event_id, 'hex') END,
   CASE WHEN r.kind = 'pubkey' THEN (SELECT pubkey FROM seed_member WHERE n = 5) END,
+  CASE WHEN r.kind = 'event' THEN s.channel_id END,
   r.report_type, format('%s report in %s.', initcap(r.report_type), s.host), 'open',
   now() - r.n * interval '7 minutes'
 FROM seeded s
@@ -298,7 +324,8 @@ JOIN (VALUES (1, 'beta.localhost:3000', 'event', 'spam'),
              (3, 'gamma.localhost:3000', 'event', 'profanity')) r(n, host, kind, report_type)
   ON r.host = s.host
 ON CONFLICT (community_id, report_event_id) DO UPDATE SET
-  status = EXCLUDED.status, resolved_by = NULL, resolved_at = NULL, created_at = EXCLUDED.created_at;
+  channel_id = EXCLUDED.channel_id, status = EXCLUDED.status, resolved_by = NULL,
+  resolved_at = NULL, created_at = EXCLUDED.created_at;
 
 INSERT INTO product_feedback (id, community_id, event_id, submitter_pubkey, category, body, tags, event_created_at, received_at)
 SELECT ('feed0000-0000-4000-8000-0000000001' || lpad(f.n::text, 2, '0'))::uuid, s.community_id,
@@ -311,10 +338,19 @@ JOIN (VALUES (1, 'beta.localhost:3000', 3, 'bug', 'Notifications arrive twice on
   ON f.host = s.host
 ON CONFLICT (event_id) DO UPDATE SET
   community_id = EXCLUDED.community_id, body = EXCLUDED.body, event_created_at = EXCLUDED.event_created_at,
-  received_at = EXCLUDED.received_at;
+  received_at = EXCLUDED.received_at, status = 'new';
 SQL
 
-run_psql -q -v ON_ERROR_STOP=1 -v local_community_id="${community_id}" <<< "${multi_sql}"
+# One transaction: the guard in multi_sql locks admin actions and refuses before
+# any write, so the reset cannot race a claim. Uploads only follow a commit.
+run_psql -q -1 -v ON_ERROR_STOP=1 -v local_community_id="${community_id}" \
+  <<< "${multi_sql}"$'\n'"${sql}"
+
+upload_fixture "${search_image}" "${search_image_hash}" png image/png 2000x1172
+upload_fixture "${workspace_image}" "${workspace_image_hash}" png image/png 2000x1172
+upload_fixture "${quality_image}" "${quality_image_hash}" png image/png 2000x1172
+upload_fixture "${composer_diagnostics}" "${composer_diagnostics_hash}" txt text/plain ""
+upload_fixture "${workspace_diagnostics}" "${workspace_diagnostics_hash}" txt text/plain ""
 
 cat <<'EOF'
 Seeded 14 moderation reports, 9 feedback entries, and 5 attachments, plus
