@@ -5073,11 +5073,13 @@ mod postgres_tests {
     const HANDLER_TEST_ISSUER: &str = "https://issuer.example";
     const HANDLER_TEST_AUDIENCE: &str = "https://relay.example";
     const HANDLER_TEST_KID: &str = "test-key-1";
-    const HANDLER_TEST_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-        WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-        zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-        -----END PRIVATE KEY-----\n";
+    const HANDLER_TEST_EC_PEM: &str = concat!(
+        "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only P-256 key
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+        "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+        "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+        "-----END PRIVATE KEY-----\n",
+    );
 
     /// Build a NIP-FI Enforce AppState with a real injected P-256 verifier.
     ///
@@ -6959,11 +6961,13 @@ mod postgres_tests {
         const TEST_KID: &str = "test-key-1";
         // PKCS#8 private key matching TEST_JWK_X/Y — same key used by
         // nip_fi_guard_rejects_crypto_invalid_assertion_before_handler_fires.
-        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const TEST_EC_PKCS8_PEM: &str = concat!(
+            "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only P-256 key
+            "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+            "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+            "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+            "-----END PRIVATE KEY-----\n",
+        );
 
         let jwks: JwkSet = serde_json::from_value(serde_json::json!({
             "keys": [{
