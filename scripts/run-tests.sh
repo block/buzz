@@ -87,10 +87,10 @@ run_unit_tests() {
   run_test_step "buzz-auth unit tests" \
     cargo test -p buzz-auth --lib -- --nocapture
 
-  # S4 cross-pod NIP-FI disconnect payload tests (infra-free). Mirrors
-  # `just test-unit`.
-  run_test_step "buzz-pubsub conn_control NIP-FI tests" \
-    cargo test -p buzz-pubsub --lib conn_control::tests::nip_fi_disconnect_ -- --nocapture
+  # Cross-pod disconnect payload tests (NIP-FI and community archive fence;
+  # infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub conn_control tests" \
+    cargo test -p buzz-pubsub --lib conn_control::tests:: -- --nocapture
 
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
@@ -131,6 +131,9 @@ run_unit_tests() {
 
   run_test_step "buzz-admin storage snapshot tests" \
     cargo test -p buzz-admin storage_snapshot -- --nocapture
+
+  run_test_step "buzz-admin community archive command tests" \
+    cargo test -p buzz-admin communities -- --nocapture
 
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
@@ -240,6 +243,12 @@ run_unit_tests() {
 
   run_test_step "buzz-relay admission regression test" \
     cargo test -p buzz-relay --lib state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket -- --nocapture
+
+  run_test_step "buzz-relay archive revalidation fence test" \
+    cargo test -p buzz-relay --lib state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback -- --exact --nocapture
+
+  run_test_step "buzz-relay archived close-reason test" \
+    cargo test -p buzz-relay --lib connection::tests::send_loop_sends_policy_close_when_community_is_archived -- --exact --nocapture
 
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
