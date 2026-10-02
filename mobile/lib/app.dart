@@ -27,9 +27,12 @@ import 'features/channels/deep_link_dispatcher.dart';
 import 'features/channels/voice_note_recording.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
+import 'features/profile/set_status_sheet.dart';
+import 'features/profile/user_status_provider.dart';
 import 'features/profile/profile_edit_page.dart';
 import 'features/profile/profile_text_editor.dart';
 import 'features/settings/settings_page.dart';
+import 'features/settings/theme_picker_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
@@ -414,6 +417,8 @@ class App extends HookConsumerWidget {
           AuthStatus.authenticated => DeepLinkDispatcher(
             child: HomePage(
               settingsPageBuilder: _buildSettingsPage,
+              communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+              communityAppearancePageBuilder: (_) => const ThemePickerPage(),
               hasUnreadInbox: hasUnreadInbox,
             ),
           ),
@@ -438,9 +443,12 @@ class _SettingsPageContent extends ConsumerWidget {
       profileHeader: const SettingsProfileHeader(),
       profileEditPageBuilder: (_) =>
           const ProfileEditPage(startInPhotoEditor: true),
+      onSetStatus: (context) => showSetStatusSheet(
+        context,
+        currentStatus: ref.read(userStatusProvider).asData?.value,
+      ),
       onEditDisplayName: showProfileDisplayNameEditor,
       onEditProfileDescription: showProfileDescriptionEditor,
-      invitePageBuilder: (_) => const CommunityInvitePage(),
       identityRecoveryPageBuilder: (_) =>
           const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
     );

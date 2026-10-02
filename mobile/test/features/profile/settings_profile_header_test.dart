@@ -16,7 +16,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -240,7 +239,7 @@ void main() {
 
     expect(container.read(profileAvatarHandoffProvider), isNull);
   });
-  testWidgets('uses a bounded icon for an unresolved status shortcode', (
+  testWidgets('keeps the avatar unbadged while showing the current status', (
     tester,
   ) async {
     const missingShortcode = ':very_long_missing_custom_emoji:';
@@ -266,14 +265,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(Hero), findsNothing);
-    final badge = find.byType(MaskedAvatarBadge);
+    expect(find.byType(MaskedAvatarBadge), findsNothing);
+    expect(find.text('Focusing'), findsOneWidget);
     expect(
-      find.descendant(of: badge, matching: find.text(missingShortcode)),
-      findsNothing,
-    );
-    expect(
-      find.descendant(of: badge, matching: find.byIcon(LucideIcons.smile)),
-      findsOneWidget,
+      tester.getSize(find.byKey(const ValueKey('settings-profile-avatar'))),
+      const Size(128, 128),
     );
   });
 

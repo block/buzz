@@ -6,23 +6,16 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
-import '../../shared/custom_emoji/custom_emoji_provider.dart';
-import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/relay/media_image.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
-import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
 import 'user_status_provider.dart';
 
-/// Desktop's settings-avatar treatment (`ProfileSettingsCard`): a large centred
-/// avatar with a circular badge notched out of its bottom-right corner. Desktop
-/// puts an edit-photo pencil in that badge; here it carries the status glyph and
-/// opens the status sheet instead. The notch shape — including the fillets where
-/// it meets the avatar's edge — comes from [AvatarBadgeMaskGeometry.badge].
+/// Profile avatar, display name, status, and presence shown above settings.
 class SettingsProfileHeader extends HookConsumerWidget {
   const SettingsProfileHeader({super.key});
 
@@ -55,90 +48,92 @@ class SettingsProfileHeader extends HookConsumerWidget {
       padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.twelve),
       child: Column(
         children: [
-          MaskedAvatarBadge(
-            size: _avatarSize,
-            avatar: GestureDetector(
-              key: const ValueKey('settings-profile-avatar'),
-              onTap: animatedAvatar == null
-                  ? null
-                  : () => stoppedAnimationUrl.value =
-                        stoppedAnimationUrl.value == animatedAvatar.animationUrl
-                        ? null
-                        : animatedAvatar.animationUrl,
-              child: ColoredBox(
-                key: const ValueKey('settings-profile-avatar-background'),
-                color: animatedAvatar == null
-                    ? context.colors.primaryContainer
-                    : Colors.transparent,
-                child:
-                    animatedAvatar != null &&
-                        stoppedAnimationUrl.value != animatedAvatar.animationUrl
-                    ? ProgressiveAnimatedAvatar(
-                        key: ValueKey(animatedAvatar.animationUrl),
-                        descriptor: animatedAvatar,
-                        fallback: _AvatarFallback(initial: profile?.initial),
-                        loadingImage: activeHandoff == null
-                            ? null
-                            : MemoryImage(activeHandoff.animation),
-                        onAnimationReady: activeHandoff == null
-                            ? null
-                            : () => ref
-                                  .read(profileAvatarHandoffProvider.notifier)
-                                  .clear(activeHandoff.avatarUrl),
-                      )
-                    : activeHandoff == null || animatedPosterUrl == null
-                    ? AvatarImageContent(
-                        imageUrl: avatarUrl,
-                        fallback: _AvatarFallback(initial: profile?.initial),
-                      )
-                    : Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Image(
-                            image: MemoryImage(activeHandoff.poster),
-                            fit: BoxFit.cover,
-                            gaplessPlayback: true,
-                          ),
-                          Offstage(
-                            offstage: true,
-                            child: MediaImage(
-                              key: ValueKey(
-                                'settings-profile-paused-handoff-${activeHandoff.avatarUrl}',
-                              ),
-                              url: animatedPosterUrl,
+          SizedBox.square(
+            dimension: _avatarSize,
+            child: ClipOval(
+              child: GestureDetector(
+                key: const ValueKey('settings-profile-avatar'),
+                onTap: animatedAvatar == null
+                    ? null
+                    : () => stoppedAnimationUrl.value =
+                          stoppedAnimationUrl.value ==
+                              animatedAvatar.animationUrl
+                          ? null
+                          : animatedAvatar.animationUrl,
+                child: ColoredBox(
+                  key: const ValueKey('settings-profile-avatar-background'),
+                  color: animatedAvatar == null
+                      ? context.colors.primaryContainer
+                      : Colors.transparent,
+                  child:
+                      animatedAvatar != null &&
+                          stoppedAnimationUrl.value !=
+                              animatedAvatar.animationUrl
+                      ? ProgressiveAnimatedAvatar(
+                          key: ValueKey(animatedAvatar.animationUrl),
+                          descriptor: animatedAvatar,
+                          fallback: _AvatarFallback(initial: profile?.initial),
+                          loadingImage: activeHandoff == null
+                              ? null
+                              : MemoryImage(activeHandoff.animation),
+                          onAnimationReady: activeHandoff == null
+                              ? null
+                              : () => ref
+                                    .read(profileAvatarHandoffProvider.notifier)
+                                    .clear(activeHandoff.avatarUrl),
+                        )
+                      : activeHandoff == null || animatedPosterUrl == null
+                      ? AvatarImageContent(
+                          imageUrl: avatarUrl,
+                          fallback: _AvatarFallback(initial: profile?.initial),
+                        )
+                      : Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Image(
+                              image: MemoryImage(activeHandoff.poster),
                               fit: BoxFit.cover,
-                              errorBuilder: (_, _, _) =>
-                                  const SizedBox.shrink(),
-                              frameBuilder:
-                                  (
-                                    context,
-                                    child,
-                                    frame,
-                                    wasSynchronouslyLoaded,
-                                  ) {
-                                    if (wasSynchronouslyLoaded ||
-                                        frame != null) {
-                                      WidgetsBinding.instance
-                                          .addPostFrameCallback((_) {
-                                            ref
-                                                .read(
-                                                  profileAvatarHandoffProvider
-                                                      .notifier,
-                                                )
-                                                .clear(activeHandoff.avatarUrl);
-                                          });
-                                    }
-                                    return child;
-                                  },
+                              gaplessPlayback: true,
                             ),
-                          ),
-                        ],
-                      ),
+                            Offstage(
+                              offstage: true,
+                              child: MediaImage(
+                                key: ValueKey(
+                                  'settings-profile-paused-handoff-${activeHandoff.avatarUrl}',
+                                ),
+                                url: animatedPosterUrl,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) =>
+                                    const SizedBox.shrink(),
+                                frameBuilder:
+                                    (
+                                      context,
+                                      child,
+                                      frame,
+                                      wasSynchronouslyLoaded,
+                                    ) {
+                                      if (wasSynchronouslyLoaded ||
+                                          frame != null) {
+                                        WidgetsBinding.instance
+                                            .addPostFrameCallback((_) {
+                                              ref
+                                                  .read(
+                                                    profileAvatarHandoffProvider
+                                                        .notifier,
+                                                  )
+                                                  .clear(
+                                                    activeHandoff.avatarUrl,
+                                                  );
+                                            });
+                                      }
+                                      return child;
+                                    },
+                              ),
+                            ),
+                          ],
+                        ),
+                ),
               ),
-            ),
-            badge: _StatusBadge(
-              emoji: status?.emoji ?? '',
-              onTap: openStatusSheet,
             ),
           ),
           const SizedBox(height: Grid.twelve),
@@ -147,8 +142,7 @@ class SettingsProfileHeader extends HookConsumerWidget {
             style: context.textTheme.titleMedium,
             textAlign: TextAlign.center,
           ),
-          // Keep the status text visible even when no emoji is set. NIP-38
-          // permits text-only statuses, which the avatar badge cannot represent.
+          // Keep text-only and emoji-only statuses visible below the name.
           if (hasStatus)
             GestureDetector(
               onTap: openStatusSheet,
@@ -189,10 +183,12 @@ class _AvatarFallback extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      initial ?? '?',
-      style: context.textTheme.displaySmall?.copyWith(
-        color: context.colors.onPrimaryContainer,
+    return Center(
+      child: Text(
+        initial ?? '?',
+        style: context.textTheme.displaySmall?.copyWith(
+          color: context.colors.onPrimaryContainer,
+        ),
       ),
     );
   }
@@ -333,71 +329,3 @@ Color _presenceColor(BuildContext context, String presence) =>
       'away' => context.appColors.warning,
       _ => context.colors.outline,
     };
-
-/// Fills the notch left by [MaskedAvatarBadge], so its size comes from the mask
-/// geometry rather than being set here.
-class _StatusBadge extends StatelessWidget {
-  const _StatusBadge({required this.emoji, required this.onTap});
-
-  final String emoji;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: 'Set a status',
-      child: GestureDetector(
-        onTap: onTap,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            shape: BoxShape.circle,
-          ),
-          child: Center(child: _StatusGlyph(emoji: emoji)),
-        ),
-      ),
-    );
-  }
-}
-
-/// The status emoji, resolving `:shortcode:` values against the community's
-/// custom emoji. Falls back to the add-status icon when no status is set.
-class _StatusGlyph extends ConsumerWidget {
-  const _StatusGlyph({required this.emoji});
-
-  final String emoji;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    if (emoji.isEmpty) {
-      return Icon(
-        LucideIcons.smilePlus,
-        size: 20,
-        color: context.colors.onSurfaceVariant,
-      );
-    }
-
-    final shortcode = emoji.startsWith(':') && emoji.endsWith(':')
-        ? emoji.substring(1, emoji.length - 1).toLowerCase()
-        : null;
-    if (shortcode != null) {
-      for (final entry in ref.watch(customEmojiListProvider)) {
-        if (entry.shortcode == shortcode) {
-          return CustomEmojiImage(
-            shortcode: shortcode,
-            url: entry.url,
-            size: 22,
-          );
-        }
-      }
-      return Icon(
-        LucideIcons.smile,
-        size: 20,
-        color: context.colors.onSurfaceVariant,
-      );
-    }
-
-    return Text(emoji, style: const TextStyle(fontSize: 20));
-  }
-}

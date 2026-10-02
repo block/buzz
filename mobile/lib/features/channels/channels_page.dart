@@ -13,13 +13,15 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/community/community_icon_provider.dart';
+import '../../shared/community/community_membership_provider.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/app_list_card.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -162,12 +164,20 @@ _UnreadChannelState _computeUnreadChannelState({
 class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
+    this.communityInvitePageBuilder,
+    this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
     this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+
+  /// Builds the invite destination opened from the community sheet.
+  final WidgetBuilder? communityInvitePageBuilder;
+
+  /// Builds the appearance destination opened from the community sheet.
+  final WidgetBuilder? communityAppearancePageBuilder;
 
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
@@ -309,8 +319,11 @@ class ChannelsPage extends HookConsumerWidget {
       showBuzzModalBottomSheet<void>(
         context: context,
         showCloseButton: false,
-        showDragHandle: false,
-        builder: (_) => const _CommunitySwitcherSheet(),
+        showDragHandle: true,
+        builder: (_) => _CommunitySwitcherSheet(
+          invitePageBuilder: communityInvitePageBuilder,
+          appearancePageBuilder: communityAppearancePageBuilder,
+        ),
       );
     }
 

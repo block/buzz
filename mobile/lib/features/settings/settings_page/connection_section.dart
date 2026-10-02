@@ -92,27 +92,6 @@ Future<bool> _waitForResumedFrame() async {
   return true;
 }
 
-/// Destructive, so it gets a container of its own rather than sitting at the
-/// bottom of the connection group.
-class _RemoveCommunitySection extends ConsumerWidget {
-  const _RemoveCommunitySection();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return AppListCard(
-      verticalPadding: Grid.twelve,
-      children: [
-        AppListRow(
-          icon: LucideIcons.logOut,
-          title: 'Remove community',
-          titleColor: context.colors.error,
-          onTap: () => _confirmRemoveCommunity(context, ref),
-        ),
-      ],
-    );
-  }
-}
-
 class _IdentityRow extends StatelessWidget {
   const _IdentityRow({required this.nsec});
 
@@ -147,43 +126,4 @@ class _IdentityRow extends StatelessWidget {
       ),
     );
   }
-}
-
-void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
-  showBuzzDialog<void>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('Remove Community'),
-      content: const Text(
-        'This will disconnect this community. You will need '
-        'to scan a new pairing code to reconnect.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () async {
-            Navigator.of(ctx).pop(); // close dialog
-            try {
-              await ref.read(authProvider.notifier).signOut();
-            } catch (error) {
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Could not remove community: $error')),
-              );
-              return;
-            }
-            if (!context.mounted) return;
-            // Pop all pushed routes back to root so MaterialApp.home rebuilds
-            // to PairingPage when auth state changes.
-            Navigator.of(context).popUntil((route) => route.isFirst);
-          },
-          style: FilledButton.styleFrom(backgroundColor: ctx.colors.error),
-          child: const Text('Remove'),
-        ),
-      ],
-    ),
-  );
 }

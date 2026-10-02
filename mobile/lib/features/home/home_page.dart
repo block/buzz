@@ -17,11 +17,19 @@ import '../search/search_page.dart';
 class HomePage extends HookConsumerWidget {
   const HomePage({
     required this.settingsPageBuilder,
+    this.communityInvitePageBuilder,
+    this.communityAppearancePageBuilder,
     required this.hasUnreadInbox,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+
+  /// Builds the invite destination opened from the community sheet.
+  final WidgetBuilder? communityInvitePageBuilder;
+
+  /// Builds the appearance destination opened from the community sheet.
+  final WidgetBuilder? communityAppearancePageBuilder;
   final bool hasUnreadInbox;
 
   static const double _tabBarHeight = mobileTabBarHeight;
@@ -90,6 +98,8 @@ class HomePage extends HookConsumerWidget {
     final pages = [
       ChannelsPage(
         settingsPageBuilder: settingsPageBuilder,
+        communityInvitePageBuilder: communityInvitePageBuilder,
+        communityAppearancePageBuilder: communityAppearancePageBuilder,
         tabReselection: homeReselection,
         onSettingsTransitionProgress: (progress) {
           if (settingsTransitionProgress.value != progress) {

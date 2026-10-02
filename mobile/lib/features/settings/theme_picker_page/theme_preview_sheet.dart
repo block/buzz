@@ -109,7 +109,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
         centerTitle: true,
         showBottomDivider: false,
         leading: _ThemePreviewCloseButton(onPressed: close),
-        title: const Text('Theme'),
+        title: const Text('Appearance'),
         actions: [_ThemePreviewSetButton(onPressed: applySelection)],
       ),
       body: Column(
