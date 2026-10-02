@@ -91,8 +91,8 @@ mod tests {
 
     use crate::nip_fi_core::test_support::{communities, TEST_COMMUNITY_URI, TEST_HOST};
 
-    /// `(community, stage)` label pairs of every shadow counter increment.
-    fn shadow_counts(recorder: &DebuggingRecorder) -> Vec<(String, String)> {
+    /// `(community, stage, outcome)` labels of every shadow counter increment.
+    fn shadow_counts(recorder: &DebuggingRecorder) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
         for (key, _, _, value) in recorder.snapshotter().snapshot().into_vec() {
             let key = key.key();
@@ -110,7 +110,7 @@ mod tests {
                 unreachable!()
             };
             for _ in 0..n {
-                out.push((label("community"), label("stage")));
+                out.push((label("community"), label("stage"), label("outcome")));
             }
         }
         out.sort();
@@ -136,7 +136,7 @@ mod tests {
         });
         let labels: Vec<String> = shadow_counts(&recorder)
             .into_iter()
-            .map(|(c, _)| c)
+            .map(|(c, _, _)| c)
             .collect();
         assert_eq!(labels, [TEST_COMMUNITY_URI, "unmapped", "unmapped"]);
     }
@@ -210,24 +210,28 @@ mod tests {
             let counts = shadow_counts(&recorder);
             assert_eq!(counts.len(), expected, "{mode:?}");
             assert!(
-                counts.iter().all(|(_, stage)| stage == "strict_proof"),
+                counts
+                    .iter()
+                    .all(|(_, stage, outcome)| stage == "strict_proof" && outcome == "rejected"),
                 "{mode:?}"
             );
             assert_eq!(guard.0.load(Ordering::SeqCst), 0, "{mode:?}");
             if mode.observes_only() {
-                // A passing strict proof is still `strict_proof`, never an
-                // admit that could be summed with whole-request verdicts.
+                // Both outcomes stay `strict_proof`, never an admit that
+                // could be summed with whole-request verdicts.
+                let recorder = DebuggingRecorder::new();
                 metrics::with_local_recorder(&recorder, || {
                     super::observe_strict_proof(&state, &headers, "bridge", || Ok::<_, ()>(()));
+                    super::observe_strict_proof(&state, &headers, "bridge", || Err(()));
                 });
-                let counts = shadow_counts(&recorder);
-                assert_eq!(
-                    counts,
-                    [(
+                let label = |outcome: &str| {
+                    (
                         "https://relay.example".to_owned(),
-                        "strict_proof".to_owned()
-                    )]
-                );
+                        "strict_proof".to_owned(),
+                        outcome.to_owned(),
+                    )
+                };
+                assert_eq!(shadow_counts(&recorder), [label("pass"), label("rejected")]);
             }
         }
     }

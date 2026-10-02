@@ -107,9 +107,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                 // Off returns `rejection` as is; shadow also records the
                 // enforce verdict for the failed proof, still with no DB work.
                 let failed = || Err::<crate::nip_fi_http::Nip98Proof, _>(rejection);
-                let admission =
-                    crate::nip_fi_http::admit_nip_fi_http_on_state(state, &parts.headers, failed);
-                return Err(admission.expect_err("a failed proof never admits"));
+                crate::nip_fi_http::admit_nip_fi_http_on_state(state, &parts.headers, failed)?;
+                // Unreachable: a failed proof never admits.
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "git auth error").into_response());
             }
         }
 
