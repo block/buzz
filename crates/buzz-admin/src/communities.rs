@@ -132,14 +132,18 @@ async fn unarchive(
         .to_string();
 
     let db = crate::connect_db().await?;
-    let record = db
+    let record = match db
         .unarchive_community_owned_by(&host, &owner_pubkey)
         .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no active-deletion-state community matched both the hostname and current owner pubkey"
-            )
-        })?;
+    {
+        buzz_db::UnarchiveCommunityResult::Unarchived(record) => record,
+        buzz_db::UnarchiveCommunityResult::DeletionPending => {
+            anyhow::bail!("community deletion is pending; unarchive is refused")
+        }
+        buzz_db::UnarchiveCommunityResult::NotFound => anyhow::bail!(
+            "no active-deletion-state community matched both the hostname and current owner pubkey"
+        ),
+    };
     print_json(&unarchive_evidence(&record, &operator_id, &reason))?;
     Ok(0)
 }

@@ -2484,6 +2484,7 @@ pub(crate) mod tests {
             sink,
             data_rx,
             ctrl_rx,
+            mpsc::channel(1).1,
             restart_rx,
             cancel,
             archived_community_disconnect_reason(),

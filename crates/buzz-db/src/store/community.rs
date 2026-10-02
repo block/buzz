@@ -1135,10 +1135,12 @@ mod postgres_tests {
                 .expect("matching archive fence"),
             Some("applied")
         );
-        db.unarchive_community_owned_by(&host, &owner)
-            .await
-            .expect("unarchive community")
-            .expect("owned community");
+        assert!(matches!(
+            db.unarchive_community_owned_by(&host, &owner)
+                .await
+                .expect("unarchive community"),
+            UnarchiveCommunityResult::Unarchived(_)
+        ));
         assert_eq!(
             db.with_community_archive_fence(created.id, first_archive.archived_at, || "stale")
                 .await
@@ -1239,11 +1241,12 @@ mod postgres_tests {
                 .expect("inactive community fence"),
             Some("disconnected")
         );
-        assert!(db
-            .unarchive_community_owned_by(&host, &owner)
-            .await
-            .expect("unarchive community")
-            .is_some());
+        assert!(matches!(
+            db.unarchive_community_owned_by(&host, &owner)
+                .await
+                .expect("unarchive community"),
+            UnarchiveCommunityResult::Unarchived(_)
+        ));
         assert!(db
             .is_community_active(created.id)
             .await
