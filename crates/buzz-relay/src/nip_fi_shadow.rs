@@ -18,23 +18,26 @@ pub(crate) fn record(
     communities: &NipFiCommunities,
     verdict: Result<(), WouldDeny>,
 ) {
+    record_for(route, community_label(headers, communities), verdict);
+}
+
+/// [`record`] for a caller that resolved its community label earlier.
+pub(crate) fn record_for(route: &'static str, community: String, verdict: Result<(), WouldDeny>) {
     let (stage, outcome) = match verdict {
         Ok(()) => ("admit", "admit"),
         Err((stage, class)) => (stage, class_label(class)),
     };
-    emit(route, headers, communities, stage, outcome);
+    emit(route, community, stage, outcome);
 }
 
-fn emit(
-    route: &'static str,
-    headers: &HeaderMap,
-    communities: &NipFiCommunities,
-    stage: &'static str,
-    outcome: &'static str,
-) {
-    let community = crate::nip_fi_core::resolve_community(headers, communities)
+/// The bounded community label for `headers`: its configured URI or `unmapped`.
+pub(crate) fn community_label(headers: &HeaderMap, communities: &NipFiCommunities) -> String {
+    crate::nip_fi_core::resolve_community(headers, communities)
         .map_or("unmapped", |binding| binding.expected_aud())
-        .to_owned();
+        .to_owned()
+}
+
+fn emit(route: &'static str, community: String, stage: &'static str, outcome: &'static str) {
     metrics::counter!(
         "buzz_nip_fi_shadow_total",
         "route" => route,
@@ -66,7 +69,8 @@ pub(crate) fn observe_strict_proof<E>(
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
         let outcome = strict().map_or(class_label(DenialClass::EvidenceRejected), |()| "pass");
-        emit(route, headers, &nip_fi.communities, "strict_proof", outcome);
+        let community = community_label(headers, &nip_fi.communities);
+        emit(route, community, "strict_proof", outcome);
     }
 }
 

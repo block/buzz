@@ -26,9 +26,26 @@ pub(crate) enum NipFiUpgradeOutcome {
     Admitted(VerifiedAssertion),
     /// Enforcement is off — no assertion required.
     NotRequired,
+    /// Shadow: the assertion passed and is only observed from here on.
+    Observed(VerifiedAssertion),
     /// Enforcement active but assertion absent/rejected — return the HTTP
     /// denial response.
     Denied(Response<Body>),
+}
+
+/// The enforced and the shadow-observed assertion slots of an admitted upgrade.
+pub(crate) type UpgradeAssertions = (Option<VerifiedAssertion>, Option<VerifiedAssertion>);
+
+impl NipFiUpgradeOutcome {
+    /// The enforced and the shadow-observed assertion, or the denial response.
+    pub(crate) fn into_assertions(self) -> Result<UpgradeAssertions, Box<Response<Body>>> {
+        match self {
+            Self::NotRequired => Ok((None, None)),
+            Self::Admitted(assertion) => Ok((Some(assertion), None)),
+            Self::Observed(assertion) => Ok((None, Some(assertion))),
+            Self::Denied(response) => Err(Box::new(response)),
+        }
+    }
 }
 
 /// Validate the NIP-FI assertion on a WebSocket upgrade request.
@@ -51,16 +68,19 @@ pub(crate) fn check_nip_fi_at_upgrade(
     mode: NipFiMode,
 ) -> NipFiUpgradeOutcome {
     if !mode.restricts() {
-        // Shadow records the verdict and drops the assertion: no connection holds one.
+        // Shadow records an upgrade would-deny; a passing assertion is
+        // observed until AUTH, where its admission verdict is recorded.
         if mode.observes_only() {
             let verdict = resolve_community(headers, communities)
                 .map_err(|class| ("community", class))
                 .and_then(|community| {
                     evaluate_attached_assertion(headers, community, verifier)
-                        .map(drop)
                         .map_err(|rejection| ("assertion", rejection.denial_class()))
                 });
-            crate::nip_fi_shadow::record("ws", headers, communities, verdict);
+            match verdict {
+                Ok(assertion) => return NipFiUpgradeOutcome::Observed(assertion),
+                Err(deny) => crate::nip_fi_shadow::record("ws", headers, communities, Err(deny)),
+            }
         }
         return NipFiUpgradeOutcome::NotRequired;
     }
@@ -543,17 +563,29 @@ mod tests {
         assert_eq!(verifier.calls(), 0);
     }
 
-    // Pins: shadow evaluates the assertion but admits exactly as Off, so no
-    // connection is ever handed a verified assertion. Mutation: returning
-    // `Admitted` in shadow fails the `NotRequired` match.
+    // Pins: shadow evaluates the assertion but only observes it: the enforced
+    // slot stays empty, so no connection is handed a verified assertion, and a
+    // rejected one admits as Off. Mutation: returning `Admitted` in shadow, or
+    // `Observed` for a rejection, fails the split.
     #[test]
-    fn shadow_upgrade_evaluates_but_never_admits_an_assertion() {
+    fn shadow_upgrade_observes_but_never_admits_an_assertion() {
         let verifier = ScriptedVerifier::new(Ok(Some(nostr::Keys::generate().public_key())));
         let headers = headers_with("Bearer a.b.c");
-        assert!(matches!(
-            check_nip_fi_at_upgrade(&headers, &communities(), Some(&verifier), NipFiMode::Shadow),
-            NipFiUpgradeOutcome::NotRequired
-        ));
+        let check = || {
+            check_nip_fi_at_upgrade(&headers, &communities(), Some(&verifier), NipFiMode::Shadow)
+        };
+        let Ok((None, Some(_))) = check().into_assertions() else {
+            panic!("a passing shadow assertion is observed, never enforced");
+        };
         assert_eq!(verifier.calls(), 1, "shadow must evaluate the assertion");
+        let Ok((None, None)) = check_nip_fi_at_upgrade(
+            &host_headers(),
+            &communities(),
+            Some(&verifier),
+            NipFiMode::Shadow,
+        )
+        .into_assertions() else {
+            panic!("a missing shadow assertion admits as Off");
+        };
     }
 }

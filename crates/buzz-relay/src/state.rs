@@ -98,6 +98,8 @@ pub(crate) struct CommunityConnectionControl {
     pubkey: Arc<std::sync::OnceLock<[u8; 32]>>,
     /// Owner of an admitted agent; revoking the owner closes this socket.
     owner: Arc<std::sync::OnceLock<[u8; 32]>>,
+    /// Shadow-mode observation of this socket; no enforce path reads it.
+    nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
 }
 
 impl CommunityConnectionControl {
@@ -110,7 +112,24 @@ impl CommunityConnectionControl {
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
             pubkey: Arc::default(),
             owner: Arc::default(),
+            nip_fi_shadow: Arc::default(),
         }
+    }
+
+    /// Carries the socket's shadow session to its AUTH handler.
+    pub(crate) fn attach_nip_fi_shadow(
+        &self,
+        session: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    ) {
+        if let Some(session) = session {
+            let _ = self.nip_fi_shadow.set(session);
+        }
+    }
+
+    pub(crate) fn nip_fi_shadow(
+        &self,
+    ) -> Option<&Arc<crate::nip_fi_shadow_session::ShadowSession>> {
+        self.nip_fi_shadow.get()
     }
 
     /// Records the authenticated pubkey so pubkey-scoped disconnects reach this socket.
@@ -1337,6 +1356,8 @@ pub struct AppState {
     /// lets tests wait for every publish to finish; nothing waits on it in
     /// production.
     pub nip_fi_publish_tasks: tokio_util::task::TaskTracker,
+    /// Shadow-mode sessions a shadow disconnect records a would-close for.
+    pub(crate) nip_fi_shadow_sessions: Arc<crate::nip_fi_shadow_session::ShadowSessions>,
 }
 
 impl AppState {
@@ -1531,6 +1552,7 @@ impl AppState {
             nip_fi_command_verifier: None,
             nip_fi_command_replay,
             nip_fi_publish_tasks: tokio_util::task::TaskTracker::new(),
+            nip_fi_shadow_sessions: Arc::default(),
         };
         (
             state,

@@ -95,15 +95,14 @@ pub async fn ws_audio_handler(
     // WebSocket handshake. Running pre-lookup means a denied request pays zero
     // DB cost and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let nip_fi_assertion = {
-        use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+    let (nip_fi_assertion, shadow_assertion) = {
+        use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
         let communities = &state.config.nip_fi.communities;
-        match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
-            NipFiUpgradeOutcome::NotRequired => None,
-            NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
-            NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+        match check_nip_fi_at_upgrade(&headers, communities, verifier, mode).into_assertions() {
+            Ok(assertions) => assertions,
+            Err(resp) => return resp.into_response(),
         }
     };
 
@@ -151,6 +150,15 @@ pub async fn ws_audio_handler(
     // so the NIP-FI session partition is rooted at the HTTP handshake, not the
     // post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
     let connection_time = chrono::Utc::now();
+    let shadow = shadow_assertion.map(|a| {
+        crate::nip_fi_shadow_session::ShadowSession::start(
+            &state,
+            "audio",
+            &headers,
+            a,
+            connection_time,
+        )
+    });
     limit_audio_websocket(ws).on_upgrade(move |socket| {
         handle_audio_connection(
             socket,
@@ -159,6 +167,7 @@ pub async fn ws_audio_handler(
             channel_id,
             permit,
             nip_fi_assertion,
+            shadow,
             connection_time,
         )
     })
@@ -199,6 +208,7 @@ fn default_protocol_version() -> u8 {
 }
 
 #[cfg_attr(test, allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_audio_connection(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -206,6 +216,7 @@ pub(crate) async fn handle_audio_connection(
     channel_id: Uuid,
     _permit: OwnedSemaphorePermit,
     nip_fi_assertion: Option<VerifiedAssertion>,
+    nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let cancel = CancellationToken::new();
@@ -234,6 +245,7 @@ pub(crate) async fn handle_audio_connection(
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) =
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
     let control = CommunityConnectionControl::new(cancel);
+    control.attach_nip_fi_shadow(nip_fi_shadow);
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = audio_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -617,6 +629,9 @@ pub(crate) async fn handle_active_audio_connection(
         crate::nip_fi_test_hooks::record_pairing_reached_after_cancel(tenant.community());
     }
 
+    if let Some(shadow) = control.nip_fi_shadow() {
+        shadow.observe_pairing(pubkey);
+    }
     // NIP-FI key pairing [FI-INV-05]: unconditional, using the shared production
     // seam. When an assertion was presented at upgrade, the proven NIP-42 key
     // MUST equal the assertion's `nostr_pubkey` claim. Claimless assertion is
@@ -685,6 +700,9 @@ pub(crate) async fn handle_active_audio_connection(
                 return;
             }
         }
+    }
+    if let Some(shadow) = control.nip_fi_shadow() {
+        shadow.observe_admission(&state);
     }
     #[cfg(test)]
     crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
@@ -5838,6 +5856,7 @@ mod tests {
                                     channel_id,
                                     permit,
                                     Some(assertion_i),
+                                    None,
                                     conn_time,
                                 )
                                 .await
@@ -5929,6 +5948,103 @@ mod tests {
 
         state.nip_fi_deny_map = Some(deny_map);
         Arc::new(state)
+    }
+
+    // Audio records shadow pairing and the deny-set check where enforce runs
+    // them, one verdict per connection. Mutation: deleting audio's
+    // `observe_pairing` or `observe_admission` call drops its record.
+    #[test]
+    fn shadow_audio_auth_records_one_verdict_where_enforce_decides() {
+        use crate::nip_fi_shadow_session::tests::{shadow_records, shadow_state};
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+
+        let cases = [
+            (false, false, "pairing/denied"),
+            (true, true, "deny_set/denied"),
+            (true, false, "admit/admit"),
+        ];
+        for (paired, deny_listed, expected) in cases {
+            let records = shadow_records(async move {
+                let key = nostr::Keys::generate();
+                let asserted = if paired {
+                    key.public_key()
+                } else {
+                    nostr::Keys::generate().public_key()
+                };
+                let state = Arc::new(shadow_state(deny_listed.then(|| key.public_key())).await);
+                let assertion = VerifiedAssertion::for_test(
+                    Some(asserted),
+                    vec![Utc::now() + Duration::hours(1)],
+                );
+                let headers = axum::http::HeaderMap::new();
+                let session = crate::nip_fi_shadow_session::ShadowSession::start(
+                    &state,
+                    "audio",
+                    &headers,
+                    assertion,
+                    Utc::now(),
+                );
+                let tenant = buzz_core::tenant::TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+                    "test.local".to_string(),
+                );
+                let control =
+                    crate::state::CommunityConnectionControl::new(CancellationToken::new());
+                control.attach_nip_fi_shadow(Some(session));
+                let slot = Arc::new(std::sync::Mutex::new(Some(control)));
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+                let addr = listener.local_addr().expect("addr");
+                let app = Router::new().route(
+                    "/",
+                    get(move |ws: WebSocketUpgrade| async move {
+                        let control = slot.lock().unwrap().take().expect("one connection");
+                        ws.on_upgrade(move |socket| {
+                            handle_active_audio_connection(
+                                socket,
+                                state,
+                                tenant,
+                                uuid::Uuid::new_v4(),
+                                control,
+                                None,
+                                Utc::now(),
+                                None,
+                            )
+                        })
+                    }),
+                );
+                let server = tokio::spawn(async move { axum::serve(listener, app).await });
+                let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                    .await
+                    .expect("connect");
+                let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(challenge))) =
+                    client.next().await
+                else {
+                    panic!("expected a challenge");
+                };
+                let challenge: serde_json::Value =
+                    serde_json::from_str(&challenge).expect("challenge JSON");
+                let event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                    .tag(nostr::Tag::parse(["relay", "ws://test.local"]).unwrap())
+                    .tag(
+                        nostr::Tag::parse(["challenge", challenge["challenge"].as_str().unwrap()])
+                            .unwrap(),
+                    )
+                    .sign_with_keys(&key)
+                    .unwrap();
+                let auth = serde_json::json!({"type": "auth", "event": event}).to_string();
+                client
+                    .send(tokio_tungstenite::tungstenite::Message::Text(auth.into()))
+                    .await
+                    .expect("send auth");
+                let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while let Some(Ok(_)) = client.next().await {}
+                });
+                drained.await.expect("the handler ends the connection");
+                server.abort();
+            });
+            assert_eq!(records, [expected]);
+        }
     }
 
     /// Consumes Ping/Pong until the socket terminates (Close, EOF or error)

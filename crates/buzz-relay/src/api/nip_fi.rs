@@ -145,6 +145,9 @@ pub async fn disconnect(
                         .community_connections
                         .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
             } else {
+                state
+                    .nip_fi_shadow_sessions
+                    .would_close(&cmd.caller_iss, &pubkey_bytes);
                 0
             };
             if closed > 0 {
@@ -360,7 +363,8 @@ pub fn apply_nip_fi_disconnect(
     // Close sessions for all merge outcomes except UnknownIssuer, never in shadow.
     let close_sessions = |reason: &str| {
         if state.config.nip_fi.mode.observes_only() {
-            return;
+            let sessions = &state.nip_fi_shadow_sessions;
+            return sessions.would_close(&message.issuer, &message.pubkey_bytes);
         }
         let closed = state
             .conn_manager

@@ -609,7 +609,7 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion) = {
+    let (upgrade_checked, nip_fi_assertion, shadow_assertion) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -632,21 +632,19 @@ async fn nip11_or_ws_handler(
         let is_h2_ws_connect = req.version() == axum::http::Version::HTTP_2
             && req.method() == axum::http::Method::CONNECT;
         if is_h1_ws_upgrade || is_h2_ws_connect {
-            use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+            use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = &state.config.nip_fi.communities;
-            let assertion = match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
-                NipFiUpgradeOutcome::NotRequired => None,
-                NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
-                NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
-            };
-            (true, assertion)
+            match check_nip_fi_at_upgrade(&headers, communities, verifier, mode).into_assertions() {
+                Ok((assertion, shadow)) => (true, assertion, shadow),
+                Err(resp) => return (*resp).into_response(),
+            }
         } else {
             // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
             // The `Ok(ws)` arm below backstops any extractor-accepted shape this
             // predicate misses. [F3-H2-GATE]
-            (false, None)
+            (false, None, None)
         }
     };
 
@@ -676,6 +674,8 @@ async fn nip11_or_ws_handler(
             }
         }
     }
+    let shadow_assertion = shadow_assertion
+        .filter(|a| !crate::nip_fi_shadow_session::upgrade_denied(&state, &headers, a));
 
     // Row zero: bind the connection to its community from the request host
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
@@ -715,19 +715,20 @@ async fn nip11_or_ws_handler(
             // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
             // and this block is unreachable (the h1 denial is returned before
             // we get here).
-            let nip_fi_assertion = if !upgrade_checked {
+            let (nip_fi_assertion, shadow_assertion) = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
-                use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+                use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
                 let mode = state.config.nip_fi.mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = &state.config.nip_fi.communities;
-                match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
-                    NipFiUpgradeOutcome::NotRequired => None,
-                    NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
-                    NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+                match check_nip_fi_at_upgrade(&headers, communities, verifier, mode)
+                    .into_assertions()
+                {
+                    Ok(assertions) => assertions,
+                    Err(resp) => return (*resp).into_response(),
                 }
             } else {
-                nip_fi_assertion
+                (nip_fi_assertion, shadow_assertion)
             };
 
             // Shutting down: refuse new sockets instead of accepting a
@@ -744,6 +745,15 @@ async fn nip11_or_ws_handler(
             // handshake, not the post-community-active-check instant.
             // [FI-TRACE-LEASE-BOUND]
             let connection_time = chrono::Utc::now();
+            let shadow = shadow_assertion.map(|a| {
+                crate::nip_fi_shadow_session::ShadowSession::start(
+                    &state,
+                    "ws",
+                    &headers,
+                    a,
+                    connection_time,
+                )
+            });
             limit_relay_websocket(ws, max_frame_bytes)
                 .on_upgrade(move |socket| {
                     handle_connection(
@@ -752,6 +762,7 @@ async fn nip11_or_ws_handler(
                         addr,
                         tenant,
                         nip_fi_assertion,
+                        shadow,
                         connection_time,
                     )
                 })
@@ -2496,9 +2507,10 @@ mod tests {
         use super::*;
         use std::sync::Arc;
 
-        // Pins: a real shadow root handshake runs the upgrade check once.
+        // Pins: a real shadow root handshake runs the upgrade check once, and
+        // a passing assertion closed before AUTH records no verdict.
         // Mutation: re-running the fallback whenever no assertion is held
-        // doubles the verifier call and the shadow record.
+        // doubles the verifier call; recording at upgrade adds a record.
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn shadow_root_handshake_is_checked_once() {
@@ -2556,7 +2568,7 @@ mod tests {
                     _ => 0,
                 })
                 .sum();
-            assert_eq!((verifier.calls(), records), (1, 1));
+            assert_eq!((verifier.calls(), records), (1, 0));
         }
 
         // Pins D8 for a well-formed Host absent from the communities table:
