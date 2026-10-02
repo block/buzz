@@ -6154,16 +6154,20 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         if !config_options.is_empty() {
             println!("Models (stable configOptions):");
             for opt in &config_options {
-                let config_id = opt.get("configId").and_then(|v| v.as_str()).unwrap_or("?");
+                let config_id = opt
+                    .get("id")
+                    .or_else(|| opt.get("configId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let display = opt
-                    .get("displayName")
+                    .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or(config_id);
-                println!("  {display} (configId: {config_id})");
+                println!("  {display} (id: {config_id})");
                 if let Some(options) = opt.get("options").and_then(|v| v.as_array()) {
                     for o in options {
                         let val = o.get("value").and_then(|v| v.as_str()).unwrap_or("?");
-                        let name = o.get("displayName").and_then(|v| v.as_str()).unwrap_or(val);
+                        let name = o.get("name").and_then(|v| v.as_str()).unwrap_or(val);
                         println!("    - {name} (value: {val})");
                     }
                 }
