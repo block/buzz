@@ -2,8 +2,16 @@
 set -euo pipefail
 
 SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
-HOST=$(rustc -vV | sed -n 's|host: ||p')
-TARGET=${1:-$HOST}
+if [[ -n "${1:-}" ]]; then
+    TARGET="$1"
+else
+    HOST=$(rustc -vV 2>/dev/null | sed -n 's|host: ||p')
+    TARGET="${HOST:-}"
+    if [[ -z "$TARGET" ]]; then
+        echo "Error: target not specified and rustc is not available to determine host triple" >&2
+        exit 1
+    fi
+fi
 if [[ "$TARGET" != *windows* ]]; then
     SIDECARS+=(buzz-backend-kubernetes)
     BUILD_HINT="cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli"
@@ -31,10 +39,10 @@ fi
 
 missing=()
 for bin in "${SIDECARS[@]}"; do
-    [[ -f "$SRC_DIR/${bin}${EXE}" ]] || missing+=("${bin}${EXE}")
+    [[ -s "$SRC_DIR/${bin}${EXE}" ]] || missing+=("${bin}${EXE}")
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "Error: missing release binaries in $SRC_DIR: ${missing[*]}" >&2
+    echo "Error: missing or empty release binaries in $SRC_DIR: ${missing[*]}" >&2
     echo "Run '$BUILD_HINT' first." >&2
     exit 1
 fi
@@ -49,6 +57,15 @@ for bin in "${SIDECARS[@]}"; do
     # binaries executable explicitly.
     if [[ -z "$EXE" ]]; then
         chmod 755 "$destination"
+    fi
+
+    if [[ ! -s "$destination" ]]; then
+        echo "Error: staged sidecar $destination is missing or empty" >&2
+        exit 1
+    fi
+    if [[ -z "$EXE" && ! -x "$destination" ]]; then
+        echo "Error: staged sidecar $destination is not executable" >&2
+        exit 1
     fi
 done
 echo "Sidecars bundled for $TARGET"
