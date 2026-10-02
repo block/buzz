@@ -1,3 +1,4 @@
+import { discoveredEffortValues } from "./discoveredEffort";
 /**
  * Controlled field group for global agent config (provider, model, effort, env vars).
  *
@@ -364,10 +365,15 @@ export function AgentConfigFields({
 
   const {
     discoveredModelOptions,
+    discoveredEffortOption,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
     modelDiscoverySuccessfulEmpty,
   } = usePersonaModelDiscovery({
+    model:
+      selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL"
+        ? (config.model ?? undefined)
+        : undefined,
     envVars: config.env_vars,
     isCustomProviderEditing: isCustomProvider,
     modelFieldVisible: !dependentFieldsDisabled,
@@ -570,8 +576,15 @@ export function AgentConfigFields({
   }
 
   function handleModelChange(value: string) {
+    const env_vars = { ...config.env_vars };
+    if (
+      selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL" &&
+      effortPersistenceKey
+    )
+      delete env_vars[effortPersistenceKey];
     onConfigChange({
       ...config,
+      env_vars,
       model: config.provider === "relay-mesh" ? value || "auto" : value || null,
     });
   }
@@ -638,7 +651,9 @@ export function AgentConfigFields({
     getProviderEffortConfig(effortProvider, config.model ?? "");
   // Harness-native runtimes own their effort vocabulary via the catalog entry.
   const effortValidForRenderer = isHarnessNativeEffort
-    ? (selectedRuntime?.effortCanonicalValues ?? [])
+    ? discoveredEffortOption
+      ? discoveredEffortValues(discoveredEffortOption)
+      : (selectedRuntime?.effortCanonicalValues ?? [])
     : effortValid;
   const effortDefaultForRenderer = isHarnessNativeEffort ? null : effortDefault;
   const currentEffort = effortPersistenceKey

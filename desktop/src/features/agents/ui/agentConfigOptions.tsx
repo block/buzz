@@ -211,6 +211,7 @@ export function resetConfigForHarnessChange(
 ): GlobalAgentConfig {
   const nextEnvVars = { ...config.env_vars };
   delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+  delete nextEnvVars.BUZZ_ACP_EFFORT_LEVEL;
 
   return {
     ...config,

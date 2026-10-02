@@ -791,6 +791,9 @@ pub struct UpdateManagedAgentResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentModelsResponse {
+    /// Adapter-advertised, model-specific thought_level descriptor (ACP only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_option: Option<serde_json::Value>,
     pub agent_name: String,
     pub agent_version: String,
     /// Unified model list (merged from both ACP paths, deduplicated by ID).

@@ -6091,8 +6091,36 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None, None).await?;
-        Ok::<_, acp::AcpError>((init, session))
+        let mut session = client.session_new_full(&cwd, vec![], None, None).await?;
+        if let Some(desired) = args
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let response = match acp::resolve_model_switch_method(&session.raw, desired) {
+                Some(acp::ModelSwitchMethod::ConfigOption {
+                    config_id,
+                    option_value,
+                }) => {
+                    client
+                        .session_set_config_option(&session.session_id, &config_id, &option_value)
+                        .await?
+                }
+                Some(acp::ModelSwitchMethod::SetModel { model_id }) => {
+                    client
+                        .session_set_model(&session.session_id, &model_id)
+                        .await?
+                }
+                None => anyhow::bail!("model {desired:?} is not advertised by this adapter"),
+            };
+            if let Some(options) = response.get("configOptions") {
+                session.raw["configOptions"] = options.clone();
+            }
+            if let Some(models) = response.get("models") {
+                session.raw["models"] = models.clone();
+            }
+        }
+        Ok::<_, anyhow::Error>((init, session))
     })
     .await;
 
@@ -6137,6 +6165,8 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
             },
             "stable": {
                 "configOptions": config_options,
+                "effortOption": session_resp.raw["configOptions"].as_array()
+                    .and_then(|options| options.iter().find(|option| option["category"] == "thought_level")),
             },
             "unstable": model_state.as_ref().map(|ms| serde_json::json!({
                 "currentModelId": ms.get("currentModelId"),

@@ -17,10 +17,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        load_global_agent_config, load_managed_agents, load_personas,
+        record_agent_command_with_global, resolve_effective_agent_env, save_global_agent_config,
+        save_managed_agents, stop_managed_agent_process, sync_managed_agent_processes,
+        validate_global_config, AgentReadiness, BackendKind, GlobalAgentConfig,
     },
 };
 
@@ -198,12 +198,20 @@ fn collect_restart_candidates(
             if !has_live_runtime {
                 return false;
             }
-            let effective_cmd = record_agent_command(record, &all_personas);
-            let runtime_meta = known_acp_runtime(&effective_cmd);
-            let old_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, old_global);
-            let new_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, new_global);
+            let old_cmd = record_agent_command_with_global(record, &all_personas, old_global);
+            let new_cmd = record_agent_command_with_global(record, &all_personas, new_global);
+            let old_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                known_acp_runtime(&old_cmd),
+                old_global,
+            );
+            let new_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                known_acp_runtime(&new_cmd),
+                new_global,
+            );
             let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
             let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
             // For a Ready+running agent: the process must be alive now and the
@@ -211,7 +219,8 @@ fn collect_restart_candidates(
             // restart for a process that already exited between the pre-filter
             // scan and Phase 2.  NotReady→Ready bypasses the alive check
             // because Phase 2 will stop-then-start unconditionally.
-            let env_changed = old_ready && old_effective.env != new_effective.env;
+            let env_changed =
+                old_ready && (old_cmd != new_cmd || old_effective.env != new_effective.env);
 
             should_restart_on_config_change(old_ready, new_ready, env_changed)
         })
@@ -309,16 +318,25 @@ async fn restart_local_agent_on_config_change(
         //
         // Reuse personas_snapshot from Phase 1 — avoids loading personas again
         // per agent when the save-command personas haven't changed.
-        let effective_cmd = record_agent_command(record, &personas_owned);
-        let runtime_meta = known_acp_runtime(&effective_cmd);
-        let old_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &old_global_clone);
-        let new_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &new_global_clone);
+        let old_cmd = record_agent_command_with_global(record, &personas_owned, &old_global_clone);
+        let new_cmd = record_agent_command_with_global(record, &personas_owned, &new_global_clone);
+        let old_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            known_acp_runtime(&old_cmd),
+            &old_global_clone,
+        );
+        let new_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            known_acp_runtime(&new_cmd),
+            &new_global_clone,
+        );
         let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
         let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
         // Under lock, the alive check was already done above via process_is_running.
-        let env_changed = old_ready && old_effective.env != new_effective.env;
+        let env_changed =
+            old_ready && (old_cmd != new_cmd || old_effective.env != new_effective.env);
         if !should_restart_on_config_change(old_ready, new_ready, env_changed) {
             return Err(format!(
                 "agent {pubkey_owned} restart condition no longer valid under lock"

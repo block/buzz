@@ -102,6 +102,7 @@ pub(super) fn filter_openrouter_models(
     }
 
     Ok(Some(AgentModelsResponse {
+        effort_option: None,
         agent_name: "openrouter".to_string(),
         agent_version: "models-api".to_string(),
         models,

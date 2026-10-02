@@ -702,3 +702,40 @@ fn apply_strips_mixed_case_effort_keys() {
 #[cfg(test)]
 #[path = "effort_cmd_tests.rs"]
 mod cmd_tests;
+
+#[test]
+fn acp_defaults_effort_reaches_launch_and_instance_override_wins() {
+    for id in ["codex", "claude"] {
+        let runtime = known_acp_runtime_exact(id).unwrap();
+        for effort in ["low", "medium", "high"] {
+            let global = env(&[(ACP_KEY, effort)]);
+            let mut agent = record();
+            let resolved = effort_launch_projection(
+                &agent,
+                Some(runtime),
+                &[],
+                None,
+                &global,
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(resolved.key, ACP_KEY);
+            assert_eq!(
+                resolved.value.as_deref(),
+                Some(effort),
+                "{id} global effort ignored"
+            );
+            agent.effort_level = Some("high".into());
+            let resolved = effort_launch_projection(
+                &agent,
+                Some(runtime),
+                &[],
+                None,
+                &global,
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(resolved.value.as_deref(), Some("high"));
+        }
+    }
+}

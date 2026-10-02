@@ -17,12 +17,12 @@
 //! neither a running session nor the on-disk harness file.)
 //!
 //! The **tier-reading** native key is the runtime's real `thinking_env_var`
-//! (`None` for Claude/Codex — those have no native key, so the column is the
+//! (`None` for ACP runtimes without a catalog effort key — those have no native key, so the column is the
 //! sole authority and a user-supplied `BUZZ_ACP_EFFORT_LEVEL` is transport, not
 //! a tier). The **emission** key ([`EffortLaunch::key`]) is
 //! `thinking_env_var.unwrap_or(BUZZ_ACP_EFFORT_LEVEL)`: Goose emits
 //! `GOOSE_THINKING_EFFORT`, buzz-agent emits `BUZZ_AGENT_THINKING_EFFORT`,
-//! Claude/Codex/keyless-ACP and any unknown/custom runtime emit the retained
+//! ACP runtimes without a catalog effort key/keyless-ACP and any unknown/custom runtime emit the retained
 //! ACP-startup sentinel `BUZZ_ACP_EFFORT_LEVEL`.
 //!
 //! [`EffortLaunch::suppress`] lists every known native/legacy effort key plus
@@ -194,7 +194,7 @@ pub(crate) fn effort_tier_alias(
 ///   (`parse_thinking_effort`), emit it lowercased; a foreign canonical (e.g.
 ///   Goose `off`) is rejected so it is never emitted as
 ///   `BUZZ_AGENT_THINKING_EFFORT=off`, which crashes the child at config init.
-/// - both absent (Claude/Codex, unknown/custom): raw passthrough — the value
+/// - both absent (ACP runtimes without a catalog effort key, unknown/custom): raw passthrough — the value
 ///   rides `BUZZ_ACP_EFFORT_LEVEL` to an adapter that accepts any string.
 pub(crate) fn normalize_effort(
     contract: Option<&EffortNormalization>,
@@ -372,13 +372,12 @@ pub(crate) fn effort_launch_projection(
     // Value gate: Goose canonicalizes through its alias contract; buzz-agent
     // validates against its accepted set (invalid → skip, so a foreign
     // canonical like Goose `off` is never emitted where the destination parser
-    // rejects it); Claude/Codex and unknown/custom pass raw over the sentinel.
+    // rejects it); ACP runtimes without a catalog effort key and unknown/custom pass raw over the sentinel.
     let contract = runtime.and_then(|r| r.effort_normalization);
     let accepted = runtime.and_then(|r| r.effort_accepted_values);
     let norm = |raw: &str| -> Option<String> { normalize_effort(contract, accepted, raw) };
 
-    // Tier-reading native key: the runtime's REAL native key. `None` (Claude,
-    // Codex, unknown/custom) means there are no env-tier authorities — the
+    // Tier-reading native key: the runtime's REAL native key. `None` (unknown/custom) means there are no env-tier authorities — the
     // sentinel in user env is transport only — so the column is the sole source.
     let native_key = runtime.and_then(|r| r.thinking_env_var);
 

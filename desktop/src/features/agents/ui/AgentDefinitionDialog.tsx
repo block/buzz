@@ -1,3 +1,5 @@
+import { discoveredEffortValues } from "./discoveredEffort";
+import { EffortSelectField } from "./buzzAgentModelTuningFields";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -329,6 +331,7 @@ export function AgentDefinitionDialog({
       model: modelForSubmit,
       provider: providerForSubmit,
     } = buildRuntimeModelProviderPayload({
+      inheritHarness: aiConfigurationMode === "defaults",
       runtime,
       model: aiConfigurationMode === "defaults" ? "" : model,
       provider: aiConfigurationMode === "defaults" ? "" : provider,
@@ -401,6 +404,17 @@ export function AgentDefinitionDialog({
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setHasUserChanges(true);
     setAiConfigurationMode(nextMode);
+    if (nextMode === "defaults") {
+      setRuntime(defaultRuntime?.id ?? "");
+      setEnvVars((previous) => {
+        const next = { ...previous };
+        delete next.BUZZ_ACP_EFFORT_LEVEL;
+        delete next.BUZZ_AGENT_THINKING_EFFORT;
+        if (selectedRuntime?.thinkingEnvVar)
+          delete next[selectedRuntime.thinkingEnvVar];
+        return next;
+      });
+    }
     setIsCustomProviderEditing(false);
     setIsCustomModelEditing(false);
     const nextPair = agentAiConfigurationPairForMode({
@@ -410,7 +424,13 @@ export function AgentDefinitionDialog({
             provider: inheritedProviderDefault.value,
             model: inheritedModelDefault.value,
           }
-        : { provider: "", model: runtimeFileConfig?.model?.trim() ?? "" },
+        : {
+            provider: "",
+            model:
+              globalConfig.model?.trim() ||
+              runtimeFileConfig?.model?.trim() ||
+              "",
+          },
       mode: nextMode,
       needsProviderSelection: runtimeCanChooseLlmProvider,
     });
@@ -508,9 +528,14 @@ export function AgentDefinitionDialog({
   );
   const {
     discoveredModelOptions,
+    discoveredEffortOption,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
+    model:
+      selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL"
+        ? model || undefined
+        : undefined,
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
@@ -708,6 +733,14 @@ export function AgentDefinitionDialog({
   }
 
   function handleModelDropdownChange(nextValue: string) {
+    if (selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL") {
+      setEnvVars((previous) => {
+        const next = { ...previous };
+        delete next.BUZZ_ACP_EFFORT_LEVEL;
+        delete next.BUZZ_AGENT_THINKING_EFFORT;
+        return next;
+      });
+    }
     setHasUserChanges(true);
     applySelection(
       selectionOnModelDropdownChange(selection, {
@@ -888,7 +921,16 @@ export function AgentDefinitionDialog({
                 modelDiscoveryStatus={modelDiscoveryStatus}
                 modelDropdownOptions={modelDropdownOptions}
                 modelSelectValue={modelSelectValue}
-                onCustomModelChange={setModel}
+                onCustomModelChange={(value) => {
+                  setHasUserChanges(true);
+                  setModel(value);
+                  setEnvVars((previous) => {
+                    const next = { ...previous };
+                    delete next.BUZZ_ACP_EFFORT_LEVEL;
+                    delete next.BUZZ_AGENT_THINKING_EFFORT;
+                    return next;
+                  });
+                }}
                 showSharedComputeAutoHint={
                   isRelayMesh && modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE
                 }
@@ -899,6 +941,36 @@ export function AgentDefinitionDialog({
             ) : null}
           </AnimatePresence>
 
+          {aiConfigurationMode === "custom" &&
+          selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL" ? (
+            <EffortSelectField
+              currentEffort={
+                envVars.BUZZ_ACP_EFFORT_LEVEL ??
+                envVars.BUZZ_AGENT_THINKING_EFFORT ??
+                ""
+              }
+              disabled={isPending || modelDiscoveryLoading}
+              effortDefault={null}
+              effortValid={discoveredEffortValues(discoveredEffortOption)}
+              htmlFor="persona-effort"
+              testId="persona-effort"
+              inheritedEffort={globalConfig.env_vars.BUZZ_ACP_EFFORT_LEVEL}
+              label="Effort"
+              onChange={(value) => {
+                setHasUserChanges(true);
+                setEnvVars((previous) => {
+                  const next = { ...previous };
+                  delete next.BUZZ_AGENT_THINKING_EFFORT;
+                  if (value) next.BUZZ_ACP_EFFORT_LEVEL = value;
+                  else delete next.BUZZ_ACP_EFFORT_LEVEL;
+                  return next;
+                });
+              }}
+              showUnavailableOptions={false}
+              useCustomSelect
+            />
+          ) : null}
+
           {aiConfigurationMode === "defaults" ? (
             <AgentCreateAiDefaultsSummary
               canChooseProvider={runtimeCanChooseLlmProvider}
@@ -906,7 +978,7 @@ export function AgentDefinitionDialog({
               inheritedModel={inheritedModelDefault}
               inheritedProvider={inheritedProviderDefault}
               isConfigured={localModeGate.satisfied}
-              model={runtimeFileConfig?.model}
+              model={globalConfig.model?.trim() || runtimeFileConfig?.model}
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}
             />
@@ -915,7 +987,7 @@ export function AgentDefinitionDialog({
 
         <AgentDefaultsDialog
           onOpenChange={setAiDefaultsOpen}
-          open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
+          open={aiDefaultsOpen}
           returnFocusRef={aiDefaultsTriggerRef}
         />
 

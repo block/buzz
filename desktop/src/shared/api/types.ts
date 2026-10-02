@@ -576,7 +576,20 @@ export type ManagedAgentPrereqs = {
   mcp: CommandAvailability;
 };
 
+export type DiscoveredEffortOption = {
+  value?: string;
+  options?: DiscoveredEffortOption[];
+  name?: string;
+  displayName?: string;
+};
+
 export type AgentModelsResponse = {
+  effortOption?: {
+    id?: string;
+    configId?: string;
+    currentValue?: string;
+    options?: DiscoveredEffortOption[];
+  };
   agentName: string;
   agentVersion: string;
   models: AgentModelInfo[];
