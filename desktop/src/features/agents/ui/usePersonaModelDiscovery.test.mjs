@@ -471,6 +471,29 @@ test("Claude Code options keep the adapter's name and description, and label the
   ]);
 });
 
+test('a harness "default" agent default reads plain Default model and keeps its description', () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "default",
+      models: [
+        {
+          id: "default",
+          name: "Default (recommended)",
+          description: "Opus 4.8 · Most capable",
+        },
+        { id: "haiku", name: "Haiku", description: null },
+      ],
+    }),
+    "",
+    "claude",
+  );
+
+  assert.deepEqual(options, [
+    { id: "", label: "Default model", description: "Opus 4.8 · Most capable" },
+    { id: "haiku", label: "Haiku" },
+  ]);
+});
+
 test("Claude Code runtime labels full model ids with the shared formatter", () => {
   const models = [
     ["opus[1m]", "Opus"],

@@ -71,6 +71,11 @@ export function getDiscoveredPersonaModelOptions(
     (runtimeId === "claude" ? claudeCodeModelLabel(rawId) : null) ??
     resolveModelLabel(id, name, provider);
   const agentDefaultModel = response.agentDefaultModel?.trim();
+  // The harness's own "default" entry is already a Default label; naming it
+  // again would read "Default model (Default (recommended))".
+  const defaultIsHarnessEntry =
+    agentDefaultModel !== undefined &&
+    isHarnessDefaultModelEntry({ id: agentDefaultModel });
 
   const defaultModelOption =
     providerRequiresExplicitModel(provider) && harnessDefaultEntry === undefined
@@ -81,7 +86,7 @@ export function getDiscoveredPersonaModelOptions(
             label:
               provider === "relay-mesh"
                 ? "Default (auto)"
-                : agentDefaultModel
+                : agentDefaultModel && !defaultIsHarnessEntry
                   ? `Default model (${labelFor(
                       agentDefaultModel,
                       response.models.find(
@@ -90,6 +95,9 @@ export function getDiscoveredPersonaModelOptions(
                       response.agentDefaultModel ?? "",
                     )})`
                   : "Default model",
+            ...(defaultIsHarnessEntry && harnessDefaultEntry?.description
+              ? { description: harnessDefaultEntry.description }
+              : {}),
           },
         ];
 
