@@ -108,6 +108,8 @@ jobs:
         run: scripts/test-relay-image-eligibility-workflow.sh
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
+      - name: Desktop sidecar bundling contract
+        run: scripts/test-bundle-sidecars.sh
       - name: OSS desktop promotion contract
         run: |
           scripts/test-oss-desktop-promotion.sh
