@@ -211,7 +211,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // Off mode); only a real refusal is 403.
         let unavailable = |legacy: Response| match mode {
             buzz_auth::NipFiMode::Off => legacy,
-            _ => crate::nip_fi_http::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable),
+            _ => crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable),
         };
         match crate::api::relay_members::check_relay_membership(
             state,
@@ -4139,6 +4139,7 @@ mod off_mode_precedence_tests {
                 fn verify_assertion(
                     &self,
                     _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
                 ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
                 {
                     Ok(buzz_auth::VerifiedAssertion::new_for_test(self.0))
