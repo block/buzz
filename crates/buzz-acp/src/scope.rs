@@ -23,7 +23,7 @@
 use nostr::Event;
 use uuid::Uuid;
 
-use crate::queue::{reaction_target_id, routing_thread_tags, ResolvedEdit};
+use crate::queue::{reply_thread, ResolvedEdit};
 
 /// Operator policy controlling how ACP provider sessions are scoped.
 ///
@@ -150,12 +150,9 @@ impl SessionScope {
             return Self::Conversation { channel_id };
         }
 
-        let root_event_id = routing_thread_tags(event, edit)
-            .root_event_id
-            .unwrap_or_else(|| reaction_target_id(event));
         Self::Thread {
             channel_id,
-            root_event_id: root_event_id.to_ascii_lowercase(),
+            root_event_id: reply_thread(event, edit),
         }
     }
 

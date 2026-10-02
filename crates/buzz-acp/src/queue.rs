@@ -149,6 +149,11 @@ impl BatchEvent {
     pub fn routing_thread_tags(&self) -> ThreadTags {
         routing_thread_tags(&self.event, self.edit.as_ref())
     }
+
+    /// See [`reply_thread`].
+    pub fn reply_thread(&self) -> String {
+        reply_thread(&self.event, self.edit.as_ref())
+    }
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -236,6 +241,9 @@ pub struct EventQueue {
     in_flight_deadlines: HashMap<SessionScope, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
     in_flight_batch_sizes: HashMap<SessionScope, usize>,
+    /// Reply thread of each in-flight turn: the [`reply_thread`] of the batch
+    /// event whose `<context>` routes the turn's replies (its last event).
+    in_flight_reply_threads: HashMap<SessionScope, String>,
     retry_after: HashMap<SessionScope, Instant>,
     /// Per-scope retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<SessionScope, u32>,
@@ -277,6 +285,7 @@ impl EventQueue {
             in_flight_scopes: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
+            in_flight_reply_threads: HashMap::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
@@ -424,6 +433,7 @@ impl EventQueue {
             );
             self.in_flight_scopes.remove(&scope);
             self.in_flight_deadlines.remove(&scope);
+            self.in_flight_reply_threads.remove(&scope);
             // Recover any withheld goose-native steer events for the expired
             // scope back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -467,6 +477,7 @@ impl EventQueue {
                             .insert(scope.clone(), now + self.in_flight_deadline);
                         self.in_flight_batch_sizes
                             .insert(scope.clone(), cancelled.len());
+                        self.record_in_flight_reply_thread(&scope, &cancelled);
                         return Some(FlushBatch {
                             channel_id: scope.channel_id(),
                             scope,
@@ -504,6 +515,7 @@ impl EventQueue {
             .insert(scope.clone(), now + self.in_flight_deadline);
         self.in_flight_batch_sizes
             .insert(scope.clone(), events.len());
+        self.record_in_flight_reply_thread(&scope, &events);
 
         // Merge any cancelled events stored by requeue_as_cancelled().
         let cancelled_events = self.cancelled_batches.remove(&scope).unwrap_or_default();
@@ -556,6 +568,7 @@ impl EventQueue {
         self.in_flight_scopes.remove(&scope);
         self.in_flight_deadlines.remove(&scope);
         self.in_flight_batch_sizes.remove(&scope);
+        self.in_flight_reply_threads.remove(&scope);
         let now = Instant::now();
         match self.retry_after.get(&scope) {
             // Active throttle → scope was requeued; keep retry_counts intact.
@@ -774,6 +787,7 @@ impl EventQueue {
             );
             self.in_flight_scopes.remove(&scope);
             self.in_flight_deadlines.remove(&scope);
+            self.in_flight_reply_threads.remove(&scope);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired scope so they are
             // not permanently orphaned in the side table.
@@ -927,6 +941,29 @@ impl EventQueue {
     /// treated as its conversation scope).
     pub fn is_scope_in_flight<K: IntoScope>(&self, scope: K) -> bool {
         self.in_flight_scopes.contains(&scope.into_scope())
+    }
+
+    /// The reply thread of the turn in flight for `scope`, if any.
+    ///
+    /// A native steer adds a message to a running turn without a new
+    /// `<context>`, so the turn keeps replying where its own `<context>`
+    /// points. A message whose [`reply_thread`] differs (possible under the
+    /// channel session policy) must not be steered natively; the cancel+merge
+    /// path re-dispatches it with its own full `<context>`.
+    pub fn in_flight_reply_thread(&self, scope: &SessionScope) -> Option<&str> {
+        self.in_flight_reply_threads.get(scope).map(String::as_str)
+    }
+
+    fn record_in_flight_reply_thread(&mut self, scope: &SessionScope, events: &[BatchEvent]) {
+        match events.last() {
+            Some(last) => {
+                self.in_flight_reply_threads
+                    .insert(scope.clone(), last.reply_thread());
+            }
+            None => {
+                self.in_flight_reply_threads.remove(scope);
+            }
+        }
     }
 
     /// Whether any scope currently has a turn in flight.
@@ -1173,6 +1210,19 @@ pub fn edit_target_id(event: &Event) -> Option<String> {
 /// message. This holds even when fetching the original failed.
 pub(crate) fn reaction_target_id(event: &Event) -> String {
     edit_target_id(event).unwrap_or_else(|| event.id.to_hex())
+}
+
+/// The thread that replies to `event` belong to: its routed thread root, or
+/// the routed event itself when it is top-level (a reply opens a thread
+/// rooted there). Lowercase, so equivalent hex spellings compare equal.
+///
+/// This is the thread-session key, and it decides whether a message may be
+/// steered natively into a running turn (see [`EventQueue::in_flight_reply_thread`]).
+pub(crate) fn reply_thread(event: &Event, edit: Option<&ResolvedEdit>) -> String {
+    routing_thread_tags(event, edit)
+        .root_event_id
+        .unwrap_or_else(|| reaction_target_id(event))
+        .to_ascii_lowercase()
 }
 
 /// Thread tags that route replies for `event`. See

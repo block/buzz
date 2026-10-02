@@ -663,7 +663,14 @@ impl QueuedNormalListenerEvent {
         let Some(signal) = mode_gate_signal(handling, &self.effective_author, owner) else {
             return;
         };
+        // A native steer keeps the running turn's `<context>`, so it may only
+        // carry a message that replies in the same thread. Under the channel
+        // policy one session spans threads; a message for another thread takes
+        // the cancel+merge path, whose re-prompt carries its own `<context>`.
+        let same_reply_thread = queue.in_flight_reply_thread(&self.scope)
+            == Some(self.steer_event.reply_thread().as_str());
         let native_attempted = matches!(signal, ControlSignal::Steer)
+            && same_reply_thread
             && try_native_steer(
                 pool,
                 queue,
@@ -4343,8 +4350,9 @@ fn try_native_steer(
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    // An edit's block carries its resolved original-message routing, so a
-    // steered edit is anchored exactly as a dispatched one would be.
+    // The caller steers natively only a message in the running turn's reply
+    // thread, so the turn's own `<context>` still routes the reply. An edit's
+    // block names its original (`Edit of:`) and the original's thread root.
     let event_id_hex = be.event.id.to_hex();
     let body = native_steer_body(channel_id, &be);
 
@@ -10009,13 +10017,14 @@ mod edit_native_steer_tests {
         assert_eq!(queued.reaction_target_id, original.id.to_hex());
     }
 
-    /// End to end through the listener's steer decision: a routed edit that
-    /// arrives during a running turn goes out as a native steer carrying the
-    /// original's route, and the running turn is not cancelled.
-    #[tokio::test]
-    async fn routed_edit_steers_running_turn_with_original_route() {
-        let root = "ab".repeat(32);
-        let original = message(Some(&root));
+    /// Drive a routed edit of `original` through the listener's steer decision
+    /// while a turn for `running_event` is in flight under the channel policy.
+    /// Returns the native steer request, if any, and the control signal sent
+    /// to the running turn, if any.
+    fn steer_edit_into_running_turn(
+        running_event: nostr::Event,
+        original: &nostr::Event,
+    ) -> (Option<pool::SteerRequest>, Option<ControlSignal>) {
         let channel_id = Uuid::new_v4();
         let ingress =
             |event: nostr::Event, edit: Option<queue::ResolvedEdit>| NormalListenerIngress {
@@ -10029,9 +10038,8 @@ mod edit_native_steer_tests {
                 edit,
             };
 
-        // A turn is already running in the scope.
         let mut queue = EventQueue::new(config::DedupMode::Queue);
-        let running = ingress(message(None), None);
+        let running = ingress(running_event, None);
         let scope = running.session_scope(scope::SessionPolicy::Channel, false);
         running.push(&mut queue, scope.clone());
         queue.flush_next().expect("running turn");
@@ -10058,12 +10066,13 @@ mod edit_native_steer_tests {
         let edit = edit_event(&original.id.to_hex(), &[]);
         let resolved = queue::ResolvedEdit {
             target_event_id: original.id.to_hex(),
-            target_thread_tags: queue::parse_thread_tags(&original),
+            target_thread_tags: queue::parse_thread_tags(original),
         };
         let edit_ingress = ingress(edit, Some(resolved));
         assert_eq!(
             edit_ingress.session_scope(scope::SessionPolicy::Channel, false),
-            scope
+            scope,
+            "channel policy: one session spans every thread"
         );
         let (ack_tx, _ack_rx) = mpsc::unbounded_channel();
         edit_ingress
@@ -10075,21 +10084,68 @@ mod edit_native_steer_tests {
                 &mut queue,
                 &ack_tx,
             );
+        (steer_rx.try_recv().ok(), control_rx.try_recv().ok())
+    }
 
-        let request = steer_rx.try_recv().expect("edit is sent as a native steer");
+    /// A routed edit whose original is in the running turn's thread is
+    /// steered natively, carrying the original's route, and the running turn
+    /// is not cancelled.
+    #[tokio::test]
+    async fn routed_edit_in_running_thread_steers_natively() {
+        let root = "ab".repeat(32);
+        let original = message(Some(&root));
+        let (steer, control) = steer_edit_into_running_turn(message(Some(&root)), &original);
+
+        let request = steer.expect("edit is sent as a native steer");
         let body = request.prompt_blocks.join("\n");
         assert!(
             body.contains(&format!("Edit of: {}", original.id.to_hex())),
             "{body}"
         );
         assert!(body.contains(&format!("root={root}")), "{body}");
-        assert!(
-            matches!(
-                control_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-            ),
+        assert_eq!(
+            control, None,
             "native steer must not cancel the running turn"
         );
+    }
+
+    /// Editing the top-level message a turn is working on steers that turn:
+    /// replies to the edit belong to the same new thread.
+    #[tokio::test]
+    async fn edit_of_running_top_level_trigger_steers_natively() {
+        let original = message(None);
+        let (steer, control) = steer_edit_into_running_turn(original.clone(), &original);
+
+        assert!(steer.is_some(), "edit is sent as a native steer");
+        assert_eq!(
+            control, None,
+            "native steer must not cancel the running turn"
+        );
+    }
+
+    /// Under the channel policy a turn started from thread A can be running
+    /// when an edit whose original is in thread B arrives. A native steer
+    /// would leave the turn's `<context>` replying to A, so the edit takes the
+    /// cancel+merge path instead; its re-prompt routes replies to B.
+    #[tokio::test]
+    async fn routed_edit_for_another_thread_cancels_and_merges() {
+        let thread_b = "ab".repeat(32);
+        let original = message(Some(&thread_b));
+        let (steer, control) = steer_edit_into_running_turn(message(None), &original);
+
+        assert!(steer.is_none(), "no native steer into thread A's turn");
+        assert_eq!(control, Some(ControlSignal::Steer));
+    }
+
+    /// The same rule covers a top-level original: replies to it open a thread
+    /// rooted at the original, not at the running turn's top-level trigger.
+    #[tokio::test]
+    async fn routed_edit_for_another_top_level_message_cancels_and_merges() {
+        let original = message(None);
+        let (steer, control) = steer_edit_into_running_turn(message(None), &original);
+
+        assert!(steer.is_none(), "no native steer across top-level threads");
+        assert_eq!(control, Some(ControlSignal::Steer));
     }
 }
 
