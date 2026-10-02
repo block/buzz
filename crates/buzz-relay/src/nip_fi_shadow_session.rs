@@ -165,6 +165,16 @@ impl ShadowSession {
         });
     }
 
+    /// Retires a pending session without a record: its connection was
+    /// refused for a non-NIP-FI reason, so enforce would record nothing.
+    pub(crate) fn retire_pending(&self) {
+        self.transition(|phase| {
+            if let Phase::Pending { .. } = phase {
+                *phase = Phase::Ended;
+            }
+        });
+    }
+
     fn revoke(&self) {
         self.transition(|phase| match phase {
             Phase::Pending { revoked } => *revoked = true,
@@ -229,11 +239,7 @@ impl AuthAttempt<'_> {
     /// refusal's frames and cleanup are awaited.
     pub(crate) fn refused(&self) {
         if let Some(session) = self.0 {
-            session.transition(|phase| {
-                if let Phase::Pending { .. } = phase {
-                    *phase = Phase::Ended;
-                }
-            });
+            session.retire_pending();
         }
     }
 }

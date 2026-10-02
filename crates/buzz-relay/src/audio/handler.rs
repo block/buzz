@@ -600,6 +600,7 @@ pub(crate) async fn handle_active_audio_connection(
                 Ok(ctx) => ctx,
                 Err(e) => {
                     warn!(channel_id = %channel_id, "audio auth failed: {e}");
+                    shadow_attempt.refused();
                     // Under NIP-FI the failure is classified exactly as on the
                     // root route; Off-mode keeps the legacy bespoke frame.
                     let fi = nip_fi_assertion.is_some();
@@ -615,6 +616,9 @@ pub(crate) async fn handle_active_audio_connection(
                                 .into(),
                         )
                     };
+                    #[cfg(test)]
+                    crate::nip_fi_test_hooks::before_audio_refusal_frames(tenant.community())
+                        .await;
                     crate::connection::send_exit_frames_bounded(&mut ws_send, [frame]).await;
                     if fi {
                         cancel.cancel();
@@ -752,6 +756,8 @@ pub(crate) async fn handle_active_audio_connection(
     };
     if let Some(class) = relay_refusal {
         shadow_attempt.refused();
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_audio_refusal_frames(tenant.community()).await;
         // Off mode keeps one legacy frame for both outcomes.
         exit_authorization_refusal(
             &mut ws_send,
@@ -3001,9 +3007,15 @@ async fn commit_participant_join(
     // contains every live participant. `None` for same-pod joins (local room is
     // authoritative). [FI-TRACE-JOINED-PAYLOAD-COMMITTED]
     owner_roster: Option<&crate::audio::join::RosterSnapshot>,
-    // Admitted the instant the join commits, before publication awaits.
+    // Admitted the instant the join commits, before publication awaits;
+    // retired at each refusal below, before its rollback awaits.
     shadow: Option<&crate::nip_fi_shadow_session::ShadowSession>,
 ) -> Result<CommitJoinOutcome, JoinCommitError> {
+    let retire_shadow = || {
+        if let Some(shadow) = shadow {
+            shadow.retire_pending();
+        }
+    };
     // 1. Sign the 48101 event synchronously.
     //
     // Fix 1: include `generation` so desktop can fence the first liveness
@@ -3082,6 +3094,9 @@ async fn commit_participant_join(
     crate::nip_fi_test_hooks::before_archive_recheck(tenant.community()).await;
 
     if channel_archived_early.is_some() {
+        retire_shadow();
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_join_refusal_rollback(tenant.community()).await;
         let _ = tx.rollback().await;
         return Err(JoinCommitError::Archived);
     }
@@ -3126,6 +3141,7 @@ async fn commit_participant_join(
         .flatten();
 
         if channel_archived.is_some() {
+            retire_shadow();
             let _ = tx.rollback().await;
             return Err(JoinCommitError::Archived);
         }
@@ -3142,6 +3158,7 @@ async fn commit_participant_join(
         .await?;
 
         if !parent_still_member {
+            retire_shadow();
             let _ = tx.rollback().await;
             return Err(JoinCommitError::ParentMembershipLost);
         }
@@ -3162,6 +3179,7 @@ async fn commit_participant_join(
         .await?;
 
         if !link_still_exists {
+            retire_shadow();
             let _ = tx.rollback().await;
             return Err(JoinCommitError::HuddleLinkGone);
         }
@@ -5995,21 +6013,39 @@ mod tests {
         Arc<crate::nip_fi_shadow_session::ShadowSession>,
         Vec<String>,
     ) {
+        let session = audio_shadow_session(&state, asserted);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let frames = shadow_audio_auth_in(state, key, Arc::clone(&session), community).await;
+        (session, frames)
+    }
+
+    /// A shadow session for an audio connection asserting `asserted`.
+    fn audio_shadow_session(
+        state: &crate::state::AppState,
+        asserted: nostr::PublicKey,
+    ) -> Arc<crate::nip_fi_shadow_session::ShadowSession> {
         use chrono::{Duration, Utc};
         let assertion =
             VerifiedAssertion::for_test(Some(asserted), vec![Utc::now() + Duration::hours(1)]);
-        let headers = axum::http::HeaderMap::new();
-        let session = crate::nip_fi_shadow_session::ShadowSession::start(
-            &state,
+        crate::nip_fi_shadow_session::ShadowSession::start(
+            state,
             "audio",
-            &headers,
+            &axum::http::HeaderMap::new(),
             assertion,
             Utc::now(),
-        );
-        let tenant = buzz_core::tenant::TenantContext::resolved(
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
-            "test.local".to_string(),
-        );
+        )
+    }
+
+    /// [`shadow_audio_auth`] observed by `session` in `community`.
+    async fn shadow_audio_auth_in(
+        state: Arc<crate::state::AppState>,
+        key: &nostr::Keys,
+        session: Arc<crate::nip_fi_shadow_session::ShadowSession>,
+        community: buzz_core::tenant::CommunityId,
+    ) -> Vec<String> {
+        use chrono::Utc;
+        let tenant =
+            buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string());
         let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
         control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
         let slot = Arc::new(std::sync::Mutex::new(Some(control)));
@@ -6066,7 +6102,49 @@ mod tests {
         });
         drained.await.expect("the handler ends the connection");
         server.abort();
-        (session, frames)
+        frames
+    }
+
+    /// Runs [`shadow_audio_auth_in`] for a paired key, holding its refusal
+    /// frames while the deadline fires; returns the frames.
+    async fn held_refusal_deadline(state: crate::state::AppState) -> Vec<String> {
+        let state = Arc::new(state);
+        let key = nostr::Keys::generate();
+        let session = audio_shadow_session(&state, key.public_key());
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let (arrived, release) =
+            crate::nip_fi_test_hooks::audio_refusal_frames_hook::arm(community);
+        let held = async {
+            arrived.await.expect("the refusal is decided");
+            session.expire();
+            release.notify_one();
+        };
+        let (frames, ()) = tokio::join!(
+            shadow_audio_auth_in(Arc::clone(&state), &key, Arc::clone(&session), community),
+            held
+        );
+        frames
+    }
+
+    // A NIP-42 failure retires the session where it is decided: the deadline
+    // firing while its refusal frame is held records nothing. Mutation:
+    // deleting the failure arm's `refused()` records `deadline/rejected`.
+    #[test]
+    fn shadow_audio_nip42_failure_retires_before_its_frame() {
+        use crate::nip_fi_shadow_session::tests::{shadow_records, shadow_state};
+        let records = shadow_records(async {
+            let mut state = shadow_state(None).await;
+            let mut config = (*state.config).clone();
+            // The AUTH names `ws://test.local`; a wss relay expects `wss://`.
+            config.relay_url = "wss://relay.test".to_owned();
+            state.config = Arc::new(config);
+            let frames = held_refusal_deadline(state).await;
+            assert!(
+                frames.iter().any(|f| f.contains("auth failed")),
+                "{frames:?}"
+            );
+        });
+        assert!(records.is_empty(), "{records:?}");
     }
 
     // Audio records shadow pairing and the deny-set check where enforce runs
@@ -7156,6 +7234,33 @@ mod tests {
             }
         }
 
+        // A relay-membership refusal retires the session where it is decided:
+        // the deadline firing while its refusal frame is held records nothing.
+        // Mutation: deleting that site's `refused()` records
+        // `deadline/rejected`.
+        #[test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        fn shadow_audio_policy_refusal_retires_before_its_frame() {
+            use crate::nip_fi_shadow_session::tests::{shadow_records, shadow_state};
+            let records = shadow_records(async {
+                let mut state = (*audio_test_state_real_db()
+                    .await
+                    .expect("postgres-ci provides a database"))
+                .clone();
+                let mut config = (*state.config).clone();
+                config.require_relay_membership = true;
+                state.config = std::sync::Arc::new(config);
+                state.nip_fi_deny_map = shadow_state(None).await.nip_fi_deny_map;
+                state.nip_fi_shadow_sessions = std::sync::Arc::default();
+                let frames = held_refusal_deadline(state).await;
+                assert!(
+                    frames.iter().any(|f| f.contains("not a relay member")),
+                    "{frames:?}"
+                );
+            });
+            assert!(records.is_empty(), "{records:?}");
+        }
+
         // ── Shared scripted mesh fixtures for cross-pod postgres witnesses ─────
         //
         // These types are used by `commit_confirm_timeout_at_seam`,
@@ -7467,8 +7572,10 @@ mod tests {
         /// One audio join commit observed by `shadow` after a clean deny-set
         /// check and a real deny for its key (merged, or refused for capacity
         /// when `capacity` is 1): the commit admits it, then ends it
-        /// `revoked`; a refused commit admits nothing, and retirement at the
-        /// refusal leaves the deadline nothing to record. A committed session
+        /// `revoked`; a refused commit admits nothing, and retires at the
+        /// refusal: the deadline firing while its rollback is held records
+        /// nothing (deleting the helper's `retire_shadow()` records
+        /// `deadline/rejected`). A committed session
         /// whose publication follows ends `expired`, never a pending
         /// `deadline`. Mutation: admitting after the commit returns, or not
         /// registering at the deny-set check, changes the records.
@@ -7476,11 +7583,10 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         fn shadow_join_commit_is_the_audio_admission() {
             use crate::nip_fi_shadow_session::tests::{deliver, pod, session, shadow_records};
-            use crate::nip_fi_shadow_session::AuthAttempt;
             let cases: [(usize, bool, bool, &[&str]); 4] = [
                 (8, true, false, &["admit/admit", "end/revoked"]),
                 (1, true, false, &["admit/admit", "end/revoked"]),
-                (8, true, true, &[]),
+                (8, false, true, &[]),
                 (8, false, false, &["admit/admit", "end/expired"]),
             ];
             for (capacity, deny, archived, expected) in cases {
@@ -7504,7 +7610,6 @@ mod tests {
                     }
                     let key = member.public_key();
                     let shadow = session(&state, Some(key), chrono::Duration::hours(1));
-                    let attempt = AuthAttempt(Some(&shadow));
                     shadow.observe_pairing(key);
                     shadow.observe_deny_set(&state);
                     if deny {
@@ -7514,34 +7619,45 @@ mod tests {
                         chrono::Utc::now() + chrono::Duration::hours(1),
                         CancellationToken::new(),
                     );
-                    let committed = commit_participant_join(
-                        &state,
-                        &tenant,
-                        channel_id,
-                        channel_id,
-                        &key.to_hex(),
-                        &key.to_bytes(),
-                        uuid::Uuid::new_v4(),
-                        0,
-                        0,
-                        1,
-                        "1",
-                        &MembershipAdmission::Existing {
-                            parent_channel_id: channel_id,
-                        },
-                        &gate,
-                        &Arc::new(crate::audio::room::Room::new(
+                    let (arrived, release) =
+                        crate::nip_fi_test_hooks::join_refusal_rollback_hook::arm(
                             tenant.community(),
+                        );
+                    let held = async {
+                        if archived {
+                            arrived.await.expect("the join is refused");
+                            shadow.expire();
+                            release.notify_one();
+                        }
+                    };
+                    let commit = async {
+                        commit_participant_join(
+                            &state,
+                            &tenant,
                             channel_id,
-                        )),
-                        None,
-                        Some(&shadow),
-                    )
-                    .await;
+                            channel_id,
+                            &key.to_hex(),
+                            &key.to_bytes(),
+                            uuid::Uuid::new_v4(),
+                            0,
+                            0,
+                            1,
+                            "1",
+                            &MembershipAdmission::Existing {
+                                parent_channel_id: channel_id,
+                            },
+                            &gate,
+                            &Arc::new(crate::audio::room::Room::new(
+                                tenant.community(),
+                                channel_id,
+                            )),
+                            None,
+                            Some(&shadow),
+                        )
+                        .await
+                    };
+                    let (committed, ()) = tokio::join!(commit, held);
                     assert_eq!(committed.is_err(), archived, "{committed:?}");
-                    if committed.is_err() {
-                        attempt.refused();
-                    }
                     shadow.expire();
                 });
                 assert_eq!(

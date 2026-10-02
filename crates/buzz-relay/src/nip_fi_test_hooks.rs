@@ -201,6 +201,13 @@ make_hook!(audio_membership_check_hook, before_membership_check);
 make_hook!(git_membership_hook, before_git_membership);
 make_hook!(audio_membership_lock_hook, before_membership_lock);
 make_hook!(audio_participant_commit_hook, before_participant_commit);
+// `before_audio_refusal_frames`: fires in `audio/handler.rs` once a NIP-42
+// failure or relay-membership refusal is decided, before its frames are
+// written. `before_join_refusal_rollback`: fires in `commit_participant_join`
+// once the early archived check refuses, before `tx.rollback()`. A test holds
+// either window to prove the shadow session already retired.
+make_hook!(audio_refusal_frames_hook, before_audio_refusal_frames);
+make_hook!(join_refusal_rollback_hook, before_join_refusal_rollback);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
 make_hook!(audio_add_peer_hook, after_add_peer);
 // `before_lease_permit`: fires in `handle_active_audio_connection` immediately
