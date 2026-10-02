@@ -7,9 +7,9 @@
 //!
 //! | Series | Labels | One increment per |
 //! |---|---|---|
-//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per session at its first successful NIP-42 AUTH |
+//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first |
 //! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
-//! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended |
+//! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended; a session never admitted records none |
 //! | `buzz_nip_fi_shadow_disconnect_total` | `route` (`admin`, `cross_pod`), `outcome` | disconnect-path event that moves a real disconnect counter in enforce |
 //!
 //! Denominators differ. A would-deny rate is the non-`admit` share of
@@ -36,6 +36,7 @@ pub(crate) enum Stage {
     Assertion,
     Pairing,
     DenySet,
+    Deadline,
 }
 
 impl Stage {
@@ -47,6 +48,7 @@ impl Stage {
             Self::Assertion => "assertion",
             Self::Pairing => "pairing",
             Self::DenySet => "deny_set",
+            Self::Deadline => "deadline",
         }
     }
 }
@@ -394,7 +396,8 @@ mod tests {
             let line = lines.next()?;
             let inline_test_mod = line.trim() == "#[cfg(test)]"
                 && lines.peek().is_some_and(|n| {
-                    n.trim_start().starts_with("mod ") && n.trim_end().ends_with('{')
+                    let n = n.trim_start().trim_start_matches("pub(crate) ");
+                    n.starts_with("mod ") && n.trim_end().ends_with('{')
                 });
             (!inline_test_mod).then_some(line) // ends the iterator
         })
