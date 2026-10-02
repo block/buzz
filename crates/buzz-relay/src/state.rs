@@ -1650,9 +1650,9 @@ impl AppState {
     /// Snapshot the last completed audit without accessing the database.
     ///
     /// Periodic refresh failures retain the last-known-good audit by design.
-    /// Alert on both the age and the absence of
-    /// `buzz_partition_audit_last_success_timestamp_seconds`; the exporter
-    /// evicts it during sustained failures. See
+    /// Alert on the age of
+    /// `buzz_partition_audit_last_success_timestamp_seconds`, which failed
+    /// audits keep exported, and on audit runs stopping. See
     /// `docs/partition-catalog-monitoring.md`.
     pub fn partition_audit_snapshot(&self) -> Option<buzz_db::partition::PartitionAudit> {
         let cached = match self.partition_audit.read() {

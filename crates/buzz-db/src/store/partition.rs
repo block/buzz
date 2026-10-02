@@ -463,6 +463,7 @@ async fn audit_partition_catalog_report_at_with_timeout(
                     "outcome" => "error"
                 )
                 .increment(1);
+                refresh_last_success_recency(table);
                 metrics::histogram!(
                     "buzz_partition_audit_duration_seconds",
                     "table" => table
@@ -480,6 +481,7 @@ async fn audit_partition_catalog_report_at_with_timeout(
                     "outcome" => "error"
                 )
                 .increment(1);
+                refresh_last_success_recency(table);
                 metrics::histogram!(
                     "buzz_partition_audit_duration_seconds",
                     "table" => table
@@ -1037,6 +1039,17 @@ fn qualified_relation_name(schema: &str, relation: &str) -> String {
         quote_identifier(schema),
         quote_identifier(relation)
     )
+}
+
+/// Keep a table's last success timestamp exported through failed audits
+/// without changing it, so the exporter's idle timeout cannot evict it. A
+/// table that never succeeded exports 0, which reads as maximally stale.
+fn refresh_last_success_recency(table: &'static str) {
+    metrics::gauge!(
+        "buzz_partition_audit_last_success_timestamp_seconds",
+        "table" => table
+    )
+    .increment(0.0);
 }
 
 fn emit_audit_metrics(audit: &PartitionTableAudit, duration_seconds: f64, now: DateTime<Utc>) {
