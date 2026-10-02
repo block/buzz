@@ -2,6 +2,9 @@
 /target/
 /dist/
 /admin-web/dist/
+result
+result-*
+
 
 # Python cache
 __pycache__/
