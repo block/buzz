@@ -110,6 +110,7 @@ class ActivityPage extends HookConsumerWidget {
     );
     final topSectionHeight = frostedAppBarHeight(
       context,
+      nativeLargeTitle: true,
       titleStyle: headerTitleStyle,
       bottomHeight: Grid.xxs,
     );
@@ -419,6 +420,43 @@ class ActivityPage extends HookConsumerWidget {
     return FrostedScaffold(
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
+        nativeTitle: 'Activity',
+        nativeLargeTitle: true,
+        nativeActions: [
+          IosNavigationAction(
+            label: 'Filter activity',
+            symbol: 'line.3.horizontal.decrease',
+            children: [
+              for (final entry in _filterLabels.entries)
+                IosNavigationAction(
+                  label: entry.value,
+                  selected: filter.value == entry.key,
+                  onPressed: () => filter.value = entry.key,
+                ),
+            ],
+          ),
+          IosNavigationAction(
+            label: 'Activity options',
+            symbol: 'ellipsis',
+            children: [
+              IosNavigationAction(
+                label: 'Unread only',
+                selected: unreadOnly.value,
+                onPressed: () => unreadOnly.value = !unreadOnly.value,
+              ),
+              IosNavigationAction(
+                label: 'Mark all as read',
+                onPressed: unreadVisibleCount == 0
+                    ? null
+                    : () {
+                        for (final item in visibleItems) {
+                          if (!isDone(item)) markItemRead(item);
+                        }
+                      },
+              ),
+            ],
+          ),
+        ],
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
         showBottomDivider: true,

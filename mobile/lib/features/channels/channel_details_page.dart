@@ -260,6 +260,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     return FrostedScaffold(
       useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
+        nativeTitle: showCollapsedTitle.value ? resolvedChannel.name : '',
         centerTitle: true,
         leading: usesNativeIosGlassBackButton
             ? IosGlassNavigationButton(

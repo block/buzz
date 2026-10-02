@@ -55,8 +55,9 @@ class PulsePage extends HookConsumerWidget {
         reactions.asData?.value ?? const <String, PulseReactionState>{};
 
     return FrostedScaffold(
+      nativePinnedBody: true,
       resizeToAvoidBottomInset: true,
-      appBar: const FrostedAppBar(title: Text('Pulse')),
+      appBar: const FrostedAppBar(nativeLargeTitle: true, title: Text('Pulse')),
       floatingActionButton: FloatingActionButton(
         heroTag: 'pulse-compose-fab',
         onPressed: () => Navigator.of(context).push(

@@ -193,6 +193,7 @@ class ChannelsPage extends HookConsumerWidget {
       context,
       titleStyle: headerTitleStyle,
       bottomHeight: _kTopSectionBottomPadding,
+      nativeLargeTitle: true,
     );
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
@@ -314,6 +315,19 @@ class ChannelsPage extends HookConsumerWidget {
       );
     }
 
+    final activeCommunity = ref
+        .watch(activeCommunityProvider)
+        .unwrapPrevious()
+        .value;
+    final communityRelay = activeCommunity?.relayUrl;
+    final communityAvatar = communityRelay == null
+        ? null
+        : ref
+              .watch(communityIconProvider(communityRelay))
+              .unwrapPrevious()
+              .value;
+    final profile = ref.watch(profileProvider).unwrapPrevious().value;
+    final communityName = activeCommunity?.name.trim() ?? '';
     final topSectionGradient = context.appColors.topSectionGradient;
     final usesPinnedGradient = topSectionGradient != null;
 
@@ -323,6 +337,33 @@ class ChannelsPage extends HookConsumerWidget {
           : context.colors.surface,
       backgroundGradient: topSectionGradient,
       appBar: FrostedAppBar(
+        nativeTitle: 'Home',
+        nativeLargeTitle: true,
+        nativeLeading: IosNavigationAction(
+          label: 'Switch community',
+          avatarIdentity: activeCommunity?.id,
+          symbol: 'building.2.crop.circle',
+          imageUrl: communityAvatar,
+          avatarInitial: communityName.isEmpty
+              ? '?'
+              : communityName.substring(0, 1).toUpperCase(),
+          onPressed: openCommunitySwitcher,
+        ),
+        nativeActions: [
+          IosNavigationAction(
+            label: 'Settings',
+            avatarIdentity: '${activeCommunity?.id}:${activeCommunity?.pubkey}',
+            symbol: 'person.crop.circle',
+            imageUrl: profile?.avatarUrl,
+            avatarInitial: profile?.initial ?? '?',
+            onPressed: () => Navigator.of(context).push(
+              _SettingsPageRoute(
+                builder: settingsPageBuilder,
+                onTransitionProgress: onSettingsTransitionProgress,
+              ),
+            ),
+          ),
+        ],
         horizontalInset: _kTopSectionInset,
         // Let the full Buzz gradient show at rest. Once the list begins to
         // move beneath this row, build up blur over the first 64dp of scroll

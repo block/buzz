@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'ios_navigation_bar.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
@@ -36,6 +38,9 @@ class FrostedScaffold extends HookWidget {
   /// surface roles.
   final bool useUtilitySurfaceTheme;
 
+  /// Reserves the native large title above fixed controls.
+  final bool nativePinnedBody;
+
   const FrostedScaffold({
     super.key,
     required this.appBar,
@@ -45,10 +50,12 @@ class FrostedScaffold extends HookWidget {
     this.backgroundColor,
     this.backgroundGradient,
     this.useUtilitySurfaceTheme = false,
+    this.nativePinnedBody = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final scrollOffset = useValueNotifier(0.0);
     final isScrolledUnder = useState(false);
     final pendingScrolledUnder = useRef<bool?>(null);
     final scrollUpdateScheduled = useRef(false);
@@ -76,6 +83,16 @@ class FrostedScaffold extends HookWidget {
 
     final observedBody = NotificationListener<ScrollNotification>(
       onNotification: (notification) {
+        if (notification.depth == 0 &&
+            notification.metrics.axis == Axis.vertical) {
+          final next = notification.metrics.pixels.clamp(
+            0.0,
+            IosNavigationMetrics.of(context).largeTitleHeight,
+          );
+          if ((scrollOffset.value - next).abs() > 0.1) {
+            scrollOffset.value = next;
+          }
+        }
         if (notification.depth != 0 ||
             notification.metrics.axis != Axis.vertical ||
             (notification is! ScrollUpdateNotification &&
@@ -88,13 +105,16 @@ class FrostedScaffold extends HookWidget {
       },
       child: body,
     );
-    final scaffold = Scaffold(
-      backgroundColor: backgroundColor,
-      resizeToAvoidBottomInset: resizeToAvoidBottomInset,
-      floatingActionButton: floatingActionButton,
-      body: FrostedScrollUnderScope(
-        isScrolledUnder: isScrolledUnder.value,
-        child: Stack(children: _stackChildren(observedBody)),
+    final scaffold = IosNavigationScrollScope(
+      offset: scrollOffset,
+      child: Scaffold(
+        backgroundColor: backgroundColor,
+        resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+        floatingActionButton: floatingActionButton,
+        body: FrostedScrollUnderScope(
+          isScrolledUnder: isScrolledUnder.value,
+          child: Stack(children: _stackChildren(observedBody, scrollOffset)),
+        ),
       ),
     );
     if (!useUtilitySurfaceTheme) return scaffold;
@@ -104,7 +124,10 @@ class FrostedScaffold extends HookWidget {
     );
   }
 
-  List<Widget> _stackChildren(Widget observedBody) {
+  List<Widget> _stackChildren(
+    Widget observedBody,
+    ValueListenable<double> scrollOffset,
+  ) {
     final backdrop = backgroundGradient == null
         ? const <Widget>[]
         : [
@@ -117,7 +140,25 @@ class FrostedScaffold extends HookWidget {
         'frosted-scaffold-body-transition-transform',
       ),
       opacityKey: const ValueKey('frosted-scaffold-body-transition-opacity'),
-      child: observedBody,
+      child: nativePinnedBody && defaultTargetPlatform == TargetPlatform.iOS
+          ? ValueListenableBuilder<double>(
+              valueListenable: scrollOffset,
+              child: observedBody,
+              builder: (context, offset, child) => Padding(
+                padding: EdgeInsets.only(
+                  top: appBar.nativeLargeTitle
+                      ? (IosNavigationMetrics.of(context).largeTitleHeight -
+                                offset)
+                            .clamp(
+                              0.0,
+                              IosNavigationMetrics.of(context).largeTitleHeight,
+                            )
+                      : 0,
+                ),
+                child: child,
+              ),
+            )
+          : observedBody,
     );
     // The bar must be painted after the scrollable sheet: [BackdropFilter]
     // only samples pixels that were already painted behind it. This is the

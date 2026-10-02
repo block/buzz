@@ -108,6 +108,14 @@ class _ThemePreviewExperience extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         centerTitle: true,
         showBottomDivider: false,
+        nativeLeading: IosNavigationAction(
+          label: 'Close',
+          symbol: 'xmark',
+          onPressed: close,
+        ),
+        nativeActions: [
+          IosNavigationAction(label: 'Set', onPressed: applySelection),
+        ],
         leading: _ThemePreviewCloseButton(onPressed: close),
         title: const Text('Theme'),
         actions: [_ThemePreviewSetButton(onPressed: applySelection)],

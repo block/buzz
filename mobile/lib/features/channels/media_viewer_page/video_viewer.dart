@@ -354,20 +354,46 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               ),
             ),
           ),
-          PositionedDirectional(
-            top: Grid.sm,
-            end: Grid.sm,
-            child: Opacity(
-              opacity: chromeOpacity,
-              child: SafeArea(
-                child: _MediaViewerCloseButton(
-                  key: const ValueKey('message-media-video-viewer-close'),
-                  tooltip: 'Close video viewer',
-                  onPressed: () => Navigator.of(context).maybePop(),
+          if (defaultTargetPlatform == TargetPlatform.iOS)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height:
+                  MediaQuery.paddingOf(context).top +
+                  IosNavigationMetrics.of(context).compactHeight,
+              child: Opacity(
+                opacity: chromeOpacity,
+                child: Theme(
+                  data: ThemeData.dark(),
+                  child: IosNavigationBar(
+                    title: 'Video',
+                    actions: [
+                      IosNavigationAction(
+                        label: 'Close video viewer',
+                        symbol: 'xmark',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else
+            PositionedDirectional(
+              top: Grid.sm,
+              end: Grid.sm,
+              child: Opacity(
+                opacity: chromeOpacity,
+                child: SafeArea(
+                  child: _MediaViewerCloseButton(
+                    key: const ValueKey('message-media-video-viewer-close'),
+                    tooltip: 'Close video viewer',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
                 ),
               ),
             ),
-          ),
           PositionedDirectional(
             bottom: 0,
             start: 0,

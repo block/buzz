@@ -66,7 +66,6 @@ import 'local_message_send_transition.dart';
 import 'mobile_huddle_controller.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
-import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
@@ -577,17 +576,45 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
-        leading: usesNativeIosGlassBackButton
-            ? IosGlassNavigationButton(
-                key: const ValueKey('channel-ios-glass-back'),
-                icon: IosGlassNavigationIcon.back,
-                semanticLabel: 'Back',
-                onPressed: () => Navigator.of(context).maybePop(),
-                width: iosGlassChannelHeaderLeadingWidth,
-                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                nativeViewSuppressed: messageActionBackdropActive,
-              )
-            : null,
+        nativeTitle: resolveDmChannelDisplayLabel(
+          resolvedChannel,
+          currentPubkey: currentPubkey,
+        ),
+        nativeActions: [
+          if (_showsMembersAction(resolvedChannel))
+            IosNavigationAction(
+              label: 'View members',
+              symbol: 'person.2',
+              onPressed: () => showBuzzModalBottomSheet<void>(
+                context: context,
+                title: 'Members',
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (_) => MembersSheet(
+                  channel: resolvedChannel,
+                  currentPubkey: currentPubkey,
+                ),
+              ),
+            ),
+          IosNavigationAction(
+            label: 'Channel actions',
+            symbol: 'ellipsis',
+            onPressed: () async {
+              final shouldClose = await showChannelActionsSheet(
+                context: context,
+                channel: resolvedChannel,
+                isUnread: false,
+                sectionId: ref
+                    .read(channelSectionsProvider)
+                    .store
+                    .assignments[resolvedChannel.id],
+              );
+              if (shouldClose == true && context.mounted) {
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+        ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,

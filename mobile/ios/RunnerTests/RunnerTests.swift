@@ -8,6 +8,52 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  @MainActor
+  func testNativeNavigationTitleExpandsAgainAtTop() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let bar = factory.create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 180),
+      viewIdentifier: 999999,
+      arguments: ["title": "Home", "largeTitle": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
+    XCTAssertNotNil(material.effect)
+    XCTAssertEqual(material.alpha, 0)
+    let expandedHeight = navigation.navigationBar.frame.height
+    let metrics = try XCTUnwrap(messenger.metrics)
+    let compactHeight = try XCTUnwrap(metrics["compactHeight"] as? Double)
+    let measuredExpandedHeight = try XCTUnwrap(metrics["expandedHeight"] as? Double)
+    XCTAssertEqual(expandedHeight, measuredExpandedHeight, accuracy: 0.5)
+    XCTAssertGreaterThan(expandedHeight, compactHeight)
+    for _ in 0..<3 {
+      messenger.scroll(to: measuredExpandedHeight - compactHeight)
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      try await Task.sleep(nanoseconds: 200_000_000)
+      XCTAssertLessThan(navigation.navigationBar.frame.height, expandedHeight)
+      XCTAssertEqual(material.alpha, 1)
+      XCTAssertEqual(material.frame, bar.view().bounds)
+      messenger.scroll(to: 0)
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      try await Task.sleep(nanoseconds: 200_000_000)
+      XCTAssertEqual(navigation.navigationBar.frame.height, expandedHeight, accuracy: 0.5)
+      XCTAssertEqual(material.alpha, 0)
+    }
+  }
+
+
+
   func testVoiceNotePackagingStagesHaveBoundedDeadlines() {
     XCTAssertEqual(VoiceNotePackager.videoEnvelopeTimeout, 30)
     XCTAssertEqual(VoiceNotePackager.exportTimeout, 30)
@@ -1309,5 +1355,38 @@ private actor NativeEmojiDownloadProbe {
     for waiter in reached {
       waiter.continuation.resume()
     }
+  }
+}
+
+private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
+  var metrics: [String: Any]?
+  func send(onChannel channel: String, message: Data?) {
+    guard let message else { return }
+    let call = FlutterStandardMethodCodec.sharedInstance().decodeMethodCall(message)
+    if call.method == "metrics" { metrics = call.arguments as? [String: Any] }
+  }
+  func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
+    send(onChannel: channel, message: message)
+    callback?(nil)
+  }
+  private var handler: FlutterBinaryMessageHandler?
+
+  func setMessageHandlerOnChannel(
+    _ channel: String,
+    binaryMessageHandler handler: FlutterBinaryMessageHandler?
+  ) -> FlutterBinaryMessengerConnection {
+    self.handler = handler
+    return 1
+  }
+
+  func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) {
+    handler = nil
+  }
+
+  func scroll(to offset: Double) {
+    let message = FlutterStandardMethodCodec.sharedInstance().encode(
+      FlutterMethodCall(methodName: "scroll", arguments: offset)
+    )
+    handler?(message) { _ in }
   }
 }
