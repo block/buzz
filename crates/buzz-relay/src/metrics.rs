@@ -299,6 +299,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     describe_auth_metrics();
     crate::startup_steps::describe_metrics();
     initialize_auth_metric_series();
+    initialize_partition_audit_metric_series();
     tokio::spawn(exporter);
     Ok(())
 }
@@ -520,6 +521,13 @@ pub(crate) fn initialize_auth_metric_series() {
         .increment(0);
     }
     metrics::gauge!("buzz_ws_authenticated_connections_active").set(0.0);
+}
+
+/// Export the partition audit counters at zero before the first audit, so
+/// `increase()`-based alerts count the first failure and every new outcome.
+pub(crate) fn initialize_partition_audit_metric_series() {
+    buzz_db::partition::initialize_audit_metric_series();
+    metrics::counter!("buzz_partition_audit_failures_total").increment(0);
 }
 
 /// Record one issued NIP-42 challenge after it enters the connection writer.
@@ -1231,6 +1239,46 @@ mod partition_alert_tests {
             .map(|table| (table.to_string(), 0.0))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(samples(&scrape, LAST_SUCCESS), zero, "{scrape}");
+    }
+
+    #[test]
+    fn audit_counters_export_zero_baselines_before_the_first_audit() {
+        let (recorder, handle) = super::readiness_test_recorder_with_idle_timeout(1);
+        metrics::with_local_recorder(&recorder, super::initialize_partition_audit_metric_series);
+
+        let scrape = handle.render();
+        let zero_runs = scrape
+            .lines()
+            .filter(|line| line.starts_with(&format!("{RUNS}{{")) && line.ends_with(" 0"))
+            .count();
+        assert_eq!(zero_runs, MANAGED_TABLES.len() * 3, "{scrape}");
+        assert!(
+            scrape
+                .lines()
+                .any(|line| line == "buzz_partition_audit_failures_total 0"),
+            "{scrape}"
+        );
+
+        // A first failure then reads as an increase from the zero baseline.
+        metrics::with_local_recorder(&recorder, || {
+            current_thread_runtime().block_on(async {
+                assert!(unreachable_db().audit_partitions(3).await.is_err());
+            });
+        });
+        let scrape = handle.render();
+        for table in MANAGED_TABLES {
+            for (outcome, value) in [("ok", 0), ("degraded", 0), ("error", 1)] {
+                let line = scrape
+                    .lines()
+                    .find(|line| {
+                        line.starts_with(&format!("{RUNS}{{"))
+                            && line.contains(&format!(r#"table="{table}""#))
+                            && line.contains(&format!(r#"outcome="{outcome}""#))
+                    })
+                    .unwrap_or_else(|| panic!("{table}/{outcome} missing:\n{scrape}"));
+                assert!(line.ends_with(&format!(" {value}")), "{line}");
+            }
+        }
     }
 
     mod postgres_tests {

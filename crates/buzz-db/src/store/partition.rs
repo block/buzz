@@ -1041,6 +1041,24 @@ fn qualified_relation_name(schema: &str, relation: &str) -> String {
     )
 }
 
+/// Export every `buzz_partition_audit_runs_total` series at zero.
+///
+/// Prometheus `increase()` ignores the first sample of a new series, so an
+/// outcome first seen mid-run would otherwise be invisible to rate-based
+/// alerts. Call once at process start, before the first audit.
+pub fn initialize_audit_metric_series() {
+    for &table in PARTITIONED_TABLES {
+        for outcome in ["ok", "degraded", "error"] {
+            metrics::counter!(
+                "buzz_partition_audit_runs_total",
+                "table" => table,
+                "outcome" => outcome
+            )
+            .increment(0);
+        }
+    }
+}
+
 /// Keep a table's last success timestamp exported through failed audits
 /// without changing it, so the exporter's idle timeout cannot evict it. A
 /// table that never succeeded exports 0, which reads as maximally stale.

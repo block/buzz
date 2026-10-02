@@ -50,12 +50,14 @@ rising. A table that has never been audited successfully exports `0`. The
 timestamp disappears only when audits stop running for longer than the idle
 timeout; the other per-table gauges can be evicted during sustained failures.
 
-Counters are not idle-evicted while the process runs:
+Counters are not idle-evicted while the process runs. The relay exports every
+run outcome for both managed tables, and the failure counter, at 0 when its
+metrics exporter starts, so `increase()` counts the first failure and the first
+run with a new outcome:
 
 - `buzz_partition_audit_runs_total{table, outcome}` increments once per table
   per audit. The outcome is `ok`, `degraded`, or `error`, including audits run
-  inside startup partition creation. After the first audit, every live relay
-  exports this counter for both managed tables.
+  inside startup partition creation.
 - `buzz_partition_audit_failures_total` counts failed explicit audit attempts:
   the startup fallback audit that runs when startup partition creation fails, and
   each periodic audit. A startup creation failure is not counted by itself. If
@@ -66,9 +68,14 @@ Counters are not idle-evicted while the process runs:
 ## Alerts
 
 Use all three rules below. Aggregate with `without (...)`, not `by (...)`, so
-cluster, account, environment, namespace, and pod labels stay in the alert. When
-a pod terminates, its scrape target disappears and its series go stale, so
-normal pod turnover cannot leave an alert firing.
+cluster, account, environment, namespace, and pod labels stay in the alert.
+
+When a pod terminates, its scrape target disappears and its series go stale.
+Instant selectors drop a stale series at once, but range selectors such as
+`[30m]` keep reading its earlier samples until they leave the window. Each
+range-based rule therefore also requires the counter to be exported now, which
+it is for the whole life of a relay, so a terminated pod cannot keep or start an
+alert.
 
 ```yaml
 # The last success is older than two default audit intervals. This also fires
@@ -84,17 +91,25 @@ normal pod turnover cannot leave an alert firing.
 # timeout (2,700 s by default), so this fires before the stopped loop's
 # timestamp is evicted and the stale rule resolves.
 - alert: BuzzPartitionAuditNotRunning
-  expr: sum without (outcome) (increase(buzz_partition_audit_runs_total[30m])) == 0
+  expr: |
+    sum without (outcome) (increase(buzz_partition_audit_runs_total[30m])) == 0
+      and sum without (outcome) (buzz_partition_audit_runs_total)
   for: 5m
 
 # Explicit audit attempts keep failing, even if a later attempt succeeds.
 - alert: BuzzPartitionAuditFailing
-  expr: increase(buzz_partition_audit_failures_total[1h]) >= 2
+  expr: |
+    increase(buzz_partition_audit_failures_total[1h]) >= 2
+      and buzz_partition_audit_failures_total
 ```
 
-All three rules read series that exist after the first audit attempt, whether
-or not it succeeded. To also catch a live relay that never exports audit runs,
-compare its scrape target health with the run counter, for example
+The counters exist from relay start, and the success timestamp exists after the
+first audit attempt, whether or not it succeeded. The startup audit runs within
+seconds of the zero baselines, usually before the first scrape, so
+`BuzzPartitionAuditFailing` can miss a failure in that one attempt; if it does
+not recover, `BuzzPartitionAuditStale` fires. To also catch a live relay that
+never exports audit runs, compare its scrape target health with the run
+counter, for example
 `up == 1 unless on (namespace, pod) count by (namespace, pod) (buzz_partition_audit_runs_total)`,
 scoped to the relay job.
 
@@ -105,8 +120,9 @@ problems show directly in `buzz_partition_serving_safe` and
 `buzz_partition_uncovered_months`.
 
 The tests in `crates/buzz-relay/src/metrics.rs` (`partition_alert_tests`) check
-that the production exporter and audit emit the series these rules read: a `0`
-timestamp before any success, the last success kept through failures past the
-idle timeout, and run counters that outlive an evicted timestamp. They do not
+that the production exporter and audit emit the series these rules read: zero
+counter baselines before the first audit, a `0` timestamp before any success,
+the last success kept through failures past the idle timeout, and run counters
+that outlive an evicted timestamp. They do not
 evaluate the rules, their `for` durations, or label matching; validate those
 with `promtool test rules` against your alerting configuration.
