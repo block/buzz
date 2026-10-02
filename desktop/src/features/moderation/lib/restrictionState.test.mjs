@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isTimedOut, parseRestrictionTimestampMs } from "./restrictionState.ts";
+import {
+  hasObservableTimeout,
+  isTimedOut,
+  parseRestrictionTimestampMs,
+} from "./restrictionState.ts";
 
 test("parses an RFC3339 string to epoch ms", () => {
   assert.equal(
@@ -38,4 +42,34 @@ test("isTimedOut is false for an absent muted-until (fail closed to not-timed-ou
 
 test("isTimedOut is false for an unparseable muted-until", () => {
   assert.equal(isTimedOut("garbage"), false);
+});
+
+const NOW = 1_000_000_000_000;
+const future = () => new Date(NOW + 60_000).toISOString();
+const past = () => new Date(NOW - 60_000).toISOString();
+
+test("hasObservableTimeout is false for no restrictions", () => {
+  assert.equal(hasObservableTimeout([], NOW), false);
+});
+
+test("hasObservableTimeout is true for a future mute", () => {
+  assert.equal(hasObservableTimeout([{ mutedUntil: future() }], NOW), true);
+});
+
+test("hasObservableTimeout is false for a past mute", () => {
+  assert.equal(hasObservableTimeout([{ mutedUntil: past() }], NOW), false);
+});
+
+test("hasObservableTimeout is false for a null mute (ban-only)", () => {
+  assert.equal(hasObservableTimeout([{ mutedUntil: null }], NOW), false);
+});
+
+test("hasObservableTimeout is true when any restriction has a future mute", () => {
+  assert.equal(
+    hasObservableTimeout(
+      [{ mutedUntil: past() }, { mutedUntil: null }, { mutedUntil: future() }],
+      NOW,
+    ),
+    true,
+  );
 });

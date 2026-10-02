@@ -5,6 +5,8 @@ import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
+import { absorbStandaloneProjectRepositories } from "./lib/projectCollection";
+import { findProjectHomeByChannelId } from "./lib/projectHomeSelection";
 import { buildProjectReadModels, type Project } from "./projectModels";
 
 const PROJECT_ENUMERATION_PAGE_SIZE = 500;
@@ -16,6 +18,7 @@ const TOMBSTONE_COORDINATE_CHUNK_SIZE = 100;
 /** Additional server-side scoping merged into every enumeration page. */
 export type ProjectEventExtraFilter = {
   "#a"?: string[];
+  "#buzz-channel"?: string[];
 };
 
 type ProjectEventFilter = ProjectEventExtraFilter & {
@@ -44,6 +47,7 @@ export async function enumerateProjectEvents(
   kinds: number[],
   pageSize: number,
   extraFilter?: ProjectEventExtraFilter,
+  signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
   if (!Number.isSafeInteger(pageSize) || pageSize <= 0) {
     throw new Error(
@@ -55,6 +59,10 @@ export async function enumerateProjectEvents(
   let until: number | undefined;
 
   for (;;) {
+    // Each relay REQ is bounded, but this loop is not: leaving the Projects
+    // surface cancels its queries, and the abort must stop the enumeration
+    // from queuing further pages behind the next surface's fetches.
+    signal?.throwIfAborted();
     const page = await fetchPage({
       ...extraFilter,
       kinds,
@@ -65,6 +73,7 @@ export async function enumerateProjectEvents(
     if (page.length < pageSize) return [...eventsById.values()];
 
     const oldest = Math.min(...page.map((event) => event.created_at));
+    signal?.throwIfAborted();
     const boundary = await fetchPage({
       ...extraFilter,
       kinds,
@@ -94,12 +103,14 @@ export function fetchProjectEventsExhaustively(
   kinds: number[],
   extraFilter?: ProjectEventExtraFilter,
   pageSize = PROJECT_ENUMERATION_PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
   return enumerateProjectEvents(
     (filter) => relayClient.fetchEvents(filter),
     kinds,
     pageSize,
     extraFilter,
+    signal,
   );
 }
 
@@ -165,6 +176,7 @@ export async function buildProjectsFromFetcher(
   options: {
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
+    viewerPubkey?: string | null;
   } = {},
 ): Promise<Project[]> {
   const [projectEvents, repositoryEvents] = await Promise.all([
@@ -192,11 +204,40 @@ export async function buildProjectsFromFetcher(
     );
   }
 
-  return buildProjectReadModels({
-    projectEvents,
-    repositoryEvents,
-    deletionEvents: tombstoneResult.events,
-    relayOrigin: options.relayOrigin ?? null,
-    hiddenAddresses: options.hiddenAddresses ?? new Set(),
-  }).sort((a, b) => b.createdAt - a.createdAt);
+  return absorbStandaloneProjectRepositories(
+    buildProjectReadModels({
+      projectEvents,
+      repositoryEvents,
+      deletionEvents: tombstoneResult.events,
+      relayOrigin: options.relayOrigin ?? null,
+      hiddenAddresses: options.hiddenAddresses ?? new Set(),
+      viewerPubkey: options.viewerPubkey,
+    }),
+  ).sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/**
+ * Resolves one channel's authoritative project home without waiting for the
+ * community-wide project enumeration used by the sidebar and Projects view.
+ */
+export async function buildProjectHomeFromFetcher(
+  fetchExhaustively: FetchProjectEventsExhaustively,
+  channelId: string,
+  options: {
+    relayOrigin?: string | null;
+    hiddenAddresses?: ReadonlySet<string>;
+    viewerPubkey?: string | null;
+  } = {},
+): Promise<Project | null> {
+  const projects = await buildProjectsFromFetcher(
+    (kinds, extraFilter) =>
+      fetchExhaustively(
+        kinds,
+        kinds.includes(KIND_DELETION)
+          ? extraFilter
+          : { ...extraFilter, "#buzz-channel": [channelId] },
+      ),
+    options,
+  );
+  return findProjectHomeByChannelId(channelId, projects);
 }

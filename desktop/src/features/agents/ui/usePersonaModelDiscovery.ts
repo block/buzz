@@ -10,9 +10,12 @@ import {
   formatModelDiscoveryErrorStatus,
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
-import { formatModelDisplayName } from "../lib/formatAgentModelLabel";
 import type { PersonaModelOption } from "./agentConfigOptions";
 import { providerRequiresExplicitModel } from "./agentConfigOptions";
+import {
+  disambiguateModelLabels,
+  resolveModelLabel,
+} from "@/features/agents/lib/formatAgentModelLabel";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -65,7 +68,7 @@ export function getDiscoveredPersonaModelOptions(
               provider === "relay-mesh"
                 ? "Default (auto)"
                 : agentDefaultModel
-                  ? `Default model (${formatModelDisplayName(agentDefaultModel)})`
+                  ? `Default model (${resolveModelLabel(agentDefaultModel, null, provider)})`
                   : "Default model",
           },
         ];
@@ -76,10 +79,13 @@ export function getDiscoveredPersonaModelOptions(
 
   return [
     ...defaultModelOption,
-    ...explicitModels.map((model) => ({
-      id: model.id,
-      label: formatModelDisplayName(model.name?.trim() || model.id),
-    })),
+    ...disambiguateModelLabels(
+      explicitModels.map((model) => ({
+        id: model.id,
+        label: resolveModelLabel(model.id, model.name, provider),
+      })),
+      provider,
+    ),
   ];
 }
 

@@ -89,7 +89,7 @@ export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=5432 PGSCHEMA_PLAN_DB="${
 export PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
-  psql -U buzz -d "${DB_NAME}" -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
+  psql -U buzz -d "${DB_NAME}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
 BUZZ_DB_NAME="${DB_NAME}" BUZZ_COMMUNITY_HOST="${COMMUNITY_HOST}" ./scripts/setup-desktop-test-data.sh
 docker exec buzz-redis redis-cli -n "${REDIS_DB}" FLUSHDB >/dev/null
 phase database "${phase_start}"
@@ -103,6 +103,7 @@ else
   RELAY_BIN="${ROOT}/target/ci/buzz-relay"
 fi
 log "starting relay at ${RELAY_HTTP_URL}"
+RELAY_PRIVATE_KEY="$(openssl rand -hex 32)"
 env \
   DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/${DB_NAME}" \
   REDIS_URL="redis://localhost:6379/${REDIS_DB}" \
@@ -110,6 +111,7 @@ env \
   BUZZ_BIND_ADDR="127.0.0.1:${RELAY_PORT}" \
   BUZZ_HEALTH_PORT="${HEALTH_PORT}" \
   BUZZ_METRICS_PORT="${METRICS_PORT}" \
+  BUZZ_RELAY_PRIVATE_KEY="${RELAY_PRIVATE_KEY}" \
   BUZZ_REQUIRE_AUTH_TOKEN=false \
   BUZZ_RECONCILE_CHANNELS=true \
   BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=1000000 \

@@ -8,10 +8,11 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_profile.dart';
 import 'forum_models.dart';
 
 /// Card displaying a forum post preview in the posts list.
@@ -53,7 +54,10 @@ class ForumPostCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? _shortPubkey(post.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, post.channelId, pk);
+    final isAgent =
+        ref.watch(agentMentionPubkeysProvider(post.channelId)).contains(pk) ||
+        profile?.ownerPubkey != null;
     final profileMentionNames = ref.watch(
       userCacheProvider.select(
         (cache) => _buildMentionNames(post.mentionPubkeys, cache),
@@ -85,6 +89,11 @@ class ForumPostCard extends HookConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      post.channelId,
+      post.mentionPubkeys,
+    );
     final preview = post.content.length > 200
         ? '${post.content.substring(0, 200)}...'
         : post.content;
@@ -111,14 +120,26 @@ class ForumPostCard extends HookConsumerWidget {
               children: [
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => showUserProfileSheet(context, post.pubkey),
-                  child: _PostAvatar(profile: profile, pubkey: post.pubkey),
+                  onTap: () => showUserProfileSheet(
+                    context,
+                    post.pubkey,
+                    names: channelIdentityNamesProvider(post.channelId),
+                  ),
+                  child: _PostAvatar(
+                    profile: profile,
+                    pubkey: post.pubkey,
+                    isAgent: isAgent,
+                  ),
                 ),
                 const SizedBox(width: Grid.xxs),
                 Expanded(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => showUserProfileSheet(context, post.pubkey),
+                    onTap: () => showUserProfileSheet(
+                      context,
+                      post.pubkey,
+                      names: channelIdentityNamesProvider(post.channelId),
+                    ),
                     child: Text(
                       displayName,
                       maxLines: 1,
@@ -172,6 +193,7 @@ class ForumPostCard extends HookConsumerWidget {
                   child: MessageContent(
                     content: preview,
                     mentionNames: mentionNames,
+                    mentionLabels: mentionLabels,
                     agentMentionPubkeys: agentMentionPubkeys,
                     tags: post.tags,
                     baseStyle: messageBodyTextStyle.copyWith(
@@ -308,8 +330,13 @@ class ForumPostCard extends HookConsumerWidget {
 class _PostAvatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
+  final bool isAgent;
 
-  const _PostAvatar({required this.profile, required this.pubkey});
+  const _PostAvatar({
+    required this.profile,
+    required this.pubkey,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -328,13 +355,9 @@ class _PostAvatar extends StatelessWidget {
           fontWeight: FontWeight.w600,
         ),
       ),
+      isAgent: isAgent,
     );
   }
-}
-
-String _shortPubkey(String pubkey) {
-  if (pubkey.length > 12) return '${pubkey.substring(0, 8)}\u2026';
-  return pubkey;
 }
 
 Map<String, String> _buildMentionNames(

@@ -1,15 +1,10 @@
 import { usePreventSleepContext } from "@/features/agents/usePreventSleep";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
-import {
-  setPersistentAgentAudienceEnabled,
-  usePersistentAgentAudience,
-} from "@/features/messages/lib/persistentAgentAudience";
 
 export function PreventSleepSettingsCard() {
   const { enabled, setEnabled, hasRunningAgents, expired, clearExpired } =
     usePreventSleepContext();
-  const persistentAudience = usePersistentAgentAudience(null);
 
   return (
     <div className="min-w-0 space-y-3">
@@ -17,30 +12,6 @@ export function PreventSleepSettingsCard() {
         data-testid="agents-preferences-card"
         title="Preferences"
       >
-        <SettingsOptionRow>
-          <div className="min-w-0">
-            <label
-              className="text-sm font-medium"
-              htmlFor="persistent-agent-audience-switch"
-            >
-              Keep addressed agents active
-            </label>
-            <p
-              className="text-sm font-normal text-muted-foreground/70"
-              data-settings-subcopy
-            >
-              Keep agents you address selected for future messages in the same
-              channel or thread. Remove them from the composer at any time.
-            </p>
-          </div>
-          <Switch
-            checked={persistentAudience.enabled}
-            data-testid="persistent-agent-audience-toggle"
-            id="persistent-agent-audience-switch"
-            onCheckedChange={setPersistentAgentAudienceEnabled}
-          />
-        </SettingsOptionRow>
-
         <SettingsOptionRow>
           <div className="min-w-0">
             <label

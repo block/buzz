@@ -45,6 +45,9 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "LC_ALL",
     "TMPDIR",
     "XDG_CONFIG_HOME",
+    // Explicit Buzz-owned OAuth root for named demo builds. The agent may spawn
+    // auth-capable child tools after clearing its ambient environment.
+    "BUZZ_AGENT_CONFIG_DIR",
     // SSH — required for git clone/push over SSH (git@github.com:...)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
@@ -77,16 +80,11 @@ const PASSTHROUGH_ENV: &[&str] = &[
     // was configured correctly and the child could not see it.
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
-    // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
-    // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
-    // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
-    // non-secret signed ownership attestation needed by portable owner-scoped
-    // CLI operations; MCP subprocesses are trusted like the agent runtime.
-    "NOSTR_PRIVATE_KEY",
+    // Git config/keyfile paths arrive explicitly in session/new mcpServers[].env.
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
-    // Agent display name — dev-mcp uses it as the git author name. On the
+    // Agent display name for tools. On the
     // Desktop path this arrives via the wire `mcpServers[].env` declaration
     // (which wins here anyway); the allowlist entry covers ACP clients that
     // spawn buzz-agent without declaring it.
@@ -594,15 +592,7 @@ impl McpRegistry {
         budget: ResultBudget,
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<ToolResult, AgentError> {
-        let arg_obj = match arguments {
-            Value::Object(m) => Some(m.clone()),
-            Value::Null => None,
-            _ => {
-                return Err(AgentError::Mcp(format!(
-                    "tool {qname} arguments must be a JSON object"
-                )))
-            }
-        };
+        let arg_obj = validate_arg_shape(qname, arguments)?;
         let mut params = CallToolRequestParams::default();
         params.name = bare.to_owned().into();
         params.arguments = arg_obj;
@@ -810,6 +800,29 @@ async fn spawn_one(
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     guard.pgid = None;
     Ok((client, pgid, names, tools))
+}
+
+/// Validate that tool-call arguments are a shape the MCP transport can carry:
+/// a JSON object (`Some(map)`) or absent (`None`). Any other JSON type is a
+/// malformed call that the transport would reject.
+///
+/// Hoisted out of `do_call` so the permission gate can run it *before* asking
+/// the user: a malformed non-object argument is rejected locally without
+/// prompting for approval of a call that could never execute. `do_call` runs
+/// it again as the single authoritative shape check — the duplicate is a cheap
+/// idempotent match, and keeping it here means no code path can reach the
+/// transport with an unvalidated shape.
+pub fn validate_arg_shape(
+    qname: &str,
+    arguments: &Value,
+) -> Result<Option<Map<String, Value>>, AgentError> {
+    match arguments {
+        Value::Object(m) => Ok(Some(m.clone())),
+        Value::Null => Ok(None),
+        _ => Err(AgentError::Mcp(format!(
+            "tool {qname} arguments must be a JSON object"
+        ))),
+    }
 }
 
 /// Send `notifications/cancelled` to the MCP server, fire-and-forget.

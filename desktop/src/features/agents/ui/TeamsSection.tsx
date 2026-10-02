@@ -21,6 +21,7 @@ import { SectionHeader } from "@/shared/ui/PageHeader";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
 import { IDENTITY_CARD_GRID_CLASS } from "./UnifiedAgentsSection";
+import { teamCatalogCopy } from "./teamLibraryCopy";
 
 const TEAM_CARD_COLUMN_CLASS = "w-full";
 
@@ -36,6 +37,7 @@ type TeamsSectionProps = {
   onDelete: (team: AgentTeam) => void;
   onAddToChannel: (team: AgentTeam) => void;
   onShare: (team: AgentTeam) => void;
+  onDiscover: () => void;
   onImport: () => void;
 };
 
@@ -51,6 +53,7 @@ export function TeamsSection({
   onDelete,
   onAddToChannel,
   onShare,
+  onDiscover,
   onImport,
 }: TeamsSectionProps) {
   return (
@@ -87,6 +90,7 @@ export function TeamsSection({
           <NewTeamCard
             isPending={isPending}
             onCreate={onCreate}
+            onDiscover={onDiscover}
             onImport={onImport}
           />
           {teams.map((team) => {
@@ -191,10 +195,12 @@ export function TeamsSection({
 function NewTeamCard({
   isPending,
   onCreate,
+  onDiscover,
   onImport,
 }: {
   isPending: boolean;
   onCreate: () => void;
+  onDiscover: () => void;
   onImport: () => void;
 }) {
   return (
@@ -208,6 +214,13 @@ function NewTeamCard({
       >
         <DropdownMenuItem disabled={isPending} onClick={onCreate}>
           Create team
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          data-testid="team-catalog-open"
+          disabled={isPending}
+          onClick={onDiscover}
+        >
+          {teamCatalogCopy.chooseFromCatalog}
         </DropdownMenuItem>
         <DropdownMenuItem disabled={isPending} onClick={onImport}>
           Import

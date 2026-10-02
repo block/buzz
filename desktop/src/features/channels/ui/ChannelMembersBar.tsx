@@ -35,6 +35,7 @@ import { AddChannelBotDialog } from "./AddChannelBotDialog";
 type ChannelMembersBarProps = {
   channel: Channel;
   currentPubkey?: string;
+  endActions?: React.ReactNode;
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
@@ -45,6 +46,7 @@ type ChannelMembersBarProps = {
 export function ChannelMembersBar({
   channel,
   currentPubkey,
+  endActions,
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
@@ -65,7 +67,14 @@ export function ChannelMembersBar({
   );
   const { startHuddle, isStarting: isStartingHuddle } = useHuddle();
   const queryClient = useQueryClient();
-  const membersQuery = useChannelMembersQuery(channel.id);
+  // The roster is only needed for DM huddle composition (agent detection and
+  // participant naming). Streams/forums render the count from the channel
+  // summary and gate huddle access on `channel.isMember`, so mounting this
+  // bar must not put a full-roster fetch on the channel-switch path.
+  const membersQuery = useChannelMembersQuery(
+    channel.id,
+    channel.channelType === "dm",
+  );
   const providersQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -182,39 +191,42 @@ export function ChannelMembersBar({
 
   const controls =
     variant === "compact" ? (
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            aria-label="Channel actions"
-            data-testid="channel-actions-menu-trigger"
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <EllipsisVertical />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48" forceMount>
-          <DropdownMenuItem
-            data-testid="channel-members-trigger"
-            onSelect={onToggleMembers}
-          >
-            <Users />
-            <span>Members</span>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {memberCount}
-            </span>
-          </DropdownMenuItem>
-          {huddleIndicator}
-          <DropdownMenuItem
-            data-testid="channel-management-trigger"
-            onSelect={onManageChannel}
-          >
-            <Settings2 />
-            <span>Manage channel</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className="flex items-center gap-[6px]">
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label="Channel actions"
+              data-testid="channel-actions-menu-trigger"
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <EllipsisVertical />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48" forceMount>
+            <DropdownMenuItem
+              data-testid="channel-members-trigger"
+              onSelect={onToggleMembers}
+            >
+              <Users />
+              <span>Members</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {memberCount}
+              </span>
+            </DropdownMenuItem>
+            {huddleIndicator}
+            <DropdownMenuItem
+              data-testid="channel-management-trigger"
+              onSelect={onManageChannel}
+            >
+              <Settings2 />
+              <span>Manage channel</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {endActions}
+      </div>
     ) : (
       <div className="flex items-center gap-[6px]">
         <Tooltip disableHoverableContent>
@@ -253,6 +265,8 @@ export function ChannelMembersBar({
           </TooltipTrigger>
           <TooltipContent>Channel settings</TooltipContent>
         </Tooltip>
+
+        {endActions}
       </div>
     );
 

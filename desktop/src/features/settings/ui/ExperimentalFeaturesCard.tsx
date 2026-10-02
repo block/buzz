@@ -1,4 +1,4 @@
-import { setAgentManagedProfiles } from "@/shared/api/tauri";
+import { setAgentManagedProfiles } from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";

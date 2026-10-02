@@ -37,11 +37,11 @@ use super::{pipeline::start_auto_enabled_transcription, HuddlePhase};
 pub fn voice_mode_guidelines(parent_channel_id: &str) -> String {
     format!(
         "\
-You are in a live voice huddle attached to channel {parent_channel_id}.
-Only messages sent with `buzz messages send` to this huddle channel are spoken aloud, in the order sent; everything else you produce is silent.
-When a user addresses you, your FIRST tool call must send a brief spoken reply to this channel, before any file read, search, or other tool call. The usual rule against bare acknowledgments does not apply here; the pickup is the feedback that you heard them.
+You are in a live voice huddle. Its attached main channel is {parent_channel_id}; that is not the live huddle channel.
+The channel UUID in the current `[Context]` block is the live huddle channel. Only messages sent with `buzz messages send` to that current Context channel are spoken aloud, in the order sent; everything else you produce is silent.
+When a user addresses you, your FIRST tool call must send a brief spoken reply to the current Context channel, before any file read, search, or other tool call. The usual rule against bare acknowledgments does not apply here; the pickup is the feedback that you heard them.
 Then work, sending each useful sentence as its own message the moment it is ready—a few sentences per answer, not a monologue.
-Speak plainly without markdown; post code or long detail to the attached channel instead.
+Speak plainly without markdown; post code or long detail to the attached main channel instead.
 If you are not addressed, stay silent."
     )
 }
@@ -75,6 +75,12 @@ pub struct AgentHuddleSyncResult {
     pub matched_active_huddle: bool,
     /// Agents newly enrolled in the Huddle's ephemeral channel.
     pub added: Vec<String>,
+    /// Channels whose membership this sync changed (ephemeral, and the parent
+    /// when an agent was enrolled there), so the frontend can refresh them.
+    /// Reported even when `error` is set, because earlier adds still landed.
+    pub changed_channel_ids: Vec<String>,
+    /// Failure that stopped the sync after `changed_channel_ids` were written.
+    pub error: Option<String>,
 }
 
 // Multiple frontend mutation paths can observe the same membership addition
@@ -163,6 +169,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
         return Ok(AgentHuddleSyncResult {
             matched_active_huddle: false,
             added: Vec::new(),
+            changed_channel_ids: Vec::new(),
+            error: None,
         });
     }
     let _sync_guard = AGENT_SYNC_LOCK.lock().await;
@@ -173,6 +181,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
             return Ok(AgentHuddleSyncResult {
                 matched_active_huddle: false,
                 added: Vec::new(),
+                changed_channel_ids: Vec::new(),
+                error: None,
             });
         }
         let ephemeral_channel_id = huddle
@@ -187,6 +197,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
             return Ok(AgentHuddleSyncResult {
                 matched_active_huddle: false,
                 added: Vec::new(),
+                changed_channel_ids: Vec::new(),
+                error: None,
             });
         }
         let state_agents = huddle
@@ -231,8 +243,26 @@ pub(crate) async fn sync_agents_for_active_huddle(
     let ephemeral_uuid = Uuid::parse_str(&ephemeral_channel_id).map_err(|e| e.to_string())?;
     let parent_uuid = Uuid::parse_str(&parent_channel_id).map_err(|e| e.to_string())?;
     let mut added = Vec::new();
+    let mut changed_channel_ids = Vec::new();
     for pubkey in missing {
-        add_agent_to_huddle(ephemeral_uuid, parent_uuid, &pubkey, state).await?;
+        match add_agent_to_huddle(ephemeral_uuid, parent_uuid, &pubkey, state).await {
+            Ok(result) => {
+                note_changed(&mut changed_channel_ids, &ephemeral_channel_id);
+                if result.parent_added {
+                    note_changed(&mut changed_channel_ids, &parent_channel_id);
+                }
+            }
+            Err(error) => {
+                // The ephemeral add may have landed before the failure.
+                note_changed(&mut changed_channel_ids, &ephemeral_channel_id);
+                return Ok(AgentHuddleSyncResult {
+                    matched_active_huddle: true,
+                    added,
+                    changed_channel_ids,
+                    error: Some(error),
+                });
+            }
+        }
         merged_agents.push(pubkey.clone());
         added.push(pubkey);
     }
@@ -243,6 +273,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
             return Ok(AgentHuddleSyncResult {
                 matched_active_huddle: true,
                 added,
+                changed_channel_ids,
+                error: None,
             });
         }
         let mut roster_changed = false;
@@ -277,6 +309,8 @@ pub(crate) async fn sync_agents_for_active_huddle(
     Ok(AgentHuddleSyncResult {
         matched_active_huddle: true,
         added,
+        changed_channel_ids,
+        error: None,
     })
 }
 
@@ -287,6 +321,12 @@ pub async fn sync_agents_to_active_huddle(
     state: State<'_, AppState>,
 ) -> Result<AgentHuddleSyncResult, String> {
     sync_agents_for_active_huddle(&channel_id, agent_pubkeys, &state).await
+}
+
+fn note_changed(changed: &mut Vec<String>, channel_id: &str) {
+    if !changed.iter().any(|id| id == channel_id) {
+        changed.push(channel_id.to_owned());
+    }
 }
 
 fn contains_member(members: &[(String, Option<String>)], pubkey: &str) -> bool {
@@ -303,11 +343,13 @@ mod tests {
     fn voice_mode_guidelines_pin_spoken_reply_as_first_tool_call() {
         let guidelines = voice_mode_guidelines("parent-channel");
         assert_eq!(guidelines.lines().count(), 6);
-        assert!(guidelines.contains("Only messages sent with `buzz messages send`"));
+        assert!(guidelines.contains("Its attached main channel is parent-channel"));
+        assert!(guidelines.contains("that is not the live huddle channel"));
+        assert!(guidelines.contains("current `[Context]` block is the live huddle channel"));
+        assert!(guidelines.contains("buzz messages send` to that current Context channel"));
         assert!(guidelines.contains("your FIRST tool call must send a brief spoken reply"));
         assert!(guidelines.contains("before any file read, search, or other tool call"));
         assert!(guidelines.contains("rule against bare acknowledgments does not apply here"));
-        assert!(guidelines.contains("parent-channel"));
     }
 
     #[test]

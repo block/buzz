@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { Bot } from "lucide-react";
 
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
@@ -5,7 +6,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 import { formatRecipientName } from "./useNewMessageRecipients";
 
@@ -27,7 +28,7 @@ function HoverRecipientIdentity({
   displayName: string;
   pubkey: string;
 }) {
-  const identityLabel = truncatePubkey(pubkey);
+  const identityLabel = truncateNpub(pubkey);
 
   return (
     <span
@@ -113,6 +114,7 @@ export function NewMessageResultRow({
           className="h-8 w-8 text-xs shadow-none"
           iconClassName="h-4 w-4"
           label={name}
+          shape={user.isAgent ? "squircle" : "circle"}
         />
         <div className="min-w-0 flex-1">
           {user.isAgent ? (
@@ -132,6 +134,10 @@ export function NewMessageResultRow({
                   />
                   agent
                 </span>
+                <AgentManagementMarker
+                  pubkey={user.pubkey}
+                  ownerPubkey={user.ownerPubkey}
+                />
               </div>
               {ownerLabel ? (
                 <span className="block truncate text-xs text-muted-foreground">

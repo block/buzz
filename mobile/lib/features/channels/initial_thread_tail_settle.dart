@@ -36,12 +36,14 @@ class InitialThreadTailSettle {
     required int? targetIndex,
     required double hiddenTopFraction,
     required double hiddenBottomFraction,
+    required VoidCallback onSettled,
   }) {
     if (_isComplete) return;
 
     final generation = ++_generation;
     if (targetIndex == null) {
       _isComplete = true;
+      onSettled();
       return;
     }
 
@@ -67,8 +69,13 @@ class InitialThreadTailSettle {
         // head. A clipped tail still takes the measured correction path.
         if (targetIsFullyVisible) {
           _isComplete = true;
+          onSettled();
           return;
         }
+        // This package uses a temporary second list for distant targets. The
+        // caller keeps the hydrated viewport unpainted until this one-frame
+        // placement completes, so that implementation detail cannot appear as
+        // an entry bounce.
         controller
             .scrollTo(
               index: targetIndex,
@@ -76,7 +83,9 @@ class InitialThreadTailSettle {
               duration: const Duration(milliseconds: 1),
             )
             .whenComplete(() {
-              if (generation == _generation) _isComplete = true;
+              if (generation != _generation) return;
+              _isComplete = true;
+              onSettled();
             });
       });
       // A post-frame callback does not itself request the frame in which it

@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { SmilePlus } from "lucide-react";
 import * as React from "react";
 
@@ -25,6 +26,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
+  buildGroupedMembershipPayload,
+  parseSystemMessagePayload,
+  type SystemMessagePayload,
+} from "../lib/membershipGroupPayload";
+import {
+  addedActionPrefix,
   addedByActionPrefix,
   describeChannelTextFieldChange,
   toInlineName,
@@ -44,118 +51,12 @@ import {
 const SYSTEM_ACTION_BUTTON_CLASS = "h-6 w-6 rounded-full p-0";
 const SYSTEM_ACTION_ICON_CLASS = "!h-4 !w-4";
 
-type SystemMessagePayload = {
-  type: string;
-  actor?: string;
-  target?: string;
-  targets?: string[];
-  topic?: string;
-  purpose?: string;
-  // Moderation tombstone fields (kind:40099 "message_deleted"). All optional and
-  // moderator-authored — present when a moderator removed the message, absent for
-  // a plain member self-delete. Reporter identity/evidence never appears here.
-  public_reason?: string;
-  reason_code?: string;
-  action_id?: string;
-};
-
 type SystemMessageDescription = {
   action: React.ReactNode;
   title: React.ReactNode;
 };
 
 const MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES = 3;
-
-function parseSystemMessagePayload(
-  message: TimelineMessage,
-): SystemMessagePayload | null {
-  try {
-    return JSON.parse(message.body) as SystemMessagePayload;
-  } catch {
-    return null;
-  }
-}
-
-function buildGroupedMembershipPayload(
-  messages: readonly TimelineMessage[],
-): SystemMessagePayload | null {
-  if (messages.length < 2) return null;
-
-  const payloads = messages.map(parseSystemMessagePayload);
-  const joinedThenLeft = buildJoinedThenLeftPayload(payloads);
-  if (joinedThenLeft) return joinedThenLeft;
-
-  const arrivals = payloads.map((payload) => {
-    const payloadActor = payload?.actor ? normalizePubkey(payload.actor) : null;
-    const payloadTarget = payload?.target
-      ? normalizePubkey(payload.target)
-      : null;
-    if (payload?.type !== "member_joined" || !payloadActor || !payloadTarget) {
-      return null;
-    }
-    return { actor: payloadActor, target: payloadTarget };
-  });
-  if (arrivals.some((arrival) => !arrival)) return null;
-
-  const membershipArrivals = arrivals as {
-    actor: string;
-    target: string;
-  }[];
-  const targets = membershipArrivals.map(({ target }) => target);
-  const isSelfJoinGroup = membershipArrivals.every(
-    ({ actor, target }) => actor === target,
-  );
-
-  if (isSelfJoinGroup) {
-    return {
-      type: "members_joined",
-      target: targets[0],
-      targets,
-    };
-  }
-
-  const actor = membershipArrivals[0].actor;
-  const isSameAdderGroup = membershipArrivals.every(
-    ({ actor: candidateActor, target }) =>
-      candidateActor === actor && candidateActor !== target,
-  );
-  if (!isSameAdderGroup) {
-    return null;
-  }
-
-  return {
-    type: "members_added",
-    actor,
-    target: targets[0],
-    targets,
-  };
-}
-
-function buildJoinedThenLeftPayload(
-  payloads: readonly (SystemMessagePayload | null)[],
-): SystemMessagePayload | null {
-  if (payloads.length !== 2) return null;
-
-  const [arrival, departure] = payloads;
-  const arrivalTarget = arrival?.target
-    ? normalizePubkey(arrival.target)
-    : null;
-  const departureActor = departure?.actor
-    ? normalizePubkey(departure.actor)
-    : null;
-  if (
-    arrival?.type !== "member_joined" ||
-    departure?.type !== "member_left" ||
-    !arrival.actor ||
-    !arrivalTarget ||
-    normalizePubkey(arrival.actor) !== arrivalTarget ||
-    arrivalTarget !== departureActor
-  ) {
-    return null;
-  }
-
-  return { type: "member_joined_then_left", target: arrival.target };
-}
 
 function aggregateGroupedReactions(
   messages: readonly TimelineMessage[],
@@ -285,6 +186,7 @@ function ProfileName({
       interactive={Boolean(pubkey)}
     >
       {children}
+      <AgentManagementMarker pubkey={pubkey} />
     </InlineChip>
   ) : (
     <span
@@ -295,6 +197,7 @@ function ProfileName({
       )}
     >
       {children}
+      <AgentManagementMarker pubkey={pubkey} />
     </span>
   );
 
@@ -316,7 +219,7 @@ function ProfileName({
 
 function membershipActivityPubkeys(payload: SystemMessagePayload): string[] {
   const pubkeys =
-    payload.type === "members_added" || payload.type === "members_joined"
+    payload.type === "members_arrived"
       ? (payload.targets ?? [])
       : payload.type === "member_removed"
         ? [payload.target ?? payload.actor]
@@ -417,6 +320,12 @@ function MemberNamesInlineList({
                 {hiddenTargets.map((pubkey) => (
                   <div className="flex items-center gap-2" key={pubkey}>
                     <UserAvatar
+                      accent={isKnownAgentPubkey(
+                        pubkey,
+                        profiles,
+                        personaLookup,
+                        agentPubkeys,
+                      )}
                       avatarUrl={resolveAvatarUrl(pubkey, profiles)}
                       className="!h-5 !w-5 shrink-0 text-3xs"
                       displayName={resolveDisplayLabel(
@@ -424,6 +333,16 @@ function MemberNamesInlineList({
                         currentPubkey,
                         profiles,
                       )}
+                      shape={
+                        isKnownAgentPubkey(
+                          pubkey,
+                          profiles,
+                          personaLookup,
+                          agentPubkeys,
+                        )
+                          ? "squircle"
+                          : "circle"
+                      }
                     />
                     <span className="min-w-0 truncate">
                       {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
@@ -437,6 +356,148 @@ function MemberNamesInlineList({
       ) : null}
     </>
   );
+}
+
+function describeGroupedArrivals({
+  agentPubkeys,
+  currentPubkey,
+  isTargetCurrentUser,
+  membershipTitle,
+  payload,
+  personaLookup,
+  profiles,
+}: {
+  agentPubkeys?: ReadonlySet<string>;
+  currentPubkey: string | undefined;
+  isTargetCurrentUser: boolean;
+  membershipTitle: React.ReactNode;
+  payload: SystemMessagePayload;
+  personaLookup?: Map<string, string>;
+  profiles: UserProfileLookup | undefined;
+}): SystemMessageDescription | null {
+  const arrivals = payload.arrivals;
+  if (!arrivals?.length || !payload.targets?.length) return null;
+
+  const sharedActor = arrivals[0].actor;
+  const hasSelfJoins = arrivals.some(({ actor, target }) => actor === target);
+  const hasAdditions = arrivals.some(({ actor, target }) => actor !== target);
+  const isSameAdderGroup =
+    hasAdditions &&
+    arrivals.every(
+      ({ actor, target }) => actor === sharedActor && actor !== target,
+    );
+  const isAllAdditionGroup = hasAdditions && !hasSelfJoins;
+  const isAllSelfJoinGroup = hasSelfJoins && !hasAdditions;
+  const additionalTargets = payload.targets.slice(1);
+
+  if (payload.targets.length === 1) {
+    if (isSameAdderGroup) {
+      return {
+        title: membershipTitle,
+        action: (
+          <>
+            {addedByActionPrefix(isTargetCurrentUser)}{" "}
+            <ProfileName pubkey={sharedActor} underlineOnHover>
+              {resolveInlineDisplayLabel(sharedActor, currentPubkey, profiles)}
+            </ProfileName>
+          </>
+        ),
+      };
+    }
+
+    if (isAllAdditionGroup) {
+      return {
+        title: membershipTitle,
+        action: addedActionPrefix(isTargetCurrentUser),
+      };
+    }
+
+    if (isAllSelfJoinGroup) {
+      return {
+        title: membershipTitle,
+        action: "joined",
+      };
+    }
+
+    return {
+      title: membershipTitle,
+      action: "arrived",
+    };
+  }
+
+  if (isSameAdderGroup) {
+    return {
+      title: membershipTitle,
+      action: (
+        <>
+          {addedByActionPrefix(isTargetCurrentUser)}{" "}
+          <ProfileName pubkey={sharedActor} underlineOnHover>
+            {resolveInlineDisplayLabel(sharedActor, currentPubkey, profiles)}
+          </ProfileName>
+          , along with{" "}
+          <MemberNamesInlineList
+            agentPubkeys={agentPubkeys}
+            currentPubkey={currentPubkey}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            targets={additionalTargets}
+          />
+        </>
+      ),
+    };
+  }
+
+  if (isAllAdditionGroup) {
+    return {
+      title: membershipTitle,
+      action: (
+        <>
+          {addedActionPrefix(isTargetCurrentUser)} along with{" "}
+          <MemberNamesInlineList
+            agentPubkeys={agentPubkeys}
+            currentPubkey={currentPubkey}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            targets={additionalTargets}
+          />
+        </>
+      ),
+    };
+  }
+
+  if (isAllSelfJoinGroup) {
+    return {
+      title: membershipTitle,
+      action: (
+        <>
+          joined along with{" "}
+          <MemberNamesInlineList
+            agentPubkeys={agentPubkeys}
+            currentPubkey={currentPubkey}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            targets={additionalTargets}
+          />
+        </>
+      ),
+    };
+  }
+
+  return {
+    title: membershipTitle,
+    action: (
+      <>
+        arrived along with{" "}
+        <MemberNamesInlineList
+          agentPubkeys={agentPubkeys}
+          currentPubkey={currentPubkey}
+          personaLookup={personaLookup}
+          profiles={profiles}
+          targets={additionalTargets}
+        />
+      </>
+    ),
+  };
 }
 
 function describeSystemEvent(
@@ -490,48 +551,16 @@ function describeSystemEvent(
   );
 
   switch (payload.type) {
-    case "members_added":
-      if (!payload.actor || !payload.targets?.length) return null;
-      return {
-        title: membershipTitle,
-        action: (
-          <>
-            {addedByActionPrefix(isTargetCurrentUser)}{" "}
-            <ProfileName pubkey={payload.actor} underlineOnHover>
-              {resolveInlineDisplayLabel(
-                payload.actor,
-                currentPubkey,
-                profiles,
-              )}
-            </ProfileName>
-            , along with{" "}
-            <MemberNamesInlineList
-              agentPubkeys={agentPubkeys}
-              currentPubkey={currentPubkey}
-              personaLookup={personaLookup}
-              profiles={profiles}
-              targets={payload.targets.slice(1)}
-            />
-          </>
-        ),
-      };
-    case "members_joined":
-      if (!payload.targets?.length) return null;
-      return {
-        title: membershipTitle,
-        action: (
-          <>
-            joined the channel along with{" "}
-            <MemberNamesInlineList
-              agentPubkeys={agentPubkeys}
-              currentPubkey={currentPubkey}
-              personaLookup={personaLookup}
-              profiles={profiles}
-              targets={payload.targets.slice(1)}
-            />
-          </>
-        ),
-      };
+    case "members_arrived":
+      return describeGroupedArrivals({
+        agentPubkeys,
+        currentPubkey,
+        isTargetCurrentUser,
+        membershipTitle,
+        payload,
+        personaLookup,
+        profiles,
+      });
     case "member_joined_then_left":
       if (!payload.target) return null;
       return {
@@ -711,9 +740,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     return null;
   }
   const isMembershipArrival =
-    payload.type === "member_joined" ||
-    payload.type === "members_added" ||
-    payload.type === "members_joined";
+    payload.type === "member_joined" || payload.type === "members_arrived";
   const isMembershipActivity =
     isMembershipArrival ||
     payload.type === "member_joined_then_left" ||
@@ -865,7 +892,9 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           <div className="flex justify-center">
             <div className="flex min-w-0 max-w-[min(40rem,80%)] items-center gap-2">
               <MembershipAvatarStack
+                agentPubkeys={agentPubkeys}
                 currentPubkey={currentPubkey}
+                personaLookup={personaLookup}
                 profiles={profiles}
                 pubkeys={membershipPubkeys}
               />
@@ -896,6 +925,10 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
               <MessageAuthorText as="div" className="text-foreground">
                 {description.title}
               </MessageAuthorText>
+              <AgentManagementMarker
+                pubkey={displayedIdentityPubkey}
+                ownerPubkey={displayedOwnerPubkey}
+              />
               {displayedIdentityIsAgent ? (
                 <>
                   <MessageAgentOwner

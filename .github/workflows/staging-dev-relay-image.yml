@@ -1,0 +1,276 @@
+name: Staging dev relay image
+
+# Publishes pre-merge relay runtime images for bb-block staging only.
+#
+# Operators run this workflow from the default branch and provide a target ref in
+# this repository. GitHub's workflow_dispatch permission model limits triggering
+# to collaborators who can run repository workflows; no actor allowlist is kept
+# here. The target ref is resolved to an immutable commit SHA before checkout,
+# and the published tag is derived from that full SHA.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch, tag, refs/heads/*, or refs/tags/* in block/buzz to publish for bb-block staging"
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  IMAGE_NAME: ghcr.io/block/buzz-staging-dev
+  ECR_REPOSITORY: 929862310821.dkr.ecr.us-west-2.amazonaws.com/ghcr.io/block/buzz-staging-dev
+
+jobs:
+  resolve:
+    name: Resolve target ref
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      target_sha: ${{ steps.resolve.outputs.target_sha }}
+      image_tag: ${{ steps.resolve.outputs.image_tag }}
+    steps:
+      - name: Require reviewed workflow from main in canonical repository
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$REPOSITORY" != "block/buzz" ]; then
+            echo "::error::Staging dev relay image publication is restricted to block/buzz"
+            exit 1
+          fi
+
+          if [ "$DISPATCH_REF" != "refs/heads/main" ]; then
+            echo "::error::Dispatch this workflow from main, not $DISPATCH_REF"
+            exit 1
+          fi
+
+      - name: Resolve target ref in this repository
+        id: resolve
+        env:
+          TARGET_REF_INPUT: ${{ inputs.target_ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          target_ref=$(printf '%s' "$TARGET_REF_INPUT" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+          if [ -z "$target_ref" ]; then
+            echo "target_ref must not be empty" >&2
+            exit 1
+          fi
+
+          if [ ${#target_ref} -gt 255 ]; then
+            echo "target_ref is too long" >&2
+            exit 1
+          fi
+
+          if [[ ! "$target_ref" =~ ^[A-Za-z0-9._/@-]+$ ]]; then
+            echo "target_ref contains unsupported characters; use a branch, tag, or full refs/heads/* or refs/tags/* name" >&2
+            exit 1
+          fi
+
+          case "$target_ref" in
+            -*|*..*|*.lock|refs/pull/*|pull/*|*/pull/*)
+              echo "target_ref is not an allowed repository branch/tag/ref" >&2
+              exit 1
+              ;;
+          esac
+
+          workdir=$(mktemp -d)
+          trap 'rm -rf "$workdir"' EXIT
+          git -C "$workdir" init --quiet
+          git -C "$workdir" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+
+          fetch_commit() {
+            local ref=$1
+            git -C "$workdir" fetch --no-tags --depth=1 origin "$ref" >/dev/null 2>&1
+            git -C "$workdir" rev-parse --verify "FETCH_HEAD^{commit}"
+          }
+
+          target_sha=""
+          if [[ "$target_ref" == refs/heads/* || "$target_ref" == refs/tags/* ]]; then
+            target_sha=$(fetch_commit "$target_ref") || {
+              echo "target_ref did not resolve in ${GITHUB_REPOSITORY}: $target_ref" >&2
+              exit 1
+            }
+          else
+            if target_sha=$(fetch_commit "refs/heads/${target_ref}"); then
+              :
+            elif target_sha=$(fetch_commit "refs/tags/${target_ref}"); then
+              :
+            else
+              echo "target_ref did not resolve as a branch or tag in ${GITHUB_REPOSITORY}: $target_ref" >&2
+              exit 1
+            fi
+          fi
+
+          target_sha=$(printf '%s' "$target_sha" | tr '[:upper:]' '[:lower:]')
+          if [[ ! "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "resolved target SHA is invalid: $target_sha" >&2
+            exit 1
+          fi
+
+          image_tag="dev-sha-${target_sha}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "target_sha=${target_sha}"
+            echo "image_tag=${image_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+          printf "Resolved \`%s\` to \`%s\`; image tag \`%s\`.\n" "$target_ref" "$target_sha" "$image_tag" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build staging relay runtime (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    needs: resolve
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - name: Checkout resolved target
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ needs.resolve.outputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.title=Buzz staging dev relay
+            org.opencontainers.image.description=Pre-merge Buzz relay runtime image for bb-block staging only
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.target_sha }}
+
+      - name: Build and push runtime image by digest
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+          cache-to: |
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }},mode=max,compression=zstd
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests-release
+          touch "/tmp/digests-release/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: staging-dev-relay-digests-${{ matrix.arch }}
+          path: /tmp/digests-release/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish staging relay runtime manifest
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve
+      - build
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: staging-dev-relay-digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest list
+        id: manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          digests=()
+          for digest in *; do
+            digests+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create -t "${IMAGE_NAME}:${IMAGE_TAG}" "${digests[@]}"
+          merged_digest=$(docker buildx imagetools inspect "${IMAGE_NAME}:${IMAGE_TAG}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${merged_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Deployment summary
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+          TARGET_SHA: ${{ needs.resolve.outputs.target_sha }}
+          MERGED_DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          {
+            echo "### Published bb-block staging dev relay image"
+            echo
+            echo "**Source commit:** \`${TARGET_SHA}\`"
+            echo "**GHCR image:** \`${IMAGE_NAME}:${IMAGE_TAG}\`"
+            echo "**Manifest digest:** \`${MERGED_DIGEST}\`"
+            echo
+            echo "Set bb-block staging BPCI values to:"
+            echo '```yaml'
+            echo "buzz:"
+            echo "  image:"
+            echo "    repository: ${ECR_REPOSITORY}"
+            echo "    tag: ${IMAGE_TAG}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

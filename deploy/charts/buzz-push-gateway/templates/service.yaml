@@ -6,4 +6,4 @@ metadata:
 spec:
   selector: {{- include "push.runtimeLabels" . | nindent 4 }}
   ports:
-    - { name: https, port: {{ .Values.service.port }}, targetPort: public }
+    - { name: http, port: {{ .Values.service.port }}, targetPort: public }

@@ -17,6 +17,7 @@ test("turns every bare Buzz entity permalink family into a chip node", () => {
   const id = "cd".repeat(32);
   const links = [
     `buzz://repo?owner=${owner}&d=buzz`,
+    `buzz://project?owner=${owner}&d=onboarding`,
     `buzz://pr?id=${id}&owner=${owner}&d=buzz`,
     `buzz://issue?id=${id}&owner=${owner}&d=buzz`,
   ];

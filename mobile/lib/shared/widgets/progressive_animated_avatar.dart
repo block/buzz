@@ -15,11 +15,19 @@ class ProgressiveAnimatedAvatar extends HookWidget {
     required this.descriptor,
     required this.fallback,
     this.fit = BoxFit.cover,
+    this.loadingImage,
+    this.onAnimationReady,
   });
 
   final AnimatedAvatarDescriptor descriptor;
   final Widget fallback;
   final BoxFit fit;
+
+  /// A local image shown instead of the poster while remote media warms up.
+  final ImageProvider? loadingImage;
+
+  /// Called after the remote animation has produced its first frame.
+  final VoidCallback? onAnimationReady;
 
   @override
   Widget build(BuildContext context) {
@@ -42,6 +50,7 @@ class ProgressiveAnimatedAvatar extends HookWidget {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (context.mounted) {
                 readyAnimationUrl.value = descriptor.animationUrl;
+                onAnimationReady?.call();
               }
             });
           }
@@ -60,12 +69,20 @@ class ProgressiveAnimatedAvatar extends HookWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        AvatarImageContent(
-          key: const ValueKey('progressive-animated-avatar-poster'),
-          imageUrl: descriptor.posterUrl,
-          fallback: fallback,
-          fit: fit,
-        ),
+        if (loadingImage case final image?)
+          Image(
+            key: const ValueKey('progressive-animated-avatar-local-handoff'),
+            image: image,
+            fit: fit,
+            gaplessPlayback: true,
+          )
+        else
+          AvatarImageContent(
+            key: const ValueKey('progressive-animated-avatar-poster'),
+            imageUrl: descriptor.posterUrl,
+            fallback: fallback,
+            fit: fit,
+          ),
         Offstage(
           key: const ValueKey('progressive-animated-avatar-animation-loading'),
           offstage: true,

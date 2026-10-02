@@ -9,12 +9,6 @@ import {
 } from "@/shared/api/tauriIdentity";
 import type { IdentityStorage } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/shared/ui/dialog";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
@@ -24,7 +18,11 @@ import {
   resetEncryptedBackupSession,
   useEncryptedBackupSession,
 } from "./EncryptedBackupCreator";
-import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
+import {
+  IdentityKeyHelpContent,
+  IdentityKeyHelpDialog,
+} from "./IdentityKeyHelpDialog";
+import { IdentityKeyIntroduction } from "./IdentityKeyIntroduction";
 import { IdentityRecoveryPairing } from "./IdentityRecoveryPairing";
 import { LandingBees } from "./LandingBees";
 import {
@@ -32,33 +30,29 @@ import {
   type NostrKeyImportStage,
 } from "./NostrKeyImportForm";
 import {
-  ONBOARDING_INK_ICON_CLASS,
   ONBOARDING_LANDING_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
-  OnboardingChrome,
 } from "./OnboardingChrome";
+import { OnboardingCard } from "./OnboardingCard";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
+import type { HarnessConnectionMethod } from "./harnessConnectionOptions";
 import type { DefaultConfigDraft } from "./types";
 
 export type MachineOnboardingPage =
   | "identity"
+  | "identity-key-intro"
+  | "identity-key-help"
   | "key-import"
   | "backup"
   | "setup"
   | "config";
 
-type BackupSubview = "created" | "options" | "password";
-
-/** A pending navigation the parent should execute after RouterProvider mounts. */
-export type PostOnboardingNavigation = {
-  to: string;
-  search?: Record<string, string>;
-};
+type BackupSubview = "created" | "password";
 
 export function MachineOnboardingFlow({
   complete,
@@ -67,21 +61,16 @@ export function MachineOnboardingFlow({
   identityLost,
   initialPage,
   queryClient,
-  navigateAfterComplete,
 }: {
-  complete: (pubkey?: string) => void;
+  complete: (
+    pubkey?: string,
+    options?: { continueToProfile?: boolean },
+  ) => void;
   continueWithIdentity: (pubkey: string) => void;
   continueWithRecoveredIdentity: (pubkey: string) => void;
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
-  /**
-   * Called when the user finishes onboarding and requests navigation to a
-   * specific route (e.g. Settings → Agents). The parent owns the RouterProvider,
-   * so navigation must be deferred to it — calling router.navigate() here races
-   * with RouterProvider mounting.
-   */
-  navigateAfterComplete?: (nav: PostOnboardingNavigation) => void;
 }) {
   const [page, setPage] = React.useState<MachineOnboardingPage>(
     identityLost ? "key-import" : (initialPage ?? "identity"),
@@ -98,6 +87,8 @@ export function MachineOnboardingFlow({
   const [keyImportDialog, setKeyImportDialog] = React.useState<
     "backup" | "phone" | null
   >(null);
+  const [identityKeyHelpReturnPage, setIdentityKeyHelpReturnPage] =
+    React.useState<"identity" | "identity-key-intro">("identity");
   const [phoneRecoveryStep, setPhoneRecoveryStep] = React.useState("loading");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
@@ -106,6 +97,16 @@ export function MachineOnboardingFlow({
     IdentityStorage | undefined
   >();
   const [readyRuntimeIds, setReadyRuntimeIds] = React.useState<string[]>([]);
+  const [setupBackAction, setSetupBackAction] = React.useState<
+    (() => void) | null
+  >(null);
+  const [harnessConnectionMethod, setHarnessConnectionMethod] =
+    React.useState<HarnessConnectionMethod | null>(null);
+  const [configBackTarget, setConfigBackTarget] = React.useState<
+    "method" | "list"
+  >("method");
+  const [isChoosingDifferentHarness, setIsChoosingDifferentHarness] =
+    React.useState(false);
   const [defaultConfigDraft, setDefaultConfigDraft] =
     React.useState<DefaultConfigDraft | null>(null);
   const [isDefaultConfigSaving, setIsDefaultConfigSaving] =
@@ -117,17 +118,30 @@ export function MachineOnboardingFlow({
   >("forward");
   const [returningFromSecurity, setReturningFromSecurity] =
     React.useState(false);
-  // Owned here so switching between the yellow onboarding view and the dark
-  // security subview keeps the created backup, password, and test progress.
+  // Owned here so switching between the onboarding card and the security
+  // subview keeps the created backup, password, and test progress.
   const backupSession = useEncryptedBackupSession();
   const reduceMotion = useReducedMotion() ?? false;
-  const isSecuritySubview = page === "backup" && backupSubview !== "created";
+  const setupSelectionHandoffRef = React.useRef(false);
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
+      if (setupSelectionHandoffRef.current) return;
       setReadyRuntimeIds(Array.from(new Set(runtimeIds)));
     },
     [],
   );
+  const handleSetupBackActionChange = React.useCallback(
+    (backAction: () => void) =>
+      setSetupBackAction((current) =>
+        current === backAction ? current : backAction,
+      ),
+    [],
+  );
+  const returnToApiConfig = React.useCallback(() => {
+    setIsChoosingDifferentHarness(false);
+    setTransitionDirection("backward");
+    setPage("config");
+  }, []);
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -218,9 +232,14 @@ export function MachineOnboardingFlow({
       setKeyImportStage("key-entry");
       return;
     }
+    if (keyImportDialog) {
+      setKeyImportDialog(null);
+      setPhoneRecoveryStep("loading");
+      return;
+    }
     setTransitionDirection("backward");
     setPage("identity");
-  }, [keyImportStage]);
+  }, [keyImportDialog, keyImportStage]);
 
   const returnToCreatedKey = React.useCallback(() => {
     setBackupDirection("backward");
@@ -231,8 +250,8 @@ export function MachineOnboardingFlow({
   const backFromPasswordBackup = React.useCallback(() => {
     resetEncryptedBackupSession(backupSession);
     setBackupDirection("backward");
-    setReturningFromSecurity(false);
-    setBackupSubview("options");
+    setReturningFromSecurity(true);
+    setBackupSubview("created");
   }, [backupSession]);
 
   const backFromSetup = React.useCallback(() => {
@@ -252,60 +271,70 @@ export function MachineOnboardingFlow({
     setPage("backup");
   }, [backupSession, backupSubview, identityWasImported]);
 
+  const backFromConfig = React.useCallback(() => {
+    setupSelectionHandoffRef.current = false;
+    setTransitionDirection("backward");
+    setIsChoosingDifferentHarness(false);
+    if (configBackTarget === "method") {
+      setHarnessConnectionMethod(null);
+    }
+    setPage("setup");
+  }, [configBackTarget]);
+
   const chromeBackAction =
-    page === "key-import" &&
-    (!identityLost || keyImportStage === "backup-password")
-      ? { disabled: isKeyImporting, onClick: backFromKeyImport }
-      : page === "backup" && backupSubview !== "created"
+    page === "identity-key-help"
+      ? {
+          onClick: () => {
+            setTransitionDirection("backward");
+            setPage(identityKeyHelpReturnPage);
+          },
+        }
+      : page === "identity-key-intro"
         ? {
-            label: "Return to onboarding",
-            onClick: returnToCreatedKey,
-            testId: "backup-return-to-onboarding",
+            disabled: isPending,
+            onClick: () => {
+              setError(null);
+              setTransitionDirection("backward");
+              setPage("identity");
+            },
           }
-        : page === "backup"
-          ? {
-              onClick: () => {
-                setTransitionDirection("backward");
-                setPage("identity");
-              },
-            }
-          : page === "setup"
-            ? { onClick: backFromSetup }
-            : page === "config"
+        : page === "key-import" &&
+            (keyImportDialog !== null ||
+              !identityLost ||
+              keyImportStage === "backup-password")
+          ? { disabled: isKeyImporting, onClick: backFromKeyImport }
+          : page === "backup" && backupSubview !== "created"
+            ? {
+                label: "Return to onboarding",
+                onClick: returnToCreatedKey,
+                testId: "backup-return-to-onboarding",
+              }
+            : page === "backup"
               ? {
-                  disabled: isDefaultConfigSaving,
                   onClick: () => {
                     setTransitionDirection("backward");
-                    setPage("setup");
+                    setPage("identity-key-intro");
                   },
                 }
-              : undefined;
+              : page === "setup"
+                ? { onClick: setupBackAction ?? backFromSetup }
+                : page === "config"
+                  ? {
+                      disabled: isDefaultConfigSaving,
+                      onClick: backFromConfig,
+                    }
+                  : undefined;
 
-  return (
-    <div
-      className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 text-foreground ${
-        isSecuritySubview ? "buzz-onboarding-security-theme" : ""
-      } ${
-        page === "identity"
-          ? "buzz-onboarding-welcome py-8"
-          : "pb-28 pt-[106px]"
-      }`}
-      data-testid="machine-onboarding-gate"
-    >
-      <StartupWindowDragRegion />
-      {page === "identity" ? <LandingBees /> : null}
-      {page !== "identity" && !isSecuritySubview ? (
-        <OnboardingChrome
-          current={page === "config" ? 4 : page === "setup" ? 3 : 2}
-        />
-      ) : null}
-      <OnboardingFooterProvider backAction={chromeBackAction}>
-        <div
-          className={`relative flex w-full max-w-[1040px] flex-col items-center text-center ${
-            page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
-          }`}
-        >
-          {page === "identity" ? (
+  if (page === "identity") {
+    return (
+      <div
+        className="buzz-onboarding-neutral-theme buzz-startup-shell buzz-onboarding-welcome flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 py-8 text-foreground"
+        data-testid="machine-onboarding-gate"
+      >
+        <StartupWindowDragRegion />
+        <LandingBees />
+        <OnboardingFooterProvider>
+          <div className="relative my-auto flex w-full max-w-[1040px] flex-col items-center text-center">
             <OnboardingSlideTransition
               className="flex w-full max-w-[720px] flex-col items-center text-center"
               direction={transitionDirection}
@@ -327,7 +356,14 @@ export function MachineOnboardingFlow({
                 <Button
                   className={ONBOARDING_LANDING_CTA_CLASS}
                   disabled={isPending}
-                  onClick={() => void loadFreshIdentity()}
+                  onClick={() => {
+                    if (selectedPubkey) {
+                      void loadFreshIdentity();
+                      return;
+                    }
+                    setTransitionDirection("forward");
+                    setPage("identity-key-intro");
+                  }}
                   type="button"
                 >
                   {isPending
@@ -353,18 +389,103 @@ export function MachineOnboardingFlow({
                     : "Use an existing key"}
                 </Button>
               </div>
-              <IdentityKeyHelpDialog />
+              <IdentityKeyHelpDialog
+                onOpen={() => {
+                  setIdentityKeyHelpReturnPage("identity");
+                  setTransitionDirection("forward");
+                  setPage("identity-key-help");
+                }}
+              />
             </OnboardingSlideTransition>
-          ) : page === "key-import" ? (
-            <OnboardingSlideTransition
-              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
-              direction={transitionDirection}
-              transitionKey={`machine-key-import-${transitionDirection}`}
+          </div>
+        </OnboardingFooterProvider>
+      </div>
+    );
+  }
+
+  return (
+    <OnboardingCard
+      backAction={chromeBackAction}
+      current={page === "config" ? 4 : page === "setup" ? 3 : 2}
+      showStepIndicator={page !== "identity-key-help"}
+      testId="machine-onboarding-gate"
+    >
+      {page === "identity-key-intro" ? (
+        <IdentityKeyIntroduction
+          direction={transitionDirection}
+          disabled={isPending}
+          error={error}
+          onCreate={() => void loadFreshIdentity()}
+          onOpenHelp={() => {
+            setError(null);
+            setIdentityKeyHelpReturnPage("identity-key-intro");
+            setTransitionDirection("forward");
+            setPage("identity-key-help");
+          }}
+        />
+      ) : page === "identity-key-help" ? (
+        <OnboardingSlideTransition
+          className="flex min-h-0 w-full flex-col items-stretch justify-start text-left"
+          direction={transitionDirection}
+          transitionKey={`identity-key-help-${transitionDirection}`}
+        >
+          <IdentityKeyHelpContent />
+        </OnboardingSlideTransition>
+      ) : page === "key-import" ? (
+        <OnboardingSlideTransition
+          className="flex min-h-0 w-full flex-col items-stretch text-left"
+          direction={transitionDirection}
+          transitionKey={`machine-key-import-${keyImportDialog ?? "key"}-${transitionDirection}`}
+        >
+          {keyImportDialog === "backup" ? (
+            <div className="w-full" data-testid="backup-recovery-dialog">
+              <h1 className="text-title font-normal text-foreground">
+                Restore from a backup file
+              </h1>
+              <p className="mt-2 w-full text-base leading-6 text-foreground/80">
+                Choose the encrypted backup file you saved from Buzz.
+              </p>
+              <NostrKeyImportForm
+                key={keyImportFormKey}
+                mode="backup"
+                onBack={backFromKeyImport}
+                onImport={importExistingIdentity}
+                onImportingChange={setIsKeyImporting}
+                onStageChange={setKeyImportStage}
+                showBack={false}
+                showPasswordStageBack={false}
+                variant="spotlight"
+              />
+            </div>
+          ) : keyImportDialog === "phone" ? (
+            <div
+              className="flex min-h-0 w-full flex-1 flex-col"
+              data-testid="phone-recovery-dialog"
             >
+              <h1 className="text-title font-normal text-foreground">
+                {identityLost ? "Recover from your phone" : "Scan to sign in"}
+              </h1>
+              <p className="mt-2 w-full text-base leading-6 text-foreground/80">
+                {phoneRecoveryStep === "loading" || phoneRecoveryStep === "qr"
+                  ? "Scan this code with a device where you’re currently signed in to Buzz."
+                  : "Confirm the code before sharing your identity."}
+              </p>
+              <div
+                className="flex min-h-0 flex-1 items-center justify-center"
+                data-testid="identity-recovery-stage"
+              >
+                <IdentityRecoveryPairing
+                  onRecovered={loadRecoveredIdentity}
+                  onStepChange={setPhoneRecoveryStep}
+                />
+              </div>
+            </div>
+          ) : (
+            <>
               <motion.div
-                animate={{ opacity: 1, y: 0 }}
-                className="relative z-10 shrink-0"
-                initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+                animate={{ opacity: 1 }}
+                className="relative z-10 shrink-0 text-left"
+                initial={reduceMotion ? false : { opacity: 0 }}
                 key={keyImportStage}
                 transition={{
                   duration: reduceMotion ? 0 : 0.3,
@@ -376,7 +497,7 @@ export function MachineOnboardingFlow({
                     ? "Unlock your account"
                     : "Enter your private key"}
                 </h1>
-                <div className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                <div className="mt-2 w-full text-base leading-6 text-foreground/80">
                   {keyImportStage === "backup-password" ? (
                     "Enter your backup password to restore your identity."
                   ) : (
@@ -386,8 +507,11 @@ export function MachineOnboardingFlow({
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
-                        disabled={isPending}
-                        onClick={() => setKeyImportDialog("backup")}
+                        disabled={isPending || isKeyImporting}
+                        onClick={() => {
+                          setKeyImportStage("key-entry");
+                          setKeyImportDialog("backup");
+                        }}
                         type="button"
                       >
                         backup file
@@ -396,8 +520,11 @@ export function MachineOnboardingFlow({
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-phone-link"
-                        disabled={isPending}
-                        onClick={() => setKeyImportDialog("phone")}
+                        disabled={isPending || isKeyImporting}
+                        onClick={() => {
+                          setPhoneRecoveryStep("loading");
+                          setKeyImportDialog("phone");
+                        }}
                         type="button"
                       >
                         recover from your phone
@@ -407,8 +534,8 @@ export function MachineOnboardingFlow({
                   )}
                 </div>
               </motion.div>
-              <div className="buzz-onboarding-key-import-position w-full">
-                <div className="flex flex-col items-center">
+              <div className="mt-8 w-full">
+                <div className="flex flex-col items-stretch">
                   <NostrKeyImportForm
                     key={keyImportFormKey}
                     onBack={backFromKeyImport}
@@ -432,156 +559,96 @@ export function MachineOnboardingFlow({
                   ) : null}
                 </div>
               </div>
-              <Dialog
-                onOpenChange={(open) => {
-                  if (!open) setKeyImportDialog(null);
-                }}
-                open={keyImportDialog === "backup"}
-              >
-                <DialogContent
-                  className="buzz-onboarding-neutral-theme max-w-[47.5rem] -translate-y-5"
-                  closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
-                  data-system-color-scheme="light"
-                  data-testid="backup-recovery-dialog"
-                  surface="textured"
-                >
-                  <div className="mx-auto w-full max-w-[35rem] pb-6 pt-10 text-center max-sm:pb-4 max-sm:pt-6">
-                    <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
-                      Restore from a backup file
-                    </DialogTitle>
-                    <DialogDescription className="mx-auto mt-4 max-w-[28rem] text-sm leading-6 text-foreground/80">
-                      Choose the encrypted backup file you saved from Buzz.
-                    </DialogDescription>
-                    <NostrKeyImportForm
-                      footerMode="inline"
-                      mode="backup"
-                      onBack={() => setKeyImportDialog(null)}
-                      onImport={importExistingIdentity}
-                      showBack={false}
-                      variant="spotlight"
-                    />
-                  </div>
-                </DialogContent>
-              </Dialog>
-              <Dialog
-                onOpenChange={(open) => {
-                  if (!open) setKeyImportDialog(null);
-                }}
-                open={keyImportDialog === "phone"}
-              >
-                <DialogContent
-                  className="buzz-onboarding-neutral-theme max-h-[calc(100dvh-2rem)] max-w-[47.5rem] -translate-y-5 overflow-y-auto"
-                  closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
-                  data-system-color-scheme="light"
-                  data-testid="phone-recovery-dialog"
-                  surface="textured"
-                >
-                  <div className="mx-auto flex w-full max-w-[35rem] flex-col items-center pb-6 pt-8 text-center max-sm:pb-4 max-sm:pt-4">
-                    <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
-                      {identityLost
-                        ? "Recover from your phone"
-                        : "Use your Buzz identity"}
-                    </DialogTitle>
-                    <DialogDescription className="mt-4 text-sm leading-6 text-foreground/80">
-                      {phoneRecoveryStep === "loading" ||
-                      phoneRecoveryStep === "qr"
-                        ? "Scan this code with a signed-in Buzz phone."
-                        : "Confirm the code before sharing your identity."}
-                    </DialogDescription>
-                    <div className="mt-5">
-                      <IdentityRecoveryPairing
-                        onRecovered={loadRecoveredIdentity}
-                        onStepChange={setPhoneRecoveryStep}
-                      />
-                    </div>
-                  </div>
-                </DialogContent>
-              </Dialog>
-            </OnboardingSlideTransition>
-          ) : page === "backup" ? (
-            backupSubview === "password" ? (
-              <DownloadKeyStep
-                direction={backupDirection}
-                onBack={backFromPasswordBackup}
-                session={backupSession}
-              />
-            ) : (
-              <BackupStep
-                direction={backupDirection}
-                identityStorage={identityStorage}
-                onNext={() => {
-                  setTransitionDirection("forward");
-                  setPage("setup");
-                }}
-                onOpenPasswordBackup={() => {
-                  resetEncryptedBackupSession(backupSession);
-                  setBackupDirection("forward");
-                  setReturningFromSecurity(false);
-                  setBackupSubview("password");
-                }}
-                onShowOptions={() => {
-                  setBackupDirection("forward");
-                  setReturningFromSecurity(false);
-                  setBackupSubview("options");
-                }}
-                optionsExpanded={backupSubview === "options"}
-                returningFromSecurity={returningFromSecurity}
-              />
-            )
-          ) : page === "setup" ? (
-            <SetupStep
-              actions={{
-                // Fresh-key users return to whichever identity backup subview
-                // they used to reach setup; imported keys skip backup entirely.
-                back: () => {
-                  backFromSetup();
-                },
-                next: (runtimeIds) => {
-                  const ids = Array.from(runtimeIds);
-                  setReadyRuntimeIds(ids);
-                  // Harness install can fail (Windows/PATH/network). Don't soft-lock
-                  // onboarding — users can finish setup later in Settings → Agents.
-                  if (ids.length === 0) {
-                    complete(selectedPubkey ?? undefined);
-                    return;
-                  }
-                  setTransitionDirection("forward");
-                  setPage("config");
-                },
-                navigateToAgentSettings: () => {
-                  // Complete onboarding first, then delegate the Settings → Agents
-                  // navigation to the parent.  The parent owns RouterProvider, so
-                  // navigation from within the onboarding flow races with the
-                  // router mounting — calling router.navigate() here is unsafe.
-                  complete(selectedPubkey ?? undefined);
-                  navigateAfterComplete?.({
-                    to: "/settings",
-                    search: { section: "agents" },
-                  });
-                },
-              }}
-              direction={transitionDirection}
-              onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
-            />
-          ) : (
-            <DefaultConfigStep
-              actions={{
-                back: () => {
-                  setTransitionDirection("backward");
-                  setPage("setup");
-                },
-                complete: () => complete(selectedPubkey ?? undefined),
-                discardDraft: () => setDefaultConfigDraft(null),
-                updateDraft: setDefaultConfigDraft,
-              }}
-              direction={transitionDirection}
-              draft={defaultConfigDraft}
-              onSavingChange={setIsDefaultConfigSaving}
-              readyRuntimeIds={readyRuntimeIds}
-            />
+            </>
           )}
-        </div>
-      </OnboardingFooterProvider>
-    </div>
+        </OnboardingSlideTransition>
+      ) : page === "backup" ? (
+        backupSubview === "password" ? (
+          <DownloadKeyStep
+            direction={backupDirection}
+            onBack={backFromPasswordBackup}
+            session={backupSession}
+          />
+        ) : (
+          <BackupStep
+            direction={backupDirection}
+            identityStorage={identityStorage}
+            onNext={() => {
+              setTransitionDirection("forward");
+              setPage("setup");
+            }}
+            onOpenPasswordBackup={() => {
+              resetEncryptedBackupSession(backupSession);
+              setBackupDirection("forward");
+              setReturningFromSecurity(false);
+              setBackupSubview("password");
+            }}
+            optionsExpanded={false}
+            returningFromSecurity={returningFromSecurity}
+          />
+        )
+      ) : page === "setup" ? (
+        <SetupStep
+          actions={{
+            // Fresh-key users return to whichever identity backup subview
+            // they used to reach setup; imported keys skip backup entirely.
+            back: () => {
+              backFromSetup();
+            },
+            next: (runtimeIds, nextConfigBackTarget = "list") => {
+              const ids = Array.from(runtimeIds);
+              setupSelectionHandoffRef.current = ids.length > 0;
+              setReadyRuntimeIds(ids);
+              // Harness install can fail (Windows/PATH/network). Don't soft-lock
+              // onboarding — users can finish setup later in Settings → Agents.
+              if (ids.length === 0) {
+                complete(selectedPubkey ?? undefined, {
+                  continueToProfile: !identityWasImported,
+                });
+                return;
+              }
+              setConfigBackTarget(nextConfigBackTarget);
+              setIsChoosingDifferentHarness(false);
+              setTransitionDirection("forward");
+              setPage("config");
+            },
+          }}
+          direction={transitionDirection}
+          initialMethod={harnessConnectionMethod}
+          onInitialListBack={
+            isChoosingDifferentHarness ? returnToApiConfig : undefined
+          }
+          onBackActionChange={handleSetupBackActionChange}
+          onMethodChange={setHarnessConnectionMethod}
+          onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
+        />
+      ) : (
+        <DefaultConfigStep
+          actions={{
+            back: () => {
+              backFromConfig();
+            },
+            complete: () =>
+              complete(selectedPubkey ?? undefined, {
+                continueToProfile: !identityWasImported,
+              }),
+            discardDraft: () => setDefaultConfigDraft(null),
+            updateDraft: setDefaultConfigDraft,
+            useDifferentHarness:
+              harnessConnectionMethod === "api"
+                ? () => {
+                    setIsChoosingDifferentHarness(true);
+                    setTransitionDirection("forward");
+                    setPage("setup");
+                  }
+                : undefined,
+          }}
+          direction={transitionDirection}
+          draft={defaultConfigDraft}
+          onSavingChange={setIsDefaultConfigSaving}
+          readyRuntimeIds={readyRuntimeIds}
+        />
+      )}
+    </OnboardingCard>
   );
 }

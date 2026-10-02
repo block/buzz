@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
+import 'package:buzz/shared/identity_names/identity_names_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/pulse/compose_note_page.dart';
 import 'package:buzz/features/pulse/pulse_models.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {
   final Map<String, UserProfile> _users;
@@ -13,6 +16,30 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   Map<String, UserProfile> build() => _users;
+
+  @override
+  UserProfile? get(String pubkey) => _users[pubkey.toLowerCase()];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async => true;
+}
+
+class _MutableUserCache extends UserCacheNotifier {
+  _MutableUserCache(this._initial);
+
+  final Map<String, UserProfile> _initial;
+
+  @override
+  Map<String, UserProfile> build() => _initial;
+
+  @override
+  UserProfile? get(String pubkey) => state[pubkey.toLowerCase()];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async => true;
+
+  void replace(UserProfile profile) =>
+      state = {...state, profile.pubkey: profile};
 }
 
 void main() {
@@ -28,16 +55,20 @@ void main() {
     Widget home, {
     TextScaler textScaler = TextScaler.noScaling,
     String displayName = 'Alice',
+    Map<String, UserProfile>? users,
   }) {
     return ProviderScope(
       overrides: [
         userCacheProvider.overrideWith(
-          () => _FakeUserCacheNotifier({
-            'alice_pk': UserProfile(
-              pubkey: 'alice_pk',
-              displayName: displayName,
-            ),
-          }),
+          () => _FakeUserCacheNotifier(
+            users ??
+                {
+                  'alice_pk': UserProfile(
+                    pubkey: 'alice_pk',
+                    displayName: displayName,
+                  ),
+                },
+          ),
         ),
       ],
       child: MaterialApp(
@@ -62,6 +93,47 @@ void main() {
     expect(find.text('Alice'), findsOneWidget); // author name in the row
     expect(find.textContaining('original note being replied to'), findsWidgets);
     expect(find.text('Reply'), findsOneWidget); // action button label
+    // Named parent: the preview avatar initial comes from the authored name.
+    expect(_replyPreviewAvatarInitial(tester, 'Replying to Alice'), 'A');
+  });
+
+  testWidgets('a supplied context follows profile changes while open', (
+    tester,
+  ) async {
+    final author = 'a' * 64;
+    final cache = _MutableUserCache({
+      author: UserProfile(pubkey: author, displayName: 'Scout'),
+    });
+    final note = UserNote(
+      id: 'note-live',
+      pubkey: author,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120,
+      content: 'Original',
+      tags: const [],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [userCacheProvider.overrideWith(() => cache)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Consumer(
+            builder: (context, ref, _) {
+              // The opener's context, as NoteCard passes it to the route.
+              final IdentityNames opened = ref
+                  .read(identityNameSourcesProvider)
+                  .scope([author]);
+              return ComposeNotePage(replyTo: note, names: opened);
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Replying to Scout'), findsOneWidget);
+
+    cache.replace(UserProfile(pubkey: author, displayName: 'Renamed'));
+    await tester.pump();
+    expect(find.text('Replying to Renamed'), findsOneWidget);
   });
 
   testWidgets('reply preview constrains its timestamp at large text sizes', (
@@ -167,4 +239,50 @@ void main() {
     final dividerTop = tester.getRect(find.byType(Divider)).top;
     expect(dividerTop - labelTop, lessThan(220));
   });
+
+  testWidgets('reply preview keys unnamed parent authors to their hex key', (
+    tester,
+  ) async {
+    const a11ce =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+
+    final unnamedParentNote = UserNote(
+      id: 'note-unnamed-parent',
+      pubkey: a11ce,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120,
+      content: 'The original note being replied to',
+      tags: const [],
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        ComposeNotePage(replyTo: unnamedParentNote),
+        users: const {},
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Replying to npub15yw\u2026ccpw'), findsOneWidget);
+    expect(
+      _replyPreviewAvatarInitial(tester, 'Replying to npub15yw\u2026ccpw'),
+      'A',
+    );
+  });
+}
+
+/// Avatar fallback initial in the reply-context preview, located by the
+/// `Replying to` label it renders beside — the parent author's avatar, not
+/// the composer's.
+String _replyPreviewAvatarInitial(WidgetTester tester, String replyingLabel) {
+  final preview = find
+      .ancestor(of: find.text(replyingLabel), matching: find.byType(Column))
+      .first;
+  final avatar = find.descendant(
+    of: preview,
+    matching: find.byType(AvatarImage),
+  );
+  final initial = tester.widget<Text>(
+    find.descendant(of: avatar, matching: find.byType(Text)),
+  );
+  return initial.data!;
 }

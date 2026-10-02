@@ -14,65 +14,37 @@ use buzz_sdk::mentions::{
 
 /// Extract the thread root event ID from a Nostr tag array.
 ///
-/// Parses `"e"` tags with NIP-10 markers:
-/// - If a `"root"` marker exists, returns that event ID.
-/// - Otherwise, if only a `"reply"` marker exists, returns the reply target
-///   (a direct reply's parent IS the root, and nested replies need that root
-///   to thread correctly).
-/// - If no thread markers exist, returns `None` (parent is a top-level message,
-///   so it is itself the root).
+/// Delegates marker parsing and collapse to [`buzz_core::nip10`] (shared with
+/// relay ingest and ACP) so id-validity, marker selection, and top-level
+/// classification cannot drift:
+/// - A `root`+`reply` parent returns its root event ID.
+/// - A `reply`-only parent returns the reply target (a direct reply's parent IS
+///   the root).
+/// - A root-only or marker-less parent returns `None` (it is top-level and its
+///   own root).
 fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
-    fn valid_event_id(s: &str) -> bool {
-        s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
-    }
-    let arr = tags.as_array()?;
-    let mut root = None;
-    let mut reply = None;
-    for tag in arr {
-        let Some(parts) = tag.as_array() else {
-            continue;
-        };
-        if parts.len() >= 4 && parts[0].as_str() == Some("e") {
-            // Defensively ignore malformed marker values so a bad tag on the
-            // parent event can't block the reply — fall back to root == parent.
-            let id = parts[1].as_str().filter(|s| valid_event_id(s));
-            match (parts[3].as_str(), id) {
-                (Some("root"), Some(id)) => root = Some(id.to_string()),
-                (Some("reply"), Some(id)) => reply = Some(id.to_string()),
-                _ => {}
-            }
-        }
-    }
-    root.or(reply)
+    let parts: Vec<Vec<String>> = tags
+        .as_array()?
+        .iter()
+        .filter_map(|tag| {
+            tag.as_array().map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+        })
+        .collect();
+    buzz_core::nip10::parse_thread_markers_from_parts(parts.iter().map(Vec::as_slice))
+        .resolve()
+        .map(|(root, _)| root)
 }
 
-/// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
-///
-/// Fetches the parent event from the relay and inspects its NIP-10 `e` tags to
-/// determine the thread root:
-/// - Direct reply (parent is top-level): `root == parent`.
-/// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
-///
-/// Ensures CLI-sent replies thread correctly using the same NIP-10 logic.
-async fn resolve_thread_ref(
-    client: &BuzzClient,
+fn thread_ref_from_parent_tags(
+    parent_eid: nostr::EventId,
     parent_event_id: &str,
+    tags: &serde_json::Value,
 ) -> Result<ThreadRef, CliError> {
-    let parent_eid = parse_event_id(parent_event_id)?;
-    let filter = serde_json::json!({ "ids": [parent_event_id], "limit": 1 });
-    let raw = client.query(&filter).await?;
-    let events: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    let event = events
-        .as_array()
-        .and_then(|a| a.first())
-        .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
-    let tags = event
-        .get("tags")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    let root_eid = match find_root_from_tags(&tags) {
+    let root_eid = match find_root_from_tags(tags) {
         Some(root_hex) if root_hex != parent_event_id => parse_event_id(&root_hex)?,
         _ => parent_eid,
     };
@@ -83,39 +55,70 @@ async fn resolve_thread_ref(
     })
 }
 
-/// Resolve the channel UUID for an event by querying for it via POST /query.
-/// Extracts the `h` tag value from the returned event's tags.
-async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
-    let filter = serde_json::json!({
-        "ids": [event_id]
-    });
+/// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
+///
+/// Fetches the parent event from the relay and inspects its NIP-10 `e` tags to
+/// determine the thread root:
+/// - Direct reply (parent is top-level): `root == parent`.
+/// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
+///
+/// Ensures CLI-sent replies thread correctly using the same NIP-10 logic.
+async fn fetch_event(client: &BuzzClient, event_id: &str) -> Result<serde_json::Value, CliError> {
+    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
     let raw = client.query(&filter).await?;
     let events: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    let arr = events
+    events
         .as_array()
-        .ok_or_else(|| CliError::Other("query response is not an array".into()))?;
-    let event = arr
-        .first()
-        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))?;
+        .and_then(|events| events.first())
+        .cloned()
+        .ok_or_else(|| CliError::NotFound(format!("event {event_id} not found")))
+}
+
+async fn resolve_thread_ref(
+    client: &BuzzClient,
+    parent_event_id: &str,
+) -> Result<ThreadRef, CliError> {
+    let event = fetch_event(client, parent_event_id).await?;
+    thread_ref_from_event(parent_event_id, &event)
+}
+
+fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<ThreadRef, CliError> {
+    let parent_eid = parse_event_id(event_id)?;
     let tags = event
         .get("tags")
-        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    thread_ref_from_parent_tags(parent_eid, event_id, &tags)
+}
+
+/// Resolve the channel UUID for an event by querying for it via POST /query.
+/// Extracts the `h` tag value from the returned event's tags.
+fn channel_id_from_event(event_id: &str, event: &serde_json::Value) -> Result<Uuid, CliError> {
+    let tags = event
+        .get("tags")
+        .and_then(|tags| tags.as_array())
         .ok_or_else(|| CliError::Other("event missing 'tags' field".into()))?;
-    for tag in tags {
-        if let Some(arr) = tag.as_array() {
-            if arr.first().and_then(|v| v.as_str()) == Some("h") {
-                if let Some(uuid_str) = arr.get(1).and_then(|v| v.as_str()) {
-                    return Uuid::parse_str(uuid_str).map_err(|_| {
-                        CliError::Other(format!("event h-tag is not a valid UUID: {uuid_str}"))
-                    });
-                }
-            }
-        }
-    }
-    Err(CliError::Other(format!(
-        "event {event_id} has no h-tag — cannot determine channel"
-    )))
+    tags.iter()
+        .filter_map(|tag| tag.as_array())
+        .find(|tag| tag.first().and_then(|value| value.as_str()) == Some("h"))
+        .and_then(|tag| tag.get(1))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            CliError::Other(format!(
+                "event {event_id} has no h-tag — cannot determine channel"
+            ))
+        })
+        .and_then(|channel_id| {
+            Uuid::parse_str(channel_id).map_err(|_| {
+                CliError::Other(format!("event h-tag is not a valid UUID: {channel_id}"))
+            })
+        })
+}
+
+async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
+    let event = fetch_event(client, event_id).await?;
+    channel_id_from_event(event_id, &event)
 }
 
 fn resolve_names_to_pubkeys(
@@ -391,37 +394,71 @@ pub async fn cmd_get_messages(
     Ok(())
 }
 
+pub fn resolve_thread_target(
+    expected_channel_id: Uuid,
+    event_id: &str,
+    expected_root_id: Option<&str>,
+    selected_event: &serde_json::Value,
+) -> Result<String, CliError> {
+    let actual_channel_id = channel_id_from_event(event_id, selected_event)?;
+    if actual_channel_id != expected_channel_id {
+        return Err(CliError::Usage(format!(
+            "event {event_id} does not belong to channel {expected_channel_id}"
+        )));
+    }
+    let root_event_id = thread_ref_from_event(event_id, selected_event)?
+        .root_event_id
+        .to_hex();
+    if expected_root_id.is_some_and(|expected| expected != root_event_id) {
+        return Err(CliError::Usage(
+            "Buzz message link thread root does not match the selected message".into(),
+        ));
+    }
+    Ok(root_event_id)
+}
+
 pub async fn cmd_get_thread(
     client: &BuzzClient,
     channel_id: &str,
     event_id: &str,
+    expected_root_id: Option<&str>,
     limit: Option<u32>,
     depth_limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    let expected_channel_id = parse_uuid(channel_id)?;
     validate_hex64(event_id)?;
+    let selected_event = fetch_event(client, event_id).await?;
+    let root_event_id = resolve_thread_target(
+        expected_channel_id,
+        event_id,
+        expected_root_id,
+        &selected_event,
+    )?;
     let limit = limit.unwrap_or(100).min(500);
 
-    // Two filters ORed in a single HTTP call:
-    // 1. Replies referencing this event via e-tag (no kind restriction)
-    // 2. The root event itself by ID
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
         "#h": [channel_id],
-        "#e": [event_id],
+        "#e": [root_event_id.as_str()],
         "limit": limit
     });
     if let Some(d) = depth_limit {
         reply_filter["depth_limit"] = serde_json::json!(d);
     }
     let root_filter = serde_json::json!({
-        "ids": [event_id],
+        "ids": [root_event_id.as_str()],
+        "#h": [channel_id],
         "limit": 1
     });
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    events.sort_by_key(|event| {
+        event
+            .get("created_at")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+    });
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -661,15 +698,43 @@ pub async fn cmd_send_message(
             )
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
         }
-        None | Some(9) => buzz_sdk::build_message(
-            channel_uuid,
-            &final_content,
-            thread_ref.as_ref(),
-            &mention_refs,
-            p.broadcast,
-            &media_tags,
-        )
-        .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?,
+        None | Some(9) => {
+            // Scan final_content for `:shortcode:` patterns and attach NIP-30
+            // emoji tags for any that resolve in the workspace palette.
+            // Palette resolution is scoped to kind 9: forum builders (45001,
+            // 45003) do not accept emoji_tags, so resolving early would pay
+            // the relay query and immediately discard the result.
+            // The fetch is skipped entirely when content has no `:`, keeping
+            // plain sends at zero extra RTTs.  Palette resolution is
+            // decorative enrichment — a fetch or parse failure must not block
+            // delivery of a valid message; on error, degrade to no emoji tags
+            // and log a diagnostic to stderr.
+            let emoji_tags = if final_content.contains(':') {
+                match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
+                    .await
+                {
+                    Ok(tags) => tags,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: emoji palette fetch failed ({e}); sending without emoji tags"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            buzz_sdk::build_message(
+                channel_uuid,
+                &final_content,
+                thread_ref.as_ref(),
+                &mention_refs,
+                p.broadcast,
+                &media_tags,
+                &emoji_tags,
+            )
+            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?
+        }
         Some(k) => {
             return Err(CliError::Usage(format!(
                 "--kind {k} is not supported (use 9, 45001, or 45003)"
@@ -965,9 +1030,35 @@ pub async fn dispatch(
         MessagesCmd::Thread {
             channel,
             event,
+            link,
             limit,
             depth_limit,
-        } => cmd_get_thread(client, &channel, &event, limit, depth_limit, format).await,
+        } => {
+            let (channel, event, expected_root) =
+                match link {
+                    Some(link) => {
+                        let parsed = crate::links::parse_message_link(&link)?;
+                        (parsed.channel_id, parsed.message_id, parsed.thread_root_id)
+                    }
+                    None => match (channel, event) {
+                        (Some(channel), Some(event)) => (channel, event, None),
+                        _ => return Err(CliError::Usage(
+                            "messages thread requires either --link or both --channel and --event"
+                                .into(),
+                        )),
+                    },
+                };
+            cmd_get_thread(
+                client,
+                &channel,
+                &event,
+                expected_root.as_deref(),
+                limit,
+                depth_limit,
+                format,
+            )
+            .await
+        }
         MessagesCmd::Search {
             query,
             author,
@@ -993,13 +1084,16 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
+        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
+    use nostr::Keys;
     use serde_json::json;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1013,6 +1107,119 @@ mod tests {
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
 
     #[test]
+    fn compact_event_format_remains_the_three_key_contract() {
+        let normalized = serde_json::json!([{
+            "id": ID_A,
+            "pubkey": PUBKEY,
+            "kind": 9,
+            "content": "compact content",
+            "created_at": 1_787_754_972_u64,
+            "tags": [["h", "channel-id"]],
+            "sig": "d".repeat(128),
+        }])
+        .to_string();
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&format_events(&normalized, &crate::OutputFormat::Compact))
+                .unwrap();
+
+        assert_eq!(
+            output[0],
+            serde_json::json!({
+                "id": ID_A,
+                "content": "compact content",
+                "created_at": 1_787_754_972_u64,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_channel_is_rejected_before_thread_fetch() {
+        let client =
+            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let error = cmd_get_thread(
+            &client,
+            "not-a-uuid",
+            ID_A,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(error.to_string().contains("invalid UUID"));
+    }
+
+    #[test]
+    fn selected_event_derives_authoritative_channel_and_root() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = json!({
+            "tags": [
+                ["h", channel],
+                ["e", ID_A, "", "root"],
+                ["e", ID_B, "", "reply"],
+            ]
+        });
+
+        assert_eq!(
+            channel_id_from_event(ID_B, &event).unwrap().to_string(),
+            channel
+        );
+        assert_eq!(
+            thread_ref_from_event(ID_B, &event)
+                .unwrap()
+                .root_event_id
+                .to_hex(),
+            ID_A
+        );
+    }
+
+    #[test]
+    fn selected_event_requires_a_valid_channel_tag() {
+        let missing = json!({"tags": []});
+        let malformed = json!({"tags": [["h", "not-a-uuid"]]});
+        assert!(channel_id_from_event(ID_A, &missing).is_err());
+        assert!(channel_id_from_event(ID_A, &malformed).is_err());
+    }
+
+    #[test]
+    fn thread_target_rejects_wrong_channel_or_root_hint() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let other_channel = "123e4567-e89b-12d3-a456-426614174001";
+        let selected = json!({
+            "tags": [["h", channel], ["e", ID_A, "", "root"], ["e", ID_B, "", "reply"]]
+        });
+
+        assert!(resolve_thread_target(
+            Uuid::parse_str(other_channel).unwrap(),
+            ID_B,
+            Some(ID_A),
+            &selected,
+        )
+        .is_err());
+        assert!(resolve_thread_target(
+            Uuid::parse_str(channel).unwrap(),
+            ID_B,
+            Some(ID_B),
+            &selected,
+        )
+        .is_err());
+        assert_eq!(
+            resolve_thread_target(
+                Uuid::parse_str(channel).unwrap(),
+                ID_B,
+                Some(ID_A),
+                &selected,
+            )
+            .unwrap(),
+            ID_A
+        );
+    }
+
+    #[test]
     fn root_marker_wins_over_reply_marker() {
         let tags = json!([
             ["e", ID_A, "", "root"],
@@ -1020,6 +1227,23 @@ mod tests {
             ["p", PUBKEY],
         ]);
         assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_A));
+    }
+
+    #[test]
+    fn root_marker_without_reply_is_top_level() {
+        let tags = json!([["e", ID_A, "", "root"], ["p", PUBKEY],]);
+        assert!(find_root_from_tags(&tags).is_none());
+    }
+
+    #[test]
+    fn root_only_parent_starts_cli_reply_thread_at_parent() {
+        let tags = json!([["e", ID_A, "", "root"]]);
+        let parent = nostr::EventId::from_hex(ID_B).expect("valid parent id");
+
+        let thread_ref = thread_ref_from_parent_tags(parent, ID_B, &tags).expect("thread ref");
+
+        assert_eq!(thread_ref.parent_event_id, parent);
+        assert_eq!(thread_ref.root_event_id, parent);
     }
 
     #[test]
@@ -1045,14 +1269,16 @@ mod tests {
     }
 
     #[test]
-    fn malformed_tags_are_skipped() {
+    fn malformed_tags_are_skipped_and_root_only_is_top_level() {
+        // Invalid entries are ignored, leaving a valid root-only marker; the
+        // shared collapse rule still classifies that parent as top-level.
         let tags = json!([
             "not-an-array",
             ["e"],
             ["e", "short"],
             ["e", ID_A, "", "root"],
         ]);
-        assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_A));
+        assert!(find_root_from_tags(&tags).is_none());
     }
 
     #[test]
@@ -1371,5 +1597,295 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    // ── cmd_send_message — emoji-tag binding seam ─────────────────────────
+    //
+    // These tests drive `cmd_send_message` through a minimal fake relay
+    // serving `/query` (emoji palette) and `/events` (event submission).
+    //
+    // Content with no `@` and no explicit mentions bypasses member-resolution
+    // relay calls, so the only relay traffic is:
+    //   1. POST /query  — emoji palette fetch (when content has `:`)
+    //   2. POST /events — signed event submission
+    //
+    // Removing the resolver call at messages.rs:687-691 or passing &[] at
+    // :718 would cause the emoji-tag assertions below to fail.
+
+    use axum::body::Bytes as AxumBytes;
+    use axum::extract::State as AxumState;
+    use axum::http::{HeaderMap as AxumHeaderMap, StatusCode as AxumStatusCode};
+    use axum::routing::post as axum_post;
+    use axum::Router as AxumRouter;
+    use std::net::SocketAddr as StdSocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc as StdArc;
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    /// Captured body of a POST /events call.
+    #[derive(Clone, Default)]
+    struct CapturedEvent {
+        body: String,
+    }
+
+    /// Minimal fake relay for send-path tests.
+    ///
+    /// - `/query` returns the given `query_body` on every call and increments
+    ///   `query_count`.
+    /// - `/events` returns `{"event_id":"fake","accepted":true}` and records
+    ///   the raw event JSON in `captured_event`.
+    async fn fake_send_relay(
+        query_body: String,
+    ) -> (
+        String,
+        StdArc<AtomicU32>,
+        StdArc<std::sync::Mutex<Option<CapturedEvent>>>,
+    ) {
+        let query_count = StdArc::new(AtomicU32::new(0));
+        let captured_event: StdArc<std::sync::Mutex<Option<CapturedEvent>>> =
+            StdArc::new(std::sync::Mutex::new(None));
+
+        type S = (
+            StdArc<AtomicU32>,
+            String,
+            StdArc<std::sync::Mutex<Option<CapturedEvent>>>,
+        );
+        let state: S = (query_count.clone(), query_body, captured_event.clone());
+
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(
+                    |AxumState((count, body, _)): AxumState<S>,
+                     _headers: AxumHeaderMap,
+                     _req: AxumBytes| async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            body,
+                        )
+                    },
+                ),
+            )
+            .route(
+                "/events",
+                axum_post(
+                    |AxumState((_, _, cap)): AxumState<S>,
+                     _headers: AxumHeaderMap,
+                     body: AxumBytes| async move {
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0000","accepted":true}"#,
+                        )
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), query_count, captured_event)
+    }
+
+    /// Palette JSON with one emoji: `wave` → some URL.
+    fn send_palette_response() -> String {
+        serde_json::json!([{
+            "created_at": 100,
+            "tags": [
+                ["d", "buzz:custom-emoji"],
+                ["emoji", "wave", "https://cdn.example.com/wave.png"],
+                ["emoji", "sweatblob", "https://cdn.example.com/sweatblob.gif"]
+            ]
+        }])
+        .to_string()
+    }
+
+    /// A valid channel UUID used across send-path tests.
+    const SEND_TEST_CHANNEL: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    fn send_params(content: &str) -> super::SendMessageParams {
+        super::SendMessageParams {
+            channel_id: SEND_TEST_CHANNEL.to_string(),
+            content: content.to_string(),
+            kind: None,
+            reply_to: None,
+            broadcast: false,
+            files: vec![],
+            mentions: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_attaches_emoji_tags_for_known_shortcodes() {
+        // Content contains `:wave:` which resolves in the palette.
+        // The submitted event must carry an `emoji` tag for `wave`.
+        let (url, query_count, captured_event) = fake_send_relay(send_palette_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_send_message(&client, send_params("hello :wave: everyone"))
+            .await
+            .unwrap();
+
+        // Palette was queried at least once (short-circuit was NOT triggered).
+        assert!(
+            query_count.load(Ordering::Relaxed) >= 1,
+            "palette must be queried when content has a colon"
+        );
+
+        // Submitted event must contain an emoji tag for `wave`.
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags
+                .iter()
+                .any(|t| t.get(1).map(|s| s.as_str()) == Some("wave")),
+            "submitted event must have an emoji tag for `wave`, got tags: {tags:?}"
+        );
+        // Unknown shortcodes must not produce tags.
+        assert!(
+            !emoji_tags
+                .iter()
+                .any(|t| t.get(1).map(|s| s.as_str()) == Some("notreal")),
+            "unknown shortcodes must not produce emoji tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_skips_palette_query_when_no_colon_in_content() {
+        // Content has no `:` at all — the palette query must be skipped
+        // entirely (zero RTTs), and the submitted event must have no emoji tags.
+        let (url, query_count, captured_event) = fake_send_relay(send_palette_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_send_message(&client, send_params("plain message no colons"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            query_count.load(Ordering::Relaxed),
+            0,
+            "palette must NOT be queried when content has no colon"
+        );
+
+        // Submitted event must have no emoji tags.
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags.is_empty(),
+            "no-colon content must produce no emoji tags, got: {emoji_tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_succeeds_when_palette_query_errors() {
+        // Palette enrichment is decorative — a 500 from the `/query` endpoint
+        // must not abort delivery; the message must still be sent with zero
+        // emoji tags, and a diagnostic must be emitted to stderr.
+
+        // Fake relay: `/query` returns 500, `/events` accepts and captures.
+        let captured_event: StdArc<std::sync::Mutex<Option<CapturedEvent>>> =
+            StdArc::new(std::sync::Mutex::new(None));
+        let cap = captured_event.clone();
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(|_headers: AxumHeaderMap, _req: AxumBytes| async move {
+                    (
+                        AxumStatusCode::INTERNAL_SERVER_ERROR,
+                        [("content-type", "application/json")],
+                        r#"{"error":"unavailable"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/events",
+                axum_post(move |_headers: AxumHeaderMap, body: AxumBytes| {
+                    let cap = cap.clone();
+                    async move {
+                        let body_str = String::from_utf8_lossy(&body).to_string();
+                        *cap.lock().unwrap() = Some(CapturedEvent { body: body_str });
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0001","accepted":true}"#,
+                        )
+                    }
+                }),
+            );
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("http://{addr}");
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        // Must not return Err — a palette failure is a soft warning.
+        cmd_send_message(&client, send_params(":wave: message with emoji candidate"))
+            .await
+            .expect("send must succeed even when palette query returns 500");
+
+        // Submitted event must have zero emoji tags (fallback to empty).
+        let raw = captured_event.lock().unwrap();
+        let raw = raw.as_ref().expect("event must have been submitted");
+        let event: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        let tags: Vec<Vec<String>> = event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .collect();
+        let emoji_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(|s| s.as_str()) == Some("emoji"))
+            .collect();
+        assert!(
+            emoji_tags.is_empty(),
+            "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
+        );
     }
 }

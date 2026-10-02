@@ -304,9 +304,8 @@ test("pairing completion updates the final step and resets after leaving", async
   const confirmButton = confirmation.getByTestId("confirm-sas");
   const cancelButton = confirmation.getByTestId("deny-sas");
   const confirmationBox = await confirmation.boundingBox();
-  const confirmationTitleBox = await confirmation
-    .getByTestId("pairing-sas-title")
-    .boundingBox();
+  const confirmationTitle = confirmation.getByTestId("pairing-sas-title");
+  const confirmationTitleBox = await confirmationTitle.boundingBox();
   const confirmationCodeBox = await confirmationCode.boundingBox();
   const confirmationActionsBox = await confirmation
     .getByTestId("pairing-sas-actions")
@@ -345,10 +344,7 @@ test("pairing completion updates the final step and resets after leaving", async
   await expect(
     confirmation.getByText(/Only confirm if you started this pairing/),
   ).toHaveCount(0);
-  await expect(confirmation.getByTestId("pairing-sas-title")).toHaveCSS(
-    "font-size",
-    "16px",
-  );
+  await expect(confirmationTitle).toHaveCSS("font-size", "16px");
 
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
   await waitForAnimations(page);

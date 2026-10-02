@@ -51,7 +51,7 @@ Manage your repository's enforced branch and tag rules with `repos protect list|
 
 Output varies by command group — `--help` shows flags but not response shapes.
 
-**Read commands** (messages, channels, users, feed, workflows): normalized JSON arrays with `sig` stripped. Fields: `{id, pubkey, kind, content, created_at, tags}` for events; command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), workflows (`{workflow_id, content, created_at, pubkey}`).
+**Read commands** return JSON arrays. Event reads (`messages get/thread/search`, `feed get`) return normalized, complete signed Nostr events with `{id, pubkey, kind, content, created_at, tags, sig}`. Other reads use command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), and workflows (`{workflow_id, content, created_at, pubkey}`).
 
 **Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
 
@@ -163,13 +163,11 @@ Exit code 5 if the value changed since the hash was read (another agent wrote fi
 
 Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit empty result after patch.
 
-## Polling Pattern
+## Catching Up
 
-The relay has no push or webhook support. Poll with a `--since` cursor:
+An @mention wakes you, so do not loop or sleep waiting for messages. To read what arrived since you last looked, do one read with a `--since` cursor:
 
-1. `buzz messages get --channel <UUID> --limit 50` — note the maximum `created_at` from results
-2. Sleep 10-30 seconds
-3. `buzz messages get --channel <UUID> --since <max_created_at> --limit 50`
-4. Repeat, advancing `--since` each iteration
+1. `buzz messages get --channel <UUID> --since <last_seen_created_at> --limit 50`
+2. Keep the maximum `created_at` from the results as the next cursor
 
-Minimum interval: 5 seconds (relay rate limiting). Use 10s for low-latency, 30s for background monitoring. `feed get` always returns newest-first regardless of `--since`.
+`feed get` always returns newest-first regardless of `--since`.

@@ -153,6 +153,27 @@ test("edit mention snapshot replaces original references, including removals", (
   );
 });
 
+test("edit mention snapshots preserve the original agent-address state", () => {
+  const original = [
+    ["h", "uuid"],
+    ["mention", "addressed-agent", "agent-address"],
+    ["mention", "old-authored-mention"],
+  ];
+  const out = applyEditTagOverlay(original, [
+    ["buzz:mention-snapshot"],
+    ["mention", "addressed-agent", "agent-address"],
+    ["mention", "new-authored-mention"],
+  ]);
+
+  assert.deepEqual(
+    out.filter((tag) => tag[0] === "mention"),
+    [
+      ["mention", "addressed-agent", "agent-address"],
+      ["mention", "new-authored-mention"],
+    ],
+  );
+});
+
 test("legacy edits preserve original mention references", () => {
   const original = [
     ["h", "uuid"],

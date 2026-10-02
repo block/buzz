@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
@@ -16,6 +16,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
@@ -23,8 +24,8 @@ import '../channels/message_content.dart';
 import '../channels/date_formatters.dart';
 import '../forum/forum_thread_page.dart';
 import '../profile/profile_provider.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import 'recent_searches_provider.dart';
 import 'search_provider.dart';
 
@@ -39,9 +40,7 @@ const _searchTitleReturnDuration = Duration(milliseconds: 80);
 const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
-const _searchActiveFieldTopOffset = 42.0;
-const _searchBottomOverlap =
-    _searchActiveFieldTopOffset + _searchIdleFieldTopInset;
+const _searchControlsToFiltersGap = Grid.xxs;
 const _searchFilterChipVerticalPadding = Grid.xxs;
 const _searchFilterBarVerticalPadding = Grid.xxs;
 const _searchHeaderFiltersMinHeight = Grid.xl;
@@ -130,15 +129,17 @@ class SearchPage extends HookConsumerWidget {
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
     final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
+    final searchBottomOverlap =
+        _searchIdleFieldTopInset +
+        compactSearchFieldHeight +
+        _searchControlsToFiltersGap;
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
         ? compactSearchFieldHeight
         : Grid.xl;
     final searchHeaderBottomHeight = isSearchEditing.value
-        ? _searchIdleFieldTopInset +
-              compactSearchFieldHeight +
-              searchHeaderFiltersHeight
+        ? searchHeaderFiltersHeight + _searchControlsToFiltersGap
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -214,7 +215,7 @@ class SearchPage extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
-        bottomDividerOpacity: 0.06,
+        bottomDividerOpacity: 0.07,
         titleStyle: headerTitleStyle,
         // Keep this mounted through the search-field morph so it can fade in
         // beneath the returning field rather than popping in afterward.
@@ -295,7 +296,7 @@ class SearchPage extends HookConsumerWidget {
           ),
         ],
         bottomHeight: searchHeaderBottomHeight,
-        bottomOverlap: _searchBottomOverlap,
+        bottomOverlap: searchBottomOverlap,
         bottom: Stack(
           clipBehavior: Clip.none,
           children: [
@@ -308,7 +309,7 @@ class SearchPage extends HookConsumerWidget {
                   : Grid.gutter,
               top: isSearchEditing.value
                   ? _searchIdleFieldTopInset
-                  : _searchBottomOverlap + _searchIdleFieldTopInset,
+                  : searchBottomOverlap + _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
                   : idleSearchFieldHeight,
@@ -360,7 +361,7 @@ class SearchPage extends HookConsumerWidget {
                     ? Align(
                         alignment: Alignment.topCenter,
                         child: Padding(
-                          padding: EdgeInsets.only(top: _searchBottomOverlap),
+                          padding: EdgeInsets.only(top: searchBottomOverlap),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
                             height: searchHeaderFiltersHeight,
@@ -644,12 +645,10 @@ class _RecentSearches extends StatelessWidget {
 class _ChannelsSection extends StatelessWidget {
   final List<Channel> channels;
   final VoidCallback onResultSelected;
-
   const _ChannelsSection({
     required this.channels,
     required this.onResultSelected,
   });
-
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -670,12 +669,14 @@ class _ChannelsSection extends StatelessWidget {
               key: ValueKey('search-channel-title-${channel.id}'),
               style: contentListTitleTextStyle,
             ),
-            subtitle: Text(
-              '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
-              style: contentListBodyTextStyle.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
+            subtitle: channel.isMember
+                ? Text(
+                    '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
+                    style: contentListBodyTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  )
+                : null,
             trailing: !channel.isMember && !channel.isDm
                 ? Container(
                     padding: const EdgeInsets.symmetric(
@@ -717,6 +718,16 @@ class _PeopleSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The shown results are the comparison context.
+    final names = watchIdentityNames(
+      ref,
+      [for (final user in users) user.pubkey],
+      agentPubkeys: {
+        for (final user in users)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {for (final user in users) user.pubkey: user.label},
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -729,10 +740,11 @@ class _PeopleSection extends ConsumerWidget {
               key: ValueKey('search-person-leading-${user.pubkey}'),
               imageUrl: user.avatarUrl,
               radius: 20,
-              fallback: Text(user.label.substring(0, 1).toUpperCase()),
+              fallback: Text(user.initial),
+              isAgent: user.isAgent,
             ),
             title: Text(
-              user.label,
+              names.labelFor(user.pubkey),
               key: ValueKey('search-person-title-${user.pubkey}'),
               style: contentListTitleTextStyle,
             ),
@@ -824,7 +836,23 @@ class _MessageTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final authorName = authorProfile?.label ?? shortPubkey(hit.pubkey);
+    final mentionedPubkeys = mentionedPubkeysFromTags(hit.tags);
+    // A hit is labelled within its channel, as it would be there.
+    final hitChannelId = channel?.id ?? hit.channelId;
+    final labelPubkeys = {hit.pubkey.toLowerCase(), ...mentionedPubkeys};
+    final Map<String, String> labels;
+    if (hitChannelId == null) {
+      final names = watchIdentityNames(ref, labelPubkeys);
+      labels = {
+        for (final pubkey in labelPubkeys) pubkey: names.labelFor(pubkey),
+      };
+    } else {
+      labels = watchChannelIdentityLabels(ref, hitChannelId, labelPubkeys);
+    }
+    final authorName =
+        labels[hit.pubkey.toLowerCase()] ??
+        authorProfile?.label ??
+        shortPubkey(hit.pubkey);
     final timeAgo = relativeTime(hit.createdAt);
     final channelName = hit.channelName?.trim().replaceFirst(RegExp(r'^#'), '');
     final hasChannelName = channelName != null && channelName.isNotEmpty;
@@ -923,6 +951,7 @@ class _MessageTile extends ConsumerWidget {
             key: ValueKey('search-message-body-${hit.eventId}'),
             content: hit.content,
             mentionNames: mentionNames,
+            mentionLabels: labels,
             agentMentionPubkeys: agentMentionPubkeys,
             tags: hit.tags,
             maxLines: 2,

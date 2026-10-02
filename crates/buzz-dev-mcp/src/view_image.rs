@@ -49,8 +49,8 @@ pub(crate) const MAX_DECODER_ALLOC: u64 = 256 * 1024 * 1024;
 /// Connect + read timeout for URL fetches.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Lifetime of a Blossom `t=get` read token for relay media fetches.
-/// Matches the desktop client's `MEDIA_GET_AUTH_EXPIRY_SECS`.
-const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+/// 60 seconds — matches the NIP-FI strict proof window.
+const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 60;
 
 /// Build the decoder allocation cap. Centralised so the resize path uses the
 /// same value tests can reason about.
