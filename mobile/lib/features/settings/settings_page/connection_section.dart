@@ -124,6 +124,7 @@ class _IdentityRow extends StatelessWidget {
                   npub,
                   message: 'Public key (npub) copied',
                 );
+                await successHaptic();
               },
       ),
     );
