@@ -192,10 +192,14 @@ impl PubSubManager {
     ///
     /// Every pod subscribes to this global channel; on receipt it merges the
     /// deny entry and closes matching local sessions.
-    pub async fn run_nip_fi_disconnect_subscriber(self: Arc<Self>) {
+    pub async fn run_nip_fi_disconnect_subscriber(
+        self: Arc<Self>,
+        channels: &'static [&'static str],
+    ) {
         conn_control::run_nip_fi_disconnect_subscriber(
             self.redis_url.clone(),
             self.nip_fi_disconnect_tx.clone(),
+            channels,
         )
         .await;
     }
@@ -329,20 +333,21 @@ impl PubSubManager {
         Ok(subscriber_count)
     }
 
-    /// Publish a NIP-FI disconnect command to all pods on the global channel.
+    /// Publish a NIP-FI disconnect command to all pods listening on `channel`.
     ///
     /// Called after the local deny entry is inserted.  Remote pods receive this
     /// and apply the same `max(until)` merge + all-community session close.
     /// Fire-and-forget: the HTTP response does not wait on delivery.
     pub async fn publish_nip_fi_disconnect(
         &self,
+        channel: &str,
         command: &NipFiDisconnect,
     ) -> Result<i64, PubSubError> {
-        use crate::conn_control::{encode_nip_fi_disconnect, NIP_FI_DISCONNECT_CHANNEL};
+        use crate::conn_control::encode_nip_fi_disconnect;
         let mut conn = self.pool.get().await?;
         let payload = encode_nip_fi_disconnect(command)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
-            .arg(NIP_FI_DISCONNECT_CHANNEL)
+            .arg(channel)
             .arg(&payload)
             .query_async(&mut conn)
             .await?;

@@ -24,7 +24,7 @@ use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::rate_limiter::RedisRateLimiter;
-use buzz_pubsub::{PubSubManager, RedisCommandReplayGuard, RedisNip98ReplayGuard};
+use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
@@ -1422,8 +1422,8 @@ impl AppState {
         );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
-        let nip_fi_command_replay: Arc<dyn CommandReplayGuard> =
-            Arc::new(RedisCommandReplayGuard::new(redis_pool.clone()));
+        let nip_fi_command_replay =
+            crate::api::nip_fi::command_replay_guard(redis_pool.clone(), config.nip_fi.mode);
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();

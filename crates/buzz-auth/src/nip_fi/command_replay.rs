@@ -47,12 +47,24 @@ pub trait CommandReplayGuard: Send + Sync {
 /// scope.  The `nip-fi:command` segment never matches a NIP-98 key, whose
 /// final segments are always `:nip98:{event_id_hex}`.
 pub fn command_replay_key(issuer: &str, jti: &str) -> String {
+    namespaced_command_replay_key(COMMAND_REPLAY_PREFIX, issuer, jti)
+}
+
+/// Key prefix for enforce-mode command replay claims.
+pub const COMMAND_REPLAY_PREFIX: &str = "buzz:nip-fi:command";
+
+/// Key prefix for shadow-mode claims, so a shadow accept never uses up the
+/// enforce claim for the same `(iss, jti)` in a shared store.
+pub const SHADOW_COMMAND_REPLAY_PREFIX: &str = "buzz:nip-fi:shadow-command";
+
+/// [`command_replay_key`] under an explicit prefix.
+pub fn namespaced_command_replay_key(prefix: &str, issuer: &str, jti: &str) -> String {
     let mut hasher = Sha256::new();
     for part in [issuer, jti] {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
-    format!("buzz:nip-fi:command:{}", hex::encode(hasher.finalize()))
+    format!("{prefix}:{}", hex::encode(hasher.finalize()))
 }
 
 /// Process-local seen-set for tests.  Instances shared via `Arc` model pods

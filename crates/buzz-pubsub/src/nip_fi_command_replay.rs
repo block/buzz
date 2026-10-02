@@ -3,9 +3,11 @@
 //! Implements [`CommandReplayGuard`] from `buzz-auth` with the same
 //! `SET NX EX` shape and TTL clamp as [`crate::RedisNip98ReplayGuard`].
 
+use buzz_auth::nip_fi::{
+    namespaced_command_replay_key, COMMAND_REPLAY_PREFIX, SHADOW_COMMAND_REPLAY_PREFIX,
+};
 use buzz_auth::{
-    command_replay_key, error::AuthError, CommandReplayGuard, DEFAULT_REPLAY_TTL_SECS,
-    MAX_REPLAY_TTL_SECS,
+    error::AuthError, CommandReplayGuard, DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS,
 };
 
 /// Redis-backed NIP-FI command replay seen-set.
@@ -14,12 +16,25 @@ use buzz_auth::{
 /// is a first claim and `nil` is a replay.
 pub struct RedisCommandReplayGuard {
     pool: deadpool_redis::Pool,
+    prefix: &'static str,
 }
 
 impl RedisCommandReplayGuard {
     /// Create a new replay guard backed by the given Redis connection pool.
     pub fn new(pool: deadpool_redis::Pool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            prefix: COMMAND_REPLAY_PREFIX,
+        }
+    }
+
+    /// A guard for shadow pods: claims live under
+    /// `buzz:nip-fi:shadow-command:{hash}`, disjoint from enforce claims.
+    pub fn shadow(pool: deadpool_redis::Pool) -> Self {
+        Self {
+            pool,
+            prefix: SHADOW_COMMAND_REPLAY_PREFIX,
+        }
     }
 
     async fn conn(&self) -> Result<deadpool_redis::Connection, AuthError> {
@@ -42,7 +57,7 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
             let ttl = ttl_secs.clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS);
             let mut conn = self.conn().await?;
             let result: Option<String> = redis::cmd("SET")
-                .arg(command_replay_key(issuer, jti))
+                .arg(namespaced_command_replay_key(self.prefix, issuer, jti))
                 .arg("1")
                 .arg("NX")
                 .arg("EX")

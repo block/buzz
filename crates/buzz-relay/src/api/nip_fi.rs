@@ -165,8 +165,9 @@ pub async fn disconnect(
             {
                 let pubsub = Arc::clone(&state.pubsub);
                 let msg = nip_fi_disconnect_message(&cmd);
+                let channel = disconnect_publish_channel(state.config.nip_fi.mode);
                 state.nip_fi_publish_tasks.spawn(async move {
-                    if let Err(e) = pubsub.publish_nip_fi_disconnect(&msg).await {
+                    if let Err(e) = pubsub.publish_nip_fi_disconnect(channel, &msg).await {
                         // [FI-TRACE-PRIVACY-NONPUBLIC]: no iss or pubkey in logs
                         tracing::warn!("nip-fi: cross-pod propagation publish failed: {e}");
                         metrics::counter!("buzz_nip_fi_disconnect_propagation_failures_total")
@@ -213,6 +214,40 @@ pub struct NipFiCommandComponents<F: JwksFetcher = buzz_auth::HttpJwksFetcher> {
     pub deny_map: Arc<NipFiDenyMap>,
     /// The command verifier for the `POST /api/nip-fi/disconnect` endpoint.
     pub command_verifier: Arc<CommandVerifier<Arc<ProductionJwksSource<F>>>>,
+}
+
+/// Channel this pod publishes accepted disconnects on.  Shadow uses its own
+/// channel, so no enforce pod (of any build) ever acts on a shadow command.
+pub fn disconnect_publish_channel(mode: NipFiMode) -> &'static str {
+    if mode.observes_only() {
+        buzz_pubsub::conn_control::NIP_FI_SHADOW_DISCONNECT_CHANNEL
+    } else {
+        buzz_pubsub::conn_control::NIP_FI_DISCONNECT_CHANNEL
+    }
+}
+
+/// Channels this pod receives disconnects on.  Shadow also hears enforce's
+/// real disconnects so its deny record matches.
+pub fn disconnect_subscribe_channels(mode: NipFiMode) -> &'static [&'static str] {
+    use buzz_pubsub::conn_control::{NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL};
+    if mode.observes_only() {
+        &[NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL]
+    } else {
+        &[NIP_FI_DISCONNECT_CHANNEL]
+    }
+}
+
+/// Command replay guard for this pod.  Shadow claims under its own key
+/// prefix, so a shadow accept never uses up the enforce claim.
+pub fn command_replay_guard(
+    pool: deadpool_redis::Pool,
+    mode: NipFiMode,
+) -> Arc<dyn buzz_auth::CommandReplayGuard> {
+    if mode.observes_only() {
+        Arc::new(buzz_pubsub::RedisCommandReplayGuard::shadow(pool))
+    } else {
+        Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
+    }
 }
 
 /// Outcome of applying a cross-pod NIP-FI disconnect message.
@@ -3280,6 +3315,110 @@ mod route_integration_tests {
             Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
         }
 
+        async fn pod_in(mode: NipFiMode) -> Arc<AppState> {
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = mode;
+            config.nip_fi.registry.insert(test_issuer_policy());
+            let mut state = build_test_app_state(1000, config).await;
+            state.nip_fi_command_replay =
+                command_replay_guard(state.redis_pool.clone(), state.config.nip_fi.mode);
+            Arc::new(state)
+        }
+
+        /// Run `state`'s production disconnect subscriber and apply what it
+        /// hears through the production consumer, like `main.rs`.  Yields
+        /// the target of each applied message.
+        fn listen(state: &Arc<AppState>) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+            let mut rx = state.pubsub.subscribe_nip_fi_disconnect();
+            let channels = disconnect_subscribe_channels(state.config.nip_fi.mode);
+            tokio::spawn(Arc::clone(&state.pubsub).run_nip_fi_disconnect_subscriber(channels));
+            let consumer = Arc::clone(state);
+            let (seen_tx, seen) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                while let Ok(msg) = rx.recv().await {
+                    apply_nip_fi_disconnect(&consumer, &msg, chrono::Utc::now());
+                    let _ = seen_tx.send(msg.pubkey_bytes);
+                }
+            });
+            seen
+        }
+
+        /// Return once a probe that `prober` publishes has been applied via
+        /// `seen`: the subscription is live, and anything published earlier
+        /// on the probe's channel has been applied.
+        async fn await_probe(
+            seen: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+            prober: &Arc<AppState>,
+        ) {
+            for _ in 0..50 {
+                let probe = nostr::Keys::generate().public_key();
+                let token = mint_token(&probe.to_hex(), 300, serde_json::json!({}));
+                post_command(prober, &token, &probe.to_hex()).await;
+                drain_publishes(prober).await;
+                let wait = std::time::Duration::from_millis(200);
+                while let Ok(Some(k)) = tokio::time::timeout(wait, seen.recv()).await {
+                    if k == probe.to_bytes().to_vec() {
+                        return;
+                    }
+                }
+            }
+            panic!("disconnect subscriber never received a probe");
+        }
+
+        // Pins finding 1 (disconnect half): a shadow disconnect goes out only
+        // on the shadow channel, so an enforce pod denies and closes nothing,
+        // and the shadow pod closes nothing locally.  Shadow still hears
+        // enforce's real disconnects.  Mutation: publishing shadow commands on
+        // `NIP_FI_DISCONNECT_CHANNEL` closes the enforce session.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn shadow_disconnect_never_reaches_an_enforce_pod() {
+            let shadow = pod_in(NipFiMode::Shadow).await;
+            let enforce = pod_in(NipFiMode::Enforce).await;
+            let mut enforce_seen = listen(&enforce);
+            let mut shadow_seen = listen(&shadow);
+            await_probe(&mut enforce_seen, &enforce).await;
+            await_probe(&mut shadow_seen, &enforce).await;
+            let key = nostr::Keys::generate().public_key();
+            let on_shadow = IssuerSessions::register(&shadow, TEST_ISS, &key);
+            let on_enforce = IssuerSessions::register(&enforce, TEST_ISS, &key);
+
+            let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+            let (status, body) = post_command(&shadow, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(&body[..], br#"{"disconnected": true}"#);
+            assert!(is_denied(&shadow, &key), "shadow records its deny");
+            on_shadow.assert_open("shadow pod");
+            drain_publishes(&shadow).await;
+            // Anything the enforce pod would hear from that publish has
+            // arrived once a later enforce-channel probe has.
+            await_probe(&mut enforce_seen, &enforce).await;
+            assert!(!is_denied(&enforce, &key), "enforce records no shadow deny");
+            on_enforce.assert_open("enforce pod");
+        }
+
+        // Pins finding 1 (replay half): shadow and enforce share one Redis
+        // but claim under disjoint prefixes, so a shadow accept leaves the
+        // command usable by enforce, while shadow still rejects its own
+        // replay.  Mutation: a shadow guard on the enforce prefix makes the
+        // enforce use a 403.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn shadow_command_claim_never_uses_up_enforce_claim() {
+            let shadow = pod_in(NipFiMode::Shadow).await;
+            let enforce = pod_in(NipFiMode::Enforce).await;
+            let key = nostr::Keys::generate().public_key();
+            let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+
+            let (status, _) = post_command(&shadow, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::OK, "shadow accepts first use");
+            let (status, _) = post_command(&enforce, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::OK, "enforce still accepts it");
+            let (status, body) = post_command(&shadow, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "shadow rejects its replay");
+            assert_eq!(body.as_ref(), b"authorization denied\n");
+        }
+
         #[tokio::test]
         #[ignore = "requires Redis"]
         async fn redis_command_replay_on_second_pod_is_denied() {
@@ -3308,41 +3447,5 @@ mod route_integration_tests {
         async fn redis_deny_set_full_leaves_shared_claim_retryable() {
             deny_set_full_leaves_command_retryable(redis_guard()).await;
         }
-    }
-
-    // Pins D2/D10: in shadow, a verified disconnect records the deny entry
-    // and answers the exact enforce body, but closes no session — locally
-    // or from a cross-pod message. Mutation: dropping the shadow check in
-    // either close path fails `assert_open`.
-    #[tokio::test]
-    async fn shadow_disconnect_records_deny_but_closes_nothing() {
-        let mut config = crate::config::Config::for_test();
-        config.nip_fi.mode = NipFiMode::Shadow;
-        config.nip_fi.registry.insert(test_issuer_policy());
-        let state = Arc::new(build_test_app_state(1000, config).await);
-        let key = nostr::Keys::generate().public_key();
-        let sessions = IssuerSessions::register(&state, TEST_ISS, &key);
-
-        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
-        let resp = do_request(
-            Arc::clone(&state),
-            "POST",
-            vec![
-                ("Content-Type", "application/json".into()),
-                (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
-            ],
-            Some(serde_json::json!({"pubkey": key.to_hex()})),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], br#"{"disconnected": true}"#);
-        let deny_map = state.nip_fi_deny_map.as_deref().expect("deny map");
-        assert!(deny_map.is_denied(TEST_ISS, &key, chrono::Utc::now()));
-
-        apply_nip_fi_disconnect(&state, &cross_pod_message(&key), chrono::Utc::now());
-        sessions.assert_open("shadow");
     }
 }

@@ -556,7 +556,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // channel capacity) instead of being dropped until the consumer below runs.
     let mut nip_fi_disconnect_rx = pubsub.subscribe_nip_fi_disconnect();
     let pubsub_for_nip_fi = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_nip_fi.run_nip_fi_disconnect_subscriber().await });
+    let nip_fi_channels =
+        buzz_relay::api::nip_fi::disconnect_subscribe_channels(config.nip_fi.mode);
+    tokio::spawn(async move {
+        pubsub_for_nip_fi
+            .run_nip_fi_disconnect_subscriber(nip_fi_channels)
+            .await
+    });
 
     let auth = AuthService::new(config.auth.clone());
 
