@@ -361,12 +361,15 @@ mod tests {
     #[test]
     fn resolve_path_expands_tilde_against_home() {
         let home = match home_dir() {
-            Some(h) if !h.is_empty() => h,
-            _ => return, // No home in this environment (e.g. minimal CI) — skip.
+            Some(h) if !h.is_empty() && Path::new(&h).is_dir() => h,
+            _ => return, // No accessible home in this environment (e.g. minimal CI, sandbox) — skip.
         };
         let marker = format!(".dev-mcp-tilde-test-{}", std::process::id());
         let target = Path::new(&home).join(&marker);
-        fs::write(&target, b"z").expect("write under home");
+        if fs::write(&target, b"z").is_err() {
+            // Home directory is not writable in this environment (e.g. read-only mount) — skip.
+            return;
+        }
 
         let workspace = tempdir().expect("tempdir");
         let resolved = resolve_path(workspace.path(), &format!("~/{marker}"))
