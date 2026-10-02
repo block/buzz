@@ -86,6 +86,13 @@ private final class NavigationContentController: UIViewController {
     scrollView.contentSize = CGSize(width: 1, height: 10000)
     scrollView.isUserInteractionEnabled = false
     scrollView.backgroundColor = .clear
+    if #available(iOS 26.0, *) {
+      // This scroll view only drives title layout. Its automatic edge effect
+      // otherwise adds a second, hard-edged backdrop when the title collapses.
+      // The material behind the navigation controller owns the visible blur.
+      scrollView.topEdgeEffect.isHidden = true
+      scrollView.bottomEdgeEffect.isHidden = true
+    }
   }
 }
 

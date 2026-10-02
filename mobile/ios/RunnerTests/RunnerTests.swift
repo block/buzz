@@ -74,6 +74,13 @@ class RunnerTests: XCTestCase {
       XCTAssertLessThan(locations[1].doubleValue, 1, "Compact material needs a soft lower edge")
       XCTAssertEqual(material.alpha, 1, "Channel material cleared at offset \(offset)")
       XCTAssertEqual(material.frame, bar.view().bounds)
+      if #available(iOS 26.0, *) {
+        let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+        let mirroredScroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+        XCTAssertTrue(mirroredScroll.topEdgeEffect.isHidden,
+                      "The layout-only scroll view must not add a second header backdrop")
+        XCTAssertTrue(mirroredScroll.bottomEdgeEffect.isHidden)
+      }
     }
   }
 
