@@ -482,6 +482,9 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
+        // A launch prefix may change the CLI or environment the adapter sees,
+        // so the version check below could inspect the wrong binary.
+        let launch_prefixed = std::env::var_os(launch::PREFIX_ENV).is_some();
         let mut cmd = launch::command(command, args)?;
         if crate::config::normalize_agent_command_identity(command) == BUZZ_PI_ACP_NAME {
             if !args.iter().any(|arg| arg == "--") {
@@ -594,6 +597,7 @@ impl AcpClient {
         cmd.envs(launch_env.iter().cloned());
         cmd.env_remove(launch::PREFIX_ENV);
         let claude_thinking_summaries = standard_adapter == Some(StandardAdapterKind::Claude)
+            && !launch_prefixed
             && claude_cli_accepts_thinking_display(&cmd).await;
         let mut child = cmd.spawn().map_err(|error| {
             std::io::Error::new(
@@ -710,10 +714,11 @@ impl AcpClient {
     /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
     ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
     ///
-    /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
-    /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one. Metadata prompt transports and the title are
-    /// merged into a single object.
+    /// `session_title` rides in `_meta.sessionTitle` when `Some`, and a Claude
+    /// CLI that supports it gets `_meta.claudeCode.options.extraArgs` asking
+    /// for summarized thinking. These and the metadata prompt transports merge
+    /// into a single object; with none of them, `_meta` is omitted entirely,
+    /// since adapters may distinguish an absent member from a null one.
     ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
@@ -2412,18 +2417,22 @@ fn kill_process_group(_pid: u32) -> bool {
     false
 }
 
-/// Suppress the console window that Windows otherwise allocates for every
-/// console-subsystem child process spawned from a GUI (non-console) parent.
-/// No-op on non-Windows platforms.
 /// First Claude Code release with `--thinking-display`. Older CLIs exit on
 /// unknown flags, so sending it to them would fail every `session/new`.
 const CLAUDE_THINKING_DISPLAY_MIN_VERSION: (u64, u64, u64) = (2, 1, 94);
 
-/// Parse `claude --version` output such as `2.1.284 (Claude Code)`.
+/// Parse `claude --version` output such as `2.1.284 (Claude Code)`. The
+/// first word must be exactly three dot-separated digit runs.
 fn parse_claude_version(output: &str) -> Option<(u64, u64, u64)> {
     let mut parts = output.split_whitespace().next()?.split('.');
-    let mut next = || parts.next()?.parse().ok();
-    Some((next()?, next()?, next()?))
+    let mut next = || {
+        let part = parts.next()?;
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())?
+    };
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
 }
 
 /// Whether the CLI claude-agent-acp will run accepts `--thinking-display`.
@@ -2468,6 +2477,9 @@ async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> b
     accepts
 }
 
+/// Suppress the console window that Windows otherwise allocates for every
+/// console-subsystem child process spawned from a GUI (non-console) parent.
+/// No-op on non-Windows platforms.
 fn configure_no_window(cmd: &mut tokio::process::Command) {
     #[cfg(windows)]
     {
@@ -3771,6 +3783,8 @@ mod tests {
         assert!(accepts("3.0.0"), "newer major");
         assert!(!accepts(""), "empty output");
         assert!(!accepts("error: unknown"), "unparseable output");
+        assert!(!accepts("2.1.284.garbage"), "trailing junk");
+        assert!(!accepts("2.1.+284"), "sign in a component");
     }
 
     #[tokio::test]
@@ -3782,22 +3796,45 @@ mod tests {
         assert!(!claude_cli_accepts_thinking_display(&cmd).await);
     }
 
-    #[tokio::test]
-    async fn session_new_full_requests_claude_thinking_summaries_alongside_meta() {
-        let script = r#"
-            read -t 2 _init
-            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
-            read -t 2 REQ
-            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
-            sleep 1
-        "#;
-        let mut client = spawn_script(script).await;
-        client.claude_thinking_summaries = true;
-        client
-            .initialize()
-            .await
-            .expect("initialize should succeed");
+    /// Spawn a fake `claude-agent-acp` whose `CLAUDE_CODE_EXECUTABLE` is a
+    /// fake CLI running `cli_body`, then return the `_meta` its `session/new`
+    /// actually received.
+    #[cfg(unix)]
+    async fn claude_session_meta_with_cli(cli_body: &str) -> serde_json::Value {
+        use std::os::unix::fs::PermissionsExt;
 
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-claude-cli-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create fake dir");
+        let write = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake");
+            path
+        };
+        let cli = write("claude", cli_body);
+        let adapter = write(
+            "claude-agent-acp",
+            r#"read -r _init
+echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r REQ
+echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+sleep 1"#,
+        );
+        let mut client = AcpClient::spawn_with_env(
+            adapter.to_str().expect("utf8 path"),
+            &[],
+            &[],
+            false,
+            &[(
+                "CLAUDE_CODE_EXECUTABLE".into(),
+                cli.to_str().expect("utf8 path").into(),
+            )],
+        )
+        .await
+        .expect("spawn fake claude adapter");
+        client.initialize().await.expect("initialize");
         let resp = client
             .session_new_full(
                 "/tmp",
@@ -3806,9 +3843,16 @@ mod tests {
                 Some("Fizz"),
             )
             .await
-            .expect("session_new_full should succeed");
+            .expect("session_new_full");
+        client.shutdown().await;
+        std::fs::remove_dir_all(&dir).expect("remove fake dir");
+        resp.raw["_receivedRequest"]["params"]["_meta"].clone()
+    }
 
-        let meta = &resp.raw["_receivedRequest"]["params"]["_meta"];
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_spawn_requests_thinking_summaries_only_from_supporting_cli() {
+        let meta = claude_session_meta_with_cli("echo '2.1.284 (Claude Code)'").await;
         assert_eq!(
             meta["claudeCode"]["options"]["extraArgs"],
             serde_json::json!({ "thinking-display": "summarized" })
@@ -3818,6 +3862,16 @@ mod tests {
             serde_json::json!({ "append": "be brief" })
         );
         assert_eq!(meta["sessionTitle"], "Fizz");
+
+        for (case, cli) in [
+            ("old CLI", "echo '2.1.93 (Claude Code)'"),
+            ("failing CLI", "echo '2.1.284 (Claude Code)'; exit 1"),
+            ("unclean version", "echo '2.1.284.garbage'"),
+        ] {
+            let meta = claude_session_meta_with_cli(cli).await;
+            assert!(meta.get("claudeCode").is_none(), "{case}: {meta}");
+            assert_eq!(meta["sessionTitle"], "Fizz", "{case}");
+        }
     }
 
     // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
