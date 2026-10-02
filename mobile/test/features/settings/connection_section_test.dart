@@ -68,7 +68,7 @@ void main() {
     );
     expect(
       tester.getTopLeft(find.text('Copy public key')).dy,
-      lessThan(tester.getTopLeft(find.text('Edit profile')).dy),
+      lessThan(tester.getTopLeft(find.text('Display name')).dy),
     );
     expect(find.text('Connection'), findsNothing);
     final sendCard = find.ancestor(

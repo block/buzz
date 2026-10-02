@@ -14,7 +14,6 @@ class _ProfileSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) => AppListCard(
     key: const ValueKey('edit-profile-options'),
-    label: 'Edit profile',
     dividerIndent: Grid.xs,
     verticalPadding: Grid.twelve,
     children: [
@@ -38,7 +37,7 @@ class _ProfileSection extends StatelessWidget {
       ),
       AppListRow(
         key: const ValueKey('edit-profile-photo'),
-        title: 'Photo',
+        title: 'Edit photo',
         trailing: const _RowChevron(),
         onTap: () {
           unawaited(HapticFeedback.selectionClick());

@@ -329,10 +329,10 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Profile'), findsNothing);
-        expect(find.text('Edit profile'), findsOneWidget);
+        expect(find.text('Edit profile'), findsNothing);
         expect(find.text('Display name'), findsOneWidget);
         expect(find.text('Profile description'), findsOneWidget);
-        expect(find.text('Photo'), findsOneWidget);
+        expect(find.text('Edit photo'), findsOneWidget);
         final optionCard = find.descendant(
           of: find.byKey(const ValueKey('edit-profile-options')),
           matching: find.byType(Material),
@@ -415,7 +415,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('edit-profile-display-name')));
     await tester.pumpAndSettle();
     expect(opened, ['status', 'name']);
-    expect(find.text('Edit profile'), findsOneWidget);
+    expect(find.text('Edit profile'), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('edit-profile-description')));
     await tester.pumpAndSettle();

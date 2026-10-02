@@ -10,11 +10,11 @@ class _StatusSection extends ConsumerWidget {
     final nsec = ref.watch(relayConfigProvider).nsec;
     return AppListCard(
       key: const ValueKey('status-identity-options'),
+      dividerIndent: Grid.xs,
       verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           key: const ValueKey('settings-set-status'),
-          icon: LucideIcons.smilePlus,
           title: 'Set status',
           trailing: const _RowChevron(),
           onTap: () {

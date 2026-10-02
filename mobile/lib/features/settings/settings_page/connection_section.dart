@@ -20,7 +20,6 @@ class _ConnectionSection extends ConsumerWidget {
       verticalPadding: Grid.twelve,
       children: [
         AppListRow(
-          icon: LucideIcons.scanQrCode,
           title: 'Send identity to desktop',
           subtitle: 'Scan a recovery code shown by Buzz Desktop',
           trailing: const _RowChevron(),
@@ -111,7 +110,6 @@ class _IdentityRow extends StatelessWidget {
       label: 'Copy identity public key',
       value: npub ?? 'Identity unavailable',
       child: AppListRow(
-        icon: LucideIcons.key,
         title: 'Copy public key',
         trailing: Icon(
           LucideIcons.copy,
