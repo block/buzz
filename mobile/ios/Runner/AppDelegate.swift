@@ -8,6 +8,7 @@ import os.log
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private var nativeMessagePresentationCoordinator: NativeMessagePresentationCoordinator?
   private var mediaUploadChannel: FlutterMethodChannel?
   private var pushChannel: FlutterMethodChannel?
   private let apnsRegistrationBuffer = APNsRegistrationBuffer()
@@ -204,6 +205,12 @@ import os.log
         withId: "buzz/theme_pagination_glass"
       )
     }
+    nativeMessagePresentationCoordinator = NativeMessagePresentationCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeMessagePresentation"
+      )?.viewController
+    )
 
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
