@@ -126,6 +126,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let largeTitle = args["largeTitle"] as? Bool == true
     if bar.prefersLargeTitles != largeTitle { measuredWidth = 0 }
     bar.prefersLargeTitles = largeTitle
+    // Compact chat headers can open over a bottom-anchored timeline before
+    // Flutter emits any scroll notification. Keep their title readable at rest.
+    material.alpha = largeTitle ? min(1, offset / 12) : 1
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
@@ -210,7 +213,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
 
   private func setScrollOffset(_ value: CGFloat) {
     offset = max(0, value)
-    material.alpha = min(1, offset / 12)
+    material.alpha = navigation.navigationBar.prefersLargeTitles ? min(1, offset / 12) : 1
     applyScroll()
   }
 
