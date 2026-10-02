@@ -2455,16 +2455,8 @@ async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> b
         return false;
     };
     let mut version_cmd = tokio::process::Command::new(&executable);
-    version_cmd
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    // Own group, like the adapter, so a timeout also kills a launcher's children.
-    #[cfg(unix)]
-    version_cmd.process_group(0);
-    configure_no_window(&mut version_cmd);
+    version_cmd.arg("--version");
+    configure_version_probe(&mut version_cmd);
     let version = match version_cmd.spawn() {
         Ok(child) => claude_version_within(child, std::time::Duration::from_secs(5)).await,
         Err(_) => None,
@@ -2475,6 +2467,18 @@ async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> b
         "{executable:?} --version = {version:?}; thinking summaries requested: {accepts}"
     );
     accepts
+}
+
+/// Pipe stdout only, and put the probe in its own process group (like the
+/// adapter) so a timeout also kills a launcher's children.
+fn configure_version_probe(cmd: &mut tokio::process::Command) {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    configure_no_window(cmd);
 }
 
 /// Read at most a version line from `child` and require a clean exit within
@@ -3834,10 +3838,8 @@ mod tests {
         // A launcher that starts a child holding stdout open, then hangs.
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
-            .arg(format!("sleep 300 & echo $! > {}; wait", pidfile.display()))
-            .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .process_group(0);
+            .arg(format!("sleep 300 & echo $! > {}; wait", pidfile.display()));
+        configure_version_probe(&mut cmd);
         let child = cmd.spawn().expect("spawn launcher");
         let version = claude_version_within(child, std::time::Duration::from_millis(500)).await;
         assert_eq!(version, None);
