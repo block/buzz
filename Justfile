@@ -387,6 +387,8 @@ test-unit:
         # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
         # forged relay events cannot regain a path into agent routing unnoticed.
         cargo nextest run -p buzz-acp
+        # Exercise the real MCP server for modern and legacy clients.
+        cargo nextest run -p buzz-dev-mcp
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
         # They guard the embedded-migrator invariant (the complete checked-in
         # additive migration set; legacy cutover/backfill remains an operator
