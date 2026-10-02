@@ -583,9 +583,12 @@ Future<bool> _showNativeReactionDetails(
   });
   try {
     final dataset = container.read(emojiDatasetOrEmptyProvider);
+    final sheetColors = utilitySurfaceThemeData(Theme.of(context)).colorScheme;
     final pending = NativeMessagePresentation.present('reactions', {
       'requestId': requestId,
       'initialEmoji': initialEmoji,
+      'sheetColor': sheetColors.surface.toARGB32(),
+      'foregroundColor': sheetColors.primary.toARGB32(),
       'dark': Theme.of(context).brightness == Brightness.dark,
       'profiles': profiles(container.read(userCacheProvider)),
       'reactions': [

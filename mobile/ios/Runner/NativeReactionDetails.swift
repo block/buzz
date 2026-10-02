@@ -4,6 +4,8 @@ import ImageIO
 /// Native resizable sheet: selected emoji first, with All and per-emoji filters.
 final class NativeReactionDetailsViewController: UIViewController, UITableViewDataSource {
   var onClose: (() -> Void)?
+  private let sheetColor: UIColor
+  private let foregroundColor: UIColor
   private let reactions: [[String: Any]]
   private var profiles: [String: [String: Any]]
   private var selectedEmoji: String?
@@ -17,6 +19,15 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   }
 
   init(data: [String: Any]) {
+    func color(_ key: String, fallback: UIColor) -> UIColor {
+      guard let value = data[key] as? NSNumber else { return fallback }
+      let argb = value.uint32Value
+      return UIColor(red: CGFloat((argb >> 16) & 255) / 255,
+        green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255,
+        alpha: CGFloat((argb >> 24) & 255) / 255)
+    }
+    sheetColor = color("sheetColor", fallback: .systemGroupedBackground)
+    foregroundColor = color("foregroundColor", fallback: .label)
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
     let initial = data["initialEmoji"] as? String
@@ -30,21 +41,50 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    view.backgroundColor = .systemBackground
+    view.backgroundColor = sheetColor
     view.accessibilityViewIsModal = true
     let title = UILabel()
     title.text = "Reactions"
     title.font = .preferredFont(forTextStyle: .headline)
     title.adjustsFontForContentSizeCategory = true
+    title.textAlignment = .center
+    title.textColor = foregroundColor
     title.accessibilityTraits = .header
-    let close = UIButton(primaryAction: UIAction { [weak self] _ in self?.onClose?() })
-    close.setImage(UIImage(systemName: "xmark.circle.fill"), for: .normal)
-    close.tintColor = .secondaryLabel
+    let close = NativeReactionCloseButton(primaryAction: UIAction { [weak self] _ in
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+      self?.onClose?()
+    })
+    var configuration: UIButton.Configuration
+    if #available(iOS 26.0, *) {
+      configuration = .glass()
+    } else {
+      configuration = .gray()
+      configuration.baseBackgroundColor = .secondarySystemBackground
+    }
+    configuration.cornerStyle = .capsule
+    configuration.image = UIImage(systemName: "xmark",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold))
+    configuration.baseForegroundColor = foregroundColor
+    close.configuration = configuration
+    close.tintColor = foregroundColor
     close.accessibilityLabel = "Close reactions"
-    close.widthAnchor.constraint(equalToConstant: 44).isActive = true
-    close.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-    let header = UIStackView(arrangedSubviews: [title, close])
-    header.spacing = 16
+    let header = UIView()
+    for child in [title, close] {
+      child.translatesAutoresizingMaskIntoConstraints = false
+      header.addSubview(child)
+    }
+    NSLayoutConstraint.activate([
+      header.heightAnchor.constraint(equalToConstant: max(56, title.font.lineHeight + 16)),
+      title.centerXAnchor.constraint(equalTo: header.centerXAnchor),
+      title.centerYAnchor.constraint(equalTo: close.centerYAnchor),
+      title.leadingAnchor.constraint(greaterThanOrEqualTo: header.leadingAnchor, constant: 64),
+      title.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -64),
+      title.topAnchor.constraint(greaterThanOrEqualTo: header.topAnchor, constant: 4),
+      close.widthAnchor.constraint(equalToConstant: 40),
+      close.heightAnchor.constraint(equalToConstant: 40),
+      close.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -2),
+      close.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -2),
+    ])
     let filterScroll = UIScrollView()
     filterScroll.showsHorizontalScrollIndicator = false
     filters.spacing = 8
@@ -71,7 +111,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     NSLayoutConstraint.activate([
       layout.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
       layout.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-      layout.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
+      layout.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
       layout.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
       filterScroll.heightAnchor.constraint(equalToConstant: 48),
     ])
@@ -130,6 +170,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     let profile = profiles[pubkey] ?? [:]
     let name = profile["name"] as? String ?? String(pubkey.prefix(8))
     let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+    cell.backgroundColor = .clear
     cell.selectionStyle = .none
     let avatar = NativeMessageGlyph(data: profile.merging(["emoji": String(name.prefix(1))]) { _, new in new }, size: 18)
     avatar.backgroundColor = .tertiarySystemFill
@@ -160,6 +201,13 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   }
 
   override func accessibilityPerformEscape() -> Bool { onClose?(); return true }
+}
+
+/// Match the profile sheet's 40-point glass control and 44-point hit target.
+private final class NativeReactionCloseButton: UIButton {
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    bounds.insetBy(dx: -2, dy: -2).contains(point)
+  }
 }
 
 /// Short-lived image loader. Auth is supplied for the specific URL by Buzz's
