@@ -97,3 +97,37 @@ for (const globalModel of ["", "claude-opus-5"]) {
     assertDescriptions();
   });
 }
+
+// Edit passes the inherited global model and its label; the discovered
+// default row keeps its own label unless a global model actually overrides it.
+for (const [globalModel, globalModelLabel, expected] of [
+  ["", "Default model", "Default model (Opus)"],
+  [
+    "claude-sonnet-5",
+    "Default model (claude-sonnet-5)",
+    "Default model (claude-sonnet-5)",
+  ],
+]) {
+  test(`edit menu default row reads ${JSON.stringify(expected)}`, () => {
+    const options = modelDropdownOptions({
+      options: [{ id: "", label: "Default model (Opus)" }, ...models],
+      loading: false,
+      loadingValue: "__loading__",
+      allowCustom: true,
+      globalModel,
+      globalModelLabel,
+    });
+    mount(
+      React.createElement(PersonaDropdownField, {
+        ...menuProps(options),
+        value: options[0].value,
+      }),
+    );
+    openMenu();
+    const texts = [...document.body.querySelectorAll("*")].map(
+      (el) => el.textContent,
+    );
+    assert.ok(texts.includes(expected));
+    assert.ok(!texts.includes("Default model"));
+  });
+}

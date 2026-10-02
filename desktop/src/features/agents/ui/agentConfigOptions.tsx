@@ -369,7 +369,10 @@ export function buildTemplateModelDropdownOptions(
       ? [{ id: "", label: inheritedModelLabel }, ...modelOptions]
       : modelOptions;
   return base.map((option) => ({
-    label: option.id === "" ? inheritedModelLabel : option.label,
+    label:
+      option.id === "" && trimmedInheritedModel.length > 0
+        ? inheritedModelLabel
+        : option.label,
     description: option.description,
     value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
   }));
