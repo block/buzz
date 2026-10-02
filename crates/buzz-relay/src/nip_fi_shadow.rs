@@ -1,7 +1,9 @@
 //! Shadow-mode recording of what enforce would have decided. The verdict
 //! never reaches admission, a connection, or a response. Labels are bounded:
 //! the community is its configured URI or `unmapped`, never the raw `Host`,
-//! and no token, claim, key, or issuer is logged. [FI-TRACE-PRIVACY-NONPUBLIC]
+//! and no token, claim, or issuer is logged. The one key logged is the NIP-98
+//! proof key, in the debug line of the key-pairing step shadow shares with
+//! enforce. [FI-TRACE-PRIVACY-NONPUBLIC]
 //!
 //! # Metrics
 //!
@@ -10,7 +12,7 @@
 //! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first |
 //! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
 //! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended; a session never admitted records none |
-//! | `buzz_nip_fi_shadow_disconnect_total` | `route` (`admin`, `cross_pod`), `outcome` | disconnect-path event that moves a real disconnect counter in enforce |
+//! | `buzz_nip_fi_shadow_disconnect_total` | `route` (`admin`, `cross_pod`), `outcome` | disconnect-path event that moves a real disconnect counter in enforce: an accepted admin command, a capacity rejection, a subscriber lag, or a cross-pod capacity or poison failsafe. An admin command refused for its header, body, proof, replay, or a dependency error records nothing |
 //!
 //! Denominators differ. A would-deny rate is the non-`admit` share of
 //! `buzz_nip_fi_shadow_total` for a route. A strict-proof rejection rate is

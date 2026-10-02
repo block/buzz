@@ -737,7 +737,9 @@ mod tests {
     /// [FI-TRACE-ENV-RACE]
     #[test]
     fn fixture_config_read_waits_for_fi_env_lock() {
-        let guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let env = EnvGuard::new(NIP_FI_VARS);
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
@@ -774,7 +776,9 @@ mod tests {
 
     #[test]
     fn off_mode_requires_no_other_config() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         // NipFiMode::Off is the default: no issuers, no age limit.
@@ -786,7 +790,9 @@ mod tests {
 
     #[test]
     fn deny_protected_requires_no_other_config() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "deny_protected");
@@ -796,7 +802,9 @@ mod tests {
 
     #[test]
     fn enforce_without_issuers_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -831,7 +839,9 @@ mod tests {
 
     #[test]
     fn enforce_without_assertion_age_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
@@ -864,7 +874,9 @@ mod tests {
 
     #[test]
     fn unknown_mode_is_rejected() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "permissive");
@@ -900,7 +912,9 @@ mod tests {
     /// passes even if the code leaks values from valid-but-wrong-typed fields.
     #[test]
     fn malformed_issuer_json_error_does_not_leak_raw_value() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         // A sentinel that serde would echo in a type-mismatch error if not suppressed.
@@ -943,7 +957,9 @@ mod tests {
     fn invalid_algorithm_error_does_not_leak_raw_value() {
         // parse_algorithm is private; we test it indirectly by passing a full
         // issuer config with a sentinel algorithm name.
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         const SENTINEL_ALG: &str = "SENTINEL_ALGORITHM_HS256_SECRET";
@@ -978,7 +994,9 @@ mod tests {
     /// Policy-build rejection error must not leak the issuer URL.
     #[test]
     fn policy_build_rejection_error_does_not_leak_issuer_url() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         const SENTINEL_ISSUER: &str = "https://sentinel-issuer-secret.example";
@@ -1142,7 +1160,9 @@ mod tests {
     // ── NIP-FI S4 deny witnesses ──
     #[test]
     fn config_error_does_not_expose_sensitive_principal_value() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         // A syntactically broken JSON object that contains a sensitive sentinel
@@ -1194,7 +1214,9 @@ mod tests {
 
     #[test]
     fn enforce_command_age_without_principals_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -1229,7 +1251,9 @@ mod tests {
         // JWKS/assertion issuer but carries no command config.  Without this
         // rejection from_env() would succeed with an empty command_configs,
         // the endpoint would permanently return 503, and startup would log nothing.
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -1258,7 +1282,9 @@ mod tests {
 
     #[test]
     fn orphan_authorized_principals_without_command_age_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -1292,7 +1318,9 @@ mod tests {
 
     #[test]
     fn orphan_deny_set_capacity_without_command_age_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
 
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
@@ -1348,7 +1376,9 @@ mod tests {
 
     #[test]
     fn enforce_communities_map_hosts_to_bindings() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         let cfg = enforce_with_communities(serde_json::json!([
             community_entry("https://a.relay.test", &["https://issuer.test"]),
@@ -1372,7 +1402,9 @@ mod tests {
 
     #[test]
     fn enforce_without_communities_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         enforce_with_communities(serde_json::json!([])).expect_err("empty array");
         std::env::remove_var("BUZZ_NIP_FI_COMMUNITIES");
@@ -1386,7 +1418,9 @@ mod tests {
 
     #[test]
     fn enforce_community_uri_must_be_https_authority_only() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         for uri in [
             "http://a.relay.test",
@@ -1427,7 +1461,9 @@ mod tests {
 
     #[test]
     fn enforce_communities_must_have_unique_hosts() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         let err = enforce_with_communities(serde_json::json!([
             community_entry("https://a.relay.test", &["https://issuer.test"]),
@@ -1442,7 +1478,9 @@ mod tests {
 
     #[test]
     fn enforce_community_issuers_must_be_configured() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         let err = enforce_with_communities(serde_json::json!([community_entry(
             "https://a.relay.test",
@@ -1474,7 +1512,9 @@ mod tests {
 
     #[test]
     fn enforce_issuer_in_no_community_fails_closed() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         let err = enforce_with_communities(serde_json::json!([community_entry(
             "https://a.relay.test",
@@ -1489,7 +1529,9 @@ mod tests {
 
     #[test]
     fn enforce_issuer_rejects_removed_audiences_field() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
@@ -1510,7 +1552,9 @@ mod tests {
 
     #[test]
     fn enforce_community_uri_accepts_canonical_authorities() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         for uri in [
             "https://a.relay.test",
@@ -1527,7 +1571,9 @@ mod tests {
 
     #[test]
     fn enforce_empty_or_whitespace_host_resolves_to_no_community() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         // `https://.` would normalize to an empty Host key if startup let it
         // through, so whichever configs boot must never match a blank Host.
@@ -1556,7 +1602,9 @@ mod tests {
 
     #[test]
     fn deny_protected_ignores_invalid_communities() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         std::env::set_var("BUZZ_NIP_FI_MODE", "deny_protected");
         std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", "not json");
@@ -1568,7 +1616,9 @@ mod tests {
     // shadow names its own mode. Mutation: a hard-coded `enforce` fails the
     // shadow test; any rewording fails the enforce test.
     fn missing_issuers_error(mode: &str) -> String {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         std::env::set_var("BUZZ_NIP_FI_MODE", mode);
         std::env::remove_var("BUZZ_NIP_FI_ISSUERS");
@@ -1600,7 +1650,9 @@ mod tests {
     // included, and refuses to start without them.
     #[test]
     fn shadow_startup_requires_full_enforce_config() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         let communities = serde_json::json!([community_entry(
             "https://a.relay.test",
@@ -1623,7 +1675,9 @@ mod tests {
     // Pins the lifetime refusal operators see in each evaluating mode.
     #[test]
     fn missing_lifetime_error_is_exact_in_enforce_and_shadow() {
-        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new(NIP_FI_VARS);
         let communities = serde_json::json!([community_entry(
             "https://a.relay.test",

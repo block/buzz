@@ -4160,11 +4160,6 @@ mod tests {
             outcomes.push(((challenge, status_and_body(resp).await), records, strict));
         }
         let (shadow, off) = (outcomes.pop().unwrap(), outcomes.pop().unwrap());
-        eprintln!(
-            "DBG {} {}",
-            off.0 .1 .0,
-            String::from_utf8_lossy(&off.0 .1 .1)
-        );
         assert_eq!(shadow.0, off.0, "rejection unchanged");
         assert!(off.1.is_empty() && off.2.is_empty(), "off records nothing");
         let [(labels, value)] = <[_; 1]>::try_from(shadow.1).expect("exactly one shadow record");

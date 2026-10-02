@@ -1418,7 +1418,9 @@ impl Config {
             .lock()
             .unwrap()
             .push(std::thread::current().id());
-        let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::from_env().expect("default config must load for test fixture")
     }
 }
@@ -1455,7 +1457,9 @@ mod tests {
         std::sync::MutexGuard<'static, ()>,
         std::sync::MutexGuard<'static, ()>,
     ) {
-        let fi = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
+        let fi = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
     }
