@@ -22,12 +22,42 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
-private final class NavigationTitleButton: UIButton {
+private final class NavigationTitleButton: UIControl {
+  private let titleLabel = UILabel()
+  private let subtitleLabel = UILabel()
+
+  init(title: String?, subtitle: String, color: UIColor) {
+    super.init(frame: .zero)
+    titleLabel.text = title
+    titleLabel.font = .preferredFont(forTextStyle: .headline)
+    titleLabel.textColor = color
+    subtitleLabel.text = subtitle
+    subtitleLabel.font = .preferredFont(forTextStyle: .caption1)
+    subtitleLabel.textColor = .secondaryLabel
+    for label in [titleLabel, subtitleLabel] {
+      label.textAlignment = .center
+      label.lineBreakMode = .byTruncatingTail
+      label.adjustsFontForContentSizeCategory = true
+      addSubview(label)
+    }
+    isAccessibilityElement = true
+    accessibilityTraits = .button
+  }
+
+  required init?(coder: NSCoder) { return nil }
+
   override var intrinsicContentSize: CGSize {
-    let titleSize = titleLabel?.intrinsicContentSize ?? .zero
-    let subtitleSize = subtitleLabel?.intrinsicContentSize ?? .zero
-    return CGSize(width: max(titleSize.width, subtitleSize.width) + 16,
-                  height: max(44, titleSize.height + subtitleSize.height))
+    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16,
+           height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let titleHeight = titleLabel.intrinsicContentSize.height
+    let subtitleHeight = subtitleLabel.intrinsicContentSize.height
+    let top = (bounds.height - titleHeight - subtitleHeight) / 2
+    titleLabel.frame = CGRect(x: 8, y: top, width: max(0, bounds.width - 16), height: titleHeight)
+    subtitleLabel.frame = CGRect(x: 8, y: top + titleHeight, width: max(0, bounds.width - 16), height: subtitleHeight)
   }
 }
 
@@ -142,32 +172,14 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
-      var configuration = UIButton.Configuration.plain()
-      configuration.title = item.title
-      configuration.subtitle = subtitle
-      configuration.titleAlignment = .center
-      configuration.titleLineBreakMode = .byTruncatingTail
-      configuration.subtitleLineBreakMode = .byTruncatingTail
-      configuration.contentInsets = .zero
-      configuration.baseForegroundColor = color
-      configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-        var attributes = incoming
-        attributes.font = UIFont.preferredFont(forTextStyle: .headline)
-        return attributes
-      }
-      configuration.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-        var attributes = incoming
-        attributes.font = UIFont.preferredFont(forTextStyle: .caption1)
-        attributes.foregroundColor = UIColor.secondaryLabel
-        return attributes
-      }
-      let button = NavigationTitleButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
+      let button = NavigationTitleButton(title: item.title, subtitle: subtitle, color: color)
+      button.addAction(UIAction { [weak self] _ in
         self?.channel.invokeMethod("action", arguments: "title")
-      })
+      }, for: .touchUpInside)
       button.accessibilityIdentifier = "channel-navigation-title"
       button.accessibilityLabel = "Open settings for \(item.title ?? ""), \(subtitle)"
       button.isUserInteractionEnabled = args["titleEnabled"] as? Bool == true
-      button.sizeToFit()
+      button.frame.size = button.intrinsicContentSize
       item.titleView = button
     } else {
       item.titleView = nil
