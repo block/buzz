@@ -54,9 +54,23 @@ export function hasUnseenHomeMention(
   feed: HomeFeedResponse | undefined,
   seenMentionIds: ReadonlySet<string>,
 ): boolean {
-  return (
-    feed?.feed.mentions.some((item) => !seenMentionIds.has(item.id)) ?? false
-  );
+  return homeMentionAttentionIds(feed).some((id) => !seenMentionIds.has(id));
+}
+
+export function homeMentionAttentionIds(
+  feed: HomeFeedResponse | undefined,
+): string[] {
+  // The feed's mention bucket intentionally includes ordinary DMs because DM
+  // messages address every other participant even without textual @mentions.
+  return feed?.feed.mentions.map((item) => item.id) ?? [];
+}
+
+export function isInboxObserved(input: {
+  appFocused: boolean;
+  isHomeRoute: boolean;
+  isHuddleRoom: boolean;
+}): boolean {
+  return input.isHomeRoute && input.appFocused && !input.isHuddleRoom;
 }
 
 export function shouldCountTowardHomeBadgeSubtotal(

@@ -27,6 +27,7 @@ import { useChannelActivityProjection } from "@/app/useChannelActivityProjection
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import { useHuddlePresentation } from "@/app/useHuddlePresentation";
+import { isInboxObserved } from "@/features/notifications/lib/homeBadge";
 import { shouldShowSidebarChannel } from "@/app/huddleChannelVisibility";
 import {
   channelsQueryKey,
@@ -79,6 +80,7 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
+import { useAppFocused } from "@/shared/lib/useDocumentVisible";
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -128,6 +130,7 @@ export function AppShell() {
     showHuddleInMainApp,
     viewHuddleChannel,
   } = useHuddlePresentation();
+  const appFocused = useAppFocused();
   const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
@@ -467,6 +470,11 @@ export function AppShell() {
     notificationSettings.setDesktopEnabled,
     !isHuddleRoom,
     selectedView === "home" && !settingsOpen,
+    isInboxObserved({
+      appFocused,
+      isHomeRoute: selectedView === "home" && !settingsOpen,
+      isHuddleRoom,
+    }),
     getChannelReadAt,
     readStateVersion,
     highPriorityUnreadChannelIds,

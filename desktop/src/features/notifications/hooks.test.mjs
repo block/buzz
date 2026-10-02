@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   buildHomeBadgeFeedItems,
+  homeMentionAttentionIds,
   hasUnseenHomeMention,
+  isInboxObserved,
   isHomeBadgeFeedItemUnread,
   resolveHomeBadgeFeedItemReadAt,
   shouldCountTowardHomeBadgeSubtotal,
@@ -79,6 +81,47 @@ test("mention attention remains until the Inbox has seen the mention", () => {
 
   assert.equal(hasUnseenHomeMention(feed, new Set()), true);
   assert.equal(hasUnseenHomeMention(feed, new Set(["mention"])), false);
+});
+
+test("Inbox observation requires the focused main Inbox window", () => {
+  assert.equal(
+    isInboxObserved({
+      appFocused: true,
+      isHomeRoute: true,
+      isHuddleRoom: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isInboxObserved({
+      appFocused: false,
+      isHomeRoute: true,
+      isHuddleRoom: false,
+    }),
+    false,
+  );
+  assert.equal(
+    isInboxObserved({
+      appFocused: true,
+      isHomeRoute: true,
+      isHuddleRoom: true,
+    }),
+    false,
+  );
+});
+
+test("ordinary DMs count as mention attention", () => {
+  const ordinaryDm = {
+    ...feedItem("ordinary-dm", "mention"),
+    channelType: "dm",
+    content: "Can you review this?",
+    tags: [["p", "self"]],
+  };
+
+  assert.deepEqual(
+    homeMentionAttentionIds(homeFeed({ mentions: [ordinaryDm] })),
+    ["ordinary-dm"],
+  );
 });
 
 test("home badge subtotal excludes channel-counted high-priority items", () => {

@@ -719,6 +719,7 @@ test("mention in the open thread keeps an attention dot on the app icon", async 
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
   const baselineBadge = await getSettledBadgeState(page);
+  expect(baselineBadge).toEqual({ state: "none", count: 0 });
   const baselineHomeBadge = await getSidebarHomeBadgeText(page);
 
   const rootEventId = await page.evaluate((pubkey) => {
@@ -773,12 +774,16 @@ test("mention in the open thread keeps an attention dot on the app icon", async 
     },
   );
 
+  await waitForBadgeState(page, { state: "dot", count: 0 });
   await expect
     .poll(() => getSidebarHomeBadgeText(page))
     .toBe(baselineHomeBadge);
-  await waitForBadgeState(page, withDotOnlyBadge(baselineBadge));
 
   await page.getByRole("button", { name: "Inbox" }).click();
+  await waitForBadgeState(page, baselineBadge);
+  await page.getByTestId("channel-general").click();
+  await page.reload();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForBadgeState(page, baselineBadge);
 });
 

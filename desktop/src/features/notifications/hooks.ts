@@ -27,6 +27,7 @@ import {
 } from "./use-feed-desktop-notifications";
 import {
   buildHomeBadgeFeedItems,
+  homeMentionAttentionIds,
   hasUnseenHomeMention,
   isHomeBadgeFeedItemUnread,
   shouldCountTowardHomeBadgeSubtotal,
@@ -429,6 +430,7 @@ export function useHomeFeedNotificationState(
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
   desktopNotificationsEnabled: boolean,
   isHomeActive: boolean,
+  isInboxObserved: boolean,
   // NIP-RS read marker lookup, shared with the sidebar via AppShell. When
   // provided, channel-backed feed items are treated as read iff their
   // createdAt is at-or-below the channel's read marker; the local
@@ -498,7 +500,7 @@ export function useHomeFeedNotificationState(
   }, [normalizedPubkey, seenMentionIds]);
 
   const currentMentionIds = React.useMemo(
-    () => feed?.feed.mentions.map((item) => item.id) ?? [],
+    () => homeMentionAttentionIds(feed),
     [feed],
   );
 
@@ -533,11 +535,11 @@ export function useHomeFeedNotificationState(
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: feed and account changes must mark the corresponding mention ids seen
   React.useEffect(() => {
-    if (!isHomeActive) {
+    if (!isInboxObserved) {
       return;
     }
     markCurrentMentionsSeen();
-  }, [currentMentionIds, isHomeActive, normalizedPubkey]);
+  }, [currentMentionIds, isInboxObserved, normalizedPubkey]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getChannelReadAt
   return React.useMemo(() => {
@@ -590,7 +592,7 @@ export function useHomeFeedNotificationState(
     }
     return {
       hasHomeMentionAttention:
-        !isHomeActive &&
+        !isInboxObserved &&
         seenMentionIds !== null &&
         hasUnseenHomeMention(feed, new Set(seenMentionIds)),
       homeBadgeCount: total,
@@ -604,6 +606,7 @@ export function useHomeFeedNotificationState(
     getThreadReadAt,
     highPriorityChannelIds,
     isHomeActive,
+    isInboxObserved,
     localUnreadFeedIds,
     mutedChannelIds,
     readStateVersion,
