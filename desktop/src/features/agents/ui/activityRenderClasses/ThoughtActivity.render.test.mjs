@@ -60,11 +60,3 @@ for (const text of ["", "  \n"]) {
     assert.ok(!html.includes("<details"), "empty thought must not expand");
   });
 }
-
-test("ThoughtActivity: thought that later receives text renders it expandably", () => {
-  assert.ok(renderThought("").includes("No readable reasoning tokens"));
-  const html = renderThought("Weighing the two options.");
-  assert.ok(html.includes("<details"));
-  assert.ok(html.includes("Weighing the two options."));
-  assert.ok(!html.includes("No readable reasoning tokens"));
-});

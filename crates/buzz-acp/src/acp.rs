@@ -221,6 +221,10 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Ask Claude Code for summarized thinking on `session/new`. Opus omits
+    /// readable thinking unless asked; set only when the CLI the adapter runs
+    /// is new enough to accept `--thinking-display`.
+    claude_thinking_summaries: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -589,6 +593,8 @@ impl AcpClient {
             };
         cmd.envs(launch_env.iter().cloned());
         cmd.env_remove(launch::PREFIX_ENV);
+        let claude_thinking_summaries = standard_adapter == Some(StandardAdapterKind::Claude)
+            && claude_cli_accepts_thinking_display(&cmd).await;
         let mut child = cmd.spawn().map_err(|error| {
             std::io::Error::new(
                 error.kind(),
@@ -623,6 +629,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            claude_thinking_summaries,
         })
     }
 
@@ -737,6 +744,11 @@ impl AcpClient {
         if let Some(title) = session_title {
             // Merge — _meta may already carry a system prompt from an adapter extension.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
+        }
+        if self.claude_thinking_summaries {
+            // Merge — claude-agent-acp spreads these into the CLI's argv.
+            params["_meta"]["claudeCode"]["options"]["extraArgs"]["thinking-display"] =
+                serde_json::Value::String("summarized".to_owned());
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -2403,6 +2415,59 @@ fn kill_process_group(_pid: u32) -> bool {
 /// Suppress the console window that Windows otherwise allocates for every
 /// console-subsystem child process spawned from a GUI (non-console) parent.
 /// No-op on non-Windows platforms.
+/// First Claude Code release with `--thinking-display`. Older CLIs exit on
+/// unknown flags, so sending it to them would fail every `session/new`.
+const CLAUDE_THINKING_DISPLAY_MIN_VERSION: (u64, u64, u64) = (2, 1, 94);
+
+/// Parse `claude --version` output such as `2.1.284 (Claude Code)`.
+fn parse_claude_version(output: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = output.split_whitespace().next()?.split('.');
+    let mut next = || parts.next()?.parse().ok();
+    Some((next()?, next()?, next()?))
+}
+
+/// Whether the CLI claude-agent-acp will run accepts `--thinking-display`.
+///
+/// The adapter runs `CLAUDE_CODE_EXECUTABLE` when set and its bundled CLI
+/// otherwise; the bundled one cannot be inspected from here, so an unset
+/// variable, a hung or failing binary, or unparseable output all answer
+/// `false` and leave the session exactly as before.
+async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> bool {
+    const KEY: &str = "CLAUDE_CODE_EXECUTABLE";
+    let executable = cmd
+        .as_std()
+        .get_envs()
+        .find(|(key, _)| *key == KEY)
+        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_else(|| std::env::var_os(KEY))
+        .filter(|path| !path.is_empty());
+    let Some(executable) = executable else {
+        tracing::debug!(target: "acp::spawn", "{KEY} unset; not requesting thinking summaries");
+        return false;
+    };
+    let mut version_cmd = tokio::process::Command::new(&executable);
+    version_cmd
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    configure_no_window(&mut version_cmd);
+    let output =
+        tokio::time::timeout(std::time::Duration::from_secs(5), version_cmd.output()).await;
+    let version = match output {
+        Ok(Ok(out)) if out.status.success() => {
+            parse_claude_version(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => None,
+    };
+    let accepts = version.is_some_and(|v| v >= CLAUDE_THINKING_DISPLAY_MIN_VERSION);
+    tracing::debug!(
+        target: "acp::spawn",
+        "{executable:?} --version = {version:?}; thinking summaries requested: {accepts}"
+    );
+    accepts
+}
+
 fn configure_no_window(cmd: &mut tokio::process::Command) {
     #[cfg(windows)]
     {
@@ -3692,6 +3757,67 @@ mod tests {
             received["params"].get("_meta").is_none(),
             "_meta should be absent entirely, not an empty object or null"
         );
+    }
+
+    #[test]
+    fn claude_version_gate_admits_only_cli_with_thinking_display() {
+        let accepts = |out: &str| {
+            parse_claude_version(out).is_some_and(|v| v >= CLAUDE_THINKING_DISPLAY_MIN_VERSION)
+        };
+        assert!(!accepts("2.1.92 (Claude Code)"), "below the minimum");
+        assert!(!accepts("1.0.100 (Claude Code)"), "older major");
+        assert!(accepts("2.1.94 (Claude Code)"), "exactly the minimum");
+        assert!(accepts("2.1.284 (Claude Code)"), "newer");
+        assert!(accepts("3.0.0"), "newer major");
+        assert!(!accepts(""), "empty output");
+        assert!(!accepts("error: unknown"), "unparseable output");
+    }
+
+    #[tokio::test]
+    async fn claude_thinking_display_check_fails_closed_without_readable_cli() {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("CLAUDE_CODE_EXECUTABLE", "/nonexistent/claude");
+        assert!(!claude_cli_accepts_thinking_display(&cmd).await);
+        cmd.env("CLAUDE_CODE_EXECUTABLE", "");
+        assert!(!claude_cli_accepts_thinking_display(&cmd).await);
+    }
+
+    #[tokio::test]
+    async fn session_new_full_requests_claude_thinking_summaries_alongside_meta() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client.claude_thinking_summaries = true;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("be brief")),
+                Some("Fizz"),
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let meta = &resp.raw["_receivedRequest"]["params"]["_meta"];
+        assert_eq!(
+            meta["claudeCode"]["options"]["extraArgs"],
+            serde_json::json!({ "thinking-display": "summarized" })
+        );
+        assert_eq!(
+            meta["systemPrompt"],
+            serde_json::json!({ "append": "be brief" })
+        );
+        assert_eq!(meta["sessionTitle"], "Fizz");
     }
 
     // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
