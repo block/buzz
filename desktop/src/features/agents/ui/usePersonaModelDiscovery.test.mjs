@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  claudeCodeModelLabel,
   deriveModelDiscoveryPending,
   getDiscoveredPersonaModelOptions,
   isCacheableDiscoveryResponse,
@@ -468,4 +469,57 @@ test("Claude Code options keep the adapter's name and description, and label the
     { id: "haiku", label: "Haiku", description: "Haiku 4.5 · Fastest" },
     { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
   ]);
+});
+
+test("Claude Code runtime labels full model ids with the shared formatter", () => {
+  const models = [
+    ["opus[1m]", "Opus"],
+    ["claude-fable-5-1[1m]", "Fable"],
+    ["claude-sonnet-5", "Sonnet"],
+    ["claude-sonnet-4-6", "Sonnet 4.6"],
+    ["claude-sonnet-4-6[2m]", "Sonnet 4.6 (2M)"],
+    ["haiku", "Haiku"],
+  ].map(([id, name]) => ({ id, name, description: null }));
+  const claudeResponse = response({
+    agentName: "@agentclientprotocol/claude-agent-acp",
+    agentDefaultModel: "claude-sonnet-5",
+    models,
+  });
+
+  const labels = (runtimeId) =>
+    getDiscoveredPersonaModelOptions(claudeResponse, "", runtimeId).map(
+      (option) => option.label,
+    );
+
+  assert.deepEqual(labels("claude"), [
+    "Default model (Claude Sonnet 5)",
+    "Opus",
+    "Claude Fable 5.1 (1M context)",
+    "Claude Sonnet 5",
+    "Claude Sonnet 4.6",
+    "Sonnet 4.6 (2M)",
+    "Haiku",
+  ]);
+  // Other runtimes keep the adapter's names.
+  assert.deepEqual(
+    labels("codex").slice(1),
+    models.map((m) => m.name),
+  );
+});
+
+test("claudeCodeModelLabel rejects short names, unknown suffixes, and non-ASCII", () => {
+  assert.equal(claudeCodeModelLabel("claude-opus-5-5"), "Claude Opus 5.5");
+  assert.equal(
+    claudeCodeModelLabel(" CLAUDE-OPUS-5-5[1M] "),
+    "Claude Opus 5.5 (1M context)",
+  );
+  for (const id of [
+    "opus",
+    "opus[1m]",
+    "default",
+    "claude-opus-5-5[beta]",
+    "claude-öpus-5-5",
+  ]) {
+    assert.equal(claudeCodeModelLabel(id), null, id);
+  }
 });
