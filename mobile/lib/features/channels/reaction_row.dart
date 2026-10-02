@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -6,6 +8,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/native_message_presentation.dart';
+import '../../shared/relay/media_auth.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
@@ -17,6 +21,7 @@ import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
 import 'recent_emoji_provider.dart';
+import 'message_long_press_region.dart';
 import 'timeline_message.dart';
 
 /// Pill geometry, ported from desktop's `REACTION_PILL_BASE_CLASSES` in
@@ -232,39 +237,54 @@ class _ReactionPill extends HookConsumerWidget {
       return null;
     }, [reacted, messageId, reaction.emoji]);
 
-    return GestureDetector(
-      key: ValueKey('reaction-pill-${reaction.emoji}'),
-      onTap: () {
-        // The pill is already here, so burst straight away rather than waiting
-        // for the relay echo — desktop does the same on a pill click.
-        if (!reacted && isPositiveEmojiParticle(reaction.emoji)) {
-          burstEmojiFromContext(ref, context, reaction.emoji);
-        }
-        onTap();
-      },
+    return Semantics(
       onLongPress: onLongPress,
-      child: _PillSurface(
-        highlighted: reacted,
-        minWidth: _pillMinWidth,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          // Centered so a short reaction sits mid-pill once the min width kicks
-          // in rather than hugging the left edge.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            _ReactionEmoji(reaction: reaction, size: _pillGlyphSize),
-            const SizedBox(width: _pillGap),
-            // Desktop shows the count even at 1; hiding it made a fresh
-            // reaction jump in width the moment a second person joined.
-            Text(
-              '${reaction.count}',
-              style: reactionCountTextStyle.copyWith(
-                color: reacted
-                    ? context.colors.primary
-                    : context.colors.onSurfaceVariant,
+      child: RawGestureDetector(
+        gestures: {
+          LongPressGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                () => LongPressGestureRecognizer(
+                  duration: defaultTargetPlatform == TargetPlatform.iOS
+                      ? iosMessageLongPressDuration
+                      : null,
+                ),
+                (recognizer) => recognizer.onLongPress = onLongPress,
               ),
+        },
+        child: GestureDetector(
+          key: ValueKey('reaction-pill-${reaction.emoji}'),
+          onTap: () {
+            // The pill is already here, so burst straight away rather than waiting
+            // for the relay echo — desktop does the same on a pill click.
+            if (!reacted && isPositiveEmojiParticle(reaction.emoji)) {
+              burstEmojiFromContext(ref, context, reaction.emoji);
+            }
+            onTap();
+          },
+          child: _PillSurface(
+            highlighted: reacted,
+            minWidth: _pillMinWidth,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              // Centered so a short reaction sits mid-pill once the min width kicks
+              // in rather than hugging the left edge.
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _ReactionEmoji(reaction: reaction, size: _pillGlyphSize),
+                const SizedBox(width: _pillGap),
+                // Desktop shows the count even at 1; hiding it made a fresh
+                // reaction jump in width the moment a second person joined.
+                Text(
+                  '${reaction.count}',
+                  style: reactionCountTextStyle.copyWith(
+                    color: reacted
+                        ? context.colors.primary
+                        : context.colors.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -318,12 +338,17 @@ class _ReactionEmoji extends StatelessWidget {
   }
 }
 
-void showReactionDetailSheet({
+Future<void> showReactionDetailSheet({
   required BuildContext context,
   required String channelId,
   required List<TimelineReaction> reactions,
   required String initialEmoji,
-}) {
+}) async {
+  if (reactions.isEmpty) return;
+  if (await _showNativeReactionDetails(context, reactions, initialEmoji)) {
+    return;
+  }
+  if (!context.mounted) return;
   showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -524,5 +549,64 @@ class _ReactorAvatar extends StatelessWidget {
       fallback: Text(initial),
       isAgent: isAgent,
     );
+  }
+}
+
+Future<bool> _showNativeReactionDetails(
+  BuildContext context,
+  List<TimelineReaction> reactions,
+  String initialEmoji,
+) async {
+  if (!NativeMessagePresentation.isSupportedPlatform) return false;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final requestId = DateTime.now().microsecondsSinceEpoch.toString();
+  final pubkeys = reactions.expand((r) => r.userPubkeys).toSet().toList();
+  Map<String, Object?> profiles(Map<String, UserProfile> cache) => {
+    for (final pubkey in pubkeys)
+      pubkey: {
+        'name':
+            cache[pubkey.toLowerCase()]?.label ??
+            (pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey),
+        if (cache[pubkey.toLowerCase()]?.avatarUrl case final String url) ...{
+          'url': url,
+          'headers': container
+              .read(mediaGetAuthServiceProvider)
+              .headersFor(url),
+        },
+      },
+  };
+  final subscription = container.listen(userCacheProvider, (_, next) {
+    NativeMessagePresentation.present('updateProfiles', {
+      'requestId': requestId,
+      'profiles': profiles(next),
+    });
+  });
+  try {
+    final dataset = container.read(emojiDatasetOrEmptyProvider);
+    final pending = NativeMessagePresentation.present('reactions', {
+      'requestId': requestId,
+      'initialEmoji': initialEmoji,
+      'dark': Theme.of(context).brightness == Brightness.dark,
+      'profiles': profiles(container.read(userCacheProvider)),
+      'reactions': [
+        for (final reaction in reactions)
+          {
+            'emoji': reaction.emoji,
+            'label': dataset.displayName(reaction.emoji),
+            'count': reaction.count,
+            'users': reaction.userPubkeys.toSet().toList(),
+            if (reaction.emojiUrl case final String url) ...{
+              'url': url,
+              'headers': container
+                  .read(mediaGetAuthServiceProvider)
+                  .headersFor(url),
+            },
+          },
+      ],
+    });
+    container.read(userCacheProvider.notifier).preload(pubkeys);
+    return await pending != null;
+  } finally {
+    subscription.close();
   }
 }

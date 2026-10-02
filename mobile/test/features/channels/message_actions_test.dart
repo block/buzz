@@ -11,6 +11,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -112,7 +113,10 @@ Future<void> _pumpSheet(
   bool canManageMessage = false,
   List<TimelineMessage>? allMessages,
   ReminderService? reminderService,
+  Rect? anchorRect,
+  bool nativePresentation = false,
 }) async {
+  Future<void>? presentation;
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -133,12 +137,16 @@ Future<void> _pumpSheet(
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) => TextButton(
-              onPressed: () => showMessageActions(
+              onPressed: () => presentation = showMessageActions(
                 context: context,
                 ref: ref,
                 message: message,
                 channelId: _channelId,
                 canManageMessage: canManageMessage,
+                anchorRect: anchorRect,
+                captureAnchorSnapshot: nativePresentation
+                    ? _testMessageSnapshot
+                    : null,
                 allMessages: allMessages,
                 currentPubkey: 'self',
                 isMember: true,
@@ -150,7 +158,14 @@ Future<void> _pumpSheet(
       ),
     ),
   );
-  await tester.tap(find.text('open'));
+  if (nativePresentation) {
+    await tester.runAsync(() async {
+      await tester.tap(find.text('open'));
+      await presentation;
+    });
+  } else {
+    await tester.tap(find.text('open'));
+  }
   await tester.pumpAndSettle();
 }
 
@@ -581,6 +596,138 @@ void main() {
     expect(snapshot.height, 80);
   });
 
+  testWidgets(
+    'native menu respects ownership and dispatches the target read action',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      Map<Object?, Object?>? payload;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'supportsMessage') return {'supported': true};
+          payload = call.arguments as Map<Object?, Object?>;
+          return {'action': 'read'};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      final notifier = _FakeReadStateNotifier(
+        _readState(const {_channelId: 100000}),
+      );
+      await _pumpSheet(
+        tester,
+        message: _message(),
+        prefs: await _mockPrefs(),
+        readStateOverride: () => notifier,
+        anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+        nativePresentation: true,
+      );
+      expect(payload?['previewBytes'], isA<Uint8List>());
+      expect(notifier.markedUnread, ['msg:msg-1']);
+      final actions = (payload!['actions'] as List)
+          .cast<Map<Object?, Object?>>();
+      expect(actions.map((a) => a['id']), isNot(contains('edit')));
+      expect(actions.map((a) => a['id']), isNot(contains('delete')));
+      expect(find.text('Copy text'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('system messages use the native tray without action rows', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    Map<Object?, Object?>? payload;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        if (call.method == 'supportsMessage') return {'supported': true};
+        payload = call.arguments as Map<Object?, Object?>;
+        return <String, Object?>{};
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(isSystem: true),
+      prefs: await _mockPrefs(),
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+      nativePresentation: true,
+    );
+    expect(payload?['actions'], isEmpty);
+    expect(payload?['reactions'], isNotEmpty);
+    expect(payload?['previewBytes'], isA<Uint8List>());
+    expect(find.byType(BottomSheet), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('native dismissal does not open the Flutter sheet', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async => call.method == 'supportsMessage'
+          ? {'supported': true}
+          : <String, Object?>{},
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(),
+      prefs: await _mockPrefs(),
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+      nativePresentation: true,
+    );
+    expect(find.text('Copy text'), findsNothing);
+    expect(find.text('open'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('unavailable native presentation falls back to message actions', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (_) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(),
+      prefs: await _mockPrefs(),
+      canManageMessage: true,
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+    );
+    expect(find.text('Edit message'), findsOneWidget);
+    expect(find.text('Delete message'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   group('showMessageActions', () {
     testWidgets('composes the tray, lifted preview, and compact actions', (
       tester,
@@ -644,6 +791,17 @@ void main() {
         '${platform.name} composition keeps the action menu near the safe bottom',
         (tester) async {
           debugDefaultTargetPlatformOverride = platform;
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            NativeMessagePresentation.channel,
+            (_) async => null,
+          );
+          addTearDown(
+            () =>
+                tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+                  NativeMessagePresentation.channel,
+                  null,
+                ),
+          );
           try {
             final prefs = await _mockPrefs();
             await _pumpMessageActionsPopover(
@@ -1069,6 +1227,16 @@ void main() {
       tester,
     ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
       ui.Image? snapshot;
       try {
         final prefs = await _mockPrefs();

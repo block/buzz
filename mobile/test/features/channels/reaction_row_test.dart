@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
@@ -6,6 +7,8 @@ import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -57,6 +60,7 @@ Future<ProviderContainer> _pumpRow(
   bool showAddButton = false,
   VoidCallback? onAddReaction,
   String messageId = _messageId,
+  VoidCallback? onMessageLongPress,
 }) async {
   await tester.pumpWidget(
     WidgetHelpers.testable(
@@ -68,13 +72,16 @@ Future<ProviderContainer> _pumpRow(
           }),
         ),
       ],
-      child: ReactionRow(
-        messageId: messageId,
-        channelId: 'channel',
-        reactions: reactions,
-        onToggle: onToggle ?? (_) {},
-        showAddButton: showAddButton,
-        onAddReaction: onAddReaction,
+      child: MessageLongPressInkWell(
+        onLongPress: (_) => onMessageLongPress?.call(),
+        child: ReactionRow(
+          messageId: messageId,
+          channelId: 'channel',
+          reactions: reactions,
+          onToggle: onToggle ?? (_) {},
+          showAddButton: showAddButton,
+          onAddReaction: onAddReaction,
+        ),
       ),
     ),
   );
@@ -95,6 +102,53 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
+  testWidgets(
+    'holding a pill opens native membership with the selected emoji without toggling',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      Map<Object?, Object?>? payload;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payload = call.arguments as Map<Object?, Object?>;
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      var toggles = 0;
+      var messageHolds = 0;
+      await _pumpRow(
+        tester,
+        reactions: [
+          _reaction(),
+          _reaction(emoji: _eyes),
+        ],
+        onToggle: (_) => toggles++,
+        onMessageLongPress: () => messageHolds++,
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_eyes')),
+      );
+      await tester.pumpAndSettle();
+      expect(toggles, 0);
+      expect(messageHolds, 0);
+      expect(payload!['initialEmoji'], _eyes);
+      expect((payload!['reactions'] as List).length, 2);
+      final profiles = payload!['profiles'] as Map;
+      expect((profiles['alice'] as Map)['name'], 'Alice');
+      expect(find.byType(BottomSheet), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   group('ReactionRow', () {
     testWidgets('shows the count even at one, matching desktop', (
       tester,
