@@ -37,7 +37,36 @@ pub(crate) fn community_label(headers: &HeaderMap, communities: &NipFiCommunitie
         .to_owned()
 }
 
+tokio::task_local! {
+    /// Set by the router guard in shadow: whether enforce's guard would deny.
+    static GUARD_DENIED: bool;
+}
+
+/// Record the router guard's would-deny, then run the request inside its
+/// verdict.  Enforce never lets a guard-denied request reach a handler, so
+/// none of that request's handler-side records are emitted.
+pub(crate) async fn observe_guard<F: std::future::Future>(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    verdict: Result<(), WouldDeny>,
+    run: F,
+) -> F::Output {
+    let denied = verdict.is_err();
+    if denied {
+        record("http", headers, &state.config.nip_fi.communities, verdict);
+    }
+    GUARD_DENIED.scope(denied, run).await
+}
+
+/// The enclosing router guard's verdict; `None` outside a guarded request.
+fn guard_denied() -> Option<bool> {
+    GUARD_DENIED.try_with(|denied| *denied).ok()
+}
+
 fn emit(route: &'static str, community: String, stage: &'static str, outcome: &'static str) {
+    if guard_denied() == Some(true) {
+        return;
+    }
     metrics::counter!(
         "buzz_nip_fi_shadow_total",
         "route" => route,
@@ -74,12 +103,18 @@ pub(crate) fn observe_strict_proof<E>(
     }
 }
 
-/// In shadow mode, record the would-deny for a request whose Host bound no
-/// tenant, so the handler's early rejection still leaves a record.
+/// In shadow mode, record the verdict enforce reaches for a request whose
+/// Host bound no tenant: `community` when the Host maps to no configured
+/// community; an admit when enforce's guard passed it, since the handler's
+/// own rejection is no NIP-FI denial; nothing outside a guarded route.
 pub(crate) fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
-        let verdict = Err(("community", DenialClass::AuthorizationUnavailable));
+        let verdict = match crate::nip_fi_core::resolve_community(headers, &nip_fi.communities) {
+            Err(class) => Err(("community", class)),
+            Ok(_) if guard_denied() == Some(false) => Ok(()),
+            Ok(_) => return,
+        };
         record("http", headers, &nip_fi.communities, verdict);
     }
 }

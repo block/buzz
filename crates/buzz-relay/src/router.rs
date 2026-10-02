@@ -171,17 +171,63 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
 ///
-/// In Off mode the middleware is fully transparent.
+/// In Off mode the middleware is fully transparent; in Shadow it only records.
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    // Off and Shadow: fully transparent. [FI-INV-15]
-    if !state.config.nip_fi.mode.restricts() {
+    let mode = state.config.nip_fi.mode;
+    // Off: fully transparent. [FI-INV-15]
+    if mode.is_off() || nip_fi_guard_exempts(&state, &request) {
         return next.run(request).await;
     }
 
+    // DenyProtected: unconditional 503 regardless of assertion presence.
+    // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
+    if mode.denies_unconditionally() {
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+    }
+
+    let verdict = nip_fi_guard_steps(&state, request.headers());
+    // Shadow: transparent, but the guard's verdict is recorded in enforce's
+    // order, ahead of any handler step.
+    if mode.observes_only() {
+        let headers = request.headers().clone();
+        return crate::nip_fi_shadow::observe_guard(&state, &headers, verdict, next.run(request))
+            .await;
+    }
+    match verdict {
+        Ok(()) => next.run(request).await,
+        Err((_, class)) => http_denial(class),
+    }
+}
+
+/// The guard's enforce steps: the Host must map to a configured community,
+/// then the attached assertion must verify offline (transport, then
+/// signature, issuer, community, expiry and claims).  A forgotten-gate
+/// handler that omits `admit_nip_fi_http_on_state` can only be reached with a
+/// cryptographically valid assertion.  Key pairing and deny-map are performed
+/// by `admit_nip_fi_http_on_state` in the handler, not here.
+/// [FI-TRACE-TRANSPORT-CLOSED] [FI-TRACE-AUTHORITY-UNIFORM]
+fn nip_fi_guard_steps(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
+    let community =
+        crate::nip_fi_core::resolve_community(headers, &state.config.nip_fi.communities)
+            .map_err(|class| ("community", class))?;
+    crate::nip_fi_core::evaluate_attached_assertion(
+        headers,
+        community,
+        state.nip_fi_verifier.as_deref(),
+    )
+    .map(drop)
+    .map_err(|rejection| ("assertion", rejection.denial_class()))
+}
+
+/// Paths the assertion guard never checks.
+fn nip_fi_guard_exempts(state: &AppState, request: &Request<Body>) -> bool {
     let path = request.uri().path();
 
     // Exempt paths bypass the assertion-token check.
@@ -207,7 +253,7 @@ async fn nip_fi_assertion_guard(
     });
 
     if exempt {
-        return next.run(request).await;
+        return true;
     }
 
     // Admin SPA document routes are exempt when the request is on the admin
@@ -217,43 +263,9 @@ async fn nip_fi_assertion_guard(
     // go to `/api/admin/v1/...` (already exempt via the `/api/admin/` prefix).
     //
     // The exemption is host-qualified: `/reports` on a tenant host is NOT
-    // exempt and stays protected.  Off mode is already handled above.
+    // exempt and stays protected.
     // [FI-TRACE-AUTHORITY-UNIFORM]
-    if is_admin_spa_path(path) && api::admin::is_admin_host(&state, request.headers()) {
-        return next.run(request).await;
-    }
-
-    // Non-exempt path in Enforce or DenyProtected mode.
-    //
-    // DenyProtected: unconditional 503 regardless of assertion presence.
-    // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
-    if state.config.nip_fi.mode.denies_unconditionally() {
-        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
-    }
-
-    // Enforce mode, step 1: the Host must map to a configured community.
-    let community = match crate::nip_fi_core::resolve_community(
-        request.headers(),
-        &state.config.nip_fi.communities,
-    ) {
-        Ok(community) => community,
-        Err(class) => return http_denial(class),
-    };
-
-    // Enforce mode: full offline assertion verification (transport, then
-    // signature, issuer, community, expiry and claims).  A forgotten-gate handler that
-    // omits `admit_nip_fi_http_on_state` can only be reached with a
-    // cryptographically valid assertion.  Key pairing and deny-map are
-    // performed by `admit_nip_fi_http_on_state` in the handler, not here.
-    // [FI-TRACE-TRANSPORT-CLOSED] [FI-TRACE-AUTHORITY-UNIFORM]
-    match crate::nip_fi_core::evaluate_attached_assertion(
-        request.headers(),
-        community,
-        state.nip_fi_verifier.as_deref(),
-    ) {
-        Ok(_) => next.run(request).await,
-        Err(rejection) => http_denial(rejection.denial_class()),
-    }
+    is_admin_spa_path(path) && api::admin::is_admin_host(state, request.headers())
 }
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -2571,13 +2583,16 @@ mod tests {
             assert_eq!((verifier.calls(), records), (1, 0));
         }
 
-        // Pins D8 for a well-formed Host absent from the communities table:
-        // Off's rejection is unchanged and shadow records one `community`
-        // verdict labelled with the configured community.
-        // Mutation: dropping the record in invite minting leaves none.
+        // Pins the guard order for a Host mapped in config but absent from the
+        // communities table: Off's rejection is unchanged and shadow records
+        // the verdict enforce's guard reaches first — `assertion/missing`
+        // without one (enforce: 401), an admit with a valid one (enforce:
+        // the guard passes and the handler's 404 is no NIP-FI denial).
+        // Mutation: recording `community` in `observe_unbound` whenever the
+        // Host is unbound, or replaying the handler order, fails both rows.
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn shadow_db_unmapped_host_keeps_off_rejection_and_records_community() {
+        async fn shadow_db_unmapped_host_records_the_guard_verdict() {
             let base = real_db_state().await.expect("PostgreSQL must be available");
             let host = format!("unmapped-{}.example", uuid::Uuid::new_v4().simple());
             let with_mode = |mode| {
@@ -2588,31 +2603,41 @@ mod tests {
                     &format!("https://{host}"),
                     &["https://issuer.test"],
                 );
+                state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Ok(Some(
+                    nostr::Keys::generate().public_key(),
+                )))));
                 Arc::new(state)
             };
-            let labels = shadow_matches_off_with_one_record(
-                with_mode(buzz_auth::NipFiMode::Off),
-                with_mode(buzz_auth::NipFiMode::Shadow),
-                || {
-                    axum::http::Request::post("/api/invites")
-                        .header("host", &host)
-                        .body(axum::body::Body::empty())
-                        .unwrap()
-                },
-            )
-            .await;
-            for label in [
-                "\"stage\", \"community\"".to_owned(),
-                "\"outcome\", \"unavailable\"".to_owned(),
-                format!("\"community\", \"https://{host}\""),
+            for (assertion, stage, outcome) in [
+                (None, "assertion", "missing"),
+                (Some("Bearer a.b.c"), "admit", "admit"),
             ] {
-                assert!(labels.contains(&label), "{labels}");
+                let labels = shadow_matches_off_with_one_record(
+                    with_mode(buzz_auth::NipFiMode::Off),
+                    with_mode(buzz_auth::NipFiMode::Shadow),
+                    || {
+                        let mut req =
+                            axum::http::Request::post("/api/invites").header("host", &host);
+                        if let Some(token) = assertion {
+                            req = req.header(buzz_auth::CLIENT_ATTACHED_HEADER, token);
+                        }
+                        req.body(axum::body::Body::empty()).unwrap()
+                    },
+                )
+                .await;
+                for label in [
+                    format!("\"stage\", \"{stage}\""),
+                    format!("\"outcome\", \"{outcome}\""),
+                    format!("\"community\", \"https://{host}\""),
+                ] {
+                    assert!(labels.contains(&label), "{assertion:?}: {labels}");
+                }
             }
         }
 
         // Pins: the workflow handler's shared NIP-98 closure keeps the dev
         // `X-Pubkey` proof unsigned, so shadow admits it as Off does but
-        // records a NIP-98 would-deny without calling the verifier.
+        // records a NIP-98 would-deny; only the guard verifies, as in enforce.
         // Mutation: dropping the unsigned marker records `admit`.
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
@@ -2666,7 +2691,7 @@ mod tests {
                     Some(stage.value().to_owned())
                 })
                 .collect();
-            assert_eq!((stages, verifier.calls()), (vec!["nip98".to_owned()], 0));
+            assert_eq!((stages, verifier.calls()), (vec!["nip98".to_owned()], 1));
         }
 
         async fn real_db_state() -> Option<Arc<AppState>> {
