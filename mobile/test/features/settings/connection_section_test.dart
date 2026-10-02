@@ -47,7 +47,7 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.ensureVisible(find.text('Copy public key'));
+    await tester.ensureVisible(find.text('Copy public key (npub)'));
     await tester.pumpAndSettle();
 
     final expectedPubkey = nostr.Keys(
@@ -63,11 +63,14 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.descendant(of: statusCard, matching: find.text('Copy public key')),
+      find.descendant(
+        of: statusCard,
+        matching: find.text('Copy public key (npub)'),
+      ),
       findsOneWidget,
     );
     expect(
-      tester.getTopLeft(find.text('Copy public key')).dy,
+      tester.getTopLeft(find.text('Copy public key (npub)')).dy,
       lessThan(tester.getTopLeft(find.text('Display name')).dy),
     );
     expect(find.text('Connection'), findsNothing);
@@ -76,7 +79,10 @@ void main() {
       matching: find.byType(AppListCard),
     );
     expect(
-      find.descendant(of: sendCard, matching: find.text('Copy public key')),
+      find.descendant(
+        of: sendCard,
+        matching: find.text('Copy public key (npub)'),
+      ),
       findsNothing,
     );
     expect(find.text('Connected to'), findsNothing);
@@ -88,7 +94,7 @@ void main() {
     // The identity row's a11y value carries the full npub (not raw hex).
     expect(
       find.ancestor(
-        of: find.text('Copy public key'),
+        of: find.text('Copy public key (npub)'),
         matching: find.byWidgetPredicate(
           (widget) =>
               widget is Semantics && widget.properties.value == expectedNpub,
@@ -100,11 +106,11 @@ void main() {
     final chevron = tester.getRect(find.byIcon(LucideIcons.chevronRight).first);
     expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
 
-    await tester.tap(find.text('Copy public key'));
+    await tester.tap(find.text('Copy public key (npub)'));
     await tester.pump();
     expect(clipboardCall?.method, 'Clipboard.setData');
     expect(clipboardCall?.arguments, {'text': expectedNpub});
-    expect(find.text('Pubkey copied'), findsOneWidget);
+    expect(find.text('Public key (npub) copied'), findsOneWidget);
   });
 
   testWidgets('waits for a resumed frame before navigating after auth', (

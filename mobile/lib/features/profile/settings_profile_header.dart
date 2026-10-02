@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -235,6 +236,7 @@ class _PresencePill extends StatelessWidget {
               key: const ValueKey('settings-presence-menu'),
               borderRadius: BorderRadius.circular(Radii.full),
               onTap: () async {
+                unawaited(HapticFeedback.selectionClick());
                 final selected = await showAnchoredPopover<String>(
                   context: buttonContext,
                   width: 176,

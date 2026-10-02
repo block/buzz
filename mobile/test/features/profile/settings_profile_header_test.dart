@@ -12,6 +12,7 @@ import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -333,10 +334,27 @@ void main() {
       final presenceTarget = find.byKey(
         const ValueKey('settings-presence-target'),
       );
+      final haptics = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            haptics.add(call.arguments);
+          }
+          return null;
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        );
+      });
       final targetRect = tester.getRect(presenceTarget);
       await tester.tapAt(Offset(targetRect.center.dx, targetRect.bottom - 1));
       await tester.pump();
 
+      expect(haptics, contains('HapticFeedbackType.selectionClick'));
       final scale = tester.widget<ScaleTransition>(
         find.byKey(const ValueKey('activity-popover-scale')),
       );

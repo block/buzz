@@ -110,7 +110,7 @@ class _IdentityRow extends StatelessWidget {
       label: 'Copy identity public key',
       value: npub ?? 'Identity unavailable',
       child: AppListRow(
-        title: 'Copy public key',
+        title: 'Copy public key (npub)',
         trailing: Icon(
           LucideIcons.copy,
           size: 18,
@@ -119,7 +119,11 @@ class _IdentityRow extends StatelessWidget {
         onTap: npub == null
             ? null
             : () async {
-                await copyToClipboard(context, npub, message: 'Pubkey copied');
+                await copyToClipboard(
+                  context,
+                  npub,
+                  message: 'Public key (npub) copied',
+                );
               },
       ),
     );
