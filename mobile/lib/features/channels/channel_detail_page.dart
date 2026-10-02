@@ -66,6 +66,7 @@ import 'local_message_send_transition.dart';
 import 'mobile_huddle_controller.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
+import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
@@ -601,6 +602,7 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        nativeViewSuppressed: messageActionBackdropActive,
         nativeTitle: resolveDmChannelDisplayLabel(
           resolvedChannel,
           currentPubkey: currentPubkey,

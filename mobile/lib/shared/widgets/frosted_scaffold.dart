@@ -85,10 +85,9 @@ class FrostedScaffold extends HookWidget {
       onNotification: (notification) {
         if (notification.depth == 0 &&
             notification.metrics.axis == Axis.vertical) {
-          final next = notification.metrics.pixels.clamp(
-            0.0,
-            IosNavigationMetrics.of(context).largeTitleHeight,
-          );
+          // Keep real depth so a later UIKit metrics update (Dynamic Type or
+          // rotation) can apply its new collapse range without another scroll.
+          final next = notification.metrics.pixels.clamp(0.0, double.infinity);
           if ((scrollOffset.value - next).abs() > 0.1) {
             scrollOffset.value = next;
           }

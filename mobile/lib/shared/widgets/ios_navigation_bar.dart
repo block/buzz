@@ -109,6 +109,7 @@ class IosNavigationBar extends HookConsumerWidget {
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(this)..value = this;
     final offset = IosNavigationScrollScope.maybeOf(context);
+    final collapseRange = IosNavigationMetrics.of(context).largeTitleHeight;
     final avatarActions = <String, IosNavigationAction>{
       if (leading?.avatarInitial != null) 'leading': leading!,
       for (var i = 0; i < actions.length; i++)
@@ -229,14 +230,19 @@ class IosNavigationBar extends HookConsumerWidget {
       void sync() {
         final current = channel.value;
         if (current != null) {
-          unawaited(current.invokeMethod<void>('scroll', offset?.value ?? 0));
+          unawaited(
+            current.invokeMethod<void>(
+              'scroll',
+              (offset?.value ?? 0).clamp(0.0, collapseRange),
+            ),
+          );
         }
       }
 
       sync();
       offset?.addListener(sync);
       return () => offset?.removeListener(sync);
-    }, [channel.value, offset]);
+    }, [channel.value, offset, collapseRange]);
 
     return UiKitView(
       viewType: viewType,

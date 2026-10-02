@@ -3499,6 +3499,99 @@ void main() {
       expect(messageActionBackdropActive.value, isFalse);
     });
 
+    for (final thread in [false, true]) {
+      for (final reactionOnly in [false, true]) {
+        testWidgets(
+          'native header restores after backdrop thread=$thread reactionOnly=$reactionOnly',
+          (tester) async {
+            debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+            addTearDown(() {
+              debugDefaultTargetPlatformOverride = null;
+              messageActionBackdropActive.value = false;
+            });
+            final event = reactionOnly
+                ? _systemMsg(
+                    id: 'native-backdrop',
+                    payload: {
+                      'type': 'member_joined',
+                      'actor': 'alice',
+                      'target': 'alice',
+                    },
+                  )
+                : _textMsg(
+                    id: 'native-backdrop',
+                    pubkey: 'alice',
+                    content: 'Native backdrop target',
+                  );
+            final timeline = formatTimeline([event]);
+            await tester.pumpWidget(
+              _buildTestable(
+                messages: [event],
+                users: const {
+                  'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                },
+                home: thread
+                    ? ThreadDetailPage(
+                        threadHead: timeline.single,
+                        allMessages: timeline,
+                        channelId: _testChannel.id,
+                        currentPubkey: null,
+                        isMember: true,
+                        isArchived: false,
+                      )
+                    : null,
+              ),
+            );
+            await tester.pumpAndSettle();
+            final header = find.byWidgetPredicate(
+              (widget) =>
+                  widget is UiKitView &&
+                  widget.viewType == 'buzz/ios_navigation_bar',
+            );
+            expect(header, findsOneWidget);
+            final key = thread
+                ? 'thread-message-row-native-backdrop'
+                : reactionOnly
+                ? 'system-message-row-native-backdrop'
+                : 'message-row-native-backdrop';
+            await tester.longPress(find.byKey(ValueKey(key)));
+            await tester.pumpAndSettle();
+            expect(messageActionBackdropActive.value, isTrue);
+            expect(header, findsNothing);
+            expect(
+              find.descendant(
+                of: find.byType(FrostedAppBar),
+                matching: find.byType(UiKitView),
+              ),
+              findsNothing,
+              reason: 'Every header control must participate in Flutter blur',
+            );
+            final overlay = find.byKey(
+              ValueKey(
+                reactionOnly
+                    ? 'reaction-popover-tray'
+                    : 'message-action-surface',
+              ),
+            );
+            expect(overlay, findsOneWidget);
+            Navigator.of(tester.element(overlay)).pop();
+            await tester.pump();
+            expect(
+              header,
+              findsNothing,
+              reason:
+                  'Keep native view suppressed through the dismissal transition',
+            );
+            await tester.pumpAndSettle();
+            expect(messageActionBackdropActive.value, isFalse);
+            expect(header, findsOneWidget);
+            await tester.pumpWidget(const SizedBox());
+            debugDefaultTargetPlatformOverride = null;
+          },
+        );
+      }
+    }
+
     testWidgets('reaction-only and full actions share the stronger backdrop', (
       tester,
     ) async {

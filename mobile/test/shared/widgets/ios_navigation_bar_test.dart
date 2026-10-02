@@ -9,6 +9,69 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('larger native metrics keep a deeply scrolled title collapsed', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/843');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    await tester.pumpWidget(
+      _testApp(
+        home: FrostedScaffold(
+          nativePinnedBody: true,
+          appBar: const FrostedAppBar(
+            title: Text('Search'),
+            nativeLargeTitle: true,
+          ),
+          body: ListView(
+            children: [
+              for (var i = 0; i < 40; i++)
+                SizedBox(height: 60, child: Text('Row $i')),
+            ],
+          ),
+        ),
+      ),
+    );
+    tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
+      843,
+    );
+    await tester.pump();
+    await tester.drag(find.byType(ListView), const Offset(0, -250));
+    await tester.pumpAndSettle();
+    expect(calls.where((call) => call.method == 'scroll').last.arguments, 52);
+    final bodyTop = tester.getTopLeft(find.byType(ListView)).dy;
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      channel.name,
+      channel.codec.encodeMethodCall(
+        const MethodCall('metrics', {
+          'compactHeight': 44.0,
+          'expandedHeight': 124.0,
+        }),
+      ),
+      (_) {},
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(calls.where((call) => call.method == 'scroll').last.arguments, 80);
+    expect(tester.getSize(find.byType(UiKitView)).height, 44);
+    expect(tester.getTopLeft(find.byType(ListView)).dy, bodyTop);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets(
     'iOS routes use UIKit and route native menus to current callbacks',
     (tester) async {

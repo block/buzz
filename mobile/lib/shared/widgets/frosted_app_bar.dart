@@ -172,6 +172,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Native replacements for composite Flutter actions, including menus.
   final List<IosNavigationAction>? nativeActions;
 
+  /// Uses a composable Flutter header while a backdrop covers the native view.
+  final ValueListenable<bool>? nativeViewSuppressed;
+
   const FrostedAppBar({
     super.key,
     this.nativeTitle,
@@ -180,6 +183,7 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeLargeTitle = false,
     this.nativeLeading,
     this.nativeActions,
+    this.nativeViewSuppressed,
     this.leading,
     this.automaticallyImplyLeading = true,
     this.title,
@@ -206,7 +210,18 @@ class FrostedAppBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    final suppression = nativeViewSuppressed;
+    if (defaultTargetPlatform == TargetPlatform.iOS && suppression != null) {
+      return ValueListenableBuilder<bool>(
+        valueListenable: suppression,
+        builder: (context, suppressed, _) => _build(context, suppressed),
+      );
+    }
+    return _build(context, false);
+  }
+
+  Widget _build(BuildContext context, bool nativeSuppressed) {
+    if (defaultTargetPlatform == TargetPlatform.iOS && !nativeSuppressed) {
       final offset = IosNavigationScrollScope.maybeOf(context);
       Widget buildNative(double scrollOffset) {
         final extra = nativeLargeTitle
@@ -283,6 +298,7 @@ class FrostedAppBar extends StatelessWidget {
       titleContentHeight,
     );
     final usesAutomaticIosGlassBackButton =
+        !nativeSuppressed &&
         leading == null &&
         automaticallyImplyLeading &&
         canPop &&
