@@ -18,13 +18,23 @@ pub(crate) fn record(
     communities: &NipFiCommunities,
     verdict: Result<(), WouldDeny>,
 ) {
-    let community = crate::nip_fi_core::resolve_community(headers, communities)
-        .map_or("unmapped", |binding| binding.expected_aud())
-        .to_owned();
     let (stage, outcome) = match verdict {
         Ok(()) => ("admit", "admit"),
         Err((stage, class)) => (stage, class_label(class)),
     };
+    emit(route, headers, communities, stage, outcome);
+}
+
+fn emit(
+    route: &'static str,
+    headers: &HeaderMap,
+    communities: &NipFiCommunities,
+    stage: &'static str,
+    outcome: &'static str,
+) {
+    let community = crate::nip_fi_core::resolve_community(headers, communities)
+        .map_or("unmapped", |binding| binding.expected_aud())
+        .to_owned();
     metrics::counter!(
         "buzz_nip_fi_shadow_total",
         "route" => route,
@@ -46,6 +56,7 @@ const fn class_label(class: DenialClass) -> &'static str {
 }
 
 /// In shadow mode only, record whether `strict` (a pure check) would reject.
+/// Its stage is always `strict_proof`: a pass is one proof, not an admit.
 pub(crate) fn observe_strict_proof<E>(
     state: &crate::state::AppState,
     headers: &HeaderMap,
@@ -54,8 +65,8 @@ pub(crate) fn observe_strict_proof<E>(
 ) {
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
-        let verdict = strict().map_err(|_| ("strict_proof", DenialClass::EvidenceRejected));
-        record(route, headers, &nip_fi.communities, verdict);
+        let outcome = strict().map_or(class_label(DenialClass::EvidenceRejected), |()| "pass");
+        emit(route, headers, &nip_fi.communities, "strict_proof", outcome);
     }
 }
 
@@ -147,8 +158,9 @@ mod tests {
     }
 
     // A NIP-98 event without a `payload` tag passes lax checks but fails the
-    // strict one. Mutations: running the side check outside shadow, or
-    // claiming the event in the replay guard → RED.
+    // strict one. Mutations: running the side check outside shadow,
+    // claiming the event in the replay guard, or recording a pass as
+    // `stage=admit` → RED.
     #[tokio::test(flavor = "current_thread")]
     async fn strict_proof_side_check_records_only_in_shadow_and_spares_replay() {
         use base64::Engine as _;
@@ -202,6 +214,21 @@ mod tests {
                 "{mode:?}"
             );
             assert_eq!(guard.0.load(Ordering::SeqCst), 0, "{mode:?}");
+            if mode.observes_only() {
+                // A passing strict proof is still `strict_proof`, never an
+                // admit that could be summed with whole-request verdicts.
+                metrics::with_local_recorder(&recorder, || {
+                    super::observe_strict_proof(&state, &headers, "bridge", || Ok::<_, ()>(()));
+                });
+                let counts = shadow_counts(&recorder);
+                assert_eq!(
+                    counts,
+                    [(
+                        "https://relay.example".to_owned(),
+                        "strict_proof".to_owned()
+                    )]
+                );
+            }
         }
     }
 

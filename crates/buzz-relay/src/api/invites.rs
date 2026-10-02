@@ -300,11 +300,12 @@ async fn mint_invite_checked(
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(t) => t,
         Err(_) => {
+            crate::nip_fi_shadow::observe_unbound(&state, &headers);
             return api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
             )
-            .into_response()
+            .into_response();
         }
     };
 

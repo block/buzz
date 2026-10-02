@@ -173,7 +173,10 @@ async fn authenticate(
         .unwrap_or("");
     let tenant = crate::tenant::bind_community(&state.db, host)
         .await
-        .map_err(|_| error(StatusCode::NOT_FOUND, "repository not found"))?;
+        .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(state, headers);
+            error(StatusCode::NOT_FOUND, "repository not found")
+        })?;
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
     let method = if body.is_some() { "POST" } else { "GET" };
     let require_payload = body.is_some();

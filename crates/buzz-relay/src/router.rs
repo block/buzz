@@ -2559,6 +2559,104 @@ mod tests {
             assert_eq!((verifier.calls(), records), (1, 1));
         }
 
+        // Pins D8 for a well-formed Host absent from the communities table:
+        // Off's rejection is unchanged and shadow records one `community`
+        // verdict labelled with the configured community.
+        // Mutation: dropping the record in invite minting leaves none.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_db_unmapped_host_keeps_off_rejection_and_records_community() {
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let host = format!("unmapped-{}.example", uuid::Uuid::new_v4().simple());
+            let with_mode = |mode| {
+                let mut state = (*base).clone();
+                let config = Arc::make_mut(&mut state.config);
+                config.nip_fi.mode = mode;
+                config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                    &format!("https://{host}"),
+                    &["https://issuer.test"],
+                );
+                Arc::new(state)
+            };
+            let labels = shadow_matches_off_with_one_record(
+                with_mode(buzz_auth::NipFiMode::Off),
+                with_mode(buzz_auth::NipFiMode::Shadow),
+                || {
+                    axum::http::Request::post("/api/invites")
+                        .header("host", &host)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                },
+            )
+            .await;
+            for label in [
+                "\"stage\", \"community\"".to_owned(),
+                "\"outcome\", \"unavailable\"".to_owned(),
+                format!("\"community\", \"https://{host}\""),
+            ] {
+                assert!(labels.contains(&label), "{labels}");
+            }
+        }
+
+        // Pins: the workflow handler's shared NIP-98 closure keeps the dev
+        // `X-Pubkey` proof unsigned, so shadow admits it as Off does but
+        // records a NIP-98 would-deny without calling the verifier.
+        // Mutation: dropping the unsigned marker records `admit`.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_workflow_never_counts_x_pubkey_as_an_enforce_proof() {
+            use tower::ServiceExt;
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-wf-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(base.db.pool())
+                .await
+                .expect("seed community");
+            let key = nostr::Keys::generate().public_key();
+            let verifier = Arc::new(ScriptedVerifier::new(Ok(Some(key))));
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.require_auth_token = false;
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{host}"),
+                &["https://issuer.test"],
+            );
+            state.nip_fi_verifier = Some(verifier.clone());
+
+            let req = axum::http::Request::get(format!("/workflows/{}/runs", uuid::Uuid::nil()))
+                .header("host", &host)
+                .header("x-pubkey", key.to_hex())
+                .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = build_router(Arc::new(state)).oneshot(req).await.unwrap();
+            assert_ne!(
+                resp.status(),
+                axum::http::StatusCode::UNAUTHORIZED,
+                "admitted"
+            );
+
+            let stages: Vec<String> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(k, ..)| k.key().name() == "buzz_nip_fi_shadow_total")
+                .filter_map(|(k, ..)| {
+                    let stage = k.key().labels().find(|l| l.key() == "stage")?;
+                    Some(stage.value().to_owned())
+                })
+                .collect();
+            assert_eq!((stages, verifier.calls()), (vec!["nip98".to_owned()], 0));
+        }
+
         async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
@@ -3770,78 +3868,99 @@ mod tests {
         );
     }
 
-    // Pins D8 on handlers that bind the DB tenant before admission: an empty
+    /// Sends one request through the built router in Off and in Shadow.
+    /// Asserts identical status, challenge and body, no Off record, and one
+    /// Shadow record; returns that record's labels.
+    async fn shadow_matches_off_with_one_record(
+        off: Arc<AppState>,
+        shadow: Arc<AppState>,
+        request: impl Fn() -> axum::http::Request<axum::body::Body>,
+    ) -> String {
+        use tower::ServiceExt;
+        let mut outcomes = Vec::new();
+        for state in [off, shadow] {
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let resp = build_router(state).oneshot(request()).await.unwrap();
+            let challenge = resp.headers().get("WWW-Authenticate").cloned();
+            let records: Vec<_> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
+                .map(|(key, .., value)| {
+                    let labels = format!("{:?}", key.key().labels().collect::<Vec<_>>());
+                    (labels, value)
+                })
+                .collect();
+            outcomes.push(((challenge, status_and_body(resp).await), records));
+        }
+        let (shadow, off) = (outcomes.pop().unwrap(), outcomes.pop().unwrap());
+        assert_eq!(shadow.0, off.0, "rejection unchanged");
+        assert!(off.1.is_empty(), "off records nothing");
+        let [(labels, value)] = <[_; 1]>::try_from(shadow.1).expect("exactly one shadow record");
+        assert_eq!(value, metrics_util::debugging::DebugValue::Counter(1));
+        labels
+    }
+
+    // Pins D8 on every handler that returns before NIP-FI admission: an empty
     // Host keeps Off's exact rejection and leaves one `community` record.
-    // Mutation: dropping `observe_unbound` at any site leaves no record.
+    // Mutation: dropping the record at any site leaves no shadow record.
     #[tokio::test(flavor = "current_thread")]
     async fn shadow_empty_host_keeps_off_rejection_and_records_community() {
         use axum::body::Body;
         use base64::Engine as _;
-        use tower::ServiceExt;
-        // Git syntax-checks credentials before binding the tenant.
         let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
             .sign_with_keys(&nostr::Keys::generate())
             .unwrap();
-        let auth = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_string(&event).unwrap());
+        let signed = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_string(&event).unwrap())
+        );
         let sha = "a".repeat(64);
-        let requests = [
-            ("POST", "/events".to_owned()),
-            ("PUT", "/upload".to_owned()),
-            ("GET", format!("/media/{sha}")),
-            ("GET", "/moderation/reports".to_owned()),
-            ("GET", format!("/workflows/{}/runs", uuid::Uuid::nil())),
+        let git = "/git/o/r.git/info/refs?service=git-upload-pack".to_owned();
+        let branch = format!("/git/{sha}/r/default-branch");
+        let rows = [
+            ("POST", "/events".to_owned(), Some(signed.as_str())),
+            ("PUT", "/upload".to_owned(), Some(&signed)),
+            ("GET", format!("/media/{sha}"), Some(&signed)),
+            ("GET", "/moderation/reports".to_owned(), Some(&signed)),
             (
                 "GET",
-                "/git/o/r.git/info/refs?service=git-upload-pack".to_owned(),
+                format!("/workflows/{}/runs", uuid::Uuid::nil()),
+                Some(&signed),
             ),
+            ("GET", git.clone(), Some(&signed)),
+            ("GET", git.clone(), None),
+            ("GET", git, Some("Nostr !!not-base64!!")),
+            ("POST", "/gifs/search".to_owned(), Some(&signed)),
+            ("POST", "/gifs/share".to_owned(), Some(&signed)),
+            ("GET", branch.clone(), Some(&signed)),
+            ("POST", branch, Some(&signed)),
+            ("POST", "/api/invites".to_owned(), Some(&signed)),
         ];
-        for (method, path) in requests {
-            let mut outcomes = Vec::new();
-            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Shadow] {
-                let recorder = metrics_util::debugging::DebuggingRecorder::new();
-                let snapshotter = recorder.snapshotter();
-                let _guard = metrics::set_default_local_recorder(&recorder);
-                let req = axum::http::Request::builder()
-                    .method(method)
-                    .uri(&path)
-                    .header("authorization", format!("Nostr {auth}"))
-                    .body(Body::empty())
-                    .unwrap();
-                let resp = build_router(nip_fi_state(mode).await)
-                    .oneshot(req)
-                    .await
-                    .unwrap();
-                let records: Vec<_> = snapshotter
-                    .snapshot()
-                    .into_vec()
-                    .into_iter()
-                    .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
-                    .map(|(key, .., value)| {
-                        (
-                            format!("{:?}", key.key().labels().collect::<Vec<_>>()),
-                            value,
-                        )
-                    })
-                    .collect();
-                outcomes.push((status_and_body(resp).await, records));
-            }
-            let (shadow, off) = (outcomes.pop().unwrap(), outcomes.pop().unwrap());
-            assert_eq!(shadow.0, off.0, "{method} {path}: rejection unchanged");
-            assert!(off.1.is_empty(), "{method} {path}");
-            assert_eq!(shadow.1.len(), 1, "{method} {path}: {:?}", shadow.1);
-            let (labels, value) = &shadow.1[0];
-            assert_eq!(
-                *value,
-                metrics_util::debugging::DebugValue::Counter(1),
-                "{method} {path}"
-            );
+        for (method, path, auth) in rows {
+            let request = || {
+                let mut req = axum::http::Request::builder().method(method).uri(&path);
+                if let Some(auth) = auth {
+                    req = req.header("authorization", auth);
+                }
+                req.body(Body::empty()).unwrap()
+            };
+            let labels = shadow_matches_off_with_one_record(
+                nip_fi_state(buzz_auth::NipFiMode::Off).await,
+                nip_fi_state(buzz_auth::NipFiMode::Shadow).await,
+                request,
+            )
+            .await;
             for label in [
                 "\"stage\", \"community\"",
                 "\"outcome\", \"unavailable\"",
                 "\"community\", \"unmapped\"",
             ] {
-                assert!(labels.contains(label), "{method} {path}: {labels}");
+                assert!(labels.contains(label), "{method} {path} {auth:?}: {labels}");
             }
         }
     }

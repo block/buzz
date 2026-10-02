@@ -132,6 +132,7 @@ async fn authenticate(
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(state, headers);
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",

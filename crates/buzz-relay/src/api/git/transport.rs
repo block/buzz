@@ -103,7 +103,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // domain.
         let mode = state.config.nip_fi.mode;
         if !mode.restricts() {
-            parse_git_auth_header(&parts.headers, method)?;
+            if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
+                // Off returns `rejection` as is; shadow also records the
+                // enforce verdict for the failed proof, still with no DB work.
+                let failed = || Err::<crate::nip_fi_http::Nip98Proof, _>(rejection);
+                let admission =
+                    crate::nip_fi_http::admit_nip_fi_http_on_state(state, &parts.headers, failed);
+                return Err(admission.expect_err("a failed proof never admits"));
+            }
         }
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved

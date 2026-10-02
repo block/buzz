@@ -3365,22 +3365,42 @@ mod route_integration_tests {
             panic!("disconnect subscriber never received a probe");
         }
 
+        /// Return once `seen` has applied a message for `key`.
+        async fn await_target(
+            seen: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+            key: &nostr::PublicKey,
+        ) {
+            let wait = std::time::Duration::from_secs(5);
+            while let Ok(Some(k)) = tokio::time::timeout(wait, seen.recv()).await {
+                if k == key.to_bytes().to_vec() {
+                    return;
+                }
+            }
+            panic!("disconnect subscriber never received the target");
+        }
+
         // Pins finding 1 (disconnect half): a shadow disconnect goes out only
-        // on the shadow channel, so an enforce pod denies and closes nothing,
-        // and the shadow pod closes nothing locally.  Shadow still hears
-        // enforce's real disconnects.  Mutation: publishing shadow commands on
-        // `NIP_FI_DISCONNECT_CHANNEL` closes the enforce session.
+        // on the shadow channel, so an enforce pod denies and closes nothing.
+        // Other shadow pods receive it and record the deny; no shadow pod
+        // closes a session, whether the command came from shadow or enforce.
+        // Mutation: publishing shadow commands on `NIP_FI_DISCONNECT_CHANNEL`
+        // closes the enforce session; letting a shadow pod close on a
+        // received command fails `assert_open` on the shadow pods.
         #[tokio::test]
         #[ignore = "requires Redis"]
         async fn shadow_disconnect_never_reaches_an_enforce_pod() {
             let shadow = pod_in(NipFiMode::Shadow).await;
+            let peer = pod_in(NipFiMode::Shadow).await;
             let enforce = pod_in(NipFiMode::Enforce).await;
             let mut enforce_seen = listen(&enforce);
             let mut shadow_seen = listen(&shadow);
+            let mut peer_seen = listen(&peer);
             await_probe(&mut enforce_seen, &enforce).await;
             await_probe(&mut shadow_seen, &enforce).await;
+            await_probe(&mut peer_seen, &enforce).await;
             let key = nostr::Keys::generate().public_key();
             let on_shadow = IssuerSessions::register(&shadow, TEST_ISS, &key);
+            let on_peer = IssuerSessions::register(&peer, TEST_ISS, &key);
             let on_enforce = IssuerSessions::register(&enforce, TEST_ISS, &key);
 
             let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
@@ -3395,6 +3415,24 @@ mod route_integration_tests {
             await_probe(&mut enforce_seen, &enforce).await;
             assert!(!is_denied(&enforce, &key), "enforce records no shadow deny");
             on_enforce.assert_open("enforce pod");
+            await_target(&mut peer_seen, &key).await;
+            assert!(
+                is_denied(&peer, &key),
+                "a second shadow pod records the deny"
+            );
+            on_peer.assert_open("second shadow pod");
+
+            // An enforce disconnect reaching a shadow pod records the deny
+            // and closes nothing there.
+            let target = nostr::Keys::generate().public_key();
+            let target_on_shadow = IssuerSessions::register(&shadow, TEST_ISS, &target);
+            let token = mint_token(&target.to_hex(), 300, serde_json::json!({}));
+            let (status, _) = post_command(&enforce, &token, &target.to_hex()).await;
+            assert_eq!(status, StatusCode::OK);
+            drain_publishes(&enforce).await;
+            await_target(&mut shadow_seen, &target).await;
+            assert!(is_denied(&shadow, &target), "shadow records enforce's deny");
+            target_on_shadow.assert_open("shadow pod, enforce command");
         }
 
         // Pins finding 1 (replay half): shadow and enforce share one Redis
