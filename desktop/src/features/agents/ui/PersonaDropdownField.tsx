@@ -14,8 +14,10 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
 } from "./agentConfigOptions";
+import { OptionLabel } from "./PersonaDropdownOptionLabel";
 
 export function PersonaDropdownField({
+  ariaDescribedBy,
   contentClassName,
   disabled,
   id,
@@ -24,6 +26,7 @@ export function PersonaDropdownField({
   placeholder,
   value,
 }: {
+  ariaDescribedBy?: string;
   contentClassName?: string;
   disabled?: boolean;
   id: string;
@@ -40,6 +43,7 @@ export function PersonaDropdownField({
       <DropdownMenu modal={false} onOpenChange={setOpen} open={open}>
         <DropdownMenuTrigger asChild>
           <button
+            aria-describedby={ariaDescribedBy}
             className={cn(
               "flex h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm leading-6",
               PERSONA_FIELD_CONTROL_CLASS,
@@ -88,7 +92,7 @@ export function PersonaDropdownField({
                   key={option.value}
                   value={option.value}
                 >
-                  <span className="truncate">{option.label}</span>
+                  <OptionLabel option={option} />
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>

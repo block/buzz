@@ -28,6 +28,18 @@ export function reconcileChannelWindowMessages(
   messages: RelayEvent[],
 ) {
   const windowEvents = flattenChannelWindowEvents(window);
+  if (window.pages.length === 0) {
+    // A pageless window is unresolved, not authoritative. This state can exist
+    // briefly when the companion window query mounts beside an already-cached
+    // rendered timeline. Preserve that cache while admitting live events;
+    // otherwise the first live event projects a one-row overlay over the
+    // entire conversation until reload refetches page zero.
+    let merged = messages;
+    for (const event of windowEvents) {
+      merged = reconcileIncomingMessage(merged, event);
+    }
+    return [...merged].sort((left, right) => compareRelayOrder(right, left));
+  }
   const authoritativeIds = new Set(windowEvents.map((event) => event.id));
   const retained = retainRefetchReconciliationEvents(messages).filter(
     (event) => !authoritativeIds.has(event.id),

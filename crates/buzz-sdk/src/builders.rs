@@ -1,4 +1,4 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -11,8 +11,8 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
-        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -120,6 +120,11 @@ fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Maximum length of a custom emoji shortcode.
+pub const MAX_CUSTOM_EMOJI_SHORTCODE_LEN: usize = 64;
+/// Maximum reaction payload length for a colon-wrapped custom emoji shortcode.
+pub const MAX_CUSTOM_EMOJI_REACTION_LEN: usize = MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 2;
+
 /// Validate and normalize a NIP-30 custom emoji shortcode.
 ///
 /// Shortcodes are case-insensitive in Buzz's relay-global set; lowercase
@@ -131,9 +136,9 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
             "emoji shortcode must not be empty".into(),
         ));
     }
-    if trimmed.len() > 64 {
+    if trimmed.len() > MAX_CUSTOM_EMOJI_SHORTCODE_LEN {
         return Err(SdkError::InvalidInput(format!(
-            "emoji shortcode exceeds 64 bytes (got {})",
+            "emoji shortcode exceeds {MAX_CUSTOM_EMOJI_SHORTCODE_LEN} bytes (got {})",
             trimmed.len()
         )));
     }
@@ -208,6 +213,21 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
     Ok(())
 }
 
+/// Attach NIP-30 `["emoji", shortcode, url]` tags.
+///
+/// Each element of `emoji_tags` must be a three-element vector whose first
+/// entry is `"emoji"`.  Entries that don't match this shape are silently
+/// skipped so an unknown future shape never blocks a message send.
+fn nip30_emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
+    for et in emoji_tags {
+        if et.len() == 3 && et[0] == "emoji" {
+            let parts: Vec<&str> = et.iter().map(String::as_str).collect();
+            tags.push(Tag::parse(parts).map_err(|e| SdkError::InvalidTag(e.to_string()))?);
+        }
+    }
+    Ok(())
+}
+
 /// Build a stream message (kind 9).
 ///
 /// - `channel_id`: target channel UUID
@@ -216,6 +236,7 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
 /// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
 /// - `media_tags`: raw imeta tag vectors
+/// - `emoji_tags`: NIP-30 `["emoji", shortcode, url]` tag vectors
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -223,6 +244,7 @@ pub fn build_message(
     mentions: &[&str],
     broadcast: bool,
     media_tags: &[Vec<String>],
+    emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
@@ -234,7 +256,10 @@ pub fn build_message(
         tags.push(tag(&["broadcast", "1"])?);
     }
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+    nip30_emoji_tags(emoji_tags, &mut tags)?;
+    Ok(EventBuilder::new(Kind::Custom(9), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -285,7 +310,9 @@ pub fn build_forum_post(
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45001), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a forum comment reply (kind 45003).
@@ -301,7 +328,9 @@ pub fn build_forum_comment(
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45003), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a diff/patch message (kind 40008).
@@ -526,9 +555,186 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 }
 
 /// Build a canvas update event (kind 40100).
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+///
+/// When `expected_revision` is set, an `["expected-revision", …]` tag is
+/// attached. A 64-hex event ID names the head the write was composed against;
+/// the literal `none` asserts no head exists yet. The relay enforces this tag
+/// as a compare-and-swap (CAS): it reads the canonical live head under an
+/// advisory lock, checks the precondition, and rejects mismatched writes before
+/// insertion. Omit the tag for an unconditional append (backward compatible).
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(expected_revision) = expected_revision {
+        if expected_revision != "none"
+            && (expected_revision.len() != 64
+                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+            )));
+        }
+        tags.push(tag(&["expected-revision", expected_revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+/// Build a canvas write (kind 40100) that edits or restores against a known
+/// head, applying writer discipline in one place.
+///
+/// Sets the `expected-revision` precondition to `head_id` and stamps
+/// `created_at = max(now, head_created_at + 1)` so the event sorts strictly
+/// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
+/// legitimate first-party restore/edit whose local clock lags the head from
+/// landing behind that head in read order (which would "succeed" without
+/// changing the visible canvas). First-party signers (CLI `set`/restore,
+/// Desktop save/restore) MUST route disciplined canvas writes through this
+/// helper rather than re-deriving the timestamp.
+///
+/// Ordering note: the `+ 1` bump guarantees a strictly greater `created_at`, so
+/// the write never ties the head. Writes that *do* share a second resolve by
+/// `id ASC` under `created_at DESC, id ASC` — the smallest event id wins the
+/// visible head, not the last write. This helper sidesteps that tie by stamping
+/// ahead; unconditional appends that omit the bump remain subject to it.
+pub fn build_set_canvas_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_id: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    let created_at = canvas_write_created_at(head_created_at)?;
+    Ok(build_set_canvas(channel_id, content, Some(head_id))?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Build an unconditional canvas write (kind 40100) that still applies writer
+/// discipline: stamps `created_at = max(now, head_created_at + 1)` so the
+/// event sorts strictly ahead of the current head under `created_at DESC, id ASC`.
+///
+/// Unlike [`build_set_canvas_after_head`], no `expected-revision` tag is added
+/// — the write is an unconditional append that can never conflict. Use this for
+/// `buzz canvas set`, which documents unconditional replace semantics.
+///
+/// Returns an error if `head_created_at` is more than
+/// [`CANVAS_MAX_FUTURE_SKEW_SECS`] beyond `now` (poisoned timeline guard).
+pub fn build_set_canvas_unconditional_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    let created_at = canvas_write_created_at(head_created_at)?;
+    Ok(build_set_canvas(channel_id, content, None)?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Maximum future skew a canvas head may carry before a first-party client
+/// refuses to ratchet past it (seconds). A head timestamped beyond `now +
+/// CANVAS_MAX_FUTURE_SKEW_SECS` is treated as poisoned: stamping
+/// `max(now, head + 1)` against it would silently extend a bogus timeline
+/// arbitrarily far ahead, and every later legitimate write would inherit that
+/// floor.
+///
+/// This is kept well below the relay's general ±900 s drift window. A ceiling
+/// head at `now + 60` produces a write at `now + 61`, which is within the relay's
+/// kind-40100-specific future bound (`CANVAS_MAX_INGEST_FUTURE_SECS = 300` in
+/// ingest.rs) and far inside the general ±900 s window — first-party clients
+/// can never construct an ingest-rejected event through ordinary use.
+pub const CANVAS_MAX_FUTURE_SKEW_SECS: u64 = 60;
+
+/// Contract-v3 writer-discipline timestamp for a canvas write asserting a head
+/// at `head_created_at`: `max(now, head_created_at + 1)` (Unix seconds).
+///
+/// The single home for canvas timestamp discipline. `build_set_canvas_after_head`
+/// stamps CLI restore/`set` writes with this, and Desktop's `set_canvas` calls
+/// it directly for the same reason, so the `max(now, head + 1)` rule is never
+/// re-derived per surface.
+///
+/// Rejects a head timestamped more than [`CANVAS_MAX_FUTURE_SKEW_SECS`] beyond
+/// `now` rather than ratcheting past it: extending a poisoned future timeline
+/// would strand every later write behind a floor arbitrarily far ahead.
+/// `u64::MAX` is covered by the same ceiling.
+pub fn canvas_write_created_at(head_created_at: u64) -> Result<u64, SdkError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    canvas_write_created_at_at(head_created_at, now)
+}
+
+/// Pure core of [`canvas_write_created_at`] with `now` injected — the clock
+/// seam. The public wrapper reads the real clock; tests drive the exact
+/// `now + 60` / `now + 61` boundaries against a fixed `now`.
+fn canvas_write_created_at_at(head_created_at: u64, now: u64) -> Result<u64, SdkError> {
+    if head_created_at > now.saturating_add(CANVAS_MAX_FUTURE_SKEW_SECS) {
+        return Err(SdkError::InvalidInput(
+            "canvas head is timestamped too far in the future; refusing to extend it".into(),
+        ));
+    }
+    Ok(now.max(head_created_at.saturating_add(1)))
+}
+
+/// Maximum ancestry links the post-write supersession walk follows before
+/// failing safe (reporting superseded). A legitimate descendant chain visible
+/// in one history page is far shorter; the bound only caps a pathological or
+/// adversarial revision stream so the walk can never loop or run unbounded.
+pub const CANVAS_ANCESTRY_WALK_MAX: usize = 256;
+
+/// Whether a just-published canvas write still survives as — or anywhere in the
+/// accepted ancestry of — the live head read back after submit. The post-write
+/// supersession check.
+///
+/// `revisions` is a recent slice of the channel's canvas stream ordered newest
+/// first, each entry `(event_id, the expected-revision it built on)`;
+/// `revisions[0]` is the live head. A conflict-checked write (Desktop
+/// save/restore, CLI `restore`) re-reads this stream after publishing and the
+/// walk starts at the head, following `expected-revision` links backward:
+/// - the head **is** our event → survived;
+/// - our event is reached anywhere in the head's ancestry chain (e.g. A→B→C
+///   with C the head and A ours, each linked by `expected-revision`) → a later
+///   write legitimately layered on top of ours → survived;
+/// - the chain ends, reaches a link outside `revisions`, cycles, exceeds
+///   [`CANVAS_ANCESTRY_WALK_MAX`], or there is no head at all → not survived: a
+///   concurrent write won the visible head and ours is superseded (preserved in
+///   history, not lost). Every non-survival outcome, including a truncated or
+///   adversarial stream, fails safe as superseded and never hangs.
+///
+/// All id comparisons are case-insensitive, matching the precondition check's
+/// `eq_ignore_ascii_case` convention. This only detects a competitor already
+/// visible at verification time; a competitor that lands after this read is
+/// still missed — the relay's advisory-lock CAS prevents concurrent conflicting
+/// writes from both being accepted, but this client check is a secondary
+/// confirmation for the caller's own visibility.
+pub fn canvas_write_survived(our_id: &str, revisions: &[(String, Option<String>)]) -> bool {
+    let Some((head_id, _)) = revisions.first() else {
+        return false; // no head after an accepted write → conservatively superseded
+    };
+    if head_id.eq_ignore_ascii_case(our_id) {
+        return true;
+    }
+    // Lowercased id → its expected-revision, for walking the chain backward.
+    let by_id: std::collections::HashMap<String, Option<&str>> = revisions
+        .iter()
+        .map(|(id, expected)| (id.to_ascii_lowercase(), expected.as_deref()))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = head_id.to_ascii_lowercase();
+    for _ in 0..CANVAS_ANCESTRY_WALK_MAX {
+        if !seen.insert(cursor.clone()) {
+            return false; // cycle guard
+        }
+        // The link out of `cursor`; absent id or missing tag ends the walk.
+        let Some(expected) = by_id.get(&cursor).copied().flatten() else {
+            return false;
+        };
+        if expected.eq_ignore_ascii_case(our_id) {
+            return true;
+        }
+        cursor = expected.to_ascii_lowercase();
+    }
+    false // depth exhausted → fail safe (superseded)
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
@@ -1110,6 +1316,131 @@ pub fn build_git_issue(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
 }
 
+/// Build an issue assignment note (kind:1) — a labeled comment whose `p`
+/// tags are the assignees, mirroring the Desktop app's assignment events.
+///
+/// Tag layout: `["e", <issue>, "", "root"]`, `["a", <repo>]`, one `["p", ..]`
+/// per assignee, and `["t", "assignment"]`.
+///
+/// Clients only trust assignments signed by the issue author or the repo
+/// owner (who may assign anyone), or a self-assignment whose sole assignee
+/// is the signer. Assignments from other signers are ignored on read.
+pub fn build_git_issue_assignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue assignment note with an optional causal assignment-operation
+/// event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_assignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Assign,
+        prior,
+    )
+}
+
+/// Build an issue unassignment note (kind:1) whose `p` tags name the people
+/// being removed and whose operation label is `t: unassignment`.
+///
+/// Clients trust unassignments signed by the issue author or repository owner,
+/// or a self-unassignment whose sole `p` tag is the signer.
+pub fn build_git_issue_unassignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_unassignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue unassignment note with an optional causal
+/// assignment-operation event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_unassignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Unassign,
+        prior,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GitIssueAssigneeOperation {
+    Assign,
+    Unassign,
+}
+
+impl GitIssueAssigneeOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Assign => "assignment",
+            Self::Unassign => "unassignment",
+        }
+    }
+}
+
+fn build_git_issue_assignee_operation(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    operation: GitIssueAssigneeOperation,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let issue = check_hex_exact(issue_id, 64, "issue")?;
+    let a_value = repo.to_a_tag_value()?;
+    if assignees.is_empty() || assignees.len() > 50 {
+        return Err(SdkError::InvalidInput(
+            "between 1 and 50 assignees are required".into(),
+        ));
+    }
+    let mut normalized = assignees
+        .iter()
+        .map(|assignee| check_pubkey_hex(assignee, "assignee"))
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+
+    let mut tags = vec![tag(&["e", &issue, "", "root"])?, tag(&["a", &a_value])?];
+    for assignee in &normalized {
+        tags.push(tag(&["p", assignee])?);
+    }
+    tags.push(tag(&["t", operation.label()])?);
+    if let Some(prior) = prior {
+        let prior = check_hex_exact(prior, 64, "prior assignment operation")?;
+        tags.push(tag(&["prior", &prior])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {
@@ -1482,11 +1813,13 @@ pub fn build_workflow_update(
     channel_id: Uuid,
     workflow_id: Uuid,
     yaml: &str,
+    expected_revision: &str,
 ) -> Result<EventBuilder, SdkError> {
     check_content(yaml, 64 * 1024)?;
     let tags = vec![
         tag(&["d", &workflow_id.to_string()])?,
         tag(&["h", &channel_id.to_string()])?,
+        tag(&["expected-revision", expected_revision])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml).tags(tags))
 }
@@ -1499,12 +1832,7 @@ pub fn build_workflow_delete(
     author_pubkey: &str,
     workflow_id: Uuid,
 ) -> Result<EventBuilder, SdkError> {
-    let pk = check_pubkey_hex(author_pubkey, "author_pubkey")?;
-    let tags = vec![tag(&[
-        "a",
-        &format!("{}:{pk}:{workflow_id}", KIND_WORKFLOW_DEF),
-    ])?];
-    Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
+    build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())
 }
 
 /// Build a workflow trigger event (kind 46020).
@@ -1838,6 +2166,364 @@ pub fn build_unarchive_identity_request(
     )
 }
 
+// ─── NIP-MP: Multi-repo projects (kind:30621) ────────────────────────────────
+//
+//  Public surface:
+//  • `validate_project_envelope` — Layer A protocol validator (8 ingest rules)
+//  • `build_project_with_tags`   — Layer A raw builder (content + tags, no canonicalization)
+//  • `ProjectMemberCoord`        — parsed member coordinate + optional relay hint
+//  • `build_project`             — Layer B writer-policy builder
+//  • `build_delete_addressable`  — generic NIP-09 kind:5 coordinate delete
+//
+//  Byte-length bounds from NIP-MP §Relay Processing:
+/// Maximum byte length of a project `d` tag value.
+pub const PROJECT_D_MAX_LEN: usize = 1024;
+/// Maximum byte length of a project `name` tag value.
+pub const PROJECT_NAME_MAX: usize = 256;
+/// Maximum byte length of a project `description` tag value.
+pub const PROJECT_DESCRIPTION_MAX: usize = 2048;
+/// Maximum byte length of a project `buzz-channel` tag value.
+pub const PROJECT_CHANNEL_MAX: usize = 256;
+/// Maximum byte length of a project `buzz-visibility` tag value.
+pub const PROJECT_VISIBILITY_MAX: usize = 256;
+/// Maximum number of `a` member tags per project event (checked before dedup).
+pub const PROJECT_MEMBER_CAP: usize = 64;
+
+/// A validated NIP-MP member `a`-tag coordinate with an optional relay hint.
+///
+/// Equality and `Hash` are by `coord` only (per spec: duplicate detection ignores hint).
+#[derive(Clone, Debug)]
+pub struct ProjectMemberCoord {
+    /// The full `30617:<owner-hex>:<repo-d>` coordinate string.
+    pub coord: String,
+    /// Optional opaque relay hint (third `a`-tag element, never validated by content).
+    pub hint: Option<String>,
+}
+
+impl PartialEq for ProjectMemberCoord {
+    fn eq(&self, other: &Self) -> bool {
+        self.coord == other.coord
+    }
+}
+
+impl Eq for ProjectMemberCoord {}
+
+impl std::hash::Hash for ProjectMemberCoord {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.coord.hash(state);
+    }
+}
+
+impl ProjectMemberCoord {
+    /// Parse a full `30617:<owner-hex>:<repo-d>` coordinate string.
+    ///
+    /// Accepts an optional relay hint as the third colon-separated element
+    /// after the split, but the split is always first-two-colons: kind, owner,
+    /// everything-else-as-repo-d.
+    ///
+    /// Rules enforced:
+    /// - Exactly three segments after splitting on the first two colons
+    /// - First segment must be the literal string `"30617"`
+    /// - Second segment must be exactly 64 lowercase hex characters
+    /// - Third segment (repo-d) must be non-empty
+    /// - Uppercase owners are rejected (never normalized)
+    pub fn parse_full(coord: &str) -> Result<Self, SdkError> {
+        // Split on first two colons only: kind:owner:rest
+        let mut parts = coord.splitn(3, ':');
+        let kind_part = parts.next().unwrap_or("");
+        let owner_part = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("");
+
+        if kind_part != "30617" {
+            return Err(SdkError::InvalidInput(format!(
+                "member coordinate must start with '30617:' (got kind {kind_part:?})"
+            )));
+        }
+        if owner_part.len() != 64 || !owner_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(SdkError::InvalidInput(format!(
+                "member owner must be a 64-character hex pubkey (got {owner_part:?})"
+            )));
+        }
+        // Reject uppercase (spec: lowercase hex required)
+        if owner_part.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(SdkError::InvalidInput(
+                "member owner hex must be lowercase".into(),
+            ));
+        }
+        if rest.is_empty() {
+            return Err(SdkError::InvalidInput(
+                "member coordinate repo-d must not be empty".into(),
+            ));
+        }
+        Ok(ProjectMemberCoord {
+            coord: format!("30617:{owner_part}:{rest}"),
+            hint: None,
+        })
+    }
+
+    /// Returns the `a`-tag element slice: `[coord]` or `[coord, hint]`.
+    pub fn to_tag_parts(&self) -> Vec<String> {
+        let mut parts = vec!["a".to_string(), self.coord.clone()];
+        if let Some(h) = &self.hint {
+            parts.push(h.clone());
+        }
+        parts
+    }
+}
+
+/// **Layer A**: Validate a complete kind:30621 envelope against the 8 NIP-MP
+/// ingest rules.  This is the single source of protocol truth used by both
+/// `build_project_with_tags` (raw path) and `build_project` (policy path).
+///
+/// Rules enforced (matches relay `buzz-db` ingest logic):
+/// 1. `d` cardinality: exactly one `d` tag.
+/// 2. `d` value: non-empty, ≤1024 bytes.
+/// 3. Member cap: raw count of every `a` tag ≤ 64 (checked **before** per-tag
+///    parsing, matching relay rule order).
+/// 4. Member tag arity: every `a` tag has 2 or 3 elements (no more, no fewer).
+/// 5. Member coordinate grammar: first-two-colons split; kind literal `"30617"`;
+///    owner lowercase 64-hex; repo-d non-empty verbatim.
+/// 6. Member deduplication: coordinate equality only (hint ignored); any
+///    coordinate that appears more than once is a duplicate.
+/// 7. Singleton metadata: each of `name`, `description`, `buzz-channel`,
+///    `buzz-visibility` appears at most once.
+/// 8. Metadata byte lengths: `name` ≤256, `description` ≤2048,
+///    `buzz-channel` ≤256, `buzz-visibility` ≤256.
+pub fn validate_project_envelope(tags: &[Tag], _content: &str) -> Result<(), SdkError> {
+    // --- Rule 1 & 2: d tag ---
+    let d_tags: Vec<&Tag> = tags.iter().filter(|t| tag_name(t) == Some("d")).collect();
+    match d_tags.len() {
+        0 => {
+            return Err(SdkError::InvalidInput(
+                "project must have exactly one 'd' tag (rule: d-cardinality)".into(),
+            ))
+        }
+        1 => {}
+        _ => {
+            return Err(SdkError::InvalidInput(
+                "project must have exactly one 'd' tag (rule: d-cardinality)".into(),
+            ))
+        }
+    }
+    let d_val = tag_value(d_tags[0]).unwrap_or("");
+    if d_val.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "project 'd' tag must not be empty (rule: d-empty)".into(),
+        ));
+    }
+    if d_val.len() > PROJECT_D_MAX_LEN {
+        return Err(SdkError::InvalidInput(format!(
+            "project 'd' tag exceeds {PROJECT_D_MAX_LEN} bytes (rule: d-empty)"
+        )));
+    }
+
+    let a_tags: Vec<&Tag> = tags.iter().filter(|t| tag_name(t) == Some("a")).collect();
+
+    // --- Rule 3: member cap (checked before per-tag parsing, matching relay rule order) ---
+    if a_tags.len() > PROJECT_MEMBER_CAP {
+        return Err(SdkError::InvalidInput(format!(
+            "project exceeds member cap of {PROJECT_MEMBER_CAP} (got {}) (rule: member-cap)",
+            a_tags.len()
+        )));
+    }
+
+    // --- Rule 4: member arity ---
+    for a in &a_tags {
+        let len = a.as_slice().len() - 1; // exclude the "a" name element
+        if !(1..=2).contains(&len) {
+            return Err(SdkError::InvalidInput(format!(
+                "member 'a' tag must have 1 or 2 value elements (got {len}) (rule: member-tag-arity)"
+            )));
+        }
+    }
+
+    // --- Rules 5 & 6: coordinate grammar + deduplication ---
+    let mut seen_coords: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for a in &a_tags {
+        let coord_val = tag_value(a).unwrap_or("");
+        ProjectMemberCoord::parse_full(coord_val).map_err(|e| {
+            SdkError::InvalidInput(format!("{e} (rule: member-coordinate-malformed)"))
+        })?;
+        if !seen_coords.insert(coord_val.to_string()) {
+            return Err(SdkError::InvalidInput(format!(
+                "duplicate member coordinate {coord_val:?} (rule: member-duplicate)"
+            )));
+        }
+    }
+
+    // --- Rules 7 & 8: singleton metadata + byte bounds ---
+    let singleton_fields = [
+        (
+            "name",
+            PROJECT_NAME_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+        (
+            "description",
+            PROJECT_DESCRIPTION_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+        (
+            "buzz-channel",
+            PROJECT_CHANNEL_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+        (
+            "buzz-visibility",
+            PROJECT_VISIBILITY_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+    ];
+    for (field, max_bytes, card_rule, len_rule) in singleton_fields {
+        let matches: Vec<&Tag> = tags.iter().filter(|t| tag_name(t) == Some(field)).collect();
+        if matches.len() > 1 {
+            return Err(SdkError::InvalidInput(format!(
+                "project must have at most one '{field}' tag (rule: {card_rule})"
+            )));
+        }
+        if let Some(t) = matches.first() {
+            let val = tag_value(t).unwrap_or("");
+            if val.len() > max_bytes {
+                return Err(SdkError::InvalidInput(format!(
+                    "'{field}' tag exceeds {max_bytes} bytes (rule: {len_rule})"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Helper: tag name (first element).
+fn tag_name(tag: &Tag) -> Option<&str> {
+    tag.as_slice().first().map(String::as_str)
+}
+
+/// Helper: tag value (second element).
+fn tag_value(tag: &Tag) -> Option<&str> {
+    tag.as_slice().get(1).map(String::as_str)
+}
+
+/// **Layer A raw builder**: Build a kind:30621 project event from a raw
+/// `content` string and a raw `tags` slice, without any canonicalization.
+///
+/// Validates the entire envelope through `validate_project_envelope` before
+/// accepting it.  The caller is responsible for supplying the correct `d` tag.
+/// This is the path exercised by fixture conformance tests and by read-modify-
+/// write mutations in the CLI.
+pub fn build_project_with_tags(content: &str, tags: Vec<Tag>) -> Result<EventBuilder, SdkError> {
+    validate_project_envelope(&tags, content)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_PROJECT as u16), content).tags(tags))
+}
+
+/// **Layer B writer-policy builder**: Build a kind:30621 project event with
+/// enforced writer policy:
+/// - The `d` tag is constructed from `slug`; `check_project_slug` rejects
+///   an empty or over-length slug.
+/// - `channel` must be a valid UUID string.
+/// - `visibility` must be `"listed"` or `"unlisted"`.
+/// - Content is always empty.
+/// - Member coordinates are parsed through `ProjectMemberCoord::parse_full`.
+///
+/// The resulting envelope is validated through Layer A before the builder is
+/// returned.
+pub fn build_project(
+    slug: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    members: &[ProjectMemberCoord],
+    channel: Option<&str>,
+    visibility: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    // Slug validation
+    if slug.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "project slug must not be empty".into(),
+        ));
+    }
+    if slug.len() > PROJECT_D_MAX_LEN {
+        return Err(SdkError::InvalidInput(format!(
+            "project slug must not exceed {PROJECT_D_MAX_LEN} bytes (got {})",
+            slug.len()
+        )));
+    }
+
+    // Channel UUID validation
+    if let Some(ch) = channel {
+        uuid::Uuid::parse_str(ch).map_err(|_| {
+            SdkError::InvalidInput(format!("buzz-channel must be a valid UUID (got {ch:?})"))
+        })?;
+    }
+
+    // Visibility enum validation
+    if let Some(vis) = visibility {
+        if vis != "listed" && vis != "unlisted" {
+            return Err(SdkError::InvalidInput(format!(
+                "buzz-visibility must be 'listed' or 'unlisted' (got {vis:?})"
+            )));
+        }
+    }
+
+    let mut tags: Vec<Tag> = Vec::new();
+    tags.push(tag(&["d", slug])?);
+
+    if let Some(n) = name {
+        tags.push(tag(&["name", n])?);
+    }
+    if let Some(d) = description {
+        tags.push(tag(&["description", d])?);
+    }
+    for m in members {
+        let tag_parts = m.to_tag_parts();
+        let parts: Vec<&str> = tag_parts.iter().map(|s| s.as_str()).collect();
+        // Safety: to_tag_parts always produces ["a", coord, ...hint]
+        tags.push(
+            Tag::parse(parts.iter().copied()).map_err(|e| SdkError::InvalidTag(e.to_string()))?,
+        );
+    }
+    if let Some(ch) = channel {
+        tags.push(tag(&["buzz-channel", ch])?);
+    }
+    if let Some(vis) = visibility {
+        tags.push(tag(&["buzz-visibility", vis])?);
+    }
+
+    build_project_with_tags("", tags)
+}
+
+/// **Generic NIP-09 coordinate delete**: Build a kind:5 deletion event with
+/// a single `a`-tag addressing `<kind>:<pubkey>:<d>`.
+///
+/// Validates:
+/// - `kind` is an addressable kind (10000–19999 or 30000–39999).
+/// - `pubkey` is a 64-character lowercase hex string.
+/// - `d` is non-empty.
+///
+/// `build_workflow_delete` delegates to this function.
+pub fn build_delete_addressable(
+    kind: u32,
+    pubkey: &str,
+    d: &str,
+) -> Result<EventBuilder, SdkError> {
+    let is_addressable = (10000..20000).contains(&kind) || (30000..40000).contains(&kind);
+    if !is_addressable {
+        return Err(SdkError::InvalidInput(format!(
+            "kind {kind} is not an addressable kind (must be 10000–19999 or 30000–39999)"
+        )));
+    }
+    let pk = check_pubkey_hex(pubkey, "pubkey")?;
+    if d.is_empty() {
+        return Err(SdkError::InvalidInput("d must not be empty".into()));
+    }
+    let coord = format!("{kind}:{pk}:{d}");
+    let tags = vec![tag(&["a", &coord])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1889,10 +2575,58 @@ mod tests {
     #[test]
     fn message_happy_path() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hello", None, &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hello", None, &[], false, &[], &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn message_preserves_self_mention_p_tag() {
+        // nostr 0.44 strips p tags matching the signer by default.
+        // build_message must opt in via allow_self_tagging() so that
+        // explicit self-mentions survive signing. See #4906.
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder =
+            build_message(cid, "self-canary", None, &[&self_pk], false, &[], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_post_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder = build_forum_post(cid, "self-canary", &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_comment_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let builder = build_forum_comment(cid, "self-canary", &tr, &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
     }
 
     #[test]
@@ -1947,7 +2681,7 @@ mod tests {
             root_event_id: eid,
             parent_event_id: eid,
         };
-        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[], &[]).unwrap());
         // Direct reply: only one e-tag with "reply" marker
         let e_tags: Vec<_> = ev
             .tags
@@ -1970,7 +2704,7 @@ mod tests {
             root_event_id: root,
             parent_event_id: parent,
         };
-        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[], &[]).unwrap());
         let e_tags: Vec<_> = ev
             .tags
             .iter()
@@ -1988,7 +2722,7 @@ mod tests {
     #[test]
     fn message_broadcast_flag() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hi", None, &[], true, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[], true, &[], &[]).unwrap());
         assert!(has_tag(&ev, "broadcast", "1"));
     }
 
@@ -1996,7 +2730,7 @@ mod tests {
     fn message_mentions_deduped() {
         let cid = uuid();
         let hex = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
-        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[], &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
     }
@@ -2017,7 +2751,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&str> = hexes.iter().map(|s| s.as_str()).collect();
-        let result = build_message(cid, "hi", None, &refs, false, &[]);
+        let result = build_message(cid, "hi", None, &refs, false, &[], &[]);
         assert!(matches!(result, Err(SdkError::TooManyMentions)));
     }
 
@@ -2025,7 +2759,7 @@ mod tests {
     fn message_content_too_large() {
         let cid = uuid();
         let big = "x".repeat(64 * 1024 + 1);
-        let result = build_message(cid, &big, None, &[], false, &[]);
+        let result = build_message(cid, &big, None, &[], false, &[], &[]);
         assert!(matches!(result, Err(SdkError::ContentTooLarge { .. })));
     }
 
@@ -2033,7 +2767,91 @@ mod tests {
     fn message_max_content_ok() {
         let cid = uuid();
         let max = "x".repeat(64 * 1024);
-        assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
+        assert!(build_message(cid, &max, None, &[], false, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn message_emoji_tags_attached() {
+        let cid = uuid();
+        let emoji_tags = vec![
+            vec![
+                "emoji".to_string(),
+                "wave".to_string(),
+                "https://example.com/wave.gif".to_string(),
+            ],
+            vec![
+                "emoji".to_string(),
+                "party".to_string(),
+                "https://example.com/party.gif".to_string(),
+            ],
+        ];
+        let ev = sign(
+            build_message(
+                cid,
+                ":wave: hey :party:",
+                None,
+                &[],
+                false,
+                &[],
+                &emoji_tags,
+            )
+            .unwrap(),
+        );
+        // Both emoji tags present
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "wave", "https://example.com/wave.gif"]));
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "party", "https://example.com/party.gif"]));
+        // kind 9
+        assert_eq!(ev.kind.as_u16(), 9);
+    }
+
+    #[test]
+    fn message_malformed_emoji_tag_silently_skipped() {
+        let cid = uuid();
+        let emoji_tags = vec![
+            // only 2 elements — invalid, must be skipped
+            vec!["emoji".to_string(), "wave".to_string()],
+            // wrong kind — must be skipped
+            vec![
+                "imeta".to_string(),
+                "wave".to_string(),
+                "https://example.com/wave.gif".to_string(),
+            ],
+            // valid
+            vec![
+                "emoji".to_string(),
+                "ok".to_string(),
+                "https://example.com/ok.gif".to_string(),
+            ],
+        ];
+        let ev = sign(build_message(cid, "hi", None, &[], false, &[], &emoji_tags).unwrap());
+        let emoji_count = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("emoji"))
+            .count();
+        assert_eq!(emoji_count, 1);
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "ok", "https://example.com/ok.gif"]));
+    }
+
+    #[test]
+    fn message_empty_emoji_tags_slice_ok() {
+        let cid = uuid();
+        let ev = sign(build_message(cid, "hello", None, &[], false, &[], &[]).unwrap());
+        let emoji_count = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("emoji"))
+            .count();
+        assert_eq!(emoji_count, 0);
     }
 
     #[test]
@@ -2302,6 +3120,30 @@ mod tests {
     }
 
     #[test]
+    fn custom_emoji_reaction_accepts_max_shortcode_length() {
+        let eid = event_id();
+        let shortcode = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let ev = sign(
+            build_custom_emoji_reaction(eid, &shortcode, "https://example.com/max.png").unwrap(),
+        );
+
+        assert_eq!(ev.content, format!(":{shortcode}:"));
+        assert_eq!(ev.content.chars().count(), MAX_CUSTOM_EMOJI_REACTION_LEN);
+        assert!(has_tag(&ev, "emoji", &shortcode));
+    }
+
+    #[test]
+    fn custom_emoji_reaction_rejects_overlong_shortcode() {
+        let eid = event_id();
+        let shortcode = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+
+        assert!(matches!(
+            build_custom_emoji_reaction(eid, &shortcode, "https://example.com/too-long.png"),
+            Err(SdkError::InvalidInput(message)) if message.contains("exceeds 64 bytes")
+        ));
+    }
+
+    #[test]
     fn custom_emoji_set_happy_path() {
         let ev = sign(
             build_custom_emoji_set(&[CustomEmoji {
@@ -2326,10 +3168,238 @@ mod tests {
     #[test]
     fn set_canvas_happy_path() {
         let cid = uuid();
-        let ev = sign(build_set_canvas(cid, "# Canvas\nHello").unwrap());
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHello", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 40100);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert_eq!(ev.content, "# Canvas\nHello");
+        assert!(!ev.tags.iter().any(|t| t
+            .as_slice()
+            .first()
+            .is_some_and(|k| k == "expected-revision")));
+    }
+
+    #[test]
+    fn set_canvas_pins_expected_revision() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHi", Some(&head)).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+
+        let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
+        assert!(has_tag(&create, "expected-revision", "none"));
+    }
+
+    #[test]
+    fn set_canvas_after_head_pins_revision_and_bumps_timestamp() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Head created ahead of the signer's clock but within the future-skew
+        // ceiling: the discipline must still stamp strictly ahead of it.
+        let future_head = now + CANVAS_MAX_FUTURE_SKEW_SECS;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, future_head).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(
+            ev.created_at.as_secs() > future_head,
+            "created_at {} must be strictly ahead of future head {future_head}",
+            ev.created_at.as_secs()
+        );
+
+        // Head in the past: the signer's `now` wins and is still ahead.
+        let past_head = 1_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, past_head).unwrap());
+        assert!(ev.created_at.as_secs() > past_head);
+    }
+
+    #[test]
+    fn set_canvas_rejects_malformed_expected_revision() {
+        let cid = uuid();
+        // Wrong length (63 hex chars).
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"a".repeat(63))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Correct length but non-hex.
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"z".repeat(64))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Literal "none" and a valid 64-hex id are accepted.
+        assert!(build_set_canvas(cid, "x", Some("none")).is_ok());
+        assert!(build_set_canvas(cid, "x", Some(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn set_canvas_after_head_rejects_max_head_created_at() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        // u64::MAX is far beyond the future-skew ceiling: reject instead of
+        // silently saturating and breaking the head-advancement guarantee.
+        assert!(matches!(
+            build_set_canvas_after_head(cid, "# Restored", &head, u64::MAX),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn canvas_write_created_at_skew_boundary() {
+        // Fixed clock: the injected-`now` core removes the second-rollover seam
+        // that a real-clock read introduces. A head exactly at the ceiling
+        // (`now + 60`) is accepted and stamped strictly ahead; one second past
+        // it is rejected as poisoned.
+        //
+        // Invariant contract (pinned with literals, not constants, so a constant
+        // mutation also fails this test): the client ceiling is 60 s; the relay
+        // canvas ingest bound is 300 s; the relay general drift bound is 900 s.
+        // A ceiling head at now+60 produces now+61, well below both relay bounds.
+        // These numeric assertions must stay consistent with CANVAS_MAX_FUTURE_SKEW_SECS
+        // and the relay's CANVAS_MAX_INGEST_FUTURE_SECS (300) / MAX_TIMESTAMP_DRIFT_SECS (900).
+        let now = 1_700_000_000u64;
+        let at_ceiling = now + CANVAS_MAX_FUTURE_SKEW_SECS;
+        assert_eq!(
+            canvas_write_created_at_at(at_ceiling, now).unwrap(),
+            at_ceiling + 1,
+            "a head at now+60 is accepted and stamped strictly ahead"
+        );
+        assert!(
+            matches!(
+                canvas_write_created_at_at(at_ceiling + 1, now),
+                Err(SdkError::InvalidInput(_))
+            ),
+            "a head at now+61 is poisoned and rejected"
+        );
+
+        // Fixed-literal contract: client ceiling IS 60 s, NOT the old 900 s.
+        // Mutating CANVAS_MAX_FUTURE_SKEW_SECS back to 900 makes these fail.
+        assert!(
+            canvas_write_created_at_at(now + 60, now).is_ok(),
+            "now+60 is within the 60 s client ceiling"
+        );
+        assert!(
+            matches!(
+                canvas_write_created_at_at(now + 61, now),
+                Err(SdkError::InvalidInput(_))
+            ),
+            "now+61 is one second past the 60 s client ceiling"
+        );
+        // Confirm the old 900 s ceiling is now rejected (prevents silent
+        // reversion): a head at now+900 must not be ratcheted past.
+        assert!(
+            matches!(
+                canvas_write_created_at_at(now + 900, now),
+                Err(SdkError::InvalidInput(_))
+            ),
+            "now+900 must be rejected by the 60 s client ceiling"
+        );
+    }
+
+    /// Standalone numeric contract for the client-side canvas future-skew ceiling.
+    ///
+    /// No constants used — if CANVAS_MAX_FUTURE_SKEW_SECS changes, this test
+    /// catches it regardless of whether the constant-based assertions remain
+    /// self-consistent. The client ceiling IS 60 s: now+60 is the last accepted
+    /// head; now+61 is the first rejected head.
+    ///
+    /// Cross-crate invariant: the relay canvas ingest bound is 300 s and the
+    /// relay general drift bound is 900 s. A ceiling head at now+60 is stamped
+    /// now+61, comfortably below both relay bounds.
+    #[test]
+    fn canvas_write_created_at_numeric_contract() {
+        let now = 1_700_000_000u64;
+        // The client ceiling is exactly 60 s — not 900 s (the old value).
+        // These assertions use only fixed numeric literals; they cannot be
+        // self-referential regardless of what CANVAS_MAX_FUTURE_SKEW_SECS holds.
+        assert!(
+            canvas_write_created_at_at(now + 60, now).is_ok(),
+            "now+60 must be accepted: client ceiling is 60 s",
+        );
+        assert!(
+            canvas_write_created_at_at(now + 61, now).is_err(),
+            "now+61 must be rejected: one second past the 60 s client ceiling",
+        );
+        // Old 900 s value must also be rejected (prevents silent reversion).
+        assert!(
+            canvas_write_created_at_at(now + 900, now).is_err(),
+            "now+900 must be rejected: the old 900 s ceiling is no longer valid",
+        );
+    }
+
+    #[test]
+    fn canvas_write_survived_classifies_head_ancestry() {
+        let ours = "a".repeat(64);
+        let other = "b".repeat(64);
+        let third = "c".repeat(64);
+        // Head is our own event → survived.
+        assert!(canvas_write_survived(&ours, &[(ours.clone(), None)]));
+        // Head is case-insensitively our event → survived.
+        assert!(canvas_write_survived(&ours, &[(ours.to_uppercase(), None)]));
+        // Head is a stranger that builds directly on us (case-insensitively) →
+        // survived.
+        assert!(canvas_write_survived(
+            &ours,
+            &[(other.clone(), Some(ours.to_uppercase()))]
+        ));
+        // Transitive descendant: A(ours) → B(exp=A) → C(exp=B, the head). Ours
+        // is reached by walking the chain, so the write survived.
+        assert!(canvas_write_survived(
+            &ours,
+            &[
+                (third.clone(), Some(other.clone())),
+                (other.clone(), Some(ours.clone())),
+                (ours.clone(), None),
+            ]
+        ));
+        // Head is a stranger that builds on someone else, and that ancestor is
+        // not ours and not in the stream → superseded.
+        assert!(!canvas_write_survived(
+            &ours,
+            &[(other.clone(), Some(third.clone()))]
+        ));
+        // Head is a stranger with no ancestry tag → superseded.
+        assert!(!canvas_write_survived(&ours, &[(other.clone(), None)]));
+        // No head at all after an accepted write → superseded, never silent
+        // success (shouldn't happen, classified conservatively).
+        assert!(!canvas_write_survived(&ours, &[]));
+        // A descendant chain that never reaches ours before the stream ends →
+        // superseded (fails safe rather than assuming survival).
+        assert!(!canvas_write_survived(
+            &ours,
+            &[
+                (third.clone(), Some(other.clone())),
+                (other.clone(), Some("d".repeat(64))),
+            ]
+        ));
+    }
+
+    #[test]
+    fn canvas_write_survived_fails_safe_on_cycles_and_depth() {
+        let ours = "a".repeat(64);
+        let x = "b".repeat(64);
+        let y = "c".repeat(64);
+        // A cycle in the stream (x→y→x) that never touches ours must terminate
+        // as superseded, not loop forever.
+        assert!(!canvas_write_survived(
+            &ours,
+            &[(x.clone(), Some(y.clone())), (y.clone(), Some(x.clone()))]
+        ));
+        // A chain longer than the walk bound that never reaches ours fails safe
+        // as superseded. Each link i points to link i+1; ours is never in it.
+        let mut revisions: Vec<(String, Option<String>)> = (0..(CANVAS_ANCESTRY_WALK_MAX + 10))
+            .map(|i| {
+                let id = format!("{i:064x}");
+                let next = format!("{:064x}", i + 1);
+                (id, Some(next))
+            })
+            .collect();
+        // Terminate the last link at ours so only the depth bound (not a missing
+        // link) can stop the walk — proving the bound itself is the guard.
+        let last = revisions.len() - 1;
+        revisions[last].1 = Some(ours.clone());
+        assert!(!canvas_write_survived(&ours, &revisions));
     }
 
     #[test]
@@ -3047,6 +4117,149 @@ mod tests {
     }
 
     #[test]
+    fn git_issue_assignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // Duplicates (case-insensitive) collapse to a single p tag.
+        let assignees = vec!["C".repeat(64), "c".repeat(64), "d".repeat(64)];
+        let ev = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue to Thomas")
+                .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Assigned this issue to Thomas");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &"c".repeat(64)));
+        assert!(has_tag(&ev, "p", &"d".repeat(64)));
+        assert!(has_tag(&ev, "t", "assignment"));
+        let p_count = ev
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+            .count();
+        assert_eq!(p_count, 2);
+    }
+
+    #[test]
+    fn git_issue_assignment_rejects_bad_input() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // No assignees.
+        let err = build_git_issue_assignment(&repo, &issue, &[], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed assignee pubkey.
+        let err =
+            build_git_issue_assignment(&repo, &issue, &["nope".to_string()], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed issue id.
+        let err = build_git_issue_assignment(&repo, "short", &["c".repeat(64)], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_assignment_with_prior_emits_valid_causal_tag() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let prior = "d".repeat(64);
+        let ev = sign(
+            build_git_issue_assignment_with_prior(
+                &repo,
+                &issue,
+                &[assignee],
+                "Assigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+
+        assert!(has_tag(&ev, "prior", &prior));
+        let unassignment = sign(
+            build_git_issue_unassignment_with_prior(
+                &repo,
+                &issue,
+                &["c".repeat(64)],
+                "Unassigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&unassignment, "prior", &prior));
+        assert!(build_git_issue_assignment_with_prior(
+            &repo,
+            &issue,
+            &["c".repeat(64)],
+            "Assigned this issue",
+            Some("invalid"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn git_issue_unassignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let ev = sign(
+            build_git_issue_unassignment(
+                &repo,
+                &issue,
+                std::slice::from_ref(&assignee),
+                "Unassigned Thomas from this issue",
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Unassigned Thomas from this issue");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &assignee));
+        assert!(has_tag(&ev, "t", "unassignment"));
+        assert!(!has_tag(&ev, "t", "assignment"));
+    }
+
+    #[test]
+    fn legacy_issue_assignment_builders_omit_prior() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignees = vec!["c".repeat(64)];
+        let assignment = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue").unwrap(),
+        );
+        let unassignment = sign(
+            build_git_issue_unassignment(&repo, &issue, &assignees, "Unassigned this issue")
+                .unwrap(),
+        );
+
+        assert!(!assignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+        assert!(!unassignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+    }
+
+    #[test]
     fn git_status_open_happy_path() {
         let root = event_id().to_hex();
         let meta = GitStatusMeta {
@@ -3269,16 +4482,18 @@ mod tests {
     fn workflow_update_includes_h_tag() {
         let cid = uuid();
         let wid = uuid();
-        let ev = sign(build_workflow_update(cid, wid, "name: updated").unwrap());
+        let revision = "a".repeat(64);
+        let ev = sign(build_workflow_update(cid, wid, "name: updated", &revision).unwrap());
         assert_eq!(ev.kind.as_u16(), 30620);
         assert!(has_tag(&ev, "d", &wid.to_string()));
         assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "expected-revision", &revision));
     }
 
     #[test]
     fn workflow_update_rejects_oversized_yaml() {
         let big = "x".repeat(65 * 1024);
-        let err = build_workflow_update(uuid(), uuid(), &big).unwrap_err();
+        let err = build_workflow_update(uuid(), uuid(), &big, &"a".repeat(64)).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 
@@ -3883,5 +5098,281 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(String::as_str) == Some("replaced-by")));
+    }
+
+    // ── NIP-MP cap-before-arity ordering ─────────────────────────────────────
+
+    /// When an envelope exceeds the member cap AND contains a malformed `a` tag,
+    /// the validator must fire `member-cap` (rule 3) — not `member-tag-arity`
+    /// (rule 4).  This matches the relay's ingest ordering and means a client
+    /// sending an oversized list never receives a per-tag parse error.
+    #[test]
+    fn validate_project_envelope_cap_wins_over_arity_when_both_fail() {
+        let owner = "a".repeat(64);
+        // Build 65 well-formed `a` tags — enough to trigger the cap.
+        let mut tags = vec![Tag::parse(["d", "platform"]).unwrap()];
+        for i in 0..65usize {
+            let coord = format!("30617:{owner}:repo-{i}");
+            tags.push(Tag::parse(["a", &coord]).unwrap());
+        }
+        // Also add one malformed tag (four elements) that would fire
+        // member-tag-arity if evaluated before the cap check.
+        let coord_extra = format!("30617:{owner}:repo-extra");
+        tags.push(
+            Tag::parse([
+                "a",
+                &coord_extra,
+                "wss://relay.example.com",
+                "extra-element",
+            ])
+            .unwrap(),
+        );
+
+        let err = validate_project_envelope(&tags, "").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("member-cap"),
+            "expected member-cap to win, got: {msg}"
+        );
+        assert!(
+            !msg.contains("member-tag-arity"),
+            "arity rule must not fire before cap rule, got: {msg}"
+        );
+    }
+
+    // ── Layer B writer-policy builder ───────────────────────────────────────
+
+    const OWNER64: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const VALID_UUID: &str = "3580ca9b-47b4-4af9-b22a-1068778f26c6";
+
+    fn member_coord(repo: &str) -> ProjectMemberCoord {
+        ProjectMemberCoord::parse_full(&format!("30617:{OWNER64}:{repo}")).unwrap()
+    }
+
+    #[test]
+    fn build_project_emitted_envelope_has_correct_shape() {
+        // slug, name, description, channel, visibility, and one member.
+        let m = member_coord("buzz");
+        let ev = sign(
+            build_project(
+                "my-proj",
+                Some("My Project"),
+                Some("A description"),
+                &[m],
+                Some(VALID_UUID),
+                Some("listed"),
+            )
+            .expect("Layer B must accept valid inputs"),
+        );
+
+        // Kind must be 30621.
+        assert_eq!(ev.kind.as_u16(), KIND_PROJECT as u16);
+        // Content must be empty (Layer B policy).
+        assert!(ev.content.is_empty(), "content must be empty");
+
+        let all_tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+
+        // d tag must be present exactly once.
+        let d_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "d").collect();
+        assert_eq!(d_tags.len(), 1);
+        assert_eq!(d_tags[0][1], "my-proj");
+
+        // name, description, buzz-channel, buzz-visibility present.
+        let name_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "name").collect();
+        assert_eq!(name_tags.len(), 1);
+        assert_eq!(name_tags[0][1], "My Project");
+
+        let desc_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "description").collect();
+        assert_eq!(desc_tags.len(), 1);
+        assert_eq!(desc_tags[0][1], "A description");
+
+        let ch_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "buzz-channel").collect();
+        assert_eq!(ch_tags.len(), 1);
+        assert_eq!(ch_tags[0][1], VALID_UUID);
+
+        let vis_tags: Vec<_> = all_tags
+            .iter()
+            .filter(|t| t[0] == "buzz-visibility")
+            .collect();
+        assert_eq!(vis_tags.len(), 1);
+        assert_eq!(vis_tags[0][1], "listed");
+
+        // member a tag.
+        let a_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "a").collect();
+        assert_eq!(a_tags.len(), 1);
+        assert_eq!(a_tags[0][1], format!("30617:{OWNER64}:buzz"));
+    }
+
+    #[test]
+    fn build_project_optional_fields_absent_when_not_supplied() {
+        let m = member_coord("core");
+        let ev = sign(
+            build_project("my-proj", None, None, &[m], None, None)
+                .expect("minimal build must succeed"),
+        );
+        let names: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("name"))
+            .collect();
+        assert!(names.is_empty(), "name tag must not be emitted when absent");
+    }
+
+    #[test]
+    fn build_project_rejects_empty_slug() {
+        let m = member_coord("r");
+        let err = build_project("", None, None, &[m], None, None).unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidInput(_)),
+            "empty slug must be InvalidInput, got: {err:?}"
+        );
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn build_project_rejects_overlong_slug() {
+        let long_slug = "a".repeat(PROJECT_D_MAX_LEN + 1);
+        let m = member_coord("r");
+        let err = build_project(&long_slug, None, None, &[m], None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn build_project_rejects_invalid_channel_uuid() {
+        let m = member_coord("r");
+        let err = build_project("slug", None, None, &[m], Some("not-a-uuid"), None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(err.to_string().contains("UUID") || err.to_string().contains("uuid"));
+    }
+
+    #[test]
+    fn build_project_rejects_invalid_visibility_token() {
+        let m = member_coord("r");
+        let err = build_project("slug", None, None, &[m], None, Some("chartreuse")).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(err.to_string().contains("listed") || err.to_string().contains("unlisted"));
+    }
+
+    #[test]
+    fn build_project_rejects_over_cap_members() {
+        let members: Vec<_> = (0..=PROJECT_MEMBER_CAP)
+            .map(|i| member_coord(&format!("repo-{i}")))
+            .collect();
+        let err = build_project("slug", None, None, &members, None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("member-cap"),
+            "over-cap must report member-cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_project_rejects_duplicate_members() {
+        let m = member_coord("same");
+        let err = build_project("slug", None, None, &[m.clone(), m], None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("dedup") || err.to_string().contains("duplicate"),
+            "duplicate member must report dedup, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_project_content_is_always_empty() {
+        // build_project forces content="" regardless; Layer A also enforces
+        // that the envelope is valid. Any non-empty content would be dropped.
+        // This test pins the Layer B content-forced-empty policy.
+        let m = member_coord("r");
+        let ev = sign(build_project("slug", None, None, &[m], None, None).unwrap());
+        assert!(
+            ev.content.is_empty(),
+            "Layer B must always emit empty content"
+        );
+    }
+
+    // ── NIP-MP conformance fixtures ──────────────────────────────────────────
+    // `build_project_with_tags` directly.  Accept cases must build; reject
+    // cases must fail with an error message containing the expected rule name.
+    // A count assertion guards against silent omissions.
+    //
+    // `include_str!` path is relative to this source file.
+    fn nip_mp_fixture_tags(json_tags: &serde_json::Value) -> Vec<Tag> {
+        json_tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let parts: Vec<String> = t
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                let parts_ref: Vec<&str> = parts.iter().map(String::as_str).collect();
+                Tag::parse(parts_ref.iter().copied())
+                    .unwrap_or_else(|e| panic!("fixture tag parse error: {e}\n  raw: {t}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nip_mp_fixtures_all_31_cases_exercised() {
+        const FIXTURE_JSON: &str = include_str!("../../../docs/nips/NIP-MP.fixtures.json");
+
+        let data: serde_json::Value =
+            serde_json::from_str(FIXTURE_JSON).expect("fixture JSON must parse");
+        let cases = data["cases"].as_array().expect("cases must be array");
+
+        // Count gate: the spec says "required to test against this one file"
+        // with the exact count as-shipped.
+        assert_eq!(
+            cases.len(),
+            31,
+            "expected 31 fixture cases, got {} — was NIP-MP.fixtures.json edited?",
+            cases.len()
+        );
+
+        let mut accept_count = 0usize;
+        let mut reject_count = 0usize;
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let expect = case["expect"].as_str().unwrap();
+            let template = &case["template"];
+            let content = template["content"].as_str().unwrap_or("");
+            let tags = nip_mp_fixture_tags(&template["tags"]);
+
+            match expect {
+                "accept" => {
+                    build_project_with_tags(content, tags).unwrap_or_else(|e| {
+                        panic!("fixture '{name}' (accept) must build successfully, got: {e}")
+                    });
+                    accept_count += 1;
+                }
+                "reject" => {
+                    let reject_rules = case["reject_rules"]
+                        .as_array()
+                        .expect("reject case must have reject_rules")
+                        .iter()
+                        .map(|r| r.as_str().unwrap().to_string())
+                        .collect::<Vec<_>>();
+
+                    let err = build_project_with_tags(content, tags).unwrap_err();
+                    let err_msg = err.to_string();
+
+                    // The error must mention at least one of the expected rules.
+                    let rule_matched = reject_rules.iter().any(|r| err_msg.contains(r.as_str()));
+                    assert!(
+                        rule_matched,
+                        "fixture '{name}' rejected with wrong rule.\n  expected one of: {reject_rules:?}\n  got error: {err_msg}"
+                    );
+                    reject_count += 1;
+                }
+                other => panic!("fixture '{name}' has unknown expect value: {other:?}"),
+            }
+        }
+
+        assert_eq!(accept_count, 11, "expected 11 accept cases");
+        assert_eq!(reject_count, 20, "expected 20 reject cases");
     }
 }

@@ -38,6 +38,41 @@ async function selectText(input: Locator, selectedText: string) {
   }, selectedText);
 }
 
+async function doubleClickText(
+  page: Page,
+  input: Locator,
+  selectedText: string,
+) {
+  const point = await input.evaluate((element, text) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const value = node.textContent ?? "";
+      const index = value.indexOf(text);
+      if (index < 0) continue;
+
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(node, index + text.length);
+      const rect = range.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }
+
+    throw new Error(`Could not locate "${text}" for double-click selection`);
+  }, selectedText);
+
+  await page.mouse.dblclick(point.x, point.y);
+  await expect
+    .poll(() => page.evaluate(() => window.getSelection()?.toString()))
+    .toBe(selectedText);
+
+  return point;
+}
+
 async function selectTextRange(
   input: Locator,
   firstText: string,
@@ -175,6 +210,68 @@ async function applyCaretFormat(
 ) {
   await page.getByRole("button", { name: "Toggle formatting" }).first().click();
   await page.getByRole("button", { name: label, exact: true }).click();
+}
+
+for (const platform of [
+  { name: "macOS", navigatorPlatform: "MacIntel", shortcut: "Meta+Shift+V" },
+  {
+    name: "Windows/Linux",
+    navigatorPlatform: "Win32",
+    shortcut: "Control+Shift+V",
+  },
+]) {
+  test(`pastes rich clipboard content without formatting on ${platform.name}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((navigatorPlatform) => {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        value: navigatorPlatform,
+      });
+    }, platform.navigatorPlatform);
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"], {
+        origin: "http://127.0.0.1:4173",
+      });
+    await openGeneral(page);
+
+    await page.evaluate(async () => {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob(
+            [
+              '<p><strong>Bold</strong> and <a href="https://example.com">linked</a></p><ul><li>list item</li></ul>',
+            ],
+            { type: "text/html" },
+          ),
+          "text/plain": new Blob(["Bold and linked\nlist item"], {
+            type: "text/plain",
+          }),
+        }),
+      ]);
+    });
+
+    const input = page.getByTestId("message-input");
+    await input.click();
+    await page.keyboard.press(platform.shortcut);
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+              .__BUZZ_E2E_COMMANDS__ ?? [],
+        ),
+      )
+      .toContain("read_clipboard_text");
+    await expect(input).toHaveText("Bold and linkedlist item");
+    await expect(input.locator("strong, a, ul, li")).toHaveCount(0);
+    await expect(input.locator(":scope > p")).toHaveText([
+      "Bold and linked",
+      "list item",
+    ]);
+  });
 }
 
 for (const format of [
@@ -557,6 +654,59 @@ test("block formatting preserves a backward native selection", async ({
       }),
     )
     .toBe(true);
+});
+
+test("right-clicking selected composer text hides the selection formatter", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("before selected after");
+  const rightClickPoint = await doubleClickText(page, input, "selected");
+
+  const tray = page.getByTestId("selection-formatting-tray");
+  await expect(tray).toBeVisible();
+
+  await input.evaluate((element) => {
+    (
+      window as Window & {
+        __BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__?: boolean;
+      }
+    ).__BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__ = false;
+    element.addEventListener(
+      "contextmenu",
+      (event) => {
+        (
+          window as Window & {
+            __BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__?: boolean;
+          }
+        ).__BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__ = event.defaultPrevented;
+      },
+      { once: true },
+    );
+  });
+
+  await page.mouse.click(rightClickPoint.x, rightClickPoint.y, {
+    button: "right",
+  });
+
+  await expect(tray).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__?: boolean;
+            }
+          ).__BUZZ_E2E_CONTEXTMENU_DEFAULT_PREVENTED__,
+      ),
+    )
+    .toBe(false);
+
+  await doubleClickText(page, input, "selected");
+  await expect(tray).toBeVisible();
 });
 
 test("Buzz theme uses the primary color for the selection formatter", async ({

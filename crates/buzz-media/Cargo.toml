@@ -32,6 +32,7 @@ tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 futures-core = "0.3"
+quick-xml = { version = "0.38", features = ["serialize"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -15,8 +15,8 @@ use super::{canonical_dev_data_dir, load_persona_runtimes, patch_json_records};
 /// persona (unified agent model, Phase 1A). After this, spawn resolution reads
 /// the record's own runtime (`record_agent_command` step 2) instead of the
 /// live persona — same effective command by construction, so the spawn-config
-/// hash is unchanged and no running agent shows a spurious restart badge (see
-/// `spawn_hash::tests::materializing_runtime_keeps_hash_stable`).
+/// snapshot is unchanged and no running agent shows a spurious restart badge
+/// (see `spawn_snapshot::tests::materializing_runtime_keeps_snapshot_stable`).
 ///
 /// Idempotent: records that already carry `runtime` are untouched, as are
 /// records with no linked persona or a persona without a runtime (both keep

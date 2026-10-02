@@ -1,4 +1,4 @@
-import '../channels/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_format.dart';
 import 'inbox_item.dart';
 
 /// Resolves the effective NIP-RS read marker for one inbox row, mirroring

@@ -5,6 +5,7 @@ import {
   createInputFromRequest,
   requestTargetsEditablePersona,
   type AgentManagementRequest,
+  updateInputFromRequest,
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
 import {
@@ -32,30 +33,6 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-
-function updateInputFromRequest(
-  request: Extract<AgentManagementRequest, { action: "update" }>,
-  current: UpdatePersonaInput,
-): UpdatePersonaInput {
-  const changes = request.request;
-  return {
-    ...current,
-    displayName: changes.displayName ?? current.displayName,
-    systemPrompt: changes.systemPrompt ?? current.systemPrompt,
-    runtime: changes.runtime ?? current.runtime,
-    provider: changes.provider ?? current.provider,
-    model: changes.model ?? current.model,
-    ...(changes.respondTo
-      ? {
-          behavior: {
-            respondTo: changes.respondTo,
-            respondToAllowlist: [],
-            parallelism: current.behavior?.parallelism,
-          },
-        }
-      : {}),
-  };
-}
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -301,7 +278,11 @@ export function useAgentManagement() {
     ...createdAgentAttachment,
     isPending,
     runtimes: runtimesQuery.data ?? [],
-    runtimesLoading: runtimesQuery.isLoading,
+    runtimeCatalogStatus: runtimesQuery.isLoading
+      ? ("loading" as const)
+      : runtimesQuery.isError
+        ? ("error" as const)
+        : ("ready" as const),
     submitCreate,
     submitUpdate,
     dismiss,

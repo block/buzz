@@ -385,6 +385,14 @@ impl RelayMeshMembership for MeshMembership {
         self.draining.store(true, Ordering::Relaxed);
         self.update_local(|record| record.draining = true);
     }
+
+    fn peer_has_capability(&self, runtime_id: RuntimeId, capability: &str) -> bool {
+        self.peers
+            .read()
+            .expect("membership lock poisoned")
+            .get(&runtime_id)
+            .is_some_and(|peer| peer.record.capabilities.iter().any(|c| c == capability))
+    }
 }
 
 #[cfg(test)]

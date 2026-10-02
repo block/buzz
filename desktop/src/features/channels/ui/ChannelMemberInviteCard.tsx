@@ -1,7 +1,8 @@
 import { Search, UserPlus, X } from "lucide-react";
 import * as React from "react";
 
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
@@ -18,7 +19,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -105,6 +106,35 @@ export function ChannelMemberInviteCard({
     ],
   );
 
+  // Someone without a kind:0 profile on the relay is invisible to user
+  // search — let the caller paste their npub or hex pubkey directly instead.
+  const directInvitee = React.useMemo<UserSearchResult | null>(() => {
+    const pubkey = parsePubkeyInput(deferredInviteQuery);
+    if (
+      pubkey === null ||
+      memberPubkeys.has(pubkey) ||
+      selectedInviteePubkeys.has(pubkey) ||
+      (userSearchQuery.data ?? []).some(
+        (user) => user.pubkey.toLowerCase() === pubkey,
+      )
+    ) {
+      return null;
+    }
+    return {
+      pubkey,
+      displayName: null,
+      avatarUrl: null,
+      nip05Handle: null,
+      ownerPubkey: null,
+      isAgent: false,
+    };
+  }, [
+    deferredInviteQuery,
+    memberPubkeys,
+    selectedInviteePubkeys,
+    userSearchQuery.data,
+  ]);
+
   React.useEffect(() => {
     if (!open) {
       setInviteQuery("");
@@ -161,7 +191,7 @@ export function ChannelMemberInviteCard({
               disabled={isPending}
               id="channel-management-search-users"
               onChange={(event) => setInviteQuery(event.target.value)}
-              placeholder="Search people and agents"
+              placeholder="Search people, or paste a public key"
               value={inviteQuery}
             />
           </div>
@@ -176,6 +206,7 @@ export function ChannelMemberInviteCard({
                   <UserAvatar
                     avatarUrl={invitee.avatarUrl ?? null}
                     displayName={formatSearchUserName(invitee)}
+                    shape={invitee.isAgent ? "squircle" : "circle"}
                     size="xs"
                   />
                   <span className="font-medium">
@@ -217,12 +248,41 @@ export function ChannelMemberInviteCard({
           ) : null}
           {deferredInviteQuery.length > 0 ? (
             <div className="border-t border-border/70 px-2 py-2">
-              {userSearchQuery.isLoading ? (
+              {userSearchQuery.isLoading && !directInvitee ? (
                 <p className="px-2 py-1 text-sm text-muted-foreground">
                   Searching…
                 </p>
-              ) : inviteSearchResults.length > 0 ? (
+              ) : inviteSearchResults.length > 0 || directInvitee ? (
                 <div className="max-h-44 space-y-1 overflow-y-auto">
+                  {directInvitee ? (
+                    <button
+                      className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
+                      data-testid={`channel-direct-invite-${directInvitee.pubkey}`}
+                      onClick={() => {
+                        setSelectedInvitees((current) => [
+                          ...current,
+                          directInvitee,
+                        ]);
+                        setInviteQuery("");
+                      }}
+                      type="button"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <UserAvatar
+                          avatarUrl={null}
+                          displayName={truncateNpub(directInvitee.pubkey)}
+                          size="xs"
+                        />
+                        <p className="truncate text-sm font-medium leading-5">
+                          {truncateNpub(directInvitee.pubkey)}
+                        </p>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          by public key
+                        </span>
+                      </div>
+                      <span className="text-xs text-muted-foreground">Add</span>
+                    </button>
+                  ) : null}
                   {inviteSearchResults.map((result) => (
                     <button
                       className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
@@ -238,6 +298,7 @@ export function ChannelMemberInviteCard({
                         <UserAvatar
                           avatarUrl={result.avatarUrl}
                           displayName={formatSearchUserName(result)}
+                          shape={result.isAgent ? "squircle" : "circle"}
                           size="xs"
                         />
                         <p className="truncate text-sm font-medium leading-5">
@@ -309,7 +370,7 @@ export function ChannelMemberInviteCard({
         <div className="space-y-1 text-sm text-destructive">
           {submissionErrors.map((error) => (
             <p key={`${error.pubkey}-${error.error}`}>
-              {truncatePubkey(error.pubkey)}: {error.error}
+              {truncateNpub(error.pubkey)}: {error.error}
             </p>
           ))}
         </div>

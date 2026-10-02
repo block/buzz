@@ -24,9 +24,19 @@ export function buildHomeBadgeFeedItems(
   extraInboxItems: readonly FeedItem[],
   localUnreadFeedIds: ReadonlySet<string>,
 ): FeedItem[] {
+  // Thread activity is surfaced directly on its channel's hover preview. It
+  // should not also inflate the Inbox numeral, which is reserved for the
+  // Inbox's own high-priority activity.
+  const nonThreadExtraInboxItems = extraInboxItems.filter(
+    (item) => !isThreadReply(item.tags),
+  );
   const items = feed
-    ? [...feed.feed.mentions, ...feed.feed.needsAction, ...extraInboxItems]
-    : [...extraInboxItems];
+    ? [
+        ...feed.feed.mentions,
+        ...feed.feed.needsAction,
+        ...nonThreadExtraInboxItems,
+      ]
+    : [...nonThreadExtraInboxItems];
 
   if (feed && localUnreadFeedIds.size > 0) {
     items.push(

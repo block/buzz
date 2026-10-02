@@ -9,6 +9,8 @@ redis:
   enabled: true
 minio:
   enabled: true
+  image: ghcr.io/block/buzz-minio:latest
+  mcImage: ghcr.io/block/buzz-minio:latest
 relayUrl: wss://buzz.test.local
 ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000001"
 relay:

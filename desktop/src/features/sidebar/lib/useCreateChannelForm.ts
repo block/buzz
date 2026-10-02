@@ -41,11 +41,10 @@ export type CreateChannelFormState = {
   setEphemeral: (value: boolean) => void;
   ttlSeconds: number;
   setTtlSeconds: (value: number) => void;
-  typePopoverOpen: boolean;
-  setTypePopoverOpen: (open: boolean) => void;
   errorMessage: string | null;
   selectedTemplateId: string | null;
   handleTemplateChange: (templateId: string) => void;
+  handleTemplateCreated: (template: ChannelTemplate) => void;
   templates: ChannelTemplate[];
   nameInputRef: React.RefObject<HTMLInputElement | null>;
   isCreating: boolean;
@@ -78,7 +77,6 @@ export function useCreateChannelForm({
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<
     string | null
   >(null);
-  const [typePopoverOpen, setTypePopoverOpen] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
   const visibilityTouchedRef = React.useRef(false);
 
@@ -96,7 +94,6 @@ export function useCreateChannelForm({
     setTtlSeconds(DEFAULT_EPHEMERAL_TTL_SECONDS);
     setErrorMessage(null);
     setSelectedTemplateId(null);
-    setTypePopoverOpen(false);
     visibilityTouchedRef.current = false;
 
     if (!autoFocusName) return;
@@ -120,6 +117,13 @@ export function useCreateChannelForm({
     return () => globalThis.clearTimeout(timerId);
   }, [active, autoFocusName, initialName]);
 
+  const applyTemplate = React.useCallback((template: ChannelTemplate) => {
+    setSelectedTemplateId(template.id);
+    setDescription(template.description ?? "");
+    if (!visibilityTouchedRef.current) setVisibility(template.visibility);
+    setErrorMessage(null);
+  }, []);
+
   const handleTemplateChange = React.useCallback(
     (templateId: string) => {
       if (!templateId) {
@@ -135,12 +139,9 @@ export function useCreateChannelForm({
       );
       if (!template) return;
 
-      setSelectedTemplateId(templateId);
-      setDescription(template.description ?? "");
-      if (!visibilityTouchedRef.current) setVisibility(template.visibility);
-      setErrorMessage(null);
+      applyTemplate(template);
     },
-    [templates],
+    [applyTemplate, templates],
   );
 
   const handleSubmit = React.useCallback(
@@ -206,11 +207,10 @@ export function useCreateChannelForm({
     setEphemeral,
     ttlSeconds,
     setTtlSeconds,
-    typePopoverOpen,
-    setTypePopoverOpen,
     errorMessage,
     selectedTemplateId,
     handleTemplateChange,
+    handleTemplateCreated: applyTemplate,
     templates,
     nameInputRef,
     isCreating,

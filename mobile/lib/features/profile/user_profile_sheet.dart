@@ -1,34 +1,64 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import '../../shared/clipboard_utils.dart';
+import '../../shared/animated_avatar.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/avatar_image.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_action_tile.dart';
+import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/progressive_animated_avatar.dart';
+import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
-import 'presence_cache_provider.dart';
-import 'user_cache_provider.dart';
-import 'user_status_cache_provider.dart';
 import '../channels/message_content.dart';
+import 'presence_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
-void showUserProfileSheet(BuildContext context, String pubkey) {
-  showModalBottomSheet<void>(
+///
+/// The sheet names [pubkey] as the opening surface did: within the live
+/// comparison context [names] (for example a channel's members or a Pulse
+/// timeline). Without it, the identity is compared only with itself.
+void showUserProfileSheet(
+  BuildContext context,
+  String pubkey, {
+  ProviderListenable<IdentityNames>? names,
+}) {
+  showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
-    showDragHandle: true,
-    builder: (_) => UserProfileSheet(pubkey: pubkey),
-  );
+    showDragHandle: false,
+    builder: (_) => UserProfileSheet(pubkey: pubkey, names: names),
+  ).then((channel) {
+    if (channel == null || !context.mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChannelDetailPage(channel: channel),
+      ),
+    );
+  });
 }
 
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
-  const UserProfileSheet({super.key, required this.pubkey});
+  /// The opening surface's comparison context. The sheet watches it, so its
+  /// title follows profile and context changes while it is open. The caller
+  /// owns the context, so this sheet depends on no other feature's state.
+  final ProviderListenable<IdentityNames>? names;
+
+  const UserProfileSheet({super.key, required this.pubkey, this.names});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -40,7 +70,7 @@ class UserProfileSheet extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final presenceMap = ref.watch(presenceCacheProvider);
-    final presence = presenceMap[pk] ?? 'offline';
+    final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
@@ -66,188 +96,307 @@ class UserProfileSheet extends HookConsumerWidget {
       ref.read(userCacheProvider.notifier).preload([pk]);
       return null;
     }, [pk]);
+    final copied = useState(false);
+    final isOpeningDirectMessage = useState(false);
 
-    final displayName = profile?.displayName;
+    // Canonical npub for the copy action; null when [pubkey] is not a valid
+    // identity, in which case the copy tile is disabled — an invalid key is
+    // never placed on the clipboard.
+    final npub = fullNpub(pubkey);
+
+    // The contextual label from the opening surface, so the sheet names the
+    // identity exactly as the row that was tapped.
+    final opener = names;
+    final displayName =
+        (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
+            .labelFor(pk);
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
-    final presenceColor = switch (presence) {
-      'online' => context.appColors.success,
-      'away' => context.appColors.warning,
-      _ => context.colors.outline,
-    };
-    final presenceLabel = switch (presence) {
-      'online' => 'Online',
-      'away' => 'Away',
-      _ => 'Offline',
-    };
+    Future<void> copyPublicKey() async {
+      if (npub == null) return;
+      await Clipboard.setData(ClipboardData(text: npub));
+      if (!context.mounted) return;
+      copied.value = true;
+      _showProfileCopyToast(context);
+      unawaited(
+        Future<void>.delayed(const Duration(seconds: 2), () {
+          if (context.mounted) copied.value = false;
+        }),
+      );
+    }
 
-    return SizedBox(
-      width: double.infinity,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          Grid.sm,
-          0,
-          Grid.sm,
-          MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(context).height * 0.7,
-          ),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.only(bottom: Grid.xs),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Avatar — near full-width
-                _ProfileAvatar(avatarUrl: avatarUrl, initial: initial),
-                const SizedBox(height: Grid.xs),
+    Future<void> openDirectMessage() async {
+      if (isOpeningDirectMessage.value) return;
+      isOpeningDirectMessage.value = true;
+      try {
+        final channel = await ref
+            .read(channelActionsProvider)
+            .openDm(pubkeys: [pk]);
+        if (!context.mounted) return;
+        Navigator.of(context).pop(channel);
+      } catch (_) {
+        // Silently fail — user tapped but DM open failed.
+        if (context.mounted) isOpeningDirectMessage.value = false;
+      }
+    }
 
-                // Display name — centered, large
-                Center(
-                  child: Text(
-                    displayName ?? shortPubkey(pubkey),
-                    style: context.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-
-                // NIP-05 handle — centered, secondary
-                if (nip05 != null && nip05.isNotEmpty) ...[
-                  const SizedBox(height: Grid.half),
-                  Center(
-                    child: Text(
-                      nip05,
-                      style: context.textTheme.bodyMedium?.copyWith(
-                        color: context.colors.onSurfaceVariant,
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Flexible(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                Grid.gutter,
+                0,
+                Grid.gutter,
+                MediaQuery.viewInsetsOf(context).bottom,
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.only(bottom: Grid.xs),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Center the presence chip on the avatar's lower edge.
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: Grid.xl / 2),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Align(
+                            alignment: Alignment.center,
+                            child: FractionallySizedBox(
+                              widthFactor: 0.5,
+                              child: _ProfileAvatar(
+                                avatarUrl: avatarUrl,
+                                initial: initial,
+                                isAgent: profile?.isAgent == true,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: -(Grid.xl / 2),
+                            child: _ProfilePresenceChip(presence: presence),
+                          ),
+                        ],
                       ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: Grid.half),
 
-                const SizedBox(height: Grid.xs),
-
-                // Presence row — filled dot, not an outline icon
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: Grid.half + 2),
-                  child: Row(
-                    children: [
+                    // Display name — centered, large
+                    Center(
+                      child: Text(
+                        displayName,
+                        style: context.textTheme.headlineSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    // Match Settings: status is quiet, centered copy directly
+                    // below the profile name rather than a separate information row.
+                    if (userStatus != null && !userStatus.isEmpty)
                       SizedBox(
-                        width: 24,
-                        child: Center(
-                          child: Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              color: presenceColor,
-                              shape: BoxShape.circle,
+                        width: double.infinity,
+                        child: Padding(
+                          padding: const EdgeInsets.only(
+                            top: Grid.xxs,
+                            left: Grid.gutter,
+                            right: Grid.gutter,
+                            bottom: Grid.xxs,
+                          ),
+                          child: MessageContent(
+                            content: userStatus.text.isNotEmpty
+                                ? '${userStatus.emoji.isNotEmpty ? '${userStatus.emoji} ' : ''}${userStatus.text}'
+                                : userStatus.emoji,
+                            baseStyle: context.textTheme.bodySmall?.copyWith(
+                              color: context.colors.onSurfaceVariant,
                             ),
+                            textAlign: TextAlign.center,
+                            maxLines: 2,
                           ),
                         ),
                       ),
-                      const SizedBox(width: Grid.xxs),
-                      Text(
-                        presenceLabel,
-                        style: context.textTheme.bodyMedium?.copyWith(
-                          color: context.colors.onSurface,
+
+                    // NIP-05 handle — centered, secondary
+                    if (nip05 != null && nip05.isNotEmpty) ...[
+                      const SizedBox(height: Grid.half),
+                      Center(
+                        child: Text(
+                          nip05,
+                          style: context.textTheme.bodyMedium?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
                         ),
                       ),
                     ],
-                  ),
-                ),
 
-                if (userStatus != null && !userStatus.isEmpty)
-                  _InfoRowContent(
-                    icon: LucideIcons.messageCircle,
-                    child: MessageContent(
-                      content:
-                          '${userStatus.emoji.isNotEmpty ? '${userStatus.emoji} ' : ''}${userStatus.text}',
-                    ),
-                  ),
+                    const SizedBox(height: Grid.xs + Grid.half),
 
-                _InfoRow(
-                  icon: LucideIcons.key,
-                  text: shortPubkey(pubkey),
-                  textStyle: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                    fontFamily: 'monospace',
-                  ),
-                  onTap: () async {
-                    await copyToClipboard(
-                      context,
-                      pubkey,
-                      message: 'Public key copied',
-                    );
-                  },
-                ),
-
-                // About / bio section
-                if (about.isNotEmpty) ...[
-                  const SizedBox(height: Grid.xxs),
-                  Divider(
-                    color: context.colors.outlineVariant.withValues(alpha: 0.3),
-                  ),
-                  const SizedBox(height: Grid.xxs),
-                  Text(
-                    'About',
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: Grid.half),
-                  Text(
-                    about,
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-
-                const SizedBox(height: Grid.xs),
-
-                // Action button — Message (hidden on own profile)
-                if (pk != currentPubkey) ...[
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: () async {
-                        Navigator.of(context).pop();
-                        try {
-                          final channel = await ref
-                              .read(channelActionsProvider)
-                              .openDm(pubkeys: [pk]);
-                          if (!context.mounted) return;
-                          await Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) =>
-                                  ChannelDetailPage(channel: channel),
+                    Row(
+                      children: [
+                        if (pk != currentPubkey) ...[
+                          Expanded(
+                            child: BuzzActionTile(
+                              icon: isOpeningDirectMessage.value
+                                  ? null
+                                  : LucideIcons.messageSquare,
+                              label: isOpeningDirectMessage.value
+                                  ? 'Opening…'
+                                  : 'Message',
+                              isLoading: isOpeningDirectMessage.value,
+                              loadingSemanticLabel: 'Opening direct message',
+                              onTap: openDirectMessage,
                             ),
-                          );
-                        } catch (_) {
-                          // Silently fail — user tapped but DM open failed.
-                        }
-                      },
-                      icon: const Icon(LucideIcons.messageSquare, size: 18),
-                      label: const Text('Message'),
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          vertical: Grid.twelve,
+                          ),
+                          const SizedBox(width: Grid.twelve),
+                        ],
+                        Expanded(
+                          child: BuzzActionTile(
+                            icon: copied.value
+                                ? LucideIcons.check
+                                : LucideIcons.key,
+                            label: copied.value ? 'Copied' : 'Copy public key',
+                            isEnabled: npub != null,
+                            onTap: copyPublicKey,
+                          ),
                         ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(Radii.lg),
+                      ],
+                    ),
+                    const SizedBox(height: Grid.xs),
+
+                    // About / bio section
+                    if (about.isNotEmpty) ...[
+                      const SizedBox(height: Grid.xxs),
+                      Divider(
+                        color: context.colors.outlineVariant.withValues(
+                          alpha: 0.3,
                         ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(height: Grid.xxs),
-                ],
-              ],
+                      const SizedBox(height: Grid.xxs),
+                      Text(
+                        'About',
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: Grid.half),
+                      Text(
+                        about,
+                        style: context.textTheme.bodyMedium?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shows clipboard feedback above the bottom-sheet route. A regular SnackBar
+/// belongs to the page Scaffold, which sits behind the modal sheet.
+void _showProfileCopyToast(BuildContext context) {
+  final overlay = Overlay.of(context, rootOverlay: true);
+  final colors = context.colors;
+  final textStyle = context.textTheme.bodyMedium?.copyWith(
+    color: colors.onInverseSurface,
+  );
+  late final OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (overlayContext) => Positioned(
+      left: Grid.gutter,
+      right: Grid.gutter,
+      bottom: MediaQuery.viewPaddingOf(overlayContext).bottom + Grid.xs,
+      child: Material(
+        color: colors.inverseSurface,
+        elevation: 6,
+        borderRadius: BorderRadius.circular(Radii.lg),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Grid.xs,
+            vertical: Grid.twelve,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.check, size: 18, color: colors.onInverseSurface),
+              const SizedBox(width: Grid.xxs),
+              Text('Public key copied', style: textStyle),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  overlay.insert(entry);
+  Future<void>.delayed(const Duration(seconds: 2), () {
+    if (entry.mounted) entry.remove();
+  });
+}
+
+/// The read-only version of the presence control in Settings. A viewed profile
+/// reflects its owner's availability but does not allow another user to change
+/// it.
+class _ProfilePresenceChip extends StatelessWidget {
+  const _ProfilePresenceChip({required this.presence});
+
+  final String? presence;
+
+  @override
+  Widget build(BuildContext context) {
+    final effectivePresence = switch (presence) {
+      'online' || 'away' || 'offline' => presence,
+      _ => null,
+    };
+    final backgroundColor = switch (effectivePresence) {
+      'online' => context.appColors.success,
+      'away' => context.appColors.warning,
+      _ => context.colors.onSurfaceVariant,
+    };
+    final label = switch (effectivePresence) {
+      'online' => 'Online',
+      'away' => 'Away',
+      'offline' => 'Offline',
+      _ => 'Unknown',
+    };
+
+    return Semantics(
+      label: 'Presence: $label',
+      excludeSemantics: true,
+      child: SizedBox(
+        height: Grid.xl,
+        child: Center(
+          child: Material(
+            color: backgroundColor,
+            borderRadius: BorderRadius.circular(Radii.full),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: Grid.xs,
+                vertical: Grid.xxs,
+              ),
+              child: Text(
+                label,
+                style: filterChipTextStyle.copyWith(
+                  color: context.colors.onPrimary,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ),
           ),
         ),
@@ -256,100 +405,55 @@ class UserProfileSheet extends HookConsumerWidget {
   }
 }
 
-/// A row displaying an icon + text, used for profile info items.
+class _ProfileAvatar extends HookWidget {
+  final String? avatarUrl;
+  final String initial;
+  final bool isAgent;
 
-class _InfoRowContent extends StatelessWidget {
-  final IconData icon;
-  final Widget child;
-
-  const _InfoRowContent({required this.icon, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.quarter),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 16, color: context.colors.onSurfaceVariant),
-          const SizedBox(width: Grid.xxs),
-          Expanded(child: child),
-        ],
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  final IconData icon;
-  final String text;
-  final TextStyle? textStyle;
-  final VoidCallback? onTap;
-
-  const _InfoRow({
-    required this.icon,
-    required this.text,
-    this.textStyle,
-    this.onTap,
+  const _ProfileAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
   });
 
   @override
   Widget build(BuildContext context) {
-    final child = Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.half + 2),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 24,
-            child: Icon(icon, size: 16, color: context.colors.onSurfaceVariant),
-          ),
-          const SizedBox(width: Grid.xxs),
-          Expanded(
-            child: Text(
-              text,
-              style:
-                  textStyle ??
-                  context.textTheme.bodyMedium?.copyWith(
-                    color: context.colors.onSurface,
-                  ),
-            ),
-          ),
-          if (onTap != null)
-            Icon(
-              LucideIcons.copy,
-              size: 14,
-              color: context.colors.onSurfaceVariant,
-            ),
-        ],
-      ),
-    );
+    final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
+    final stoppedAnimationUrl = useState<String?>(null);
+    final isPlaying =
+        animatedAvatar != null &&
+        stoppedAnimationUrl.value != animatedAvatar.animationUrl;
 
-    if (onTap != null) {
-      return GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: child,
-      );
-    }
-    return child;
-  }
-}
-
-class _ProfileAvatar extends StatelessWidget {
-  final String? avatarUrl;
-  final String initial;
-
-  const _ProfileAvatar({required this.avatarUrl, required this.initial});
-
-  @override
-  Widget build(BuildContext context) {
     return AspectRatio(
       aspectRatio: 1,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: AvatarImageContent(
-          imageUrl: avatarUrl,
-          fallback: _AvatarFallback(initial: initial),
+      child: GestureDetector(
+        key: const ValueKey('selected-profile-avatar'),
+        onTap: animatedAvatar == null
+            ? null
+            : () => stoppedAnimationUrl.value =
+                  stoppedAnimationUrl.value == animatedAvatar.animationUrl
+                  ? null
+                  : animatedAvatar.animationUrl,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final avatar = isPlaying
+                ? ProgressiveAnimatedAvatar(
+                    key: ValueKey(animatedAvatar.animationUrl),
+                    descriptor: animatedAvatar,
+                    fallback: _AvatarFallback(initial: initial),
+                  )
+                : AvatarImageContent(
+                    imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                    fallback: _AvatarFallback(initial: initial),
+                  );
+            if (!isAgent) return ClipOval(child: avatar);
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(
+                constraints.biggest.shortestSide * 0.3,
+              ),
+              child: avatar,
+            );
+          },
         ),
       ),
     );

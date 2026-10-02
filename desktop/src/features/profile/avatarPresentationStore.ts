@@ -1,6 +1,10 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import {
+  buildAnimatedAvatarUrl,
+  parseAnimatedAvatarUrl,
+} from "@/shared/lib/animatedAvatar";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 export type AvatarPresentationState = "failed" | "pending" | "ready";
@@ -84,6 +88,37 @@ function probeImage(
   });
 }
 
+function presentationAssetUrls(remoteUrl: string): string[] {
+  const animated = parseAnimatedAvatarUrl(remoteUrl);
+  return animated ? [animated.posterUrl, animated.animationUrl] : [remoteUrl];
+}
+
+function verifiedPresentationUrl(
+  remoteUrl: string,
+  verifiedUrls: Array<string | null>,
+): string | null {
+  if (verifiedUrls.some((verifiedUrl) => !verifiedUrl)) return null;
+
+  const animated = parseAnimatedAvatarUrl(remoteUrl);
+  if (!animated) return verifiedUrls[0] ?? null;
+  const [posterUrl, animationUrl] = verifiedUrls;
+  return posterUrl && animationUrl
+    ? buildAnimatedAvatarUrl(posterUrl, animationUrl)
+    : null;
+}
+
+async function probePresentation(
+  remoteUrl: string,
+  attempt: number,
+): Promise<string | null> {
+  const verifiedUrls = await Promise.all(
+    presentationAssetUrls(remoteUrl).map((assetUrl) =>
+      probeImage(assetUrl, attempt),
+    ),
+  );
+  return verifiedPresentationUrl(remoteUrl, verifiedUrls);
+}
+
 async function verifyPresentation(
   entry: AvatarPresentationEntry,
 ): Promise<void> {
@@ -91,7 +126,7 @@ async function verifyPresentation(
     await wait(delayMs);
     if (!isCurrent(entry) || entry.snapshot.state !== "pending") return;
 
-    const verifiedUrl = await probeImage(entry.remoteUrl, attempt);
+    const verifiedUrl = await probePresentation(entry.remoteUrl, attempt);
     if (!isCurrent(entry) || entry.snapshot.state !== "pending") return;
     if (!verifiedUrl) continue;
 

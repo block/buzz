@@ -12,6 +12,11 @@ import {
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
 import { providerRequiresExplicitModel } from "./agentConfigOptions";
+import {
+  disambiguateModelLabels,
+  resolveModelLabel,
+} from "@/features/agents/lib/formatAgentModelLabel";
+import { generateBareModelLabel } from "./modelCapabilities";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -36,9 +41,19 @@ function isHarnessDefaultModelEntry(model: { id: string }) {
   return model.id.trim().toLowerCase() === "default";
 }
 
+/** Our generated label for a full Claude Code model id, `[1m]` kept as a
+ * suffix. Short names (`opus`) and unknown suffixes return null. */
+export function claudeCodeModelLabel(id: string): string | null {
+  if (/[^\p{ASCII}]/u.test(id)) return null;
+  const match = /^([^[]+)(\[1m\])?$/i.exec(id.trim());
+  const label = match ? generateBareModelLabel(match[1]) : null;
+  return label && match?.[2] ? `${label} (1M context)` : label;
+}
+
 export function getDiscoveredPersonaModelOptions(
   response: AgentModelsResponse | null,
   provider: string,
+  runtimeId?: string,
 ): readonly PersonaModelOption[] | null {
   if (!response?.supportsSwitching || response.models.length === 0) {
     return null;
@@ -52,7 +67,15 @@ export function getDiscoveredPersonaModelOptions(
     (model) => !isHarnessDefaultModelEntry(model),
   );
   const harnessDefaultEntry = response.models.find(isHarnessDefaultModelEntry);
+  const labelFor = (id: string, name: string | null, rawId = id) =>
+    (runtimeId === "claude" ? claudeCodeModelLabel(rawId) : null) ??
+    resolveModelLabel(id, name, provider);
   const agentDefaultModel = response.agentDefaultModel?.trim();
+  // The harness's own "default" entry is already a Default label; naming it
+  // again would read "Default model (Default (recommended))".
+  const defaultIsHarnessEntry =
+    agentDefaultModel !== undefined &&
+    isHarnessDefaultModelEntry({ id: agentDefaultModel });
 
   const defaultModelOption =
     providerRequiresExplicitModel(provider) && harnessDefaultEntry === undefined
@@ -63,9 +86,18 @@ export function getDiscoveredPersonaModelOptions(
             label:
               provider === "relay-mesh"
                 ? "Default (auto)"
-                : agentDefaultModel
-                  ? `Default model (${agentDefaultModel})`
+                : agentDefaultModel && !defaultIsHarnessEntry
+                  ? `Default model (${labelFor(
+                      agentDefaultModel,
+                      response.models.find(
+                        (model) => model.id === agentDefaultModel,
+                      )?.name ?? null,
+                      response.agentDefaultModel ?? "",
+                    )})`
                   : "Default model",
+            ...(defaultIsHarnessEntry && harnessDefaultEntry?.description
+              ? { description: harnessDefaultEntry.description }
+              : {}),
           },
         ];
 
@@ -75,10 +107,14 @@ export function getDiscoveredPersonaModelOptions(
 
   return [
     ...defaultModelOption,
-    ...explicitModels.map((model) => ({
-      id: model.id,
-      label: model.name?.trim() || model.id,
-    })),
+    ...disambiguateModelLabels(
+      explicitModels.map((model) => ({
+        id: model.id,
+        label: labelFor(model.id, model.name),
+        ...(model.description ? { description: model.description } : {}),
+      })),
+      provider,
+    ),
   ];
 }
 
@@ -381,8 +417,9 @@ export function usePersonaModelDiscovery({
       getDiscoveredPersonaModelOptions(
         activeModelDiscoveryData,
         trimmedProvider,
+        selectedRuntime?.id,
       ),
-    [activeModelDiscoveryData, trimmedProvider],
+    [activeModelDiscoveryData, trimmedProvider, selectedRuntime?.id],
   );
   const modelDiscoveryPending = deriveModelDiscoveryPending({
     modelDiscoveryLoading,

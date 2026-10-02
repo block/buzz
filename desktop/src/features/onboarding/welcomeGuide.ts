@@ -5,11 +5,12 @@ import {
 import {
   addChannelMembers,
   createManagedAgent,
-  discoverAcpRuntimes,
   getChannelMembers,
   listManagedAgents,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
+import { getAgentAccessOwnerOnly } from "@/shared/api/tauriAgentAccess";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
 import type {
@@ -17,6 +18,7 @@ import type {
   AgentPersona,
   CreateManagedAgentInput,
   ManagedAgent,
+  UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -42,7 +44,7 @@ export type WelcomeTeamStarterDefinition = Readonly<{
 export const WELCOME_TEAM_STARTERS = [
   { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
   { name: "Honey", personaId: "builtin:honey", role: "teammate" },
-  { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+  { name: "Pollen", personaId: "builtin:bumble", role: "teammate" },
 ] as const satisfies readonly WelcomeTeamStarterDefinition[];
 
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
@@ -260,6 +262,58 @@ export function welcomeStarterRuntimeUpdate(
   };
 }
 
+export function welcomeTeammateHasExpectedAccess(
+  teammate: ManagedAgent,
+  leadPubkey: string,
+  agentAccessOwnerOnly: boolean,
+) {
+  if (agentAccessOwnerOnly) {
+    // Welcome teammates are created owner-only, and the lead remains authorized
+    // as a NIP-OA-verified sibling because every Welcome agent shares one owner.
+    return (
+      teammate.respondTo === "owner-only" &&
+      teammate.respondToAllowlist.length === 0
+    );
+  }
+  return (
+    teammate.respondTo === "allowlist" &&
+    teammate.respondToAllowlist.some(
+      (pubkey) => normalizePubkey(pubkey) === normalizePubkey(leadPubkey),
+    )
+  );
+}
+
+/**
+ * The access write that moves a Welcome teammate to the state this build
+ * expects, or null when it is already there. The remediation target must track
+ * {@link welcomeTeammateHasExpectedAccess}: writing `allowlist:[lead]` in an
+ * owner-only build would fail the predicate again on the next provisioning
+ * pass, so an upgraded install with pre-existing allowlisted teammates would
+ * rewrite the same rejected state forever and keep restarting them.
+ */
+export function welcomeTeammateAccessUpdate(
+  teammate: ManagedAgent,
+  leadPubkey: string,
+  agentAccessOwnerOnly: boolean,
+): UpdateManagedAgentInput | null {
+  if (
+    welcomeTeammateHasExpectedAccess(teammate, leadPubkey, agentAccessOwnerOnly)
+  ) {
+    return null;
+  }
+  return agentAccessOwnerOnly
+    ? {
+        pubkey: teammate.pubkey,
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+      }
+    : {
+        pubkey: teammate.pubkey,
+        respondTo: "allowlist",
+        respondToAllowlist: [leadPubkey],
+      };
+}
+
 /**
  * Ensure the complete built-in Welcome Team is ready for kickoff.
  * The team itself is Rust-seeded; this only activates personas, creates any
@@ -271,11 +325,13 @@ async function provisionWelcomeTeam(
 ): Promise<WelcomeTeamAgents> {
   const existingAgents = await listManagedAgents();
   await ensureWelcomeTeamPersonasActive();
-  const [personas, runtimeCatalog, globalConfig] = await Promise.all([
-    listPersonas(),
-    discoverAcpRuntimes(),
-    getGlobalAgentConfig(),
-  ]);
+  const [personas, runtimeCatalog, globalConfig, agentAccessOwnerOnly] =
+    await Promise.all([
+      listPersonas(),
+      discoverAcpRuntimes(),
+      getGlobalAgentConfig(),
+      getAgentAccessOwnerOnly(),
+    ]);
   const personasById = new Map(
     personas.map((persona) => [persona.id, persona]),
   );
@@ -314,25 +370,21 @@ async function provisionWelcomeTeam(
     const created = await createManagedAgent(desired);
     agents.push(created.agent);
   }
-  const [lead, honey, bumble] = agents;
-  if (!lead || !honey || !bumble) {
+  const [lead, honey, pollen] = agents;
+  if (!lead || !honey || !pollen) {
     throw new Error("Welcome Team provisioning did not return every starter.");
   }
-  const welcomeAgents: WelcomeTeamAgents = [lead, honey, bumble];
+  const welcomeAgents: WelcomeTeamAgents = [lead, honey, pollen];
   const leadPubkey = lead.pubkey;
   for (const index of [1, 2] as const) {
     const teammate = welcomeAgents[index];
-    const alreadyAllowsLead =
-      teammate.respondTo === "allowlist" &&
-      teammate.respondToAllowlist.some(
-        (pubkey) => normalizePubkey(pubkey) === normalizePubkey(leadPubkey),
-      );
-    if (!alreadyAllowsLead) {
-      const updated = await updateManagedAgent({
-        pubkey: teammate.pubkey,
-        respondTo: "allowlist",
-        respondToAllowlist: [leadPubkey],
-      });
+    const accessUpdate = welcomeTeammateAccessUpdate(
+      teammate,
+      leadPubkey,
+      agentAccessOwnerOnly,
+    );
+    if (accessUpdate) {
+      const updated = await updateManagedAgent(accessUpdate);
       welcomeAgents[index] = updated.agent;
     }
   }

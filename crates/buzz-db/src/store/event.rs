@@ -1,0 +1,4620 @@
+//! Event storage and retrieval.
+//!
+//! AUTH events (kind 22242) are never stored — they carry bearer tokens.
+//! Ephemeral events (kinds 20000–29999) are never stored — Redis pub/sub only.
+//! Deduplication is application-layer: ON CONFLICT DO NOTHING.
+
+use chrono::{DateTime, Utc};
+use nostr::Event;
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
+use uuid::Uuid;
+
+use buzz_core::kind::{
+    event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_CANVAS,
+    KIND_EVENT_REMINDER, KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
+};
+use buzz_core::{CommunityId, StoredEvent};
+use buzz_datastore_tracing::datastore_span;
+
+use crate::error::{DbError, Result};
+use crate::Db;
+
+// Compatibility exports preserve the pre-extraction public event-store paths.
+pub use crate::reminder::{
+    claim_due_reminder, claim_due_reminder_with_stamp, query_due_reminders, release_due_reminder,
+    DueReminder,
+};
+
+/// Largest page [`query_events`] will return when [`EventQuery::max_limit`] is
+/// unset — the effective ceiling on any client-requested `limit`.
+///
+/// This is the value the relay advertises as NIP-11 `limitation.max_limit`, so
+/// the advertised ceiling and the enforced one cannot drift.
+pub const DEFAULT_MAX_PAGE_LIMIT: i64 = 1_000;
+
+/// NIP-AR revision and removal kinds, whose stable identity is a `d` tag.
+pub const ARTIFACT_KINDS: [i32; 2] = [
+    buzz_core::kind::KIND_ARTIFACT as i32,
+    buzz_core::kind::KIND_ARTIFACT_REMOVAL as i32,
+];
+
+/// Optional filters for [`query_events`].
+#[derive(Debug, Clone)]
+pub struct EventQuery {
+    /// Server-resolved community scope.
+    pub community_id: CommunityId,
+    /// Restrict results to this channel.
+    pub channel_id: Option<Uuid>,
+    /// Restrict results to these kind values (stored as `i32` in Postgres).
+    pub kinds: Option<Vec<i32>>,
+    /// Restrict results to events from this pubkey.
+    pub pubkey: Option<Vec<u8>>,
+    /// Return events created at or after this time.
+    pub since: Option<DateTime<Utc>>,
+    /// Return events created at or before this time.
+    pub until: Option<DateTime<Utc>>,
+    /// Maximum number of events to return.
+    pub limit: Option<i64>,
+    /// Number of events to skip (for pagination).
+    pub offset: Option<i64>,
+    /// Restrict to events with a `p` tag mentioning this hex pubkey.
+    /// Joins against `event_mentions` table (indexed).
+    pub p_tag_hex: Option<String>,
+    /// Restrict to events with this exact `d_tag` value (NIP-33).
+    /// Pushed into SQL via the `idx_events_parameterized` index.
+    pub d_tag: Option<String>,
+    /// Restrict to events with any of these `d_tag` values (multi-value NIP-33 pushdown).
+    /// Used when a filter has multiple `#d` values and targets only NIP-33 kinds.
+    pub d_tags: Option<Vec<String>>,
+    /// Composite keyset cursor: exclude events at or "after" this (created_at, id) pair.
+    /// Used with `until` for stable pagination: events where
+    /// `created_at < until OR (created_at = until AND id > before_id)`.
+    /// When set, `until` must also be set.
+    pub before_id: Option<Vec<u8>>,
+    /// When true, restricts results to global events (`channel_id IS NULL`).
+    /// Use for endpoints that serve non-channel data (e.g. kind:1 notes) to
+    /// defensively prevent leaking channel-scoped events if the ingest
+    /// invariant (`is_global_only_kind`) ever changes.
+    /// Mutually exclusive with `channel_id`.
+    pub global_only: bool,
+    /// Restrict results to events from any of these pubkeys (multi-author `IN` pushdown).
+    pub authors: Option<Vec<Vec<u8>>>,
+    /// Restrict results to events with any of these IDs (multi-id `IN` pushdown).
+    pub ids: Option<Vec<Vec<u8>>>,
+    /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
+    /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
+    pub e_tags: Option<Vec<String>>,
+    /// Restrict artifact rows ([`ARTIFACT_KINDS`]) to those with a `d` tag
+    /// matching any of these values, via JSONB containment. Their `d_tag`
+    /// column is NULL (not NIP-33), so this lets identity lookups match before
+    /// SQL `LIMIT`. Rows of other kinds are left to the caller's post-filter.
+    pub d_tag_values: Option<Vec<String>>,
+    /// Restrict results to events with an exact custom tag pair.
+    /// Uses JSONB containment against `tags` before SQL `LIMIT`.
+    pub custom_tag: Option<(String, String)>,
+    /// Restrict results to events in any of these channels. By default,
+    /// channel-less global events are retained so this can enforce a viewer's
+    /// accessible-channel scope without hiding global events. Set
+    /// [`EventQuery::channel_ids_include_global`] to `false` for an explicit
+    /// multi-channel `#h` filter, which must match only requested channels.
+    /// Applied before SQL `LIMIT` so access- and filter-scoped historical pages
+    /// have exact exhaustion semantics.
+    pub channel_ids: Option<Vec<uuid::Uuid>>,
+    /// Whether [`EventQuery::channel_ids`] also retains channel-less global
+    /// events. Defaults to `true` for access-scope queries.
+    pub channel_ids_include_global: bool,
+    /// Override the default page clamp ([`DEFAULT_MAX_PAGE_LIMIT`]). Used by
+    /// the COUNT fallback path, which needs to fetch all matching events for
+    /// post-filter counting. When None, the default clamp applies.
+    pub max_limit: Option<i64>,
+    /// Shared-gated visibility reader: when set, append an SQL visibility
+    /// clause for every kind in [`SHARED_GATED_KINDS`] before ORDER/LIMIT so
+    /// private events are excluded from the candidate page rather than
+    /// discarded after it.
+    ///
+    /// The clause is: `AND (kind NOT IN (...) OR pubkey = $reader OR tags @> ?)`,
+    /// where the `IN` list is [`SHARED_GATED_KINDS`] and `?` is the JSONB
+    /// literal `[["shared","true"]]`.  The GIN index on `tags` (migration 0004,
+    /// jsonb_path_ops) makes the containment check fast.
+    ///
+    /// NOTE: `tags @> '[["shared","true"]]'` uses JSONB containment, which
+    /// matches any tag array that is a superset of `[["shared","true"]]` — it
+    /// would match `["shared","true","extra"]` too.  The ingest `parts.len() ==
+    /// 2` exact-shape check ensures such malformed tags are never stored, so the
+    /// SQL pushdown is sound.  Keeping `event_visible_to_reader` as post-filter
+    /// defense-in-depth catches any residual mismatch.
+    pub shared_gated_reader: Option<Vec<u8>>,
+}
+
+impl EventQuery {
+    /// Construct an unconstrained query inside a server-resolved community.
+    ///
+    /// `community_id` has no safe default. This keeps call sites concise while
+    /// making tenant provenance explicit at construction.
+    #[must_use]
+    pub const fn for_community(community_id: CommunityId) -> Self {
+        Self {
+            community_id,
+            channel_id: None,
+            kinds: None,
+            pubkey: None,
+            since: None,
+            until: None,
+            limit: None,
+            offset: None,
+            p_tag_hex: None,
+            d_tag: None,
+            d_tags: None,
+            before_id: None,
+            global_only: false,
+            authors: None,
+            ids: None,
+            e_tags: None,
+            d_tag_values: None,
+            custom_tag: None,
+            channel_ids: None,
+            channel_ids_include_global: true,
+            max_limit: None,
+            shared_gated_reader: None,
+        }
+    }
+}
+
+pub use crate::reaction::{insert_reaction_event_with_thread_metadata, ReactionEventInsertOutcome};
+
+/// Maximum length for a `d_tag` value (bytes). NIP-33 d-tags are short identifiers;
+/// anything beyond this is either a bug or abuse.
+pub const D_TAG_MAX_LEN: usize = 1024;
+
+/// Maximum huddle-start content bytes considered by the parent-link lookup.
+///
+/// The canonical content is a small JSON object containing one UUID. Rejecting
+/// oversized candidates keeps a malformed lifecycle event from making audio
+/// admission pull large text rows into memory.
+const HUDDLE_LINK_CONTENT_MAX_BYTES: i64 = 512;
+/// Maximum candidate rows inspected after SQL prefiltering by parent, creator,
+/// kind, and UUID substring.
+const HUDDLE_LINK_CANDIDATE_LIMIT: i64 = 32;
+
+/// Extract the `d_tag` value for storage.
+///
+/// For NIP-33 parameterized replaceable events (kind 30000–39999): returns the first
+/// `d` tag's value, or `""` if no `d` tag is present (per NIP-33 spec).
+/// For all other events: returns `None` (column stays NULL).
+pub fn extract_d_tag(event: &Event) -> Option<String> {
+    let kind_u32 = event.kind.as_u16() as u32;
+    if !is_parameterized_replaceable(kind_u32) {
+        return None;
+    }
+    let val = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            if parts.len() >= 2 && parts[0] == "d" {
+                Some(parts[1].to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default(); // Missing d tag → empty string per NIP-33
+    Some(val)
+}
+
+/// Extract the `not_before` timestamp for materialization in the `events` table.
+///
+/// Only applies to `kind:30300` (NIP-ER event reminders). Returns the first
+/// valid `not_before` tag value as an `i64` Unix timestamp, or `None` if the
+/// event is not a reminder or has no `not_before` tag.
+pub fn extract_not_before(event: &Event) -> Option<i64> {
+    let kind_u32 = event.kind.as_u16() as u32;
+    if kind_u32 != KIND_EVENT_REMINDER {
+        return None;
+    }
+    event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        if parts.len() >= 2 && parts[0] == "not_before" {
+            parts[1].parse::<i64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn huddle_started_content_links(content: &str, ephemeral_channel_id: Uuid) -> bool {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("ephemeral_channel_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+        })
+        .is_some_and(|id| id == ephemeral_channel_id)
+}
+
+/// Resolve creator-authenticated parent links for a bounded set of huddle sessions.
+///
+/// The creator constraint matters: a member of some unrelated channel can post
+/// their own kind:48100 event there, but they cannot sign as the creator of the
+/// target ephemeral channel. One set-based query replaces the liveness
+/// endpoint's former session × parent lookup loop. Malformed historical start
+/// content is ignored rather than aborting the complete liveness snapshot.
+pub async fn huddle_started_links(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_ids: &[Uuid],
+    ephemeral_channel_ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>> {
+    if parent_channel_ids.is_empty() || ephemeral_channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT ON (backing.id)
+               backing.id AS session_id,
+               start.channel_id AS parent_channel_id,
+               backing.created_by
+        FROM events start
+        JOIN channels backing
+          ON backing.community_id = start.community_id
+         AND backing.id::text = CASE
+             WHEN start.content IS JSON OBJECT
+             THEN (start.content::json ->> 'ephemeral_channel_id')
+             ELSE NULL
+         END
+         AND backing.deleted_at IS NULL
+        WHERE start.deleted_at IS NULL
+          AND start.community_id = $1
+          AND start.channel_id = ANY($2)
+          AND start.kind = $3
+          AND octet_length(start.content) <= $5
+          AND backing.id = ANY($4)
+          AND start.pubkey = backing.created_by
+        ORDER BY backing.id, start.created_at DESC, start.id ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_ids)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(ephemeral_channel_ids)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("session_id")?,
+                row.try_get("parent_channel_id")?,
+                row.try_get("created_by")?,
+            ))
+        })
+        .collect()
+}
+
+/// Return whether a creator-signed huddle-start event links a parent channel
+/// to the requested ephemeral huddle channel.
+pub async fn huddle_started_link_exists(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_id: Uuid,
+    ephemeral_channel_id: Uuid,
+    creator_pubkey: &[u8],
+) -> Result<bool> {
+    huddle_started_link_exists_with_operation(
+        pool,
+        community_id,
+        parent_channel_id,
+        ephemeral_channel_id,
+        creator_pubkey,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+async fn huddle_started_link_exists_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_id: Uuid,
+    ephemeral_channel_id: Uuid,
+    creator_pubkey: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    let uuid_needle = format!("%{}%", ephemeral_channel_id);
+    let candidates: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT content
+        FROM events
+        WHERE deleted_at IS NULL
+          AND community_id = $1
+          AND channel_id = $2
+          AND kind = $3
+          AND pubkey = $4
+          AND octet_length(content) <= $5
+          AND content ILIKE $6
+        ORDER BY created_at DESC, id ASC
+        LIMIT $7
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_id)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(creator_pubkey)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .bind(uuid_needle)
+    .bind(HUDDLE_LINK_CANDIDATE_LIMIT)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    Ok(candidates
+        .iter()
+        .any(|content| huddle_started_content_links(content, ephemeral_channel_id)))
+}
+
+/// Return whether a creator-signed huddle-start event links a parent channel
+/// to the requested ephemeral huddle channel — checked inside an open
+/// transaction with a shared row lock on matching rows.
+///
+/// Uses `SELECT ... FOR SHARE` so any concurrent `soft_delete_event_and_update_thread()` that
+/// attempts `UPDATE events SET deleted_at = NOW() WHERE ...` on the same row
+/// must wait until this transaction commits or rolls back. This makes the
+/// re-read authoritative against concurrent deletion — "visibility" alone
+/// (i.e. a plain SELECT) is insufficient under READ COMMITTED because deletion
+/// can commit between the SELECT and the join commit in the same transaction.
+///
+/// Uses `tx.as_mut()` so the lock participates in the caller's transaction.
+/// A `false` return means the link was deleted or was never inserted, and the
+/// caller should abort the surrounding transaction.
+pub async fn huddle_started_link_exists_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    parent_channel_id: Uuid,
+    ephemeral_channel_id: Uuid,
+    creator_pubkey: &[u8],
+) -> Result<bool> {
+    let uuid_needle = format!("%{}%", ephemeral_channel_id);
+    let candidates: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT content
+        FROM events
+        WHERE deleted_at IS NULL
+          AND community_id = $1
+          AND channel_id = $2
+          AND kind = $3
+          AND pubkey = $4
+          AND octet_length(content) <= $5
+          AND content ILIKE $6
+        ORDER BY created_at DESC, id ASC
+        LIMIT $7
+        FOR SHARE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_id)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(creator_pubkey)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .bind(uuid_needle)
+    .bind(HUDDLE_LINK_CANDIDATE_LIMIT)
+    .fetch_all(tx.as_mut())
+    .await?;
+
+    Ok(candidates
+        .iter()
+        .any(|content| huddle_started_content_links(content, ephemeral_channel_id)))
+}
+
+/// Insert a Nostr event. Rejects AUTH and ephemeral kinds.
+///
+/// Returns `(StoredEvent, was_inserted)` — `was_inserted` is `false` on duplicate.
+pub async fn insert_event(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    if crate::operator_listener::is_listener_mention_kind(u32::from(event.kind.as_u16())) {
+        let mut tx = Transaction::begin(connection, None).await?;
+        let result = insert_event_in_transaction(&mut tx, community_id, event, channel_id).await?;
+        tx.commit().await?;
+        Ok(result)
+    } else {
+        insert_event_on(&mut connection, community_id, event, channel_id).await
+    }
+}
+
+/// Insert a Nostr event in a caller-owned PostgreSQL transaction.
+///
+/// This is the transaction-composition seam for callers that must keep the
+/// event insert open while performing related work. The caller owns commit or
+/// rollback.
+pub async fn insert_event_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    let result = insert_event_on(tx.as_mut(), community_id, event, channel_id).await?;
+    if result.1 {
+        crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
+    }
+    Ok(result)
+}
+
+async fn insert_event_on(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    let kind_u16 = event.kind.as_u16();
+    let kind_u32 = u32::from(kind_u16);
+
+    if kind_u32 == KIND_AUTH {
+        return Err(DbError::AuthEventRejected);
+    }
+    if is_ephemeral(kind_u32) {
+        return Err(DbError::EphemeralEventRejected(kind_u16));
+    }
+
+    let id_bytes = event.id.as_bytes();
+    let pubkey_bytes = event.pubkey.to_bytes();
+    let sig_bytes = event.sig.serialize();
+    let tags_json = serde_json::to_value(&event.tags)?;
+    // Cast chain: nostr Kind (u16) → i32 (Postgres INT column). Safe: all Buzz kinds fit in i32.
+    let kind_i32 = event_kind_i32(event);
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    let received_at = Utc::now();
+    let d_tag = extract_d_tag(event);
+    let not_before = extract_not_before(event);
+    let result = sqlx::query(
+        r#"
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes.as_slice())
+    .bind(pubkey_bytes.as_slice())
+    .bind(created_at)
+    .bind(kind_i32)
+    .bind(&tags_json)
+    .bind(&event.content)
+    .bind(sig_bytes.as_slice())
+    .bind(received_at)
+    .bind(channel_id)
+    .bind(d_tag.as_deref())
+    .bind(not_before)
+    .execute(connection)
+    .await?;
+
+    let was_inserted = result.rows_affected() > 0;
+
+    Ok((
+        StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+        was_inserted,
+    ))
+}
+
+/// Query events with optional filters. Results ordered by `created_at DESC`.
+///
+/// Uses `QueryBuilder` for dynamic filter composition — avoids string concatenation
+/// while keeping all user values in bind parameters.
+pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+    query_events_with_operation(
+        pool,
+        q,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await
+}
+
+pub(crate) async fn query_events_with_operation(
+    pool: &PgPool,
+    q: &EventQuery,
+    operation: crate::observability::WriterOperation,
+) -> Result<Vec<StoredEvent>> {
+    let mut conn = crate::observability::acquire_writer(pool, operation).await?;
+    query_events_on(&mut conn, q).await
+}
+
+/// [`query_events`] on a specific session — the replica-routing path runs
+/// follow-up (aux) queries on the exact reader connection whose heartbeat
+/// observation proved coverage for the page they annotate.
+pub(crate) async fn query_events_on(
+    conn: &mut sqlx::PgConnection,
+    q: &EventQuery,
+) -> Result<Vec<StoredEvent>> {
+    // Composite cursor requires both halves.
+    if q.before_id.is_some() && q.until.is_none() {
+        return Err(DbError::InvalidData(
+            "before_id requires until to be set".to_string(),
+        ));
+    }
+
+    // global_only and channel_id are mutually exclusive.
+    if q.global_only && q.channel_id.is_some() {
+        return Err(DbError::InvalidData(
+            "global_only and channel_id are mutually exclusive".to_string(),
+        ));
+    }
+
+    // Empty list means "match nothing" — return empty immediately.
+    if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
+        return Ok(vec![]);
+    }
+    if q.authors.as_deref().is_some_and(|a| a.is_empty()) {
+        return Ok(vec![]);
+    }
+    if q.ids.as_deref().is_some_and(|i| i.is_empty()) {
+        return Ok(vec![]);
+    }
+    if q.e_tags.as_deref().is_some_and(|e| e.is_empty()) {
+        return Ok(vec![]);
+    }
+
+    let mut qb = build_query_events_sql(q);
+    let rows = if q.e_tags.is_some() {
+        fetch_with_e_tag_deadline(conn, &mut qb).await?
+    } else {
+        qb.build().fetch_all(&mut *conn).await?
+    };
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(ev) = row_to_stored_event(row)? {
+            out.push(ev);
+        }
+    }
+    Ok(out)
+}
+
+/// SQL for [`query_events_on`], after its match-nothing early returns.
+fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
+    let clamp = q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT);
+    let limit_val = q.limit.unwrap_or(100).min(clamp);
+    let offset_val = q.offset.unwrap_or(0);
+
+    // e-tag reads filter inside a MATERIALIZED CTE and sort/limit outside it.
+    // With `ORDER BY created_at LIMIT n` in the same scope, the planner
+    // overestimates matches and walks each partition's pkey backward, testing
+    // every community row against the id set; the fence keeps it on the GIN
+    // tags index.
+    let e_tag_fence = q.e_tags.is_some();
+    let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
+        // Join against event_mentions for #p-filtered queries (indexed).
+        let mut b = QueryBuilder::new(if e_tag_fence {
+            "WITH m AS MATERIALIZED ("
+        } else {
+            ""
+        });
+        b.push(
+            "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
+             e.sig, e.received_at, e.channel_id \
+             FROM events e \
+             INNER JOIN event_mentions m \
+                ON e.community_id = m.community_id AND e.id = m.event_id \
+             WHERE e.community_id = ",
+        );
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND m.community_id = ");
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND e.deleted_at IS NULL AND m.pubkey_hex = ");
+        b.push_bind(p_hex.to_ascii_lowercase());
+        b
+    } else {
+        let mut b = QueryBuilder::new(if e_tag_fence {
+            "WITH m AS MATERIALIZED ("
+        } else {
+            ""
+        });
+        b.push(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+             FROM events WHERE community_id = ",
+        );
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND deleted_at IS NULL");
+        b
+    };
+
+    // Use unqualified column names when no join, qualified when joined.
+    let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    // Generic reads return only current artifact revisions, including delete
+    // tombstones; explicit revision IDs also read earlier revisions.
+    if q.ids.is_none() {
+        let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
+    }
+
+    if let Some(ch) = q.channel_id {
+        qb.push(format!(" AND {col_prefix}channel_id = "))
+            .push_bind(ch);
+    } else if q.global_only {
+        qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+    }
+
+    // Multi-channel IN pushdown. Access-scope queries retain global events;
+    // explicit multi-value #h filters do not.
+    //
+    // SECURITY: Some(empty vec) means "match no channels". Access-scope
+    // queries still retain globals; explicit #h queries match nothing.
+    if let Some(ref ch_ids) = q.channel_ids {
+        if ch_ids.is_empty() {
+            if q.channel_ids_include_global {
+                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+            } else {
+                qb.push(" AND FALSE");
+            }
+        } else {
+            qb.push(" AND (");
+            if q.channel_ids_include_global {
+                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+            }
+            qb.push(format!("{col_prefix}channel_id IN ("));
+            let mut sep = qb.separated(", ");
+            for ch in ch_ids {
+                sep.push_bind(*ch);
+            }
+            qb.push("))");
+        }
+    }
+
+    if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
+        qb.push(format!(" AND {col_prefix}kind IN ("));
+        let mut sep = qb.separated(", ");
+        for k in ks {
+            sep.push_bind(*k);
+        }
+        qb.push(")");
+    }
+
+    if let Some(ref pk) = q.pubkey {
+        qb.push(format!(" AND {col_prefix}pubkey = "))
+            .push_bind(pk.clone());
+    }
+
+    // Multi-author IN pushdown (mutually exclusive with single pubkey in practice).
+    if let Some(ref authors) = q.authors {
+        if !authors.is_empty() {
+            qb.push(format!(" AND {col_prefix}pubkey IN ("));
+            let mut sep = qb.separated(", ");
+            for a in authors {
+                sep.push_bind(a.clone());
+            }
+            qb.push(")");
+        }
+    }
+
+    // Multi-id IN pushdown.
+    if let Some(ref ids) = q.ids {
+        if !ids.is_empty() {
+            qb.push(format!(" AND {col_prefix}id IN ("));
+            let mut sep = qb.separated(", ");
+            for id in ids {
+                sep.push_bind(id.clone());
+            }
+            qb.push(")");
+        }
+    }
+
+    // e-tag pushdown via JSONB containment: tags @> '[["e","<hex>"]]'.
+    // Multiple e-tags use OR (any match). Served by idx_events_tags_gin
+    // (GIN, jsonb_path_ops — migrations/0004): the channel-window aux closure
+    // fans this out once per retained row, which made unindexed containment
+    // the dominant scroll-back cost (~1.7s/page on staging).
+    if let Some(ref e_tags) = q.e_tags {
+        if !e_tags.is_empty() {
+            push_e_tag_filter(&mut qb, col_prefix, e_tags);
+        }
+    }
+
+    if let Some(ref values) = q.d_tag_values {
+        push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
+    }
+
+    if let Some((ref name, ref value)) = q.custom_tag {
+        let containment = serde_json::json!([[name, value]]);
+        qb.push(format!(" AND {col_prefix}tags @> "))
+            .push_bind(containment);
+    }
+
+    if let Some(s) = q.since {
+        qb.push(format!(" AND {col_prefix}created_at >= "))
+            .push_bind(s);
+    }
+    if let Some(u) = q.until {
+        if let Some(ref bid) = q.before_id {
+            // Composite keyset cursor for stable pagination.
+            // With ORDER BY created_at DESC, id ASC, "next page" means:
+            //   created_at < cursor_ts OR (created_at = cursor_ts AND id > cursor_id)
+            qb.push(format!(" AND ({col_prefix}created_at < "));
+            qb.push_bind(u);
+            qb.push(format!(" OR ({col_prefix}created_at = "));
+            qb.push_bind(u);
+            qb.push(format!(" AND {col_prefix}id > "));
+            qb.push_bind(bid.clone());
+            qb.push("))");
+        } else {
+            qb.push(format!(" AND {col_prefix}created_at <= "))
+                .push_bind(u);
+        }
+    }
+
+    if let Some(ref d) = q.d_tag {
+        qb.push(format!(" AND {col_prefix}d_tag = "))
+            .push_bind(d.clone());
+    } else if let Some(ref ds) = q.d_tags {
+        if !ds.is_empty() {
+            qb.push(format!(" AND {col_prefix}d_tag IN ("));
+            let mut sep = qb.separated(", ");
+            for d in ds {
+                sep.push_bind(d.clone());
+            }
+            qb.push(")");
+        }
+    }
+
+    // Shared-gated visibility pushdown: exclude SHARED_GATED_KINDS events that
+    // are neither authored by the reader nor explicitly shared.  Applied BEFORE
+    // ORDER/LIMIT so that a page of newer private events does not push visible
+    // shared ones off the end of the result set (the catalog query pattern).
+    //
+    // Clause: AND (kind NOT IN (30175, 30178) OR pubkey = $reader
+    //              OR tags @> '[["shared","true"]]')
+    //
+    // The JSONB containment check is served by idx_events_tags_gin (migration
+    // 0004, jsonb_path_ops).  `tags @> '[["shared","true"]]'` matches any array
+    // that contains exactly the sub-array — a two-element `["shared","true"]`
+    // tag passes; a tag-absent event does not.  Because ingest requires exactly
+    // two elements for the shared tag (parts.len() == 2), no stored event can
+    // carry a three-element superset.
+    if let Some(ref reader_bytes) = q.shared_gated_reader {
+        let shared_containment = serde_json::json!([["shared", "true"]]);
+        qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
+        let mut sep = qb.separated(", ");
+        for kind in SHARED_GATED_KINDS {
+            sep.push_bind(*kind as i32);
+        }
+        qb.push(format!(") OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
+        qb.push(format!(" OR {col_prefix}tags @> "));
+        qb.push_bind(shared_containment);
+        qb.push(")");
+    }
+
+    // Composite ordering for deterministic pagination across ALL callers of
+    // query_events (WebSocket REQ, REST endpoints, canvas, notes, etc.).
+    // The `id ASC` tiebreaker ensures stable results when events share the
+    // same second.  No existing index covers this trailing column — Postgres
+    // sorts in memory, which is fine at current scale.  If query performance
+    // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
+    if e_tag_fence {
+        qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
+    } else {
+        qb.push(format!(
+            " ORDER BY {col_prefix}created_at DESC, {col_prefix}id ASC LIMIT "
+        ));
+    }
+    qb.push_bind(limit_val);
+    qb.push(" OFFSET ").push_bind(offset_val);
+    qb
+}
+
+/// Server-side deadline for e-tag (aux-closure / `#e`) reads, kept under the
+/// desktop's 30 s request timeout so a runaway query is cancelled once no
+/// client can still be waiting for it. It only ever tightens the effective
+/// `statement_timeout`: a shorter operator cap (`BUZZ_DB_STATEMENT_TIMEOUT_MS`)
+/// is kept, and a disabled (`0`) or longer one is lowered to 20 s. The limit is
+/// per statement, not per request.
+const E_TAG_STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('statement_timeout', \
+     CASE WHEN current_setting('statement_timeout')::interval = interval '0' \
+            OR current_setting('statement_timeout')::interval > interval '20s' \
+          THEN '20s' ELSE current_setting('statement_timeout') END, true)";
+
+/// Run an e-tag read under [`E_TAG_STATEMENT_TIMEOUT_SQL`] without changing the
+/// deadline for anything else on `conn`. `begin()` opens a transaction on an
+/// autocommit writer connection or a savepoint inside the replica's read
+/// transaction; rolling it back (the read has no writes to keep) reverts the
+/// transaction-local `set_config` in both cases.
+async fn fetch_with_e_tag_deadline(
+    conn: &mut sqlx::PgConnection,
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
+    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+    sqlx::query(E_TAG_STATEMENT_TIMEOUT_SQL)
+        .execute(&mut *tx)
+        .await?;
+    let rows = qb.build().fetch_all(&mut *tx).await?;
+    tx.rollback().await?;
+    Ok(rows)
+}
+
+/// e-tag pushdown as one array-bound containment test instead of an N-way
+/// `OR` chain, so planner cost does not scale with the number of referenced
+/// ids (the thread aux hop sends one id per reply).
+fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_tags: &[String]) {
+    let containments: Vec<serde_json::Value> = e_tags
+        .iter()
+        .map(|hex_id| serde_json::json!([["e", hex_id]]))
+        .collect();
+    qb.push(format!(" AND {col_prefix}tags @> ANY("))
+        .push_bind(containments)
+        .push("::jsonb[])");
+}
+
+/// Match `#d` on artifact rows before `LIMIT` while leaving other kinds to the
+/// caller's post-filter: `(kind NOT IN (artifact kinds) OR tags @> [["d", v]] ...)`.
+fn push_artifact_d_tag_predicate(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    values: &[String],
+) {
+    if values.is_empty() {
+        return;
+    }
+    let [revision, removal] = ARTIFACT_KINDS;
+    qb.push(format!(
+        " AND ({col_prefix}kind NOT IN ({revision}, {removal})"
+    ));
+    for value in values {
+        qb.push(format!(" OR {col_prefix}tags @> "));
+        qb.push_bind(serde_json::json!([["d", value]]));
+    }
+    qb.push(")");
+}
+
+pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<StoredEvent>> {
+    let id_bytes: Vec<u8> = row.try_get("id")?;
+    let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let kind_i32: i32 = row.try_get("kind")?;
+    let tags_json: serde_json::Value = row.try_get("tags")?;
+    let content: String = row.try_get("content")?;
+    let sig_bytes: Vec<u8> = row.try_get("sig")?;
+    let received_at: DateTime<Utc> = row.try_get("received_at")?;
+
+    let channel_id: Option<Uuid> = row.try_get("channel_id")?;
+
+    // kind is stored as i32 (Postgres INT) but Nostr uses u16. Values > 65535 are corrupt.
+    let kind_u16 = u16::try_from(kind_i32)
+        .map_err(|_| DbError::InvalidData(format!("kind out of u16 range: {kind_i32}")))?;
+
+    let event_json = serde_json::json!({
+        "id": hex::encode(&id_bytes),
+        "pubkey": hex::encode(&pubkey_bytes),
+        "created_at": created_at.timestamp(),
+        "kind": kind_u16,
+        "tags": tags_json,
+        "content": content,
+        "sig": hex::encode(&sig_bytes),
+    });
+
+    // Avoid the Value → String → parse round-trip: deserialize directly from the Value.
+    let event: nostr::Event = match serde_json::from_value(event_json) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("failed to reconstruct event from DB row: {e}");
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(StoredEvent::with_received_at(
+        event,
+        received_at,
+        channel_id,
+        true,
+    )))
+}
+
+/// Count events matching the given query parameters (NIP-45 COUNT support).
+///
+/// Uses the same filter logic as `query_events` but returns only the count.
+pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+    count_events_on(&mut conn, q).await
+}
+
+/// [`count_events`] on a specific session — the replica-routing path runs
+/// the count on the exact reader connection whose heartbeat observation
+/// proved its predicate.
+pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuery) -> Result<i64> {
+    // Empty list means "match nothing" — return 0 immediately.
+    if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
+        return Ok(0);
+    }
+    if q.authors.as_deref().is_some_and(|a| a.is_empty()) {
+        return Ok(0);
+    }
+    if q.ids.as_deref().is_some_and(|i| i.is_empty()) {
+        return Ok(0);
+    }
+    if q.e_tags.as_deref().is_some_and(|e| e.is_empty()) {
+        return Ok(0);
+    }
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
+        let mut b = QueryBuilder::new(
+            "SELECT COUNT(*) as cnt FROM events e \
+             INNER JOIN event_mentions m \
+                ON e.community_id = m.community_id AND e.id = m.event_id \
+             WHERE e.community_id = ",
+        );
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND m.community_id = ");
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND e.deleted_at IS NULL AND m.pubkey_hex = ");
+        b.push_bind(p_hex.to_ascii_lowercase());
+        b
+    } else {
+        let mut b = QueryBuilder::new("SELECT COUNT(*) as cnt FROM events WHERE community_id = ");
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND deleted_at IS NULL");
+        b
+    };
+
+    let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    // Generic reads return only current artifact revisions, including delete
+    // tombstones; explicit revision IDs also read earlier revisions.
+    if q.ids.is_none() {
+        let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
+    }
+
+    if let Some(ch) = q.channel_id {
+        qb.push(format!(" AND {col_prefix}channel_id = "))
+            .push_bind(ch);
+    } else if q.global_only {
+        qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+    }
+
+    // Multi-channel IN pushdown for COUNT. Access-scope queries retain global
+    // events; explicit multi-value #h filters do not.
+    if let Some(ref ch_ids) = q.channel_ids {
+        if ch_ids.is_empty() {
+            if q.channel_ids_include_global {
+                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+            } else {
+                qb.push(" AND FALSE");
+            }
+        } else {
+            qb.push(" AND (");
+            if q.channel_ids_include_global {
+                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+            }
+            qb.push(format!("{col_prefix}channel_id IN ("));
+            let mut sep = qb.separated(", ");
+            for ch in ch_ids {
+                sep.push_bind(*ch);
+            }
+            qb.push("))");
+        }
+    }
+
+    if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
+        qb.push(format!(" AND {col_prefix}kind IN ("));
+        let mut sep = qb.separated(", ");
+        for k in ks {
+            sep.push_bind(*k);
+        }
+        qb.push(")");
+    }
+
+    if let Some(ref pk) = q.pubkey {
+        qb.push(format!(" AND {col_prefix}pubkey = "))
+            .push_bind(pk.clone());
+    }
+
+    if let Some(ref authors) = q.authors {
+        if !authors.is_empty() {
+            qb.push(format!(" AND {col_prefix}pubkey IN ("));
+            let mut sep = qb.separated(", ");
+            for a in authors {
+                sep.push_bind(a.clone());
+            }
+            qb.push(")");
+        }
+    }
+
+    if let Some(ref ids) = q.ids {
+        if !ids.is_empty() {
+            qb.push(format!(" AND {col_prefix}id IN ("));
+            let mut sep = qb.separated(", ");
+            for id in ids {
+                sep.push_bind(id.clone());
+            }
+            qb.push(")");
+        }
+    }
+
+    if let Some(ref e_tags) = q.e_tags {
+        if !e_tags.is_empty() {
+            push_e_tag_filter(&mut qb, col_prefix, e_tags);
+        }
+    }
+
+    if let Some(ref values) = q.d_tag_values {
+        push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
+    }
+
+    if let Some(s) = q.since {
+        qb.push(format!(" AND {col_prefix}created_at >= "))
+            .push_bind(s);
+    }
+    if let Some(u) = q.until {
+        qb.push(format!(" AND {col_prefix}created_at <= "))
+            .push_bind(u);
+    }
+
+    if let Some(ref d) = q.d_tag {
+        qb.push(format!(" AND {col_prefix}d_tag = "))
+            .push_bind(d.clone());
+    } else if let Some(ref ds) = q.d_tags {
+        if !ds.is_empty() {
+            qb.push(format!(" AND {col_prefix}d_tag IN ("));
+            let mut sep = qb.separated(", ");
+            for d in ds {
+                sep.push_bind(d.clone());
+            }
+            qb.push(")");
+        }
+    }
+
+    let row = if q.e_tags.as_deref().is_some_and(|e| !e.is_empty()) {
+        // Run under the same transaction-local deadline as `query_events_on`
+        // so a COUNT over a long thread cannot stall indefinitely either.
+        let rows = fetch_with_e_tag_deadline(conn, &mut qb).await?;
+        rows.into_iter()
+            .next()
+            .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?
+    } else {
+        qb.build().fetch_one(&mut *conn).await?
+    };
+    let cnt: i64 = row.try_get("cnt")?;
+
+    Ok(cnt)
+}
+
+/// Soft-delete the live row for an addressable coordinate
+/// `(kind, pubkey, d_tag)` — the NIP-33 replacement key — provided it is not
+/// newer than the deletion request.
+///
+/// Used by `handle_a_tag_deletion` to honour NIP-09 a-tag deletions for any
+/// parameterized-replaceable kind. The WHERE clause mirrors
+/// `replace_parameterized_event` so the coordinate semantics stay consistent:
+/// `channel_id` is intentionally NOT in the key (NIP-33 replacement is global
+/// per the spec — `channel_id` is stored for query scoping, not identity).
+///
+/// `deletion_created_at_secs` is the deletion event's own `created_at`. NIP-09
+/// scopes an `a`-tag deletion to versions at or before that instant, so a
+/// delayed or replayed tombstone signed between two versions must not erase the
+/// newer replacement. `events.created_at` is immutable per row, so the predicate
+/// guarantees a tombstone can never erase a version newer than itself — the UPDATE
+/// re-evaluates its WHERE clause after any lock wait, so a replacement that races
+/// the deletion and lands with a later `created_at` is always spared.
+///
+/// This does NOT guarantee deletion completeness when a same-coordinate
+/// replacement races the deletion: the deletion may evaluate its predicate before
+/// the replacement arrives, miss the incoming head, and return `Ok(false)`. That
+/// outcome is state-identical to the deletion having arrived first (old head
+/// gone, new head present), which is a valid Nostr ordering — Nostr never fixes
+/// the order of concurrent writes from different signers, and even same-signer
+/// ordering is advisory. The return value feeds only a debug log, not a
+/// correctness gate.
+///
+/// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
+/// (already deleted, never existed, or strictly newer than the deletion).
+pub async fn soft_delete_by_coordinate(
+    pool: &PgPool,
+    community_id: CommunityId,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+    deletion_created_at_secs: i64,
+) -> Result<bool> {
+    let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+         AND created_at <= $5",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .bind(deletion_created_at)
+    .execute(&mut *connection)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Atomically soft-delete an event and decrement thread reply counters.
+///
+/// Wraps the delete + counter update in a single transaction so a crash between
+/// them cannot leave counters permanently inflated. Returns `Ok(true)` if the
+/// event was deleted this call.
+///
+/// When the target event is a kind-40100 (canvas) event, this function derives
+/// the target's `kind` and `channel_id` from the database inside the same
+/// transaction and acquires the same `(community, kind, channel)` advisory lock
+/// used by [`insert_channel_head_checked`] before the UPDATE. This prevents a
+/// concurrent tagged write from observing a head that is simultaneously being
+/// removed. The serialization invariant is owned entirely by this function;
+/// callers do not classify the target kind.
+pub async fn soft_delete_event_and_update_thread(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+    parent_event_id: Option<&[u8]>,
+    root_event_id: Option<&[u8]>,
+) -> Result<bool> {
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    let deleted = soft_delete_event_and_update_thread_in_tx(
+        &mut tx,
+        community_id,
+        event_id,
+        parent_event_id,
+        root_event_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Transaction-scoped body of [`soft_delete_event_and_update_thread`].
+///
+/// Callers that must fence the delete with their own writes (e.g. the admin
+/// action lease/marker) run this inside their transaction; the caller commits.
+pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    event_id: &[u8],
+    parent_event_id: Option<&[u8]>,
+    root_event_id: Option<&[u8]>,
+) -> Result<bool> {
+    use crate::store::replaceable::event_replacement_lock_key;
+
+    // Derive the target event's kind and channel_id inside the transaction so
+    // that the serialization decision cannot be bypassed by any caller.
+    let target: Option<(i32, Option<Uuid>)> = sqlx::query_as(
+        "SELECT kind, channel_id FROM events \
+         WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Relay-signed move removals are the source channel's only replay record.
+    if target.is_some_and(|(kind, _)| kind == 45011) {
+        return Err(DbError::InvalidData(
+            "artifact removal markers cannot be deleted".into(),
+        ));
+    }
+
+    if let Some((kind, Some(channel_id))) = target {
+        if kind == KIND_CANVAS as i32 {
+            let lock_key = event_replacement_lock_key(
+                community_id,
+                kind,
+                &[],
+                Some(channel_id.as_bytes().as_slice()),
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let deleted = result.rows_affected() > 0;
+
+    if deleted {
+        if let Some(pid) = parent_event_id {
+            sqlx::query(
+                "UPDATE thread_metadata \
+                 SET reply_count = GREATEST(reply_count - 1, 0) \
+                 WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(pid)
+            .execute(&mut *tx)
+            .await?;
+
+            if let Some(root_id) = root_event_id {
+                sqlx::query(
+                    "UPDATE thread_metadata \
+                     SET descendant_count = GREATEST(descendant_count - 1, 0) \
+                     WHERE community_id = $1 AND event_id = $2",
+                )
+                .bind(community_id.as_uuid())
+                .bind(root_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+
+    Ok(deleted)
+}
+
+/// Returns the `created_at` timestamp of the most recent non-deleted event in a channel.
+pub async fn get_last_message_at(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: uuid::Uuid,
+) -> Result<Option<DateTime<Utc>>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+    let row = sqlx::query(
+        "SELECT created_at FROM events \
+         WHERE community_id = $1 AND channel_id = $2 AND deleted_at IS NULL \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    match row {
+        Some(r) => Ok(Some(r.try_get("created_at")?)),
+        None => Ok(None),
+    }
+}
+
+/// Bulk-fetch the most recent `created_at` for a set of channel IDs.
+///
+/// Returns a map of `channel_id → last_message_at`. Channels with no events are omitted.
+/// Single query regardless of input size.
+pub async fn get_last_message_at_bulk(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[uuid::Uuid],
+) -> Result<std::collections::HashMap<uuid::Uuid, DateTime<Utc>>> {
+    if channel_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT channel_id, MAX(created_at) as last_at FROM events \
+         WHERE community_id = ",
+    );
+    qb.push_bind(community_id.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND channel_id IN (");
+    let mut sep = qb.separated(", ");
+    for id in channel_ids {
+        sep.push_bind(*id);
+    }
+    qb.push(") GROUP BY channel_id");
+
+    let rows = qb.build().fetch_all(&mut *connection).await?;
+
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let id: Uuid = row.try_get("channel_id")?;
+        let last_at: DateTime<Utc> = row.try_get("last_at")?;
+        map.insert(id, last_at);
+    }
+    Ok(map)
+}
+
+/// Fetches a single non-deleted event by its raw 32-byte ID.
+///
+/// Returns `None` if the event does not exist or has been soft-deleted.
+/// Use [`get_event_by_id_including_deleted`] when you need to inspect
+/// tombstoned rows (e.g. audit, undelete).
+pub async fn get_event_by_id(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+) -> Result<Option<StoredEvent>> {
+    get_event_by_id_with_operation(
+        pool,
+        community_id,
+        id_bytes,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+pub(crate) async fn get_event_by_id_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<Option<StoredEvent>> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    let row = sqlx::query(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    match row {
+        Some(r) => row_to_stored_event(r),
+        None => Ok(None),
+    }
+}
+
+/// Fetches the latest global (non-channel, `channel_id IS NULL`) replaceable event
+/// for a (kind, pubkey) pair.
+///
+/// Uses canonical NIP-16 ordering: `created_at DESC, id ASC LIMIT 1`.
+/// This matches the write path's tie-breaking logic and handles historical
+/// duplicate survivors where multiple live rows share the same timestamp.
+pub async fn get_latest_global_replaceable(
+    pool: &PgPool,
+    community_id: CommunityId,
+    kind: i32,
+    pubkey_bytes: &[u8],
+) -> Result<Option<StoredEvent>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let row = sqlx::query(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id IS NULL AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC \
+         LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey_bytes)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    match row {
+        Some(r) => row_to_stored_event(r),
+        None => Ok(None),
+    }
+}
+
+/// Fetches a single event by its raw 32-byte ID, **including soft-deleted rows**.
+///
+/// Most callers should use [`get_event_by_id`] instead. This variant is needed
+/// when the caller must distinguish "never existed" from "was deleted" (e.g.
+/// audit trails, compliance queries).
+pub async fn get_event_by_id_including_deleted(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+) -> Result<Option<StoredEvent>> {
+    get_event_by_id_including_deleted_with_operation(
+        pool,
+        community_id,
+        id_bytes,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+pub(crate) async fn get_event_by_id_including_deleted_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+    operation: crate::observability::WriterOperation,
+) -> Result<Option<StoredEvent>> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    let row = sqlx::query(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events WHERE community_id = $1 AND id = $2 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes)
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    match row {
+        Some(r) => row_to_stored_event(r),
+        None => Ok(None),
+    }
+}
+
+/// Batch-fetch non-deleted events by their raw 32-byte IDs.
+///
+/// Returns events in arbitrary order — callers reorder as needed.
+/// Uses a single `WHERE id IN (...)` query regardless of input size.
+pub async fn get_events_by_ids(
+    pool: &PgPool,
+    community_id: CommunityId,
+    ids: &[&[u8]],
+) -> Result<Vec<StoredEvent>> {
+    get_events_by_ids_with_operation(
+        pool,
+        community_id,
+        ids,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await
+}
+
+pub(crate) async fn get_events_by_ids_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    ids: &[&[u8]],
+    operation: crate::observability::WriterOperation,
+) -> Result<Vec<StoredEvent>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut conn = crate::observability::acquire_writer(pool, operation).await?;
+    get_events_by_ids_on(&mut conn, community_id, ids).await
+}
+
+/// [`get_events_by_ids`] on a specific session — the replica-routing path
+/// runs the query on the exact reader connection whose heartbeat
+/// observation proved its predicate.
+pub(crate) async fn get_events_by_ids_on(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    ids: &[&[u8]],
+) -> Result<Vec<StoredEvent>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    debug_assert!(ids.len() <= 500, "batch fetch should be bounded by caller");
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events WHERE community_id = ",
+    );
+    qb.push_bind(community_id.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND id IN (");
+    let mut sep = qb.separated(", ");
+    for id in ids {
+        sep.push_bind(id.to_vec());
+    }
+    qb.push(")");
+
+    let rows = qb.build().fetch_all(&mut *conn).await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(ev) = row_to_stored_event(row)? {
+            out.push(ev);
+        }
+    }
+    Ok(out)
+}
+
+/// Parameters for [`insert_event_with_thread_metadata`].
+#[derive(Debug)]
+pub struct ThreadMetadataParams<'a> {
+    /// The Nostr event ID of this message.
+    pub event_id: &'a [u8],
+    /// When the event was created.
+    pub event_created_at: DateTime<Utc>,
+    /// The channel this event belongs to.
+    pub channel_id: Uuid,
+    /// Event ID of the direct parent, if this is a reply.
+    pub parent_event_id: Option<&'a [u8]>,
+    /// When the parent event was created.
+    pub parent_event_created_at: Option<DateTime<Utc>>,
+    /// Event ID of the thread root, if this is a nested reply.
+    pub root_event_id: Option<&'a [u8]>,
+    /// When the root event was created.
+    pub root_event_created_at: Option<DateTime<Utc>>,
+    /// Nesting depth (root = 0).
+    pub depth: i32,
+    /// Whether this reply is broadcast to the channel timeline.
+    pub broadcast: bool,
+}
+
+pub(crate) async fn insert_event_with_thread_metadata_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool)> {
+    let kind_u16 = event.kind.as_u16();
+    let kind_u32 = u32::from(kind_u16);
+
+    if kind_u32 == KIND_AUTH {
+        return Err(DbError::AuthEventRejected);
+    }
+    if is_ephemeral(kind_u32) {
+        return Err(DbError::EphemeralEventRejected(kind_u16));
+    }
+
+    let id_bytes = event.id.as_bytes();
+    let pubkey_bytes = event.pubkey.to_bytes();
+    let sig_bytes = event.sig.serialize();
+    let tags_json = serde_json::to_value(&event.tags)?;
+    let kind_i32 = event_kind_i32(event);
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    let received_at = Utc::now();
+    let d_tag = extract_d_tag(event);
+    let not_before = extract_not_before(event);
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes.as_slice())
+    .bind(pubkey_bytes.as_slice())
+    .bind(created_at)
+    .bind(kind_i32)
+    .bind(&tags_json)
+    .bind(&event.content)
+    .bind(sig_bytes.as_slice())
+    .bind(received_at)
+    .bind(channel_id)
+    .bind(d_tag.as_deref())
+    .bind(not_before)
+    .execute(&mut **tx)
+    .await?;
+
+    let was_inserted = result.rows_affected() > 0;
+
+    if was_inserted {
+        if let Some(ref meta) = thread_meta {
+            let broadcast_val: bool = meta.broadcast;
+
+            let tm_result = sqlx::query(
+                r#"
+                INSERT INTO thread_metadata
+                    (community_id, event_created_at, event_id, channel_id,
+                     parent_event_id, parent_event_created_at,
+                     root_event_id, root_event_created_at,
+                     depth, broadcast)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(community_id.as_uuid())
+            .bind(meta.event_created_at)
+            .bind(meta.event_id)
+            .bind(meta.channel_id)
+            .bind(meta.parent_event_id)
+            .bind(meta.parent_event_created_at)
+            .bind(meta.root_event_id)
+            .bind(meta.root_event_created_at)
+            .bind(meta.depth)
+            .bind(broadcast_val)
+            .execute(&mut **tx)
+            .await?;
+
+            // Only bump reply counts if the metadata row was actually inserted.
+            if tm_result.rows_affected() > 0 {
+                if let Some(pid) = meta.parent_event_id {
+                    // Ensure the parent has a thread_metadata row so the UPDATE
+                    // below has something to hit. Root (depth=0) messages don't
+                    // get a row on first insert, so we create a stub here.
+                    let parent_ts = meta
+                        .parent_event_created_at
+                        .unwrap_or(meta.event_created_at);
+                    sqlx::query(
+                        r#"
+                        INSERT INTO thread_metadata
+                            (community_id, event_created_at, event_id, channel_id,
+                             parent_event_id, parent_event_created_at,
+                             root_event_id, root_event_created_at,
+                             depth, broadcast)
+                        VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
+                        ON CONFLICT DO NOTHING
+                        "#,
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(parent_ts)
+                    .bind(pid)
+                    .bind(meta.channel_id)
+                    .execute(&mut **tx)
+                    .await?;
+
+                    // Ensure the root also has a row (may differ from parent for nested replies).
+                    if let Some(root_id) = meta.root_event_id {
+                        if root_id != pid {
+                            let root_ts =
+                                meta.root_event_created_at.unwrap_or(meta.event_created_at);
+                            sqlx::query(
+                                r#"
+                                INSERT INTO thread_metadata
+                                    (community_id, event_created_at, event_id, channel_id,
+                                     parent_event_id, parent_event_created_at,
+                                     root_event_id, root_event_created_at,
+                                     depth, broadcast)
+                                VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
+                                ON CONFLICT DO NOTHING
+                                "#,
+                            )
+                            .bind(community_id.as_uuid())
+                            .bind(root_ts)
+                            .bind(root_id)
+                            .bind(meta.channel_id)
+                            .execute(&mut **tx)
+                            .await?;
+                        }
+                    }
+
+                    sqlx::query(
+                        r#"
+                        UPDATE thread_metadata
+                        SET reply_count = reply_count + 1, last_reply_at = NOW()
+                        WHERE community_id = $1 AND event_id = $2
+                        "#,
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(pid)
+                    .execute(&mut **tx)
+                    .await?;
+
+                    if let Some(root_id) = meta.root_event_id {
+                        sqlx::query(
+                            r#"
+                            UPDATE thread_metadata
+                            SET descendant_count = descendant_count + 1
+                            WHERE community_id = $1 AND event_id = $2
+                            "#,
+                        )
+                        .bind(community_id.as_uuid())
+                        .bind(root_id)
+                        .execute(&mut **tx)
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
+    }
+
+    Ok((
+        StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+        was_inserted,
+    ))
+}
+
+/// Atomically insert an event and its optional thread metadata.
+///
+/// `insert_event` and `insert_thread_metadata` calls could leave reply counters
+/// inconsistent if one succeeded and the other failed. Keep this as one
+/// transaction so reply metadata and counters commit together with the event.
+///
+/// For kind-40100 (canvas) events with a `channel_id`, acquires the same
+/// `(community, kind, channel)` advisory lock used by
+/// [`insert_channel_head_checked`] so that untagged unconditional canvas appends
+/// serialize against concurrent tagged writes on the same coordinate. Untagged
+/// writes remain unconditional — they never conflict — but must not race the
+/// head read inside a concurrent tagged transaction.
+///
+/// Returns `(StoredEvent, was_inserted)`.
+pub async fn insert_event_with_thread_metadata(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool)> {
+    use crate::store::replaceable::event_replacement_lock_key;
+
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    if event_kind_i32(event) == KIND_CANVAS as i32 {
+        if let Some(ch) = channel_id {
+            let lock_key = event_replacement_lock_key(
+                community_id,
+                KIND_CANVAS as i32,
+                &[],
+                Some(ch.as_bytes().as_slice()),
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    let result =
+        insert_event_with_thread_metadata_tx(&mut tx, community_id, event, channel_id, thread_meta)
+            .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Outcome of a channel-head conditional canvas write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelHeadWriteStatus {
+    /// The event was appended as the new channel head.
+    Inserted,
+    /// The exact event already existed (idempotent replay of the current head).
+    Duplicate,
+    /// `ExpectedHead` was supplied but no live head exists for the channel.
+    RevisionMissing,
+    /// The live head id did not match `ExpectedHead`, or `ExpectNoHead` was
+    /// required but a head already exists.
+    RevisionMismatch,
+    /// Precondition matched but the candidate does not sort ahead of the head
+    /// under `created_at DESC, id ASC`; accepting it would not change the
+    /// visible canvas.
+    SupersedeFailed,
+}
+
+/// Optimistic-concurrency precondition for [`insert_channel_head_checked`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelHeadPrecondition<'a> {
+    /// Require that no live head exists yet (first creation of the canvas).
+    ExpectNoHead,
+    /// Require the live head to match this validated 32-byte event ID.
+    ExpectedHead(&'a [u8]),
+}
+
+/// Returns `true` iff a candidate canvas event sorts strictly ahead of the
+/// current head under `created_at DESC, id ASC`.
+fn candidate_supersedes_head(
+    candidate: &Event,
+    candidate_id: &[u8; 32],
+    head_created_at: DateTime<Utc>,
+    head_id: &[u8],
+) -> bool {
+    let candidate_secs = candidate.created_at.as_secs() as i64;
+    let head_secs = head_created_at.timestamp();
+    match candidate_secs.cmp(&head_secs) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => candidate_id.as_slice() < head_id,
+    }
+}
+
+/// Conditionally append a channel-head event (canvas kind 40100) under an
+/// optimistic-concurrency precondition.
+///
+/// Acquires a per-`(community, kind, channel)` advisory lock (author excluded
+/// so cross-author concurrent edits serialize on the same head), reads the head
+/// under `created_at DESC, id ASC`, evaluates the precondition, and on success
+/// inserts the event and its mentions in the same transaction. Failures are
+/// pure reads — nothing is mutated.
+///
+/// A matching `ExpectedHead` precondition also requires the candidate to sort
+/// strictly ahead of the head; if not, returns `SupersedeFailed`. Re-submitting
+/// the byte-identical live head short-circuits to `Duplicate` without evaluating
+/// the precondition (safe transport-retry semantics).
+pub async fn insert_channel_head_checked(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Uuid,
+    precondition: ChannelHeadPrecondition<'_>,
+) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
+    use crate::store::replaceable::event_replacement_lock_key;
+
+    let kind_i32 = buzz_core::kind::event_kind_i32(event);
+    let received_at = Utc::now();
+    let incoming_id = event.id.as_bytes();
+
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    // Serialize check+insert per (community, kind, channel).
+    let lock_key = event_replacement_lock_key(
+        community_id,
+        kind_i32,
+        &[],
+        Some(channel_id.as_bytes().as_slice()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
+    let head: Option<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, created_at FROM events \
+         WHERE community_id = $1 AND kind = $2 AND channel_id = $3 AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind_i32)
+    .bind(channel_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Idempotent replay: the incoming event is already the live head.
+    if head
+        .as_ref()
+        .is_some_and(|(id, _)| id.as_slice() == incoming_id.as_slice())
+    {
+        tx.rollback().await?;
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), true),
+            ChannelHeadWriteStatus::Duplicate,
+        ));
+    }
+
+    let status = match (precondition, head.as_ref()) {
+        (ChannelHeadPrecondition::ExpectNoHead, None) => None,
+        (ChannelHeadPrecondition::ExpectNoHead, Some(_)) => {
+            Some(ChannelHeadWriteStatus::RevisionMismatch)
+        }
+        (ChannelHeadPrecondition::ExpectedHead(_), None) => {
+            Some(ChannelHeadWriteStatus::RevisionMissing)
+        }
+        (ChannelHeadPrecondition::ExpectedHead(expected), Some((id, head_created_at))) => {
+            if id.as_slice() != expected {
+                Some(ChannelHeadWriteStatus::RevisionMismatch)
+            } else if !candidate_supersedes_head(event, incoming_id, *head_created_at, id) {
+                Some(ChannelHeadWriteStatus::SupersedeFailed)
+            } else {
+                None
+            }
+        }
+    };
+    if let Some(status) = status {
+        tx.rollback().await?;
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, Some(channel_id), false),
+            status,
+        ));
+    }
+
+    let (stored, was_inserted) =
+        insert_event_with_thread_metadata_tx(&mut tx, community_id, event, Some(channel_id), None)
+            .await?;
+    if !was_inserted {
+        // The primary-key row already exists. The idempotent-replay branch above
+        // already returned `Duplicate` for the case where the incoming event is
+        // the canonical live head. Reaching here means the row exists but is NOT
+        // the live head (e.g. soft-deleted). Because every kind-40100 mutator
+        // serializes on this advisory key, no concurrent writer can have changed
+        // the live head since our read above, so the truthful result is
+        // `RevisionMismatch` — a false `Duplicate` would acknowledge a write
+        // that did not become live.
+        tx.rollback().await?;
+        return Ok((stored, ChannelHeadWriteStatus::RevisionMismatch));
+    }
+    crate::insert_mentions_in_transaction(&mut tx, community_id, event, Some(channel_id)).await?;
+    tx.commit().await?;
+
+    Ok((stored, ChannelHeadWriteStatus::Inserted))
+}
+
+impl Db {
+    /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
+    #[datastore_span(name = "insert_event", system = "postgresql")]
+    pub async fn insert_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let result =
+            crate::event::insert_event(&self.pool, community_id, event, channel_id).await?;
+        if result.1 {
+            if let Err(e) =
+                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
+    /// Queries events matching the given filter parameters.
+    ///
+    /// Always reads from the WRITER pool. If the result influences a write
+    /// or a permission decision, this is the method to call. Display-path
+    /// callers that tolerate bounded staleness should use
+    /// [`Db::query_events_routed`] instead — converting a caller is an
+    /// explicit, per-callsite decision, never a change to this method.
+    #[datastore_span(name = "query_events", system = "postgresql")]
+    pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// Query authoritative event state that directly controls a durable event
+    /// mutation or its post-commit side effects.
+    #[datastore_span(name = "query_events_for_event_write", system = "postgresql")]
+    pub async fn query_events_for_event_write(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+    }
+
+    /// Query authoritative event state for startup reconciliation.
+    #[datastore_span(name = "query_events_for_bootstrap", system = "postgresql")]
+    pub async fn query_events_for_bootstrap(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await
+    }
+
+    /// Query authoritative event state for background reconciliation or repair.
+    #[datastore_span(name = "query_events_for_maintenance", system = "postgresql")]
+    pub async fn query_events_for_maintenance(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events_with_operation(
+            &self.pool,
+            q,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await
+    }
+
+    /// [`Db::query_events`] with replica routing — the opt-in fast path for
+    /// display reads.
+    ///
+    /// Rule of thumb: **if the result influences a write or a permission,
+    /// it reads from the writer** — do not convert such a caller to this
+    /// method. Every new caller must be added to the caller-classification
+    /// table in `PLANS/REPLICA_FULL_READ_ROUTING_DESIGN.md`.
+    ///
+    /// Routing derives the strongest sound predicate from the query shape
+    /// ([`crate::RoutePredicate::for_query`]): a channel-pinned query with an
+    /// `until` upper bound may be served covered (provably complete below
+    /// the fence wall); anything else is bounded-staleness only. The whole
+    /// seam is gated on `BUZZ_REPLICA_READ_MAX_AGE_MS` (default off): when
+    /// unset, even covered-eligible queries stay on the writer, so merging
+    /// this seam is a true no-op until the budget is configured. Every
+    /// failure fails closed to the writer, except a statement-timeout cancel
+    /// (57014), which is surfaced rather than re-run.
+    #[datastore_span(name = "query_events_routed", system = "postgresql")]
+    pub async fn query_events_routed(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
+        match self
+            .route_read(
+                path,
+                predicate,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    // A cancelled statement (timeout) would be just as slow on the
+                    // writer; surface it instead of doubling the cost.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        // Mid-query replica failure: fail closed to the
+                        // writer rather than surfacing a routed error.
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::query_events_with_operation(
+                            &self.pool,
+                            q,
+                            crate::observability::WriterOperation::SubscriptionHistory,
+                        )
+                        .await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => {
+                crate::event::query_events_with_operation(
+                    &self.pool,
+                    q,
+                    crate::observability::WriterOperation::SubscriptionHistory,
+                )
+                .await
+            }
+        }
+    }
+
+    /// [`Db::query_events_routed`] restricted to the BOUNDED arm — for
+    /// reads whose result feeds a COUNT rather than a displayed page.
+    ///
+    /// The covered arm bounds insert-completeness only; stale deletions can
+    /// briefly inflate the result set (see [`crate::RoutePredicate::Covered`]). A
+    /// display page absorbs that per-row; a number derived from the rows
+    /// does not. Same classification-table requirement as
+    /// [`Db::query_events_routed`].
+    #[datastore_span(name = "query_events_routed_bounded", system = "postgresql")]
+    pub async fn query_events_routed_bounded(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    // A cancelled statement (timeout) would be just as slow on the
+                    // writer; surface it instead of doubling the cost.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::query_events_with_operation(
+                            &self.pool,
+                            q,
+                            crate::observability::WriterOperation::SubscriptionHistory,
+                        )
+                        .await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => {
+                crate::event::query_events_with_operation(
+                    &self.pool,
+                    q,
+                    crate::observability::WriterOperation::SubscriptionHistory,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Count events matching the given query (NIP-45 COUNT support).
+    ///
+    /// Always reads from the WRITER pool — see [`Db::query_events`] for the
+    /// writer-vs-routed rule.
+    #[datastore_span(name = "count_events", system = "postgresql")]
+    pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
+        crate::event::count_events(&self.pool, q).await
+    }
+
+    /// [`Db::count_events`] with replica routing — same contract, rules,
+    /// and classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// Counts route on the BOUNDED arm only, never covered: the covered
+    /// arm bounds insert-completeness but not deletion visibility (soft
+    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// downstream per-row re-filter to absorb extra rows — a silently
+    /// inflated number for up to `FENCE_STALENESS` is a different product
+    /// statement than a page briefly showing a deleted row. `Bounded` ties
+    /// the error to the accepted budget `B`.
+    #[datastore_span(name = "count_events_routed", system = "postgresql")]
+    pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::count_events_on(&mut tx, q).await {
+                    Ok(count) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(count)
+                    }
+                    // A cancelled statement (timeout) would be just as slow on the
+                    // writer; surface it instead of doubling the cost.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica count failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::count_events(&self.pool, q).await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => crate::event::count_events(&self.pool, q).await,
+        }
+    }
+
+    /// Resolve creator-signed huddle-start links for bounded parent/session sets.
+    #[datastore_span(name = "huddle_started_links", system = "postgresql")]
+    pub async fn huddle_started_links(
+        &self,
+        community_id: CommunityId,
+        parent_channel_ids: &[Uuid],
+        ephemeral_channel_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>> {
+        crate::event::huddle_started_links(
+            &self.pool,
+            community_id,
+            parent_channel_ids,
+            ephemeral_channel_ids,
+        )
+        .await
+    }
+
+    /// Return whether a creator-signed huddle-start event links a parent
+    /// channel to the requested ephemeral huddle channel.
+    #[datastore_span(name = "huddle_started_link_exists", system = "postgresql")]
+    pub async fn huddle_started_link_exists(
+        &self,
+        community_id: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        crate::event::huddle_started_link_exists(
+            &self.pool,
+            community_id,
+            parent_channel_id,
+            ephemeral_channel_id,
+            creator_pubkey,
+        )
+        .await
+    }
+
+    /// Validate a huddle link while admitting a huddle event for persistence.
+    #[datastore_span(
+        name = "huddle_started_link_exists_for_event_write",
+        system = "postgresql"
+    )]
+    pub async fn huddle_started_link_exists_for_event_write(
+        &self,
+        community_id: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        crate::event::huddle_started_link_exists_with_operation(
+            &self.pool,
+            community_id,
+            parent_channel_id,
+            ephemeral_channel_id,
+            creator_pubkey,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+    }
+
+    /// Fetch the latest replaceable event for a (kind, pubkey) pair.
+    ///
+    /// Uses canonical NIP-16 ordering: `created_at DESC, id ASC`.
+    /// This matches the write path in [`replace_addressable_event`] and handles
+    /// historical duplicate survivors correctly.
+    #[datastore_span(name = "get_latest_global_replaceable", system = "postgresql")]
+    pub async fn get_latest_global_replaceable(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_latest_global_replaceable(&self.pool, community_id, kind, pubkey_bytes)
+            .await
+    }
+
+    /// Fetches a single non-deleted event by its raw ID bytes.
+    ///
+    /// Returns `None` if the event does not exist or has been soft-deleted.
+    #[datastore_span(name = "get_event_by_id", system = "postgresql")]
+    pub async fn get_event_by_id(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id(&self.pool, community_id, id_bytes).await
+    }
+
+    /// Fetch an event as a prerequisite of an event write or durable
+    /// post-write side effect.
+    #[datastore_span(name = "get_event_by_id_for_event_write", system = "postgresql")]
+    pub async fn get_event_by_id_for_event_write(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_with_operation(
+            &self.pool,
+            community_id,
+            id_bytes,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+    }
+
+    /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.
+    #[datastore_span(name = "get_event_by_id_including_deleted", system = "postgresql")]
+    pub async fn get_event_by_id_including_deleted(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_including_deleted(&self.pool, community_id, id_bytes).await
+    }
+
+    /// Fetch an event including tombstones as a prerequisite of an event
+    /// write or durable post-write side effect.
+    #[datastore_span(
+        name = "get_event_by_id_including_deleted_for_event_write",
+        system = "postgresql"
+    )]
+    pub async fn get_event_by_id_including_deleted_for_event_write(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_including_deleted_with_operation(
+            &self.pool,
+            community_id,
+            id_bytes,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+    }
+
+    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`
+    /// when it is not newer than the deletion request.
+    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds;
+    /// `deletion_created_at_secs` is the deletion event's `created_at`.
+    #[datastore_span(name = "soft_delete_by_coordinate", system = "postgresql")]
+    pub async fn soft_delete_by_coordinate(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+        deletion_created_at_secs: i64,
+    ) -> Result<bool> {
+        crate::event::soft_delete_by_coordinate(
+            &self.pool,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
+    }
+
+    /// Atomically soft-delete an event and decrement thread reply counters.
+    #[datastore_span(name = "soft_delete_event_and_update_thread", system = "postgresql")]
+    pub async fn soft_delete_event_and_update_thread(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+        parent_event_id: Option<&[u8]>,
+        root_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        crate::event::soft_delete_event_and_update_thread(
+            &self.pool,
+            community_id,
+            event_id,
+            parent_event_id,
+            root_event_id,
+        )
+        .await
+    }
+
+    /// Returns the most recent `created_at` for a channel.
+    #[datastore_span(name = "get_last_message_at", system = "postgresql")]
+    pub async fn get_last_message_at(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        crate::event::get_last_message_at(&self.pool, community_id, channel_id).await
+    }
+
+    /// Bulk-fetch the most recent `created_at` for a set of channel IDs.
+    #[datastore_span(name = "get_last_message_at_bulk", system = "postgresql")]
+    pub async fn get_last_message_at_bulk(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, DateTime<Utc>>> {
+        crate::event::get_last_message_at_bulk(&self.pool, community_id, channel_ids).await
+    }
+
+    /// Batch-fetch non-deleted events by their raw IDs.
+    #[datastore_span(name = "get_events_by_ids", system = "postgresql")]
+    pub async fn get_events_by_ids(
+        &self,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        crate::event::get_events_by_ids_with_operation(
+            &self.pool,
+            community_id,
+            ids,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// [`Db::get_events_by_ids`] with replica routing — same contract and
+    /// classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// By-id fetches route on the BOUNDED arm only: an id list carries no
+    /// channel pin, so no fence floor can prove insert-completeness — the
+    /// covered arm is structurally unavailable. Used for FTS hit hydration,
+    /// where a missing row degrades to a skipped search hit downstream.
+    #[datastore_span(name = "get_events_by_ids_routed", system = "postgresql")]
+    pub async fn get_events_by_ids_routed(
+        &self,
+        path: &'static str,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await
+        {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    // A cancelled statement (timeout) would be just as slow on the
+                    // writer; surface it instead of doubling the cost.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::get_events_by_ids_with_operation(
+                            &self.pool,
+                            community_id,
+                            ids,
+                            crate::observability::WriterOperation::SubscriptionHistory,
+                        )
+                        .await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => {
+                crate::event::get_events_by_ids_with_operation(
+                    &self.pool,
+                    community_id,
+                    ids,
+                    crate::observability::WriterOperation::SubscriptionHistory,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Atomically insert an event AND its thread metadata in a single transaction.
+    #[datastore_span(name = "insert_event_with_thread_metadata", system = "postgresql")]
+    pub async fn insert_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<(StoredEvent, bool)> {
+        let result = crate::event::insert_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+        )
+        .await?;
+        if result.1 {
+            if let Err(e) =
+                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
+    /// Backfill `d_tag` for existing NIP-33 events (kind 30000–39999) that have `d_tag IS NULL`.
+    ///
+    /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
+    /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
+    #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
+    pub async fn backfill_d_tags(&self) -> Result<u64> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await?;
+        let result = sqlx::query(
+            "UPDATE events \
+             SET d_tag = COALESCE( \
+                 (SELECT elem->>1 FROM jsonb_array_elements(tags) AS elem \
+                  WHERE elem->>0 = 'd' LIMIT 1), \
+                 '' \
+             ) \
+             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
+               AND community_write_allowed(community_id)",
+        )
+        .execute(&mut *connection)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
+    #[datastore_span(name = "soft_delete_discovery_events", system = "postgresql")]
+    pub async fn soft_delete_discovery_events(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        relay_pubkey: &[u8],
+    ) -> Result<u64> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let result = sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND deleted_at IS NULL AND kind IN (39000, 39001, 39002)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(relay_pubkey)
+        .execute(&mut *connection)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Conditionally append a canvas write (kind 40100) under an optimistic-concurrency
+    /// precondition. Delegates to [`insert_channel_head_checked`].
+    ///
+    /// Always uses the writer pool — the precondition check and the insert must
+    /// be serialized on the writer to prevent TOCTOU races.
+    #[datastore_span(name = "insert_channel_head_checked", system = "postgresql")]
+    pub async fn insert_channel_head_checked(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        precondition: ChannelHeadPrecondition<'_>,
+    ) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
+        insert_channel_head_checked(&self.pool, community_id, event, channel_id, precondition).await
+    }
+}
+
+#[cfg(test)]
+mod e_tag_filter_shape_tests {
+    use super::*;
+
+    /// The aux closure sends one e-tag per reply. The id set must be one
+    /// array-bound predicate (never an N-way `OR`), and it must be filtered
+    /// inside a MATERIALIZED CTE with ORDER BY/LIMIT outside: in the same
+    /// scope the planner flips to a backward pkey walk over the whole
+    /// community (the long-thread timeout).
+    #[test]
+    fn e_tag_query_filters_in_materialized_fence_before_order_limit() {
+        let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+        q.kinds = Some(vec![7]);
+        q.e_tags = Some((0..188).map(|i| format!("{i:064x}")).collect());
+        let qb = build_query_events_sql(&q);
+        let sql = qb.sql().as_str().to_owned();
+
+        assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
+        assert_eq!(sql.matches("tags @> ANY(").count(), 1);
+        assert!(!sql.contains(" OR "));
+        let fence_end = sql.find(") SELECT * FROM m ").expect("fence closes");
+        assert!(sql.contains("::jsonb[])"));
+        assert!(!sql[..fence_end].contains("ORDER BY"));
+        assert!(!sql[..fence_end].contains("LIMIT"));
+        assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
+    }
+
+    #[test]
+    fn non_e_tag_query_is_not_fenced() {
+        let q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+        let qb = build_query_events_sql(&q);
+        assert!(!qb.sql().as_str().contains("MATERIALIZED"));
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    async fn make_test_community(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        let host = format!("event-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        id
+    }
+
+    async fn make_test_channel(
+        pool: &PgPool,
+        community_id: Uuid,
+        ttl_seconds: Option<i32>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels \
+             (id, community_id, name, created_by, ttl_seconds, ttl_deadline) \
+             VALUES ($1, $2, $3, $4, $5, \
+                     CASE WHEN $5 IS NULL THEN NULL \
+                          ELSE clock_timestamp() + make_interval(secs => $5) END)",
+        )
+        .bind(id)
+        .bind(community_id)
+        .bind(format!("event-ttl-test-{}", id.simple()))
+        .bind(vec![7_u8; 32])
+        .bind(ttl_seconds)
+        .execute(pool)
+        .await
+        .expect("insert test channel");
+        id
+    }
+
+    /// Effective `statement_timeout` observed *inside* the e-tag deadline, and
+    /// the value restored on `conn` afterwards.
+    async fn deadline_inside_and_after(conn: &mut sqlx::PgConnection) -> (String, String) {
+        let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
+        let rows = fetch_with_e_tag_deadline(conn, &mut qb)
+            .await
+            .expect("deadline read");
+        let inside: String = rows[0].get(0);
+        let after: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("show timeout");
+        (inside, after)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn e_tag_deadline_only_tightens_and_restores_timeout() {
+        let pool = setup_pool().await;
+        // (operator setting, expected effective value inside the read)
+        let cases = [("0", "20s"), ("5s", "5s"), ("1min", "20s")];
+        for (setting, expected) in cases {
+            // Autocommit connection (writer path).
+            let mut conn = pool.acquire().await.expect("acquire");
+            sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                .bind(setting)
+                .execute(&mut *conn)
+                .await
+                .expect("set session timeout");
+            let restored: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *conn)
+                .await
+                .expect("show timeout");
+            let (inside, after) = deadline_inside_and_after(&mut conn).await;
+            assert_eq!(inside, expected, "autocommit, operator {setting}");
+            assert_eq!(after, restored, "autocommit restore, operator {setting}");
+
+            // Nested in an outer read transaction (replica path -> savepoint).
+            let mut tx = sqlx::Connection::begin(&mut *conn).await.expect("begin");
+            let (inside, after) = deadline_inside_and_after(&mut tx).await;
+            assert_eq!(inside, expected, "savepoint, operator {setting}");
+            assert_eq!(after, restored, "savepoint restore, operator {setting}");
+            tx.rollback().await.expect("rollback outer");
+
+            sqlx::query("RESET statement_timeout")
+                .execute(&mut *conn)
+                .await
+                .expect("reset");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn e_tag_deadline_restores_timeout_after_error() {
+        let pool = setup_pool().await;
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("SET statement_timeout = '1min'")
+            .execute(&mut *conn)
+            .await
+            .expect("set session timeout");
+        // Autocommit connection (writer path).
+        let mut qb = QueryBuilder::new("SELECT 1/0");
+        let err = fetch_with_e_tag_deadline(&mut conn, &mut qb).await;
+        assert!(err.is_err(), "division by zero must fail");
+        let after: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("connection usable after error");
+        assert_eq!(after, "1min", "autocommit restore");
+
+        // Nested in an outer read transaction (replica path -> savepoint):
+        // the failed savepoint must roll back and leave the outer tx usable.
+        let mut tx = sqlx::Connection::begin(&mut *conn).await.expect("begin");
+        let mut qb = QueryBuilder::new("SELECT 1/0");
+        let err = fetch_with_e_tag_deadline(&mut tx, &mut qb).await;
+        assert!(err.is_err(), "division by zero must fail");
+        let after: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("outer transaction usable after savepoint error");
+        assert_eq!(after, "1min", "savepoint restore");
+        tx.rollback().await.expect("rollback outer");
+        sqlx::query("RESET statement_timeout")
+            .execute(&mut *conn)
+            .await
+            .expect("reset");
+    }
+
+    /// Pins the dispatch: an e-tag read through the production
+    /// `query_events_on` is cancelled at the 20 s deadline even with the
+    /// session timeout disabled, while `events` is locked. (Slow by design.)
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn e_tag_read_is_cancelled_at_deadline_when_timeout_disabled() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let mut locker = pool.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock events");
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("SET statement_timeout = 0")
+            .execute(&mut *conn)
+            .await
+            .expect("disable timeout");
+        let mut q = EventQuery::for_community(community);
+        q.e_tags = Some(vec!["00".repeat(32)]);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(40),
+            query_events_on(&mut conn, &q),
+        )
+        .await
+        .expect("deadline must fire before the 40 s guard");
+        let err = result.expect_err("locked read must be cancelled");
+        assert!(err.is_statement_cancelled(), "want 57014, got {err}");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(19));
+
+        locker.rollback().await.expect("unlock");
+        sqlx::query("RESET statement_timeout")
+            .execute(&mut *conn)
+            .await
+            .expect("reset");
+    }
+
+    /// Pins the dispatch: a COUNT with an e-tag filter through the production
+    /// `count_events_on` is cancelled at the 20 s deadline even with the
+    /// session timeout disabled, while `events` is locked. Connection and
+    /// setting are restored afterwards. (Slow by design.)
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn count_events_cancels_at_e_tag_deadline_when_timeout_disabled() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let mut locker = pool.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock events");
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("SET statement_timeout = 0")
+            .execute(&mut *conn)
+            .await
+            .expect("disable timeout");
+        let mut q = EventQuery::for_community(community);
+        q.e_tags = Some(vec!["00".repeat(32)]);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(40),
+            count_events_on(&mut conn, &q),
+        )
+        .await
+        .expect("deadline must fire before the 40 s guard");
+        let err = result.expect_err("locked COUNT must be cancelled");
+        assert!(err.is_statement_cancelled(), "want 57014, got {err}");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(19));
+
+        // Connection and session timeout are restored after the error.
+        let after: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("connection usable after cancellation");
+        assert_eq!(after, "0", "timeout must be restored to disabled");
+
+        locker.rollback().await.expect("unlock");
+        sqlx::query("RESET statement_timeout")
+            .execute(&mut *conn)
+            .await
+            .expect("reset");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_insert_in_existing_transaction_rolls_back_with_caller() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let event = make_text_event("caller-owned transaction");
+
+        let mut tx = pool.begin().await.expect("begin event insert transaction");
+        let (_, was_inserted) = insert_event_in_transaction(&mut tx, community, &event, None)
+            .await
+            .expect("insert event in caller transaction");
+        assert!(was_inserted);
+        tx.rollback().await.expect("roll back event insert");
+
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(persisted, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_insert_ttl_trigger_handles_permanent_ephemeral_duplicate_and_activation_race() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+
+        let permanent = make_test_channel(&pool, community_uuid, None).await;
+        let permanent_event = make_text_event("permanent channel event");
+        assert!(
+            insert_event(&pool, community, &permanent_event, Some(permanent))
+                .await
+                .expect("insert permanent event")
+                .1
+        );
+        let permanent_deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(permanent)
+        .fetch_one(&pool)
+        .await
+        .expect("read permanent deadline");
+        assert_eq!(permanent_deadline, None);
+
+        let ephemeral = make_test_channel(&pool, community_uuid, Some(60)).await;
+        let initial_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read initial ephemeral deadline");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let ephemeral_event = make_text_event("ephemeral channel event");
+        assert!(
+            insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
+                .await
+                .expect("insert ephemeral event")
+                .1
+        );
+        let bumped_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read bumped ephemeral deadline");
+        assert!(bumped_deadline > initial_deadline);
+        assert!(
+            !insert_event(&pool, community, &ephemeral_event, Some(ephemeral))
+                .await
+                .expect("insert duplicate event")
+                .1
+        );
+        let duplicate_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(ephemeral)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after duplicate");
+        assert_eq!(duplicate_deadline, bumped_deadline);
+
+        // Reproduce the blocked stale-prefetch ordering: ingest has already
+        // observed a permanent channel, then TTL activation locks/updates the
+        // row before the event INSERT reaches its trigger. The trigger must
+        // wait and refresh from the later event after activation commits.
+        let racing = make_test_channel(&pool, community_uuid, None).await;
+        let stale_ttl: Option<i32> = sqlx::query_scalar(
+            "SELECT ttl_seconds FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&pool)
+        .await
+        .expect("prefetch permanent channel");
+        assert_eq!(stale_ttl, None);
+
+        let mut activation = pool.begin().await.expect("begin TTL activation");
+        // Model the repaired update_channel protocol (migration 0024): the
+        // TTL transition holds the per-channel advisory key EXCLUSIVE, which
+        // is what the event trigger's shared acquisition now waits on.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("buzz_channel_ttl:{community_uuid}:{racing}"))
+            .execute(&mut *activation)
+            .await
+            .expect("acquire exclusive channel TTL key");
+        let activation_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE channels \
+             SET ttl_seconds = 60, ttl_deadline = clock_timestamp() + interval '60 seconds' \
+             WHERE community_id = $1 AND id = $2 RETURNING ttl_deadline",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&mut *activation)
+        .await
+        .expect("activate TTL while holding channel row lock");
+
+        let race_pool = pool.clone();
+        let racing_event = make_text_event("event after stale permanent prefetch");
+        let insert = tokio::spawn(async move {
+            insert_event(&race_pool, community, &racing_event, Some(racing)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !insert.is_finished(),
+            "event trigger must wait on TTL activation"
+        );
+        activation.commit().await.expect("commit TTL activation");
+        assert!(
+            insert
+                .await
+                .expect("join racing insert")
+                .expect("racing insert")
+                .1
+        );
+
+        let final_deadline: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(racing)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after racing event");
+        assert!(
+            final_deadline > activation_deadline + chrono::Duration::milliseconds(50),
+            "later event must extend TTL beyond activation deadline: activation={activation_deadline}, final={final_deadline}"
+        );
+    }
+
+    /// T1a repair regression test (migration 0024): permanent-channel event
+    /// commits must not serialize on the channel row. The 0022 trigger took
+    /// `FOR UPDATE` on the channel tuple before testing `ttl_seconds`, so
+    /// concurrent commits into one hot permanent channel queued at commit
+    /// time (deferred trigger) — invisible to any single-connection test.
+    /// This holds N insert transactions at a barrier past their INSERTs,
+    /// then proves (a) while all N sit pre-commit, no transaction holds a
+    /// row-level lock on the channel tuple, and (b) all N commits succeed
+    /// with the channel row untouched (permanent ⇒ no deadline write).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn permanent_channel_event_commits_do_not_lock_the_channel_row() {
+        const N: usize = 8;
+        // setup_pool's default cap (10) covers N held transactions plus the
+        // pg_locks inspector connection.
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        // Open N transactions, run the full event INSERT in each (the deferred
+        // trigger fires at COMMIT), and park them at a barrier.
+        let mut txs = Vec::new();
+        for i in 0..N {
+            let mut tx = pool.begin().await.expect("begin insert txn");
+            let event = make_text_event(&format!("hot channel event {i}"));
+            sqlx::query(
+                "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+                 VALUES ($1,$2,$3,$4,9,$5,$6,$7,now(),$8)",
+            )
+            .bind(community_uuid)
+            .bind(event.id.as_bytes().as_slice())
+            .bind(event.pubkey.as_bytes().as_slice())
+            .bind(DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap())
+            .bind(serde_json::to_value(&event.tags).unwrap())
+            .bind(&event.content)
+            .bind(event.sig.serialize().as_slice())
+            .bind(channel)
+            .execute(&mut *tx)
+            .await
+            .expect("insert event inside held txn");
+            txs.push(tx);
+        }
+
+        // With all N transactions holding completed INSERTs, none may hold a
+        // row-level lock on the channels tuple. (The 0022 trigger would not
+        // have taken it yet either — it locks at COMMIT — so also verify the
+        // commit phase below completes without mutual blocking.)
+        let tuple_locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks l \
+             JOIN pg_class c ON c.oid = l.relation \
+             WHERE c.relname = 'channels' AND l.locktype = 'tuple'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect pg_locks");
+        assert_eq!(tuple_locks, 0, "no channel tuple locks while txns are held");
+
+        // Release all commits concurrently. Under 0022 these serialized on the
+        // channel row (each holding it across its WAL flush); under 0024 the
+        // shared advisory key admits them all. Join with a timeout so a
+        // regression fails fast instead of hanging the suite.
+        let commits = txs
+            .into_iter()
+            .map(|tx| tokio::spawn(async move { tx.commit().await }))
+            .collect::<Vec<_>>();
+        for c in commits {
+            tokio::time::timeout(std::time::Duration::from_secs(10), c)
+                .await
+                .expect("concurrent permanent-channel commits must not block")
+                .expect("join commit task")
+                .expect("commit succeeds");
+        }
+
+        let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("read deadline after commits");
+        assert_eq!(deadline, None, "permanent channel must remain untouched");
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("count stored events");
+        assert_eq!(stored as usize, N);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_event_by_id_is_scoped_when_event_id_collides_across_communities() {
+        let pool = setup_pool().await;
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "same signed event")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+
+        insert_event(&pool, community_a, &event, None)
+            .await
+            .expect("insert in community A");
+        insert_event(&pool, community_b, &event, None)
+            .await
+            .expect("insert same event in community B");
+
+        sqlx::query("UPDATE events SET content = $1 WHERE community_id = $2 AND id = $3")
+            .bind("community-a-copy")
+            .bind(community_a.as_uuid())
+            .bind(event.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("mark community A row");
+        sqlx::query("UPDATE events SET content = $1 WHERE community_id = $2 AND id = $3")
+            .bind("community-b-copy")
+            .bind(community_b.as_uuid())
+            .bind(event.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("mark community B row");
+
+        let a = get_event_by_id(&pool, community_a, event.id.as_bytes())
+            .await
+            .expect("lookup community A")
+            .expect("community A row exists");
+        let b = get_event_by_id(&pool, community_b, event.id.as_bytes())
+            .await
+            .expect("lookup community B")
+            .expect("community B row exists");
+
+        assert_eq!(a.event.content, "community-a-copy");
+        assert_eq!(b.event.content, "community-b-copy");
+    }
+
+    fn make_event_with_kind_and_tags(kind: u16, tags: Vec<Tag>) -> nostr::Event {
+        let keys = Keys::generate();
+        EventBuilder::new(Kind::Custom(kind), "test")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("sign")
+    }
+
+    fn make_event_at(kind: u16, content: &str, created_at: u64) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign timestamped event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn explicit_multi_channel_scope_is_applied_before_historical_page_limit() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel_a = make_test_channel(&pool, community_uuid, None).await;
+        let channel_b = make_test_channel(&pool, community_uuid, None).await;
+        let unrelated_c = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_000_000;
+
+        let older_a = make_event_at(39_000, "older requested A", base + 1);
+        insert_event(&pool, community, &older_a, Some(channel_a))
+            .await
+            .expect("insert requested A candidate");
+        let requested_b = make_event_at(39_000, "requested B", base + 2);
+        insert_event(&pool, community, &requested_b, Some(channel_b))
+            .await
+            .expect("insert requested B candidate");
+        let newer_c = make_event_at(39_000, "newer unrelated C", base + 3);
+        insert_event(&pool, community, &newer_c, Some(unrelated_c))
+            .await
+            .expect("insert unrelated C candidate");
+        let global = make_event_at(39_000, "global candidate", base + 4);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![channel_a, channel_b]),
+                channel_ids_include_global: false,
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query explicit multi-channel page");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event.id, requested_b.id,
+            "newer unrelated channel C must not consume the requested A/B limit"
+        );
+
+        let partial_authorization_count = count_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![channel_a]),
+                channel_ids_include_global: false,
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("count one authorized channel from a multi-channel request");
+        assert_eq!(
+            partial_authorization_count, 1,
+            "partial authorization must exclude requested B, unrelated C, and global rows"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn access_scope_is_applied_before_historical_page_limit() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let accessible = make_test_channel(&pool, community_uuid, None).await;
+        let inaccessible = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_000_000;
+
+        // This is the bridge underfetch shape: newer inaccessible candidates
+        // outnumber the requested page, while the visible match is older.
+        for offset in 10..13 {
+            let event = make_event_at(39_000, "newer inaccessible", base + offset);
+            insert_event(&pool, community, &event, Some(inaccessible))
+                .await
+                .expect("insert inaccessible candidate");
+        }
+        let global = make_event_at(39_000, "newer global", base + 2);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
+        let older_accessible = make_event_at(39_000, "older accessible", base + 1);
+        insert_event(&pool, community, &older_accessible, Some(accessible))
+            .await
+            .expect("insert accessible candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![accessible]),
+                limit: Some(2),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query access-scoped page");
+
+        assert_eq!(events.len(), 2, "visible page must be filled before EOF");
+        assert_eq!(events[0].event.id, global.id, "global rows remain visible");
+        assert_eq!(
+            events[1].event.id, older_accessible.id,
+            "older accessible row must not be hidden behind newer inaccessible rows"
+        );
+    }
+
+    fn make_text_event(content: &str) -> nostr::Event {
+        let keys = Keys::generate();
+        EventBuilder::new(Kind::Custom(9), content)
+            .sign_with_keys(&keys)
+            .expect("sign text event")
+    }
+
+    #[test]
+    fn extract_d_tag_from_nip33_event() {
+        let event = make_event_with_kind_and_tags(
+            30023,
+            vec![Tag::parse(["d", "my-article-slug"]).unwrap()],
+        );
+        assert_eq!(extract_d_tag(&event), Some("my-article-slug".to_string()));
+    }
+
+    #[test]
+    fn extract_d_tag_first_d_wins() {
+        let event = make_event_with_kind_and_tags(
+            30023,
+            vec![
+                Tag::parse(["d", "first"]).unwrap(),
+                Tag::parse(["d", "second"]).unwrap(),
+            ],
+        );
+        assert_eq!(extract_d_tag(&event), Some("first".to_string()));
+    }
+
+    #[test]
+    fn extract_d_tag_missing_becomes_empty_string() {
+        // NIP-33: "if there is no d tag, the d tag is considered to be ''"
+        let event =
+            make_event_with_kind_and_tags(30023, vec![Tag::parse(["p", "abc123"]).unwrap()]);
+        assert_eq!(extract_d_tag(&event), Some(String::new()));
+    }
+
+    #[test]
+    fn extract_d_tag_empty_value_preserved() {
+        let event = make_event_with_kind_and_tags(30023, vec![Tag::parse(["d", ""]).unwrap()]);
+        assert_eq!(extract_d_tag(&event), Some(String::new()));
+    }
+
+    #[test]
+    fn extract_d_tag_non_nip33_returns_none() {
+        // kind:1 (text note) — not parameterized replaceable
+        let event =
+            make_event_with_kind_and_tags(1, vec![Tag::parse(["d", "should-be-ignored"]).unwrap()]);
+        assert_eq!(extract_d_tag(&event), None);
+    }
+
+    #[test]
+    fn extract_d_tag_nip29_group_metadata() {
+        // kind:39000 is in the 30000–39999 range — d_tag should be extracted
+        let event =
+            make_event_with_kind_and_tags(39000, vec![Tag::parse(["d", "group-id"]).unwrap()]);
+        assert_eq!(extract_d_tag(&event), Some("group-id".to_string()));
+    }
+
+    #[test]
+    fn extract_d_tag_boundary_kinds() {
+        // kind:29999 — just below range
+        let below = make_event_with_kind_and_tags(29999, vec![Tag::parse(["d", "val"]).unwrap()]);
+        assert_eq!(extract_d_tag(&below), None);
+
+        // kind:30000 — lower bound
+        let lower = make_event_with_kind_and_tags(30000, vec![Tag::parse(["d", "val"]).unwrap()]);
+        assert_eq!(extract_d_tag(&lower), Some("val".to_string()));
+
+        // kind:39999 — upper bound
+        let upper = make_event_with_kind_and_tags(39999, vec![Tag::parse(["d", "val"]).unwrap()]);
+        assert_eq!(extract_d_tag(&upper), Some("val".to_string()));
+
+        // kind:40000 — just above range
+        let above = make_event_with_kind_and_tags(40000, vec![Tag::parse(["d", "val"]).unwrap()]);
+        assert_eq!(extract_d_tag(&above), None);
+    }
+
+    #[test]
+    fn extract_d_tag_single_element_d_tag_ignored() {
+        // A d tag with only one element (no value) should not match — parts.len() < 2
+        let event = make_event_with_kind_and_tags(30023, vec![Tag::parse(["d"]).unwrap()]);
+        // No d tag with a value → empty string per NIP-33
+        assert_eq!(extract_d_tag(&event), Some(String::new()));
+    }
+
+    #[test]
+    fn extract_d_tag_preserves_full_value() {
+        // extract_d_tag returns the full value — length enforcement is at the ingest layer.
+        let long_val = "x".repeat(2048);
+        let event =
+            make_event_with_kind_and_tags(30023, vec![Tag::parse(["d", &long_val]).unwrap()]);
+        let result = extract_d_tag(&event).unwrap();
+        assert_eq!(result.len(), 2048);
+        assert_eq!(result, long_val);
+    }
+
+    #[test]
+    fn extract_not_before_from_reminder() {
+        let event = make_event_with_kind_and_tags(
+            KIND_EVENT_REMINDER as u16,
+            vec![Tag::parse(["not_before", "1717000000"]).unwrap()],
+        );
+        assert_eq!(extract_not_before(&event), Some(1_717_000_000));
+    }
+
+    #[test]
+    fn extract_not_before_absent_returns_none() {
+        // A bookmark/terminal reminder carries no `not_before` tag.
+        let event = make_event_with_kind_and_tags(
+            KIND_EVENT_REMINDER as u16,
+            vec![Tag::parse(["d", "abc"]).unwrap()],
+        );
+        assert_eq!(extract_not_before(&event), None);
+    }
+
+    #[test]
+    fn extract_not_before_non_reminder_returns_none() {
+        // Only kind:30300 materializes `not_before`; other kinds stay NULL.
+        let event = make_event_with_kind_and_tags(
+            30023,
+            vec![Tag::parse(["not_before", "1717000000"]).unwrap()],
+        );
+        assert_eq!(extract_not_before(&event), None);
+    }
+
+    #[test]
+    fn extract_not_before_non_numeric_returns_none() {
+        // Malformed values are rejected by ingest; materialization just skips them.
+        let event = make_event_with_kind_and_tags(
+            KIND_EVENT_REMINDER as u16,
+            vec![Tag::parse(["not_before", "not-a-number"]).unwrap()],
+        );
+        assert_eq!(extract_not_before(&event), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn coordinate_delete_spares_head_newer_than_the_deletion() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = Db::from_pool(setup_pool().await);
+        let community = CommunityId::from_uuid(make_test_community(&db.pool).await);
+        let keys = Keys::generate();
+        let kind = buzz_core::kind::KIND_PROJECT as i32;
+        let d_tag = "stale-tombstone-project";
+        let pubkey = keys.public_key().to_bytes().to_vec();
+        let base = Timestamp::now().as_secs();
+
+        let version = |content: &str, offset: u64| {
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), content)
+                .tags(vec![Tag::parse(["d", d_tag]).expect("d tag")])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign project version")
+        };
+
+        for (content, offset) in [("v1", 0), ("v2", 100)] {
+            assert!(
+                db.replace_parameterized_event(community, &version(content, offset), d_tag, None)
+                    .await
+                    .expect("store project version")
+                    .1
+            );
+        }
+
+        // Tombstone timestamped between V1 and V2: it authorizes deleting V1,
+        // never the newer head that replaced it.
+        let stale_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 50) as i64)
+            .await
+            .expect("stale coordinate delete");
+        assert!(
+            !stale_deleted,
+            "a tombstone older than the live head must delete nothing"
+        );
+
+        let live_content: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM events \
+             WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(&pubkey)
+        .bind(d_tag)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("read live head");
+        assert_eq!(
+            live_content.as_deref(),
+            Some("v2"),
+            "the newer head must survive a stale tombstone"
+        );
+
+        // A tombstone at or after the head's own timestamp still deletes it.
+        let current_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 100) as i64)
+            .await
+            .expect("current coordinate delete");
+        assert!(
+            current_deleted,
+            "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn huddle_started_links_batches_valid_creator_links_and_ignores_malformed_content() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let parent = make_test_channel(&pool, community_uuid, None).await;
+        let session = make_test_channel(&pool, community_uuid, Some(60)).await;
+        let creator = vec![7_u8; 32];
+
+        for (index, content) in [
+            "not-json".to_owned(),
+            serde_json::json!({ "ephemeral_channel_id": session }).to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW() + make_interval(secs => $4), $5, '[]', $6, $7, $8)",
+            )
+            .bind(community_uuid)
+            .bind(vec![(index + 1) as u8; 32])
+            .bind(&creator)
+            .bind(index as f64)
+            .bind(KIND_HUDDLE_STARTED as i32)
+            .bind(content)
+            .bind(vec![0_u8; 64])
+            .bind(parent)
+            .execute(&pool)
+            .await
+            .expect("insert huddle-start candidate");
+        }
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let db = Db::from_pool(pool);
+        let links = {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            db.huddle_started_links(community, &[parent], &[session])
+                .await
+        }
+        .expect("batch huddle links");
+        assert_eq!(links, vec![(session, parent, creator)]);
+
+        let counters = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                if labels.get("pool_role").map(String::as_str) != Some("writer")
+                    || labels.get("operation").map(String::as_str) != Some("subscription_history")
+                {
+                    return None;
+                }
+                let metrics_util::debugging::DebugValue::Counter(value) = value else {
+                    return None;
+                };
+                Some((
+                    (key.key().name().to_owned(), labels.get("outcome").cloned()),
+                    value,
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            counters,
+            [
+                (
+                    ("buzz_db_pool_acquire_started_total".to_owned(), None),
+                    1,
+                ),
+                (
+                    (
+                        "buzz_db_pool_acquire_attempts_total".to_owned(),
+                        Some("success".to_owned()),
+                    ),
+                    1,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            "the production huddle lookup must emit one writer/subscription_history start and success terminal"
+        );
+    }
+
+    // I4 deletion-race witness:
+    // `huddle_started_link_exists_in_transaction` acquires FOR SHARE on the
+    // matching row. A concurrent `soft_delete_event` (UPDATE events SET
+    // deleted_at = NOW() WHERE ...) must BLOCK until the join transaction
+    // commits or rolls back — it cannot race past the re-read and commit
+    // deletion before the join completes.
+    //
+    // Test protocol:
+    //   1. Insert a huddle_started event row.
+    //   2. Open a transaction and call `huddle_started_link_exists_in_transaction`
+    //      (acquires FOR SHARE).
+    //   3. Concurrently try `soft_delete_event` from a second connection —
+    //      the UPDATE blocks because FOR SHARE conflicts with UPDATE.
+    //   4. Commit the first transaction.
+    //   5. The concurrent delete now completes — confirm it succeeds.
+    //
+    // Mutation evidence:
+    //   Remove `FOR SHARE` from the SELECT in `huddle_started_link_exists_in_transaction` →
+    //   the concurrent delete completes before the join tx commits →
+    //   `link_gone_before_commit` becomes true before the tx commits →
+    //   assertion panics ("FOR SHARE must make delete block").
+    #[tokio::test]
+    #[ignore = "requires Postgres — link deletion contends with join transaction via FOR SHARE"]
+    async fn i4_huddle_link_deletion_blocked_by_join_transaction_for_share() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let community_id = buzz_core::CommunityId::from_uuid(community);
+        let parent = make_test_channel(&pool, community, None).await;
+        let session = make_test_channel(&pool, community, None).await;
+        let creator = vec![0xAAu8; 32];
+        let event_id = vec![0xBBu8; 32];
+
+        // Insert the huddle_started event row.
+        let content = serde_json::json!({"ephemeral_channel_id": session.to_string()}).to_string();
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+             VALUES ($1, $2, $3, NOW(), $4, '[]', $5, $6, $7)",
+        )
+        .bind(community)
+        .bind(&event_id)
+        .bind(&creator)
+        .bind(KIND_HUDDLE_STARTED as i32)
+        .bind(&content)
+        .bind(vec![0u8; 64])
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .expect("insert huddle_started event");
+
+        // Signal: join transaction has acquired FOR SHARE, delete may attempt.
+        let delete_may_start = Arc::new(Notify::new());
+        // Signal: delete completed (or timed out).
+        let delete_completed = Arc::new(AtomicBool::new(false));
+        let link_gone_before_commit = Arc::new(AtomicBool::new(false));
+
+        let delete_may_start2 = delete_may_start.clone();
+        let delete_completed2 = delete_completed.clone();
+        let link_gone2 = link_gone_before_commit.clone();
+        let pool2 = pool.clone();
+        let event_id2 = event_id.clone();
+        let community2 = community_id;
+
+        // Spawn the deleter: waits for the join tx to hold FOR SHARE, then tries
+        // to delete. It should block until the join tx commits.
+        let delete_handle = tokio::spawn(async move {
+            delete_may_start2.notified().await;
+            // Record whether the link row is still live at delete time.
+            // Under FOR SHARE this call will block until the join tx commits.
+            let result =
+                soft_delete_event_and_update_thread(&pool2, community2, &event_id2, None, None)
+                    .await
+                    .expect("soft_delete_event_and_update_thread should not error");
+            // Mark whether the link was deleted (not already gone).
+            link_gone2.store(result, Ordering::Relaxed);
+            delete_completed2.store(true, Ordering::Relaxed);
+        });
+
+        // Open the join transaction and acquire FOR SHARE.
+        let mut tx = pool.begin().await.expect("begin join tx");
+        let exists = huddle_started_link_exists_in_transaction(
+            &mut tx,
+            community_id,
+            parent,
+            session,
+            &creator,
+        )
+        .await
+        .expect("huddle_started_link_exists_in_transaction");
+        assert!(exists, "I4: link must exist before commit");
+
+        // Signal the deleter to attempt its UPDATE now.
+        delete_may_start.notify_one();
+
+        // Give the deleter a brief window to attempt the DELETE. Under correct
+        // FOR SHARE locking, it blocks here and `delete_completed` stays false.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(
+            !delete_completed.load(Ordering::Relaxed),
+            "I4: FOR SHARE must make soft_delete_event block — \
+             delete completed before the join transaction committed, \
+             which proves deletion can race past the re-read. \
+             Remove FOR SHARE from the SELECT in \
+             huddle_started_link_exists_in_transaction to reproduce."
+        );
+
+        // Commit the join transaction — delete should unblock.
+        tx.commit().await.expect("commit join tx");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), delete_handle)
+            .await
+            .expect("I4: delete must complete within 5s after join tx commit")
+            .expect("delete_handle must not panic");
+
+        // After the join tx commits, the delete should have succeeded.
+        assert!(
+            link_gone_before_commit.load(Ordering::Relaxed),
+            "I4: soft_delete_event must succeed once the join tx releases FOR SHARE"
+        );
+        assert!(
+            delete_completed.load(Ordering::Relaxed),
+            "I4: delete must complete after join tx commit"
+        );
+    }
+
+    #[test]
+    fn huddle_started_content_requires_matching_ephemeral_field() {
+        let channel_id = Uuid::new_v4();
+        let matching = serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+        })
+        .to_string();
+        assert!(huddle_started_content_links(&matching, channel_id));
+
+        let wrong_field = serde_json::json!({
+            "other": channel_id.to_string(),
+        })
+        .to_string();
+        assert!(!huddle_started_content_links(&wrong_field, channel_id));
+        assert!(!huddle_started_content_links("not-json", channel_id));
+    }
+
+    // ─── canvas CAS tests ─────────────────────────────────────────────────────
+
+    fn make_canvas_event_at(content: &str, created_at: u64) -> nostr::Event {
+        make_event_at(buzz_core::kind::KIND_CANVAS as u16, content, created_at)
+    }
+
+    /// Build two canvas events sharing `created_at`, returned `(lower, higher)`
+    /// by event id. Regenerates until the ids differ (always, since keys differ)
+    /// so tests can assert deterministic head ordering on the id tiebreak.
+    fn same_second_ordered_pair(created_at: u64) -> (nostr::Event, nostr::Event) {
+        let a = make_canvas_event_at("# A", created_at);
+        let b = make_canvas_event_at("# B", created_at);
+        if a.id.as_bytes() <= b.id.as_bytes() {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expect_no_head_creates_first_canvas() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# First", 1000);
+
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+        assert_eq!(status, ChannelHeadWriteStatus::Inserted);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expect_no_head_rejects_when_head_exists() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let first = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &first,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        let second = make_canvas_event_at("# Racing create", 1001);
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &second,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("second create attempt");
+        assert_eq!(status, ChannelHeadWriteStatus::RevisionMismatch);
+
+        // The losing create must not have been persisted.
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(second.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count losing create");
+        assert_eq!(persisted, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expected_head_matches_and_advances() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let first = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &first,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        let second = make_canvas_event_at("# Second", 1001);
+        let head = first.id.as_bytes();
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &second,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(head.as_slice()),
+        )
+        .await
+        .expect("edit against head");
+        assert_eq!(status, ChannelHeadWriteStatus::Inserted);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expected_head_mismatch_rejects() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let first = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &first,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        let stale = make_canvas_event_at("# Stale edit", 1002);
+        let wrong_head = [0u8; 32];
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &stale,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(&wrong_head),
+        )
+        .await
+        .expect("stale edit attempt");
+        assert_eq!(status, ChannelHeadWriteStatus::RevisionMismatch);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_expected_head_missing_rejects() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# Edit with no head", 1000);
+        let some_head = [1u8; 32];
+
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(&some_head),
+        )
+        .await
+        .expect("edit with no head");
+        assert_eq!(status, ChannelHeadWriteStatus::RevisionMissing);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_replay_of_head_is_duplicate() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        // Replaying the exact head under ExpectedHead(head) is idempotent.
+        let head = event.id.as_bytes();
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(head.as_slice()),
+        )
+        .await
+        .expect("replay head");
+        assert_eq!(status, ChannelHeadWriteStatus::Duplicate);
+    }
+
+    /// Idempotent-replay exception: replaying the byte-identical head succeeds
+    /// as a no-op even when the supplied precondition would otherwise conflict.
+    /// Precondition is not evaluated for a duplicate, so safe transport retry
+    /// never becomes a false conflict.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_replay_skips_stale_precondition() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let event = make_canvas_event_at("# First", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas");
+
+        // Replay the same bytes with a now-stale `ExpectNoHead` tag: a head
+        // exists, so the precondition would reject — but replay short-circuits.
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("replay with stale none tag");
+        assert_eq!(status, ChannelHeadWriteStatus::Duplicate);
+    }
+
+    /// Head-advancement guarantee: a candidate whose `created_at` equals the
+    /// head's but whose id is HIGHER cannot become the head under
+    /// `created_at DESC, id ASC`, so it rejects even though the precondition
+    /// matches. Accepting it would leave the visible canvas unchanged.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_rejects_same_second_higher_id() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+
+        let (lower, higher) = same_second_ordered_pair(1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &lower,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas is lower-id head");
+
+        // Candidate has the same created_at but a higher id → cannot supersede.
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &higher,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(lower.id.as_bytes().as_slice()),
+        )
+        .await
+        .expect("same-second higher-id edit");
+        assert_eq!(status, ChannelHeadWriteStatus::SupersedeFailed);
+
+        // The rejected write must not have been persisted.
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(higher.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rejected write");
+        assert_eq!(persisted, 0);
+    }
+
+    /// Head-advancement guarantee: a candidate at the same second with a LOWER
+    /// id does sort strictly ahead of the head, so it advances.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_accepts_same_second_lower_id() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+
+        let (lower, higher) = same_second_ordered_pair(1000);
+        // Seed the higher-id event as the head first.
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &higher,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("first canvas is higher-id head");
+
+        // Lower id at the same second sorts strictly ahead → advances.
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &lower,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(higher.id.as_bytes().as_slice()),
+        )
+        .await
+        .expect("same-second lower-id edit");
+        assert_eq!(status, ChannelHeadWriteStatus::Inserted);
+    }
+
+    /// Head-advancement guarantee: a behind-clock writer whose `created_at`
+    /// predates the head cannot supersede it, even with a matching precondition.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_rejects_behind_clock_writer() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let head = make_canvas_event_at("# Head", 2000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &head,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("head at t=2000");
+
+        // Writer's clock is behind — created_at earlier than head.
+        let behind = make_canvas_event_at("# Behind clock", 1100);
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &behind,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(head.id.as_bytes().as_slice()),
+        )
+        .await
+        .expect("behind-clock edit");
+        assert_eq!(status, ChannelHeadWriteStatus::SupersedeFailed);
+    }
+    /// Derives the advisory-lock key for a canvas coordinate, matching the key
+    /// computed inside `insert_channel_head_checked` and
+    /// `soft_delete_event_and_update_thread`.
+    fn canvas_lock_key(community: CommunityId, channel: Uuid) -> i64 {
+        crate::store::replaceable::event_replacement_lock_key(
+            community,
+            buzz_core::kind::KIND_CANVAS as i32,
+            &[],
+            Some(channel.as_bytes().as_slice()),
+        )
+    }
+
+    /// Polls `pg_locks` until at least `min_waiters` sessions are queued as
+    /// ungranted waiters on the given `int8` advisory lock key, or until
+    /// `timeout` elapses.
+    ///
+    /// Returns `Ok(())` once the condition is met. Panics if the timeout
+    /// expires before the required number of waiters appear, or if any waiter
+    /// task completes (exits the lock wait) before the condition is met.
+    ///
+    /// Postgres stores `pg_advisory_xact_lock(int8)` rows in `pg_locks` as
+    /// `(locktype='advisory', classid=(key>>32)::oid, objid=(key & 0xffffffff)::oid)`.
+    /// The `classid`/`objid` columns are of type `oid` (unsigned 32-bit integer).
+    async fn wait_for_advisory_waiters(
+        pool: &PgPool,
+        lock_key: i64,
+        min_waiters: i64,
+        timeout: std::time::Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        // Split the int8 key into its two oid halves exactly as Postgres does.
+        // Cast each half to int8 first (no overflow), then let sqlx bind them
+        // as bigint; Postgres compares oid columns via implicit cast.
+        let classid = ((lock_key as u64) >> 32) as i64;
+        let objid = ((lock_key as u64) & 0xffff_ffff) as i64;
+        loop {
+            let waiters: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks \
+                 WHERE locktype = 'advisory' \
+                   AND classid = $1::oid \
+                   AND objid = $2::oid \
+                   AND NOT granted",
+            )
+            .bind(classid)
+            .bind(objid)
+            .fetch_one(pool)
+            .await
+            .expect("pg_locks waiter query");
+
+            if waiters >= min_waiters {
+                return;
+            }
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {min_waiters} advisory waiters on key {lock_key:#x}; \
+                 only {waiters} appeared — the production lock was likely removed"
+            );
+
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Tombstone regression: H → A → soft-delete A → replay A-on-H must return
+    /// `RevisionMismatch`. A must remain deleted and H must remain the live head.
+    ///
+    /// Mutation oracle: the post-insert conflict branch returning `Duplicate`
+    /// unconditionally makes this test fail with status `Duplicate` instead of
+    /// `RevisionMismatch`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_deleted_replay_returns_revision_mismatch() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+
+        // H: seed the initial head.
+        let head = make_canvas_event_at("# Head", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &head,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("seed head H");
+        let head_id = head.id.to_bytes().to_vec();
+
+        // A: insert a second revision.
+        let a = make_canvas_event_at("# A", 1001);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &a,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(&head_id),
+        )
+        .await
+        .expect("insert A");
+        let a_id = a.id.to_bytes().to_vec();
+
+        // Soft-delete A so H becomes the live head again.
+        soft_delete_event_and_update_thread(&pool, community, &a_id, None, None)
+            .await
+            .expect("soft-delete A");
+
+        // Verify A is deleted and H is the live head before replay.
+        let a_deleted: Option<bool> = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&a_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("check A deleted");
+        assert_eq!(
+            a_deleted,
+            Some(true),
+            "A must be soft-deleted before replay"
+        );
+
+        // Replay byte-identical A against live head H — must not return Duplicate.
+        let (_, status) = insert_channel_head_checked(
+            &pool,
+            community,
+            &a,
+            channel,
+            ChannelHeadPrecondition::ExpectedHead(&head_id),
+        )
+        .await
+        .expect("replay A");
+        assert_eq!(
+            status,
+            ChannelHeadWriteStatus::RevisionMismatch,
+            "replay of a deleted event must return RevisionMismatch, not Duplicate"
+        );
+
+        // A must still be deleted after the replay attempt.
+        let a_still_deleted: Option<bool> = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&a_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("check A still deleted");
+        assert_eq!(
+            a_still_deleted,
+            Some(true),
+            "A must remain deleted after replay"
+        );
+
+        // H must remain the canonical live head.
+        let live_head: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND channel_id = $3 \
+             AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_CANVAS as i32)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("read live head");
+        assert_eq!(
+            live_head, head_id,
+            "H must remain the live head after failed replay"
+        );
+    }
+
+    /// Race soundness: two concurrent authors both assert the same live head and
+    /// both sign strictly-advancing writes. The per-(community, channel) advisory
+    /// lock must serialize check+insert so exactly one wins (`Inserted`) and the
+    /// other observes the moved head (`RevisionMismatch`). Exactly one write may
+    /// become the visible head; the loser must not appear as a live row.
+    ///
+    /// Causal oracle: an external connection holds the exact advisory key before
+    /// either writer starts. Both writers are spawned and `pg_locks` is polled
+    /// until both appear as ungranted waiters on this exact key. Only then is
+    /// the blocker released. This is a causal proof: both sessions have opened
+    /// their transactions and reached `pg_advisory_xact_lock` before the
+    /// interleaving begins — the outcome is deterministic rather than
+    /// scheduler-dependent.
+    ///
+    /// Mutation oracle: removing `pg_advisory_xact_lock` from
+    /// `insert_channel_head_checked` means neither writer queues as a waiter;
+    /// `wait_for_advisory_waiters` times out, or both writers read the same head,
+    /// both insert, and `head_count` becomes 3 instead of 2.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_concurrent_authors_only_one_advances() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+
+        let base = make_canvas_event_at("# Base", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &base,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("seed base head");
+        let base_id = base.id.to_bytes().to_vec();
+
+        // Acquire the exact advisory key from an external connection so both
+        // writers block immediately at pg_advisory_xact_lock.
+        let lock_key = canvas_lock_key(community, channel);
+        let mut blocker = pool.begin().await.expect("blocker tx");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *blocker)
+            .await
+            .expect("blocker acquires key");
+
+        // Both edits assert `base` as their head and are timestamped strictly
+        // ahead of it (writer discipline), so neither trips SupersedeFailed —
+        // only the advisory-lock serialization decides the winner.
+        let a = make_canvas_event_at("# Author A", 1001);
+        let b = make_canvas_event_at("# Author B", 1002);
+
+        let (pool_a, pool_b) = (pool.clone(), pool.clone());
+        let (id_a, id_b) = (base_id.clone(), base_id.clone());
+        let ta = tokio::spawn(async move {
+            insert_channel_head_checked(
+                &pool_a,
+                community,
+                &a,
+                channel,
+                ChannelHeadPrecondition::ExpectedHead(&id_a),
+            )
+            .await
+            .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
+        });
+        let tb = tokio::spawn(async move {
+            insert_channel_head_checked(
+                &pool_b,
+                community,
+                &b,
+                channel,
+                ChannelHeadPrecondition::ExpectedHead(&id_b),
+            )
+            .await
+            .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
+        });
+
+        // Wait until both writers are observed as ungranted advisory-lock
+        // waiters in pg_locks. This is a causal proof that both sessions have
+        // opened their transactions and are blocked at pg_advisory_xact_lock
+        // before we release the blocker.
+        wait_for_advisory_waiters(&pool, lock_key, 2, std::time::Duration::from_secs(5)).await;
+
+        // Release — both writers unblock and race for the advisory lock.
+        blocker.rollback().await.expect("release blocker");
+
+        let (id_a, status_a) = ta.await.expect("join A").expect("call A");
+        let (id_b, status_b) = tb.await.expect("join B").expect("call B");
+
+        let (winner_id, loser_id) = if status_a == ChannelHeadWriteStatus::Inserted {
+            assert_eq!(status_b, ChannelHeadWriteStatus::RevisionMismatch);
+            (id_a, id_b)
+        } else {
+            assert_eq!(status_a, ChannelHeadWriteStatus::RevisionMismatch);
+            assert_eq!(status_b, ChannelHeadWriteStatus::Inserted);
+            (id_b, id_a)
+        };
+
+        // Exactly one new canvas row (beyond the base) was committed.
+        let head_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND kind = $2 AND channel_id = $3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_CANVAS as i32)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("count committed canvas rows");
+        assert_eq!(head_count, 2, "base plus exactly one winning edit");
+
+        // The canonical live head must be the winner's event.
+        let live_head: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND channel_id = $3 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_CANVAS as i32)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("read live head");
+        assert_eq!(
+            live_head, winner_id,
+            "live head must be the Inserted writer's event"
+        );
+
+        // The losing writer's event must not be present as a live row.
+        let loser_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(&loser_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check loser absent");
+        assert_eq!(
+            loser_count, 0,
+            "the losing writer's event must not be a live row"
+        );
+    }
+
+    /// Race soundness for first-create: two writers both assert `ExpectNoHead`
+    /// simultaneously. Exactly one must be `Inserted`; the other gets
+    /// `RevisionMismatch`. The loser must not be persisted.
+    ///
+    /// Causal oracle: an external connection holds the exact advisory key before
+    /// either writer starts. Both writers are spawned and `pg_locks` is polled
+    /// until both appear as ungranted waiters on this exact key, proving both
+    /// transactions have opened and reached `pg_advisory_xact_lock`. Only then
+    /// is the blocker released.
+    ///
+    /// Mutation oracle: removing `pg_advisory_xact_lock` from
+    /// `insert_channel_head_checked` means neither writer queues as a waiter;
+    /// `wait_for_advisory_waiters` times out, or both writers read `None` for
+    /// the head, both pass `ExpectNoHead`, both insert, and `head_count` becomes 2.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_checked_concurrent_first_create_only_one_wins() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+
+        // Acquire the exact advisory key before either writer starts.
+        let lock_key = canvas_lock_key(community, channel);
+        let mut blocker = pool.begin().await.expect("blocker tx");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *blocker)
+            .await
+            .expect("blocker acquires key");
+
+        let a = make_canvas_event_at("# First A", 1000);
+        let b = make_canvas_event_at("# First B", 1001);
+
+        let (pool_a, pool_b) = (pool.clone(), pool.clone());
+        let ta = tokio::spawn(async move {
+            insert_channel_head_checked(
+                &pool_a,
+                community,
+                &a,
+                channel,
+                ChannelHeadPrecondition::ExpectNoHead,
+            )
+            .await
+            .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
+        });
+        let tb = tokio::spawn(async move {
+            insert_channel_head_checked(
+                &pool_b,
+                community,
+                &b,
+                channel,
+                ChannelHeadPrecondition::ExpectNoHead,
+            )
+            .await
+            .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
+        });
+
+        // Wait until both writers are observed as ungranted advisory-lock
+        // waiters in pg_locks. This is a causal proof that both sessions have
+        // opened their transactions and are blocked at pg_advisory_xact_lock
+        // before we release the blocker.
+        wait_for_advisory_waiters(&pool, lock_key, 2, std::time::Duration::from_secs(5)).await;
+
+        // Release — both race for the advisory lock.
+        blocker.rollback().await.expect("release blocker");
+
+        let (id_a, status_a) = ta.await.expect("join A").expect("call A");
+        let (id_b, status_b) = tb.await.expect("join B").expect("call B");
+
+        let (winner_id, loser_id) = if status_a == ChannelHeadWriteStatus::Inserted {
+            assert_eq!(status_b, ChannelHeadWriteStatus::RevisionMismatch);
+            (id_a, id_b)
+        } else {
+            assert_eq!(status_a, ChannelHeadWriteStatus::RevisionMismatch);
+            assert_eq!(status_b, ChannelHeadWriteStatus::Inserted);
+            (id_b, id_a)
+        };
+
+        // Exactly one canvas row exists.
+        let head_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND kind = $2 AND channel_id = $3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_CANVAS as i32)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("count canvas rows");
+        assert_eq!(head_count, 1, "exactly one first-create winner");
+
+        // The stored head is the winner.
+        let head_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND channel_id = $3 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_CANVAS as i32)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("read head");
+        assert_eq!(head_id, winner_id, "stored head must be the winner");
+
+        // The loser must not appear as a live row.
+        let loser_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(&loser_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check loser absent");
+        assert_eq!(
+            loser_count, 0,
+            "the losing first-create writer must not be a live row"
+        );
+    }
+
+    /// Serialization coverage: an untagged kind-40100 unconditional append must
+    /// acquire the same `(community, kind, channel)` advisory key as a tagged
+    /// write so the two cannot interleave on the head read.
+    ///
+    /// Proof: an external connection holds the advisory key; the untagged write
+    /// task is spawned. Since the write acquires the same key, it blocks while
+    /// the holder has it — `JoinHandle::is_finished()` returns false. After the
+    /// holder releases, the task completes and the row is committed.
+    ///
+    /// Mutation oracle: removing the `pg_advisory_xact_lock` block from
+    /// `insert_event_with_thread_metadata` for kind-40100 lets the write proceed
+    /// without acquiring the key. The task completes immediately (no block), so
+    /// `is_finished()` returns true while the holder still has the key —
+    /// `assert!(!write_task.is_finished())` fails.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_untagged_canvas_append_serializes_on_advisory_key() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let lock_key = canvas_lock_key(community, channel);
+
+        // Hold the exact advisory key on a dedicated connection.
+        let mut holder = pool.begin().await.expect("holder tx");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("holder acquires key");
+
+        // Spawn the untagged write — it should block at pg_advisory_xact_lock.
+        let event = make_canvas_event_at("# Untagged", 1000);
+        let pool_write = pool.clone();
+        let write_task = tokio::spawn(async move {
+            insert_event_with_thread_metadata(&pool_write, community, &event, Some(channel), None)
+                .await
+        });
+
+        // Give the write task time to open its transaction and reach the lock.
+        // The runtime drives the task until it blocks (advisory-lock wait suspends
+        // the async task back to the executor).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The write task must NOT have finished while the holder has the key.
+        assert!(
+            !write_task.is_finished(),
+            "untagged canvas write must block on the advisory key while holder has it; \
+             the task finished immediately, meaning the lock was not acquired"
+        );
+
+        // Release the holder — the blocked write can now acquire the key.
+        holder.rollback().await.expect("release holder");
+
+        // The write must now complete successfully.
+        let (stored, was_inserted) = write_task
+            .await
+            .expect("join write task")
+            .expect("untagged canvas insert");
+        assert!(
+            was_inserted,
+            "untagged canvas write must be inserted after holder releases"
+        );
+        let row_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(stored.event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count untagged row");
+        assert_eq!(row_count, 1, "untagged canvas row must be committed");
+    }
+
+    /// Serialization coverage: `soft_delete_event_and_update_thread` for a
+    /// kind-40100 event must acquire the same advisory key as tagged writes.
+    ///
+    /// Proof: an external connection holds the advisory key; the delete task
+    /// is spawned and blocks while the holder has it — `is_finished()` returns
+    /// false. After the holder releases, the task completes and the row is
+    /// soft-deleted.
+    ///
+    /// Mutation oracle: removing the advisory-lock branch from
+    /// `soft_delete_event_and_update_thread` lets the delete bypass the key.
+    /// The task finishes immediately while the holder still holds the key —
+    /// `assert!(!delete_task.is_finished())` fails.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_head_canvas_deletion_serializes_on_advisory_key() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
+        let lock_key = canvas_lock_key(community, channel);
+
+        // Insert a canvas event to delete.
+        let event = make_canvas_event_at("# To delete", 1000);
+        insert_channel_head_checked(
+            &pool,
+            community,
+            &event,
+            channel,
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect("seed canvas for deletion test");
+        let event_id = event.id.to_bytes().to_vec();
+
+        // Hold the exact advisory key on a dedicated connection.
+        let mut holder = pool.begin().await.expect("holder tx");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("holder acquires key");
+
+        // Spawn the delete task — it should block at pg_advisory_xact_lock.
+        let pool_del = pool.clone();
+        let eid = event_id.clone();
+        let delete_task = tokio::spawn(async move {
+            soft_delete_event_and_update_thread(&pool_del, community, &eid, None, None).await
+        });
+
+        // Give the delete task time to open its transaction and reach the lock.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The delete task must NOT have finished while the holder has the key.
+        assert!(
+            !delete_task.is_finished(),
+            "canvas soft-delete must block on the advisory key while holder has it; \
+             the task finished immediately, meaning the lock was not acquired"
+        );
+
+        // Release the holder — the blocked delete can now acquire the key.
+        holder.rollback().await.expect("release holder");
+
+        // The delete must now complete successfully.
+        let deleted = delete_task
+            .await
+            .expect("join delete task")
+            .expect("canvas soft-delete");
+        assert!(
+            deleted,
+            "canvas event must be deleted after holder releases"
+        );
+
+        let is_deleted: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM events \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check deleted_at");
+        assert!(
+            is_deleted,
+            "canvas event must have deleted_at set after soft-delete"
+        );
+    }
+}

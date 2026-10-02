@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "benchmarks/harbor-buzz-orchestra/**"
+      - "benchmarks/buzz-dataset/**"
       - ".github/workflows/benchmark-harbor.yml"
   pull_request:
     paths:
       - "benchmarks/harbor-buzz-orchestra/**"
+      - "benchmarks/buzz-dataset/**"
       - ".github/workflows/benchmark-harbor.yml"
 
 permissions:
@@ -20,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -31,6 +33,9 @@ jobs:
           python -m pip install --disable-pip-version-check -e ".[dev]"
           pytest -q
           ruff check .
+          # The task verifiers live in the sibling benchmarks/buzz-dataset, so
+          # they need the harness config passed explicitly to stay linted.
+          ruff check --config pyproject.toml ../buzz-dataset
       - name: Test provisioner
         working-directory: benchmarks/harbor-buzz-orchestra/testbed
         run: |

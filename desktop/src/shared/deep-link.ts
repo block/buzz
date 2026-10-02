@@ -15,6 +15,8 @@ export interface DeepLinkDeps {
   onAddCommunityAvailable: (listener: () => void) => () => void;
 }
 
+export type ChannelDeepLinkPayload = { channelId: string };
+
 /**
  * Payload emitted by the Rust deep-link handler for `buzz://message?…`.
  * Field names match the JSON shape produced in `desktop/src-tauri/src/lib.rs`.
@@ -22,6 +24,14 @@ export interface DeepLinkDeps {
 export type MessageDeepLinkPayload = {
   channelId: string;
   messageId: string;
+  threadRootId: string | null;
+};
+
+type PendingNavigationDeepLink = {
+  id: string;
+  kind: "channel" | "message";
+  channelId: string;
+  messageId: string | null;
   threadRootId: string | null;
 };
 
@@ -56,6 +66,11 @@ type PendingCommunityDeepLink = {
   code: string | null;
   name: string | null;
   policyReceipt: string | null;
+};
+
+type PendingEntityDeepLink = {
+  id: string;
+  href: string;
 };
 
 function acceptPendingCommunityDeepLink(
@@ -106,7 +121,7 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
  * relay's HTTP API — signed by this app's identity key — and only adds and
  * switches to the community once the relay has admitted the key.
  *
- * `buzz://message?…` is handled separately by `listenForMessageDeepLinks`,
+ * `buzz://message?…` is handled separately by `listenForNavigationDeepLinks`,
  * because it needs to dispatch into the router which only exists below the
  * `RouterProvider` in the component tree.
  */
@@ -152,16 +167,165 @@ export async function listenForDeepLinks(
   };
 }
 
+let navigationDrainTail: Promise<void> = Promise.resolve();
+let navigationDrainGeneration = 0;
+let navigationDrainEnabled = true;
+
+export async function resetNavigationDeepLinkDrain(): Promise<void> {
+  const generation = ++navigationDrainGeneration;
+  // Fail closed while the outgoing community's native queue is being cleared.
+  // A rejected clear leaves that queue's identity unknown, so no later listener
+  // may route it against a different community.
+  navigationDrainEnabled = false;
+  await invoke("clear_pending_navigation_deep_links");
+  if (generation === navigationDrainGeneration) {
+    navigationDrainEnabled = true;
+  }
+}
+
+function serializeNavigationDrain(task: () => Promise<void>): Promise<void> {
+  const drain = navigationDrainTail.then(task, task);
+  // Keep the shared tail fulfilled so one route failure cannot poison future
+  // listener mounts. The caller still receives `drain` and reports the error.
+  navigationDrainTail = drain.catch(() => {});
+  return drain;
+}
+
+async function drainPendingNavigationDeepLinks(
+  onOpenChannel: (
+    payload: ChannelDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
+  onOpenMessage: (
+    payload: MessageDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
+) {
+  const generation = navigationDrainGeneration;
+  if (!navigationDrainEnabled) return;
+  while (navigationDrainEnabled && generation === navigationDrainGeneration) {
+    const pending = await invoke<PendingNavigationDeepLink | null>(
+      "take_pending_navigation_deep_link",
+    );
+    if (
+      !pending ||
+      !navigationDrainEnabled ||
+      generation !== navigationDrainGeneration
+    ) {
+      return;
+    }
+    const accepted = await (pending.kind === "channel"
+      ? onOpenChannel({ channelId: pending.channelId })
+      : pending.messageId
+        ? onOpenMessage({
+            channelId: pending.channelId,
+            messageId: pending.messageId,
+            threadRootId: pending.threadRootId,
+          })
+        : false);
+    if (!accepted || generation !== navigationDrainGeneration) return;
+    const acknowledged = await invoke<boolean>(
+      "acknowledge_pending_navigation_deep_link",
+      { id: pending.id },
+    );
+    if (!acknowledged) return;
+  }
+}
+
 /**
- * Register a listener for `deep-link-message` events. Must be called from
- * inside the router tree (e.g. AppShell) because the navigation callback
- * uses TanStack Router state.
+ * Register listeners for queued channel/message navigation emitted by Rust.
+ * A consumer must explicitly accept each item before it is acknowledged, so
+ * effect teardown leaves an in-flight queue head available for the next mount.
  */
-export function listenForMessageDeepLinks(
-  onOpen: (payload: MessageDeepLinkPayload) => void,
+export async function listenForNavigationDeepLinks(
+  onOpenChannel: (
+    payload: ChannelDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
+  onOpenMessage: (
+    payload: MessageDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
 ): Promise<UnlistenFn> {
-  return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
-    onOpen(event.payload);
+  let drainRunning = false;
+  let drainRequested = false;
+  const drain = () => {
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          await serializeNavigationDrain(() =>
+            drainPendingNavigationDeepLinks(onOpenChannel, onOpenMessage),
+          );
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending navigation deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
+  };
+
+  const unlistens = await Promise.all([
+    listen<ChannelDeepLinkPayload>("deep-link-channel", drain),
+    listen<MessageDeepLinkPayload>("deep-link-message", drain),
+  ]);
+  drain();
+  return () => {
+    for (const unlisten of unlistens) unlisten();
+  };
+}
+
+/**
+ * Register a listener for `deep-link-entity` events — the `buzz://` share
+ * links for projects, repositories, issues, and pull requests. The payload is
+ * the raw URL; callers parse it with `parseEntityLink` before navigating.
+ */
+export function listenForEntityDeepLinks(
+  onOpen: (href: string) => boolean,
+): Promise<UnlistenFn> {
+  let drainRunning = false;
+  let drainRequested = false;
+  const drain = () => {
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          while (true) {
+            const pending = await invoke<PendingEntityDeepLink | null>(
+              "take_pending_entity_deep_link",
+            );
+            if (!pending) break;
+            if (!onOpen(pending.href)) return;
+            const acknowledged = await invoke<boolean>(
+              "acknowledge_pending_entity_deep_link",
+              { id: pending.id },
+            );
+            if (!acknowledged) break;
+          }
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending entity deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
+  };
+
+  return listen<PendingEntityDeepLink | string>("deep-link-entity", (event) => {
+    // String payloads are retained for older backends and E2E bridge calls.
+    if (typeof event.payload === "string") {
+      onOpen(event.payload);
+    } else {
+      drain();
+    }
+  }).then((unlisten) => {
+    drain();
+    return unlisten;
   });
 }
 

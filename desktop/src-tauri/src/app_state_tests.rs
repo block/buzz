@@ -326,8 +326,8 @@ fn corrupt_keyring_recovers_valid_file_without_rotating() {
     // nsec (Present) AND a valid `identity.key` is on disk (leftover from a
     // failed prior migration), recovery must RECOVER THE FILE'S identity —
     // not quarantine the file and rotate to a fresh key (the original
-    // hazard). The corrupt keyring value must be cleared and replaced by the
-    // file's key (migrated in).
+    // hazard). Recovery must overwrite the corrupt keyring value with the
+    // file's key without deleting the keyring entry first.
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     let file_keys = Keys::generate();
@@ -338,8 +338,8 @@ fn corrupt_keyring_recovers_valid_file_without_rotating() {
 
     // The FILE's identity is recovered — NOT a freshly generated one.
     assert_key_eq(&file_keys, &resolved.keys);
-    // The corrupt keyring value was cleared.
-    assert_eq!(store.deleted.borrow().as_slice(), [IDENTITY_KEY_NAME]);
+    // Recovery overwrites the corrupt value without deleting first.
+    assert!(store.deleted.borrow().is_empty());
     // The keyring now holds the file's key (migrated in, read-back verified).
     let file_nsec = file_keys.secret_key().to_bech32().unwrap();
     assert_eq!(
@@ -484,7 +484,7 @@ fn fresh_keyring_generate_writes_marker() {
     let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
 
     // The key was stored in the keyring (not the file), and the marker marks it.
-    assert!(!legacy_path.exists());
+    assert!(!legacy_path.exists() && resolved.storage == IdentityStorage::SystemKeyring);
     assert!(migration_marker_path(dir.path()).exists());
     assert_eq!(
         store
@@ -541,7 +541,10 @@ fn fresh_generate_keyring_failure_falls_back_to_file_without_marker() {
     let from_file = load_key_file(&legacy_path).unwrap();
     assert_key_eq(&resolved.keys, &from_file);
     // No marker: the file is the authoritative store, not the keyring.
-    assert!(!migration_marker_path(dir.path()).exists());
+    assert!(
+        !migration_marker_path(dir.path()).exists()
+            && resolved.storage == IdentityStorage::LocalFile
+    );
 }
 
 // ── New tests for the three defects fixed in this PR ─────────────────────
@@ -786,10 +789,7 @@ fn persist_imported_identity_falls_back_to_file_on_keyring_failure() {
     let result = persist_imported_identity_impl(&store, &imported_keys, &legacy_path, dir.path());
 
     // The policy core handles the keyring failure — Ok, not Err.
-    assert!(
-        result.is_ok(),
-        "must not propagate keyring failure when file fallback succeeds"
-    );
+    assert_eq!(result.unwrap(), IdentityStorage::LocalFile);
 
     // Key is recoverable from the file on next boot.
     let from_file = load_key_file(&legacy_path).unwrap();
@@ -1363,13 +1363,9 @@ fn verify_fails_store_does_not_write_marker_or_delete_file() {
     );
 }
 
-// ── I2: corrupt keyring + marker = Lost recovery ──────────────────────────
-
 #[test]
 fn corrupt_keyring_marker_present_no_file_is_lost() {
-    // I2: Present(corrupt) + migration marker + no identity.key → the prior
-    // identity was migrated into the keyring and is now unrecoverable (corrupt
-    // AND no file backup). Must enter Lost recovery, NOT generate a fresh key.
+    // I2: corrupt keyring + marker + no file → Lost (do not mint a fresh key).
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     write_migration_marker(&migration_marker_path(dir.path())).unwrap();
@@ -1378,22 +1374,33 @@ fn corrupt_keyring_marker_present_no_file_is_lost() {
     let store = FakeIdentityStore::present_with("not-a-valid-nsec");
     let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
 
-    // Must enter Lost recovery — a prior identity existed and is now unrecoverable.
-    assert_eq!(
-        resolved.recovery,
-        RecoveryState::Lost,
-        "corrupt keyring + marker + no file must return Lost recovery, not a fresh key"
-    );
-
-    // No identity.key written — the ephemeral key is in-memory only.
+    assert_eq!(resolved.recovery, RecoveryState::Lost);
+    // Lost must keep the corrupt keyring entry for support/export.
+    assert!(!store
+        .deleted
+        .borrow()
+        .contains(&IDENTITY_KEY_NAME.to_string()));
+    assert!(store.slot.borrow().contains_key(IDENTITY_KEY_NAME));
     assert!(!legacy_path.exists());
 }
 
 #[test]
+fn corrupt_keyring_with_valid_file_recovers_before_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_path = dir.path().join("identity.key");
+    let file_keys = Keys::generate();
+    save_key_file(&legacy_path, &file_keys).unwrap();
+    write_migration_marker(&migration_marker_path(dir.path())).unwrap();
+    let store = FakeIdentityStore::present_with("not-a-valid-nsec");
+    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+    assert_eq!(resolved.recovery, RecoveryState::None);
+    assert_key_eq(&file_keys, &resolved.keys);
+    assert!(store.deleted.borrow().is_empty());
+}
+
+#[test]
 fn corrupt_keyring_no_marker_no_file_generates_fresh() {
-    // I2 (counter-case): Present(corrupt) + NO marker + no identity.key →
-    // genuine first launch with a corrupt keyring, no prior identity to
-    // protect. generate_and_persist is still the correct last resort.
+    // I2 counter-case: corrupt keyring, no marker, no file → generate fresh.
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     assert!(!legacy_path.exists());
@@ -1402,16 +1409,9 @@ fn corrupt_keyring_no_marker_no_file_generates_fresh() {
     let store = FakeIdentityStore::present_with("not-a-valid-nsec");
     let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
 
-    // No lost recovery — this is a fresh machine with no prior identity.
-    assert_eq!(
-        resolved.recovery,
-        RecoveryState::None,
-        "corrupt keyring + no marker + no file must generate a fresh key (no prior identity)"
-    );
-
-    // A fresh, valid key was stored (keyring or file).
+    assert_eq!(resolved.recovery, RecoveryState::None);
     assert!(
         store.slot.borrow().contains_key(IDENTITY_KEY_NAME) || legacy_path.exists(),
-        "a fresh key must be stored in the keyring or the file after generate_and_persist"
+        "fresh key must be stored after generate_and_persist"
     );
 }
