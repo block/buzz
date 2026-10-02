@@ -9,6 +9,40 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testChannelTitleHasUnclippedLabelsAndOpensSettings() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let bar = factory.create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 120),
+      viewIdentifier: 999998,
+      arguments: ["title": "general", "subtitle": "36 members", "titleEnabled": true,
+                  "back": true, "actions": [["id": "0", "label": "Start Huddle", "symbol": "headphones", "enabled": true]]]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)
+    title.layoutIfNeeded()
+    // A plain title view must not receive the control's capsule presentation.
+    XCTAssertFalse(title is UIControl)
+    let labels = title.subviews.compactMap { $0 as? UILabel }
+    XCTAssertEqual(labels.map(\.text), ["general", "36 members"])
+    for label in labels {
+      XCTAssertTrue(title.bounds.contains(label.frame))
+      XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
+      XCTAssertGreaterThanOrEqual(label.bounds.height, label.intrinsicContentSize.height)
+    }
+    XCTAssertTrue(title.accessibilityActivate())
+    XCTAssertEqual(messenger.actions.last, "title")
+  }
+
+  @MainActor
   func testNativeNavigationTitleExpandsAgainAtTop() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
@@ -1360,10 +1394,12 @@ private actor NativeEmojiDownloadProbe {
 
 private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
   var metrics: [String: Any]?
+  var actions: [String] = []
   func send(onChannel channel: String, message: Data?) {
     guard let message else { return }
     let call = FlutterStandardMethodCodec.sharedInstance().decodeMethodCall(message)
     if call.method == "metrics" { metrics = call.arguments as? [String: Any] }
+    if call.method == "action", let action = call.arguments as? String { actions.append(action) }
   }
   func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
     send(onChannel: channel, message: message)

@@ -22,7 +22,8 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
-private final class NavigationTitleButton: UIControl {
+private final class NavigationTitleView: UIView {
+  var onActivate: (() -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
 
@@ -42,9 +43,18 @@ private final class NavigationTitleButton: UIControl {
     }
     isAccessibilityElement = true
     accessibilityTraits = .button
+    addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(activate)))
   }
 
   required init?(coder: NSCoder) { return nil }
+
+  @objc private func activate() { onActivate?() }
+
+  override func accessibilityActivate() -> Bool {
+    guard isUserInteractionEnabled, let onActivate else { return false }
+    onActivate()
+    return true
+  }
 
   override var intrinsicContentSize: CGSize {
     CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16,
@@ -172,10 +182,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
-      let button = NavigationTitleButton(title: item.title, subtitle: subtitle, color: color)
-      button.addAction(UIAction { [weak self] _ in
+      let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color)
+      button.onActivate = { [weak self] in
         self?.channel.invokeMethod("action", arguments: "title")
-      }, for: .touchUpInside)
+      }
       button.accessibilityIdentifier = "channel-navigation-title"
       button.accessibilityLabel = "Open settings for \(item.title ?? ""), \(subtitle)"
       button.isUserInteractionEnabled = args["titleEnabled"] as? Bool == true
