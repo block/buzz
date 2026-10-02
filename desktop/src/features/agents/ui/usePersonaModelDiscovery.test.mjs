@@ -519,7 +519,28 @@ test("claudeCodeModelLabel rejects short names, unknown suffixes, and non-ASCII"
     "default",
     "claude-opus-5-5[beta]",
     "claude-öpus-5-5",
+    "\u00a0claude-opus-5-5\u00a0",
+    "\ufeffclaude-opus-5-5[1m]\u2003",
   ]) {
     assert.equal(claudeCodeModelLabel(id), null, id);
   }
+});
+
+test("Claude Code rows with non-ASCII edge whitespace keep the adapter name", () => {
+  const id = "\ufeffclaude-opus-5-5[1m]\u2003";
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "\u00a0claude-opus-5-5\u00a0",
+      models: [
+        { id, name: "Opus 1M", description: null },
+        { id: "claude-opus-5-5", name: "Opus", description: null },
+      ],
+    }),
+    "",
+    "claude",
+  );
+  assert.deepEqual(
+    options.map((option) => option.label),
+    ["Default model (Opus)", "Opus 1M", "Claude Opus 5.5"],
+  );
 });

@@ -44,6 +44,7 @@ function isHarnessDefaultModelEntry(model: { id: string }) {
 /** Our generated label for a full Claude Code model id, `[1m]` kept as a
  * suffix. Short names (`opus`) and unknown suffixes return null. */
 export function claudeCodeModelLabel(id: string): string | null {
+  if (/[^\p{ASCII}]/u.test(id)) return null;
   const match = /^([^[]+)(\[1m\])?$/i.exec(id.trim());
   const label = match ? generateBareModelLabel(match[1]) : null;
   return label && match?.[2] ? `${label} (1M context)` : label;
@@ -66,8 +67,8 @@ export function getDiscoveredPersonaModelOptions(
     (model) => !isHarnessDefaultModelEntry(model),
   );
   const harnessDefaultEntry = response.models.find(isHarnessDefaultModelEntry);
-  const labelFor = (id: string, name: string | null) =>
-    (runtimeId === "claude" ? claudeCodeModelLabel(id) : null) ??
+  const labelFor = (id: string, name: string | null, rawId = id) =>
+    (runtimeId === "claude" ? claudeCodeModelLabel(rawId) : null) ??
     resolveModelLabel(id, name, provider);
   const agentDefaultModel = response.agentDefaultModel?.trim();
 
@@ -86,6 +87,7 @@ export function getDiscoveredPersonaModelOptions(
                       response.models.find(
                         (model) => model.id === agentDefaultModel,
                       )?.name ?? null,
+                      response.agentDefaultModel ?? "",
                     )})`
                   : "Default model",
           },
