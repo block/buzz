@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'package:buzz/features/channels/channel_identity_names_provider.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -14,6 +17,9 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../helpers/widget_helpers.dart';
 
+const _alice =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 const _fire = '\u{1F525}';
 
 /// 👀 — a real reaction that is deliberately not in the positive-burst set.
@@ -23,7 +29,7 @@ TimelineReaction _reaction({
   String emoji = _fire,
   int count = 1,
   bool reactedByCurrentUser = false,
-  List<String> userPubkeys = const ['alice'],
+  List<String> userPubkeys = const [_alice],
 }) => TimelineReaction(
   emoji: emoji,
   count: count,
@@ -68,7 +74,7 @@ Future<ProviderContainer> _pumpRow(
         emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier({
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            _alice: const UserProfile(pubkey: _alice, displayName: 'Alice'),
           }),
         ),
       ],
@@ -97,11 +103,110 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
   @override
   Map<String, UserProfile> build() => _profiles;
 
+  void replace(Map<String, UserProfile> profiles) => state = profiles;
+
   @override
   Future<bool> preload(List<String> pubkeys) async => true;
 }
 
 void main() {
+  testWidgets(
+    'native reactor labels retain channel qualifications and live updates',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final bot = 'b' * 64;
+      final roster = 'c' * 64;
+      var directoryName = 'Honey';
+      final calls = <Map<Object?, Object?>>[];
+      final completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions' || call.method == 'updateProfiles') {
+            calls.add(call.arguments as Map<Object?, Object?>);
+          }
+          if (call.method == 'reactions') return completion.future;
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            userCacheProvider.overrideWith(
+              () => _FakeUserCacheNotifier({
+                _alice: const UserProfile(pubkey: _alice, displayName: 'Honey'),
+              }),
+            ),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) =>
+                  IdentityNameSources(
+                    profiles: ref.watch(userCacheProvider),
+                    agentDisplayNames: {bot: directoryName},
+                  ).scope(
+                    [_alice, bot, roster],
+                    agentPubkeys: {bot},
+                    fallbackNames: {roster: 'Roster name'},
+                  ),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [
+              _reaction(userPubkeys: [_alice, bot, roster]),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ReactionRow)),
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      List<Object?> labels(Map<Object?, Object?> payload) {
+        final profiles = payload['profiles'] as Map;
+        return [
+          for (final key in [_alice, bot, roster])
+            (profiles[key] as Map)['name'],
+        ];
+      }
+
+      expect(labels(calls.first), ['Honey', 'Honey (agent)', 'Roster name']);
+      // Directory/roster changes must propagate without a user-cache event.
+      directoryName = 'Helper';
+      container.invalidate(channelIdentityNamesProvider('channel'));
+      await tester.pumpAndSettle();
+      expect(labels(calls.last), ['Honey', 'Helper', 'Roster name']);
+      (container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier)
+          .replace({
+            _alice: const UserProfile(pubkey: _alice, displayName: 'Helper'),
+          });
+      await tester.pumpAndSettle();
+      expect(labels(calls.last), ['Helper', 'Helper (agent)', 'Roster name']);
+      expect(calls.map((c) => c['requestId']).toSet(), hasLength(1));
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      final count = calls.length;
+      directoryName = 'Closed';
+      container.invalidate(channelIdentityNamesProvider('channel'));
+      await tester.pumpAndSettle();
+      expect(calls, hasLength(count));
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets(
     'holding a pill opens native membership with the selected emoji without toggling',
     (tester) async {
@@ -143,7 +248,7 @@ void main() {
       expect(payload!['initialEmoji'], _eyes);
       expect((payload!['reactions'] as List).length, 2);
       final profiles = payload!['profiles'] as Map;
-      expect((profiles['alice'] as Map)['name'], 'Alice');
+      expect((profiles[_alice] as Map)['name'], 'Alice');
       expect(find.byType(BottomSheet), findsNothing);
       debugDefaultTargetPlatformOverride = null;
     },
@@ -242,7 +347,7 @@ void main() {
       await _pumpRow(
         tester,
         reactions: [
-          _reaction(count: 1, userPubkeys: const ['alice']),
+          _reaction(count: 1, userPubkeys: const [_alice]),
         ],
       );
 

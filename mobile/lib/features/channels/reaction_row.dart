@@ -345,7 +345,12 @@ Future<void> showReactionDetailSheet({
   required String initialEmoji,
 }) async {
   if (reactions.isEmpty) return;
-  if (await _showNativeReactionDetails(context, reactions, initialEmoji)) {
+  if (await _showNativeReactionDetails(
+    context,
+    channelId,
+    reactions,
+    initialEmoji,
+  )) {
     return;
   }
   if (!context.mounted) return;
@@ -554,6 +559,7 @@ class _ReactorAvatar extends StatelessWidget {
 
 Future<bool> _showNativeReactionDetails(
   BuildContext context,
+  String channelId,
   List<TimelineReaction> reactions,
   String initialEmoji,
 ) async {
@@ -561,26 +567,38 @@ Future<bool> _showNativeReactionDetails(
   final container = ProviderScope.containerOf(context, listen: false);
   final requestId = DateTime.now().microsecondsSinceEpoch.toString();
   final pubkeys = reactions.expand((r) => r.userPubkeys).toSet().toList();
-  Map<String, Object?> profiles(Map<String, UserProfile> cache) => {
-    for (final pubkey in pubkeys)
-      pubkey: {
-        'name':
-            cache[pubkey.toLowerCase()]?.label ??
-            (pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey),
-        if (cache[pubkey.toLowerCase()]?.avatarUrl case final String url) ...{
-          'url': url,
-          'headers': container
-              .read(mediaGetAuthServiceProvider)
-              .headersFor(url),
+  Map<String, Object?> profiles() {
+    final cache = container.read(userCacheProvider);
+    final names = container.read(channelIdentityNamesProvider(channelId));
+    return {
+      for (final pubkey in pubkeys)
+        pubkey: {
+          'name': names.labelFor(pubkey),
+          if (cache[pubkey.toLowerCase()]?.avatarUrl case final String url) ...{
+            'url': url,
+            'headers': container
+                .read(mediaGetAuthServiceProvider)
+                .headersFor(url),
+          },
         },
-      },
-  };
-  final subscription = container.listen(userCacheProvider, (_, next) {
+    };
+  }
+
+  void updateProfiles() {
     NativeMessagePresentation.present('updateProfiles', {
       'requestId': requestId,
-      'profiles': profiles(next),
+      'profiles': profiles(),
     });
-  });
+  }
+
+  final subscription = container.listen(
+    userCacheProvider,
+    (_, _) => updateProfiles(),
+  );
+  final namesSubscription = container.listen(
+    channelIdentityNamesProvider(channelId),
+    (_, _) => updateProfiles(),
+  );
   try {
     final dataset = container.read(emojiDatasetOrEmptyProvider);
     final sheetColors = utilitySurfaceThemeData(Theme.of(context)).colorScheme;
@@ -590,7 +608,7 @@ Future<bool> _showNativeReactionDetails(
       'sheetColor': sheetColors.surface.toARGB32(),
       'foregroundColor': sheetColors.primary.toARGB32(),
       'dark': Theme.of(context).brightness == Brightness.dark,
-      'profiles': profiles(container.read(userCacheProvider)),
+      'profiles': profiles(),
       'reactions': [
         for (final reaction in reactions)
           {
@@ -611,5 +629,6 @@ Future<bool> _showNativeReactionDetails(
     return await pending != null;
   } finally {
     subscription.close();
+    namesSubscription.close();
   }
 }

@@ -11,8 +11,10 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   private var selectedEmoji: String?
   private let table = UITableView(frame: .zero, style: .plain)
   private let filters = UIStackView()
-  private var rows: [(String, [String: Any])] {
-    reactions.filter { selectedEmoji == nil || $0["emoji"] as? String == selectedEmoji }
+  private var rows: [(String, [String: Any])] = []
+
+  private func rebuildRows() {
+    rows = reactions.filter { selectedEmoji == nil || $0["emoji"] as? String == selectedEmoji }
       .flatMap { reaction in
         (reaction["users"] as? [String] ?? []).map { ($0, reaction) }
       }
@@ -33,6 +35,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     let initial = data["initialEmoji"] as? String
     selectedEmoji = reactions.contains { $0["emoji"] as? String == initial } ? initial : nil
     super.init(nibName: nil, bundle: nil)
+    rebuildRows()
     overrideUserInterfaceStyle = data["dark"] as? Bool == true ? .dark : .light
   }
 
@@ -135,7 +138,9 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     config.baseForegroundColor = selectedEmoji == emoji ? .systemBlue : .label
     let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
       guard let self else { return }
+      guard self.selectedEmoji != emoji else { return }
       self.selectedEmoji = emoji
+      self.rebuildRows()
       self.rebuildFilters()
       self.table.reloadData()
       self.table.setContentOffset(.zero, animated: false)

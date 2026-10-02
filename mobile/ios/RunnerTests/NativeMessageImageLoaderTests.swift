@@ -109,3 +109,42 @@ private final class MessageImageProtocol: URLProtocol {
   override func startLoading() { Self.start?(self) }
   override func stopLoading() {}
 }
+
+
+final class NativeReactionDetailsTests: XCTestCase {
+  @MainActor func testFiltersPreserveRowsAndUpdatedAccessibilityNames() {
+    let controller = NativeReactionDetailsViewController(data: [
+      "initialEmoji": "❤️",
+      "reactions": [
+        ["emoji": "❤️", "label": "Heart", "count": 2, "users": ["human", "agent"]],
+        ["emoji": "🔥", "label": "Fire", "count": 1, "users": ["agent"]],
+      ],
+      "profiles": ["human": ["name": "Honey"], "agent": ["name": "Honey (agent)"]],
+    ])
+    controller.loadViewIfNeeded()
+    let table = UITableView()
+    func labels() -> [String] {
+      (0..<controller.tableView(table, numberOfRowsInSection: 0)).map {
+        controller.tableView(table, cellForRowAt: IndexPath(row: $0, section: 0)).accessibilityLabel ?? ""
+      }
+    }
+    func descendants(_ view: UIView) -> [UIView] {
+      view.subviews.flatMap { [$0] + descendants($0) }
+    }
+    func select(_ label: String) {
+      let button = descendants(controller.view).compactMap { $0 as? UIButton }
+        .first { $0.accessibilityLabel == label }
+      XCTAssertNotNil(button)
+      button?.sendActions(for: .primaryActionTriggered)
+    }
+    XCTAssertEqual(labels(), ["Honey, Heart", "Honey (agent), Heart"])
+    select("All 3")
+    XCTAssertEqual(labels(), ["Honey, Heart", "Honey (agent), Heart", "Honey (agent), Fire"])
+    select("Fire 1")
+    XCTAssertEqual(labels(), ["Honey (agent), Fire"])
+    controller.updateProfiles(["agent": ["name": "Helper (agent)"]])
+    XCTAssertEqual(labels(), ["Helper (agent), Fire"])
+    select("Heart 2")
+    XCTAssertEqual(labels(), ["human, Heart", "Helper (agent), Heart"])
+  }
+}
