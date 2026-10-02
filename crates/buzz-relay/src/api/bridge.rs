@@ -2918,6 +2918,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 mod artifact_postgres_tests;
 
 #[cfg(test)]
+#[path = "private_read_postgres_tests.rs"]
+mod private_read_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
