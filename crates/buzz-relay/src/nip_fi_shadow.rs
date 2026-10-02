@@ -155,11 +155,31 @@ pub(crate) fn observe_strict_proof<E>(
     }
 }
 
+/// Bind the request's tenant from its Host header, as every HTTP handler's
+/// row zero does. `None` means the Host bound no community; the caller keeps
+/// its own legacy rejection, and shadow records enforce's verdict first.
+pub(crate) async fn bind_tenant(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+) -> Option<buzz_core::TenantContext> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .ok();
+    if tenant.is_none() {
+        observe_unbound(state, headers);
+    }
+    tenant
+}
+
 /// In shadow mode, record the verdict enforce reaches for a request whose
 /// Host bound no tenant: `community` when the Host maps to no configured
 /// community; an admit when enforce's guard passed it, since the handler's
 /// own rejection is no NIP-FI denial; nothing outside a guarded route.
-pub(crate) fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
+fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
         let verdict = match crate::nip_fi_core::resolve_community(headers, &nip_fi.communities) {

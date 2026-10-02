@@ -49,14 +49,9 @@ async fn authorize_workflow_read(
     raw_query: Option<&str>,
     workflow_id: Uuid,
 ) -> Result<TenantContext, Response> {
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| {
-            crate::nip_fi_shadow::observe_unbound(state, headers);
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",

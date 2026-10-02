@@ -649,16 +649,9 @@ async fn bind_media_read_tenant(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<TenantContext, MediaError> {
-    let raw_host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    crate::tenant::bind_community(&state.db, raw_host)
+    crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| {
-            crate::nip_fi_shadow::observe_unbound(state, headers);
-            MediaError::NotFound
-        })
+        .ok_or(MediaError::NotFound)
 }
 
 /// Extract and signature-verify the Blossom auth event for a GET/HEAD read.

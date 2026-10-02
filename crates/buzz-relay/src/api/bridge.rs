@@ -905,14 +905,9 @@ pub async fn submit_event(
     // before any tenant-scoped write, identical to the WS door in `router.rs`.
     // Unmapped host or lookup failure fails closed with a generic 404 — never a
     // default tenant, never echoing the host.
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .map_err(|_| {
-            crate::nip_fi_shadow::observe_unbound(&state, &headers);
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -1236,14 +1231,9 @@ pub async fn query_events(
     // An unmapped host or lookup failure fails closed with a generic 404 — never
     // a default tenant, never echoing the host (so an unauthenticated caller
     // cannot probe which communities exist on this deployment).
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .map_err(|_| {
-            crate::nip_fi_shadow::observe_unbound(&state, &headers);
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -1871,14 +1861,9 @@ pub async fn count_events(
     // before any tenant-scoped read, identical to the WS door in `router.rs`
     // and `query_events`/`submit_event` above. Fail-closed; never a default
     // tenant, never echoing the host.
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .map_err(|_| {
-            crate::nip_fi_shadow::observe_unbound(&state, &headers);
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -2690,14 +2675,9 @@ async fn authorize_moderation_read(
     path: &str,
     raw_query: Option<&str>,
 ) -> Result<TenantContext, Response> {
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| {
-            crate::nip_fi_shadow::observe_unbound(state, headers);
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",

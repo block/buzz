@@ -116,17 +116,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // headers; the signed `u` tag is checked against the host that resolved
         // through the authoritative communities table, not a deployment-global
         // `config.relay_url` and not any client-supplied community value.
-        let raw_host = parts
-            .headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        let tenant = crate::nip_fi_shadow::bind_tenant(state, &parts.headers)
             .await
-            .map_err(|_| {
-                crate::nip_fi_shadow::observe_unbound(state, &parts.headers);
-                (StatusCode::NOT_FOUND, "repository not found").into_response()
-            })?;
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,
