@@ -240,15 +240,25 @@ JOIN communities c ON lower(c.host) = lower(s.host)
 -- forcing a processing report back to open strands its action, and a pending
 -- action could re-apply after the reset. Locking admin actions blocks new
 -- claims and direct actions until this transaction commits.
+-- A claim or reopen locks its report row before writing an action, so the
+-- fixture rows are taken with NOWAIT: waiting on one would deadlock.
 LOCK TABLE relay_admin_actions IN SHARE ROW EXCLUSIVE MODE;
+CREATE TEMP VIEW seed_report AS
+SELECT r.* FROM moderation_reports r
+WHERE r.community_id = :'local_community_id'
+    AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000000__'
+  OR r.community_id IN (SELECT community_id FROM seeded)
+    AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000001__';
+DO $$
+BEGIN
+  PERFORM 1 FROM moderation_reports r JOIN seed_report f USING (community_id, id) FOR UPDATE OF r NOWAIT;
+EXCEPTION WHEN lock_not_available THEN
+  RAISE EXCEPTION 'admin-seed refused, nothing was written: moderation is active on a seeded report. Finish it in the admin console, then rerun just admin-seed.';
+END $$;
 CREATE TEMP TABLE seed_busy AS
 SELECT format('report %s in %s is %s', r.id, c.host, r.status) AS what
-FROM moderation_reports r JOIN communities c ON c.id = r.community_id
-WHERE (r.community_id = :'local_community_id'
-       AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000000__'
-    OR r.community_id IN (SELECT community_id FROM seeded)
-       AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000001__')
-  AND (r.status = 'processing' OR r.active_action_id IS NOT NULL)
+FROM seed_report r JOIN communities c ON c.id = r.community_id
+WHERE r.status = 'processing' OR r.active_action_id IS NOT NULL
 UNION ALL
 SELECT format('%s action %s in %s is %s', a.action, a.id, c.host, a.state)
 FROM relay_admin_actions a JOIN communities c ON c.id = a.report_community_id
