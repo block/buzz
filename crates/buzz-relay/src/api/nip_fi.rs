@@ -2017,77 +2017,6 @@ mod route_integration_tests {
         );
     }
 
-    /// Mint a valid ES256 `nip-fi+jwt` assertion for `nostr_pubkey = key_hex`,
-    /// signed by the route-integration-test key pair.
-    /// Used by the startup-oracle test to verify the assertion verifier against
-    /// its own warmed JWKS source.
-    /// Shadow startup goes through the same `AppState::new` as production: it
-    /// must build the assertion verifier and claim commands under the shadow
-    /// replay prefix, leaving the enforce claim for an enforce pod.
-    #[tokio::test]
-    async fn app_state_new_in_shadow_builds_verifier_and_shadow_replay_guard() {
-        use crate::nip_fi_config::NipFiRelayConfig;
-        use buzz_auth::CommandReplayGuard as _;
-
-        let mut config = crate::config::Config::for_test();
-        let mut registry = IssuerRegistry::new();
-        registry.insert(test_issuer_policy());
-        config.nip_fi = NipFiRelayConfig {
-            mode: buzz_auth::NipFiMode::Shadow,
-            registry,
-            jwks_configs: vec![test_jwks_config()],
-            command_configs: Vec::new(),
-            max_connection_lifetime_secs: 3600,
-            communities: crate::nip_fi_core::test_support::any_host(TEST_AUD),
-        };
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
-        let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .unwrap(),
-        );
-        let (state, _) = crate::state::AppState::new(
-            config.clone(),
-            db.clone(),
-            redis_pool.clone(),
-            buzz_audit::AuditService::new(pool.clone()),
-            pubsub,
-            buzz_auth::AuthService::new(config.auth.clone()),
-            buzz_search::SearchService::new(pool),
-            Arc::new(buzz_workflow::WorkflowEngine::new(
-                db,
-                buzz_workflow::WorkflowConfig::default(),
-            )),
-            nostr::Keys::generate(),
-            buzz_media::MediaStorage::new(&config.media).unwrap(),
-        );
-        assert!(
-            state.nip_fi_verifier.is_some(),
-            "shadow must build the verifier"
-        );
-
-        let jti = uuid::Uuid::new_v4().to_string();
-        assert!(state
-            .nip_fi_command_replay
-            .try_claim(TEST_ISS, &jti, 60)
-            .await
-            .unwrap());
-        let shadow = buzz_pubsub::RedisCommandReplayGuard::shadow(redis_pool.clone());
-        let enforce = buzz_pubsub::RedisCommandReplayGuard::new(redis_pool);
-        assert!(
-            !shadow.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
-            "claim is shadow-prefixed"
-        );
-        assert!(
-            enforce.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
-            "enforce claim untouched"
-        );
-    }
-
     /// Shadow evaluates commands like enforce, so it shares enforce's
     /// refusal to start without a command-capable issuer.
     #[test]
@@ -2114,6 +2043,10 @@ mod route_integration_tests {
         );
     }
 
+    /// Mint a valid ES256 `nip-fi+jwt` assertion for `nostr_pubkey = key_hex`,
+    /// signed by the route-integration-test key pair.
+    /// Used by the startup-oracle test to verify the assertion verifier against
+    /// its own warmed JWKS source.
     fn mint_assertion_token(key_hex: &str) -> String {
         mint_assertion_token_for(TEST_ISS, key_hex)
     }
@@ -3588,6 +3521,103 @@ mod route_integration_tests {
             state.nip_fi_command_replay =
                 command_replay_guard(state.redis_pool.clone(), state.config.nip_fi.mode);
             Arc::new(state)
+        }
+
+        /// Shadow startup goes through the same `AppState::new` as production:
+        /// it builds the assertion verifier, installs a command verifier on
+        /// the shared key source, and claims commands under the shadow replay
+        /// prefix, leaving the enforce claim for an enforce pod.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn app_state_new_in_shadow_builds_verifiers_and_shadow_replay_guard() {
+            use crate::nip_fi_config::NipFiRelayConfig;
+            use buzz_auth::CommandReplayGuard as _;
+
+            let mut config = crate::config::Config::for_test();
+            config.redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut registry = IssuerRegistry::new();
+            registry.insert(test_issuer_policy());
+            let command_configs = vec![(
+                TEST_ISS.to_owned(),
+                CommandIssuerEnvConfig {
+                    maximum_command_age_seconds: Some(30),
+                    authorized_principals: Some(vec![TEST_SUB.to_owned()]),
+                    deny_set_capacity: Some(100),
+                },
+            )];
+            config.nip_fi = NipFiRelayConfig {
+                mode: NipFiMode::Shadow,
+                registry: registry.clone(),
+                jwks_configs: vec![test_jwks_config()],
+                command_configs: command_configs.clone(),
+                max_connection_lifetime_secs: 3600,
+                communities: crate::nip_fi_core::test_support::any_host(TEST_AUD),
+            };
+            let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .unwrap();
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .unwrap(),
+            );
+            let (mut state, _) = crate::state::AppState::new(
+                config.clone(),
+                db.clone(),
+                redis_pool.clone(),
+                buzz_audit::AuditService::new(pool.clone()),
+                pubsub,
+                buzz_auth::AuthService::new(config.auth.clone()),
+                buzz_search::SearchService::new(pool),
+                Arc::new(buzz_workflow::WorkflowEngine::new(
+                    db,
+                    buzz_workflow::WorkflowConfig::default(),
+                )),
+                nostr::Keys::generate(),
+                buzz_media::MediaStorage::new(&config.media).unwrap(),
+            );
+            assert!(
+                state.nip_fi_verifier.is_some(),
+                "shadow must build the verifier"
+            );
+            let source = state.nip_fi_jwks_source.clone().expect("shared key source");
+            super::super::install_nip_fi_command_components(
+                &mut state.nip_fi_deny_map,
+                &mut state.nip_fi_command_verifier,
+                NipFiMode::Shadow,
+                &registry,
+                Arc::clone(&source),
+                &command_configs,
+            )
+            .expect("shadow installs the command verifier");
+            source.seed_snapshot_for_test(TEST_ISS, test_jwks()).await;
+            let target = nostr::Keys::generate().public_key();
+            let command = mint_token(&target.to_hex(), 300, serde_json::json!({}));
+            let verifier = state.nip_fi_command_verifier.as_ref().unwrap();
+            let verified =
+                verifier.verify_at(&command, "POST", TEST_PATH, &target, chrono::Utc::now());
+            assert!(verified.is_ok(), "shadow verifies commands: {verified:?}");
+
+            let jti = uuid::Uuid::new_v4().to_string();
+            assert!(state
+                .nip_fi_command_replay
+                .try_claim(TEST_ISS, &jti, 60)
+                .await
+                .unwrap());
+            let shadow = buzz_pubsub::RedisCommandReplayGuard::shadow(redis_pool.clone());
+            let enforce = buzz_pubsub::RedisCommandReplayGuard::new(redis_pool);
+            assert!(
+                !shadow.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
+                "claim is shadow-prefixed"
+            );
+            assert!(
+                enforce.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
+                "enforce claim untouched"
+            );
         }
 
         /// Run `state`'s production disconnect subscriber and apply what it
