@@ -116,7 +116,11 @@ async fn existing_private_reads_preserve_visible_pages_and_counts() {
     // Exercise the existing production NIP-98 contract and development X-Pubkey
     // contract. Both must page/count using the reader selected by that mode.
     for strict in [false, true] {
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).require_auth_token = strict;
+        // Ingest may leave background clones of the shared state alive, so
+        // rebuild the cheap-clone state instead of requiring a unique Arc.
+        let mut next = (*state).clone();
+        Arc::make_mut(&mut next.config).require_auth_token = strict;
+        state = Arc::new(next);
         for route in ["/query", "/count"] {
             if strict {
                 let (status, result) = post(&state, &host, route, &owner, own.clone(), false).await;
