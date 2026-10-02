@@ -679,6 +679,7 @@ void main() {
     'follow',
     'unmount',
     'unmountFailure',
+    'overlap',
   ]) {
     testWidgets('native focus and source lifecycle for $selectedAction', (
       tester,
@@ -693,6 +694,7 @@ void main() {
       });
       final visibility = <bool>[];
       var dismissed = 0;
+      var focusRestores = 0;
       late BuildContext pageContext;
       late WidgetRef pageRef;
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -738,25 +740,40 @@ void main() {
       focus.requestFocus();
       await tester.pump();
       late Future<void> presentation;
+      Future<void> openMenu() => showMessageActions(
+        context: pageContext,
+        ref: pageRef,
+        message: _message(),
+        channelId: _channelId,
+        canManageMessage: false,
+        anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+        captureAnchorSnapshot: _testMessageSnapshot,
+        composerFocusNode: focus,
+        restoreComposerFocus: () {
+          focusRestores++;
+          focus.requestFocus();
+        },
+        onPopoverPreviewVisibilityChanged: visibility.add,
+        onPopoverDismissed: () => dismissed++,
+      );
       await tester.runAsync(() async {
-        presentation = showMessageActions(
-          context: pageContext,
-          ref: pageRef,
-          message: _message(),
-          channelId: _channelId,
-          canManageMessage: false,
-          anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
-          captureAnchorSnapshot: _testMessageSnapshot,
-          composerFocusNode: focus,
-          restoreComposerFocus: focus.requestFocus,
-          onPopoverPreviewVisibilityChanged: visibility.add,
-          onPopoverDismissed: () => dismissed++,
-        );
+        presentation = openMenu();
+        if (selectedAction == 'overlap') {
+          // A is awaiting preflight/capture, so both gestures could see focus.
+          await openMenu();
+          expect(focusRestores, 0);
+        }
         await ready.future;
       });
       await tester.pump();
       expect(focus.hasFocus, isFalse);
       expect(visibility, [true]);
+      if (selectedAction == 'overlap') {
+        await tester.runAsync(openMenu);
+        await tester.pump();
+        expect(focus.hasFocus, isFalse);
+        expect(focusRestores, 0);
+      }
       if (selectedAction?.startsWith('unmount') == true) {
         await tester.pumpWidget(const SizedBox.shrink());
       }
@@ -771,7 +788,9 @@ void main() {
         await presentation;
       });
       await tester.pump();
-      expect(focus.hasFocus, selectedAction == null);
+      final restores = selectedAction == null || selectedAction == 'overlap';
+      expect(focus.hasFocus, restores);
+      expect(focusRestores, restores ? 1 : 0);
       expect(visibility, [true, false]);
       expect(dismissed, selectedAction?.startsWith('unmount') == true ? 0 : 1);
       await tester.pumpWidget(const SizedBox.shrink());

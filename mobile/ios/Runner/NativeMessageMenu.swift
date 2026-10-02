@@ -53,9 +53,9 @@ final class NativeMessageMenuViewController: UIViewController {
     scroll.translatesAutoresizingMaskIntoConstraints = false
     scroll.showsVerticalScrollIndicator = false
     scroll.contentInsetAdjustmentBehavior = .never
-    // Glass casts outside the card bounds. The inset scroll viewport must not
-    // slice those shadows into a visible rectangle along the left/bottom edges.
-    scroll.clipsToBounds = false
+    // Keep all painted actions inside the tappable viewport. Inner padding
+    // gives glass shadows space without exposing off-viewport content.
+    scroll.clipsToBounds = true
     view.addSubview(scroll)
     content.axis = .vertical
     content.spacing = 12
@@ -67,14 +67,14 @@ final class NativeMessageMenuViewController: UIViewController {
     contentTop?.isActive = true
     let safe = view.safeAreaLayoutGuide
     NSLayoutConstraint.activate([
-      scroll.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
-      scroll.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
+      scroll.leadingAnchor.constraint(equalTo: safe.leadingAnchor),
+      scroll.trailingAnchor.constraint(equalTo: safe.trailingAnchor),
       scroll.topAnchor.constraint(equalTo: safe.topAnchor, constant: 12),
       scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -12),
-      content.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
-      content.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
-      content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
-      content.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
+      content.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 16),
+      content.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -16),
+      content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -48),
+      content.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -32),
     ])
     let reactionTray = makeReactionTray()
     self.reactionTray = reactionTray
@@ -215,11 +215,11 @@ final class NativeMessageMenuViewController: UIViewController {
     // complete stack explicitly so the first presentation cannot use a stale
     // (or zero) height and leave actions below the screen.
     let size = content.systemLayoutSizeFitting(
-      CGSize(width: scroll.bounds.width, height: UIView.layoutFittingCompressedSize.height),
+      CGSize(width: max(1, scroll.bounds.width - 32), height: UIView.layoutFittingCompressedSize.height),
       withHorizontalFittingPriority: .required,
       verticalFittingPriority: .fittingSizeLevel)
-    let available = max(0, scroll.bounds.height - size.height)
-    let top = max(0, min(sourceRect.minY - scroll.frame.minY - 72, available))
+    let available = max(0, scroll.bounds.height - size.height - 48)
+    let top = max(32, min(sourceRect.minY - scroll.frame.minY - 72, available))
     if contentTop?.constant != top {
       contentTop?.constant = top
       scroll.layoutIfNeeded()

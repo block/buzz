@@ -11,6 +11,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   private var selectedEmoji: String?
   private let table = UITableView(frame: .zero, style: .plain)
   private let filters = UIStackView()
+  private var filterHeight: NSLayoutConstraint?
   private var rows: [(String, [String: Any])] = []
 
   private func rebuildRows() {
@@ -101,6 +102,8 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       filters.heightAnchor.constraint(equalTo: filterScroll.frameLayoutGuide.heightAnchor),
     ])
     rebuildFilters()
+    filterHeight = filterScroll.heightAnchor.constraint(equalToConstant: 48)
+    filterHeight?.isActive = true
     table.dataSource = self
     table.rowHeight = UITableView.automaticDimension
     table.estimatedRowHeight = 64
@@ -116,8 +119,15 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       layout.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
       layout.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
       layout.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-      filterScroll.heightAnchor.constraint(equalToConstant: 48),
     ])
+  }
+
+  override func viewWillLayoutSubviews() {
+    super.viewWillLayoutSubviews()
+    // Horizontal scrolling must not constrain Dynamic Type button height.
+    filterHeight?.constant = filters.arrangedSubviews.reduce(CGFloat(48)) { height, button in
+      max(height, button.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).height)
+    }
   }
 
   private func rebuildFilters() {
