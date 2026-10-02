@@ -69,6 +69,17 @@ pub(crate) struct VerifiedBridgeAuth {
     pub(crate) signed_created_at: Option<u64>,
 }
 
+impl VerifiedBridgeAuth {
+    /// The admission proof; the dev-mode `X-Pubkey` zero event ID is unsigned.
+    pub(crate) fn proof<X>(&self, extra: X) -> Nip98Proof<X> {
+        if self.event_id_bytes == [0; 32] {
+            Nip98Proof::unsigned(self.pubkey, extra)
+        } else {
+            Nip98Proof::new(self.pubkey, extra)
+        }
+    }
+}
+
 type BridgeAuthResult = Result<VerifiedBridgeAuth, (StatusCode, Json<Value>)>;
 
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
@@ -213,7 +224,7 @@ pub(crate) fn make_nip98_closure_for_admission(
             require_auth_token,
             require_payload,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     }
 }
@@ -901,6 +912,7 @@ pub async fn submit_event(
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(&state, &headers);
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -933,7 +945,7 @@ pub async fn submit_event(
             state.config.require_auth_token || nip_fi_active,
             nip_fi_enforce,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -1231,6 +1243,7 @@ pub async fn query_events(
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(&state, &headers);
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -1260,7 +1273,7 @@ pub async fn query_events(
             state.config.require_auth_token || nip_fi_active,
             nip_fi_enforce,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -1865,6 +1878,7 @@ pub async fn count_events(
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(&state, &headers);
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -1894,7 +1908,7 @@ pub async fn count_events(
             state.config.require_auth_token || nip_fi_active,
             nip_fi_enforce,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -2683,6 +2697,7 @@ async fn authorize_moderation_read(
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(state, headers);
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -2712,7 +2727,7 @@ async fn authorize_moderation_read(
             None,
             state.config.require_auth_token || nip_fi_active,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, auth.event_id_bytes))
+        .map(|auth| auth.proof(auth.event_id_bytes))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();

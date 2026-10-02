@@ -59,6 +59,16 @@ pub(crate) fn observe_strict_proof<E>(
     }
 }
 
+/// In shadow mode, record the would-deny for a request whose Host bound no
+/// tenant, so the handler's early rejection still leaves a record.
+pub(crate) fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
+    let nip_fi = &state.config.nip_fi;
+    if nip_fi.mode.observes_only() {
+        let verdict = Err(("community", DenialClass::AuthorizationUnavailable));
+        record("http", headers, &nip_fi.communities, verdict);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

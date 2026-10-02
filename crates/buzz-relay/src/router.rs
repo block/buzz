@@ -609,7 +609,7 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let nip_fi_assertion = {
+    let (upgrade_checked, nip_fi_assertion) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -636,16 +636,17 @@ async fn nip11_or_ws_handler(
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = &state.config.nip_fi.communities;
-            match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
+            let assertion = match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
                 NipFiUpgradeOutcome::NotRequired => None,
                 NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
                 NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
-            }
+            };
+            (true, assertion)
         } else {
             // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
             // The `Ok(ws)` arm below backstops any extractor-accepted shape this
             // predicate misses. [F3-H2-GATE]
-            None
+            (false, None)
         }
     };
 
@@ -714,7 +715,7 @@ async fn nip11_or_ws_handler(
             // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
             // and this block is unreachable (the h1 denial is returned before
             // we get here).
-            let nip_fi_assertion = if nip_fi_assertion.is_none() {
+            let nip_fi_assertion = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
                 let mode = state.config.nip_fi.mode;
@@ -2495,6 +2496,69 @@ mod tests {
         use super::*;
         use std::sync::Arc;
 
+        // Pins: a real shadow root handshake runs the upgrade check once.
+        // Mutation: re-running the fallback whenever no assertion is held
+        // doubles the verifier call and the shadow record.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_root_handshake_is_checked_once() {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-ws-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(base.db.pool())
+                .await
+                .expect("seed community");
+            let verifier = Arc::new(ScriptedVerifier::new(Ok(Some(
+                nostr::Keys::generate().public_key(),
+            ))));
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{host}"),
+                &["https://issuer.test"],
+            );
+            state.nip_fi_verifier = Some(verifier.clone());
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let app = build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut().insert("host", host.parse().unwrap());
+            req.headers_mut()
+                .insert("nostr-federated-identity", "Bearer a.b.c".parse().unwrap());
+            let (client, resp) = connect_async(req)
+                .await
+                .expect("shadow admits the handshake");
+            assert_eq!(resp.status(), axum::http::StatusCode::SWITCHING_PROTOCOLS);
+            drop(client);
+            server.abort();
+
+            let records: u64 = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
+                .map(|(.., value)| match value {
+                    metrics_util::debugging::DebugValue::Counter(n) => n,
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!((verifier.calls(), records), (1, 1));
+        }
+
         async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
@@ -3704,6 +3768,82 @@ mod tests {
             "authorization_denied wire body must be exactly 'authorization denied\\n' \
              [FI-TRACE-DENIAL-ORACLE]"
         );
+    }
+
+    // Pins D8 on handlers that bind the DB tenant before admission: an empty
+    // Host keeps Off's exact rejection and leaves one `community` record.
+    // Mutation: dropping `observe_unbound` at any site leaves no record.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shadow_empty_host_keeps_off_rejection_and_records_community() {
+        use axum::body::Body;
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        // Git syntax-checks credentials before binding the tenant.
+        let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let auth = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_string(&event).unwrap());
+        let sha = "a".repeat(64);
+        let requests = [
+            ("POST", "/events".to_owned()),
+            ("PUT", "/upload".to_owned()),
+            ("GET", format!("/media/{sha}")),
+            ("GET", "/moderation/reports".to_owned()),
+            ("GET", format!("/workflows/{}/runs", uuid::Uuid::nil())),
+            (
+                "GET",
+                "/git/o/r.git/info/refs?service=git-upload-pack".to_owned(),
+            ),
+        ];
+        for (method, path) in requests {
+            let mut outcomes = Vec::new();
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Shadow] {
+                let recorder = metrics_util::debugging::DebuggingRecorder::new();
+                let snapshotter = recorder.snapshotter();
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                let req = axum::http::Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("authorization", format!("Nostr {auth}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = build_router(nip_fi_state(mode).await)
+                    .oneshot(req)
+                    .await
+                    .unwrap();
+                let records: Vec<_> = snapshotter
+                    .snapshot()
+                    .into_vec()
+                    .into_iter()
+                    .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
+                    .map(|(key, .., value)| {
+                        (
+                            format!("{:?}", key.key().labels().collect::<Vec<_>>()),
+                            value,
+                        )
+                    })
+                    .collect();
+                outcomes.push((status_and_body(resp).await, records));
+            }
+            let (shadow, off) = (outcomes.pop().unwrap(), outcomes.pop().unwrap());
+            assert_eq!(shadow.0, off.0, "{method} {path}: rejection unchanged");
+            assert!(off.1.is_empty(), "{method} {path}");
+            assert_eq!(shadow.1.len(), 1, "{method} {path}: {:?}", shadow.1);
+            let (labels, value) = &shadow.1[0];
+            assert_eq!(
+                *value,
+                metrics_util::debugging::DebugValue::Counter(1),
+                "{method} {path}"
+            );
+            for label in [
+                "\"stage\", \"community\"",
+                "\"outcome\", \"unavailable\"",
+                "\"community\", \"unmapped\"",
+            ] {
+                assert!(labels.contains(label), "{method} {path}: {labels}");
+            }
+        }
     }
 
     // ── Characterization: HTTP guard evaluation contract ─────────────────────

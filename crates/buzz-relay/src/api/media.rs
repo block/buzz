@@ -49,17 +49,9 @@ impl FromRequestParts<Arc<AppState>> for UploadContext {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let headers = &parts.headers;
-
         // Row zero: bind tenant from the request host.  Fail-closed:
         // unmapped host → 404.
-        let raw_host = headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
-            .await
-            .map_err(|_| MediaError::NotFound)?;
+        let tenant = bind_media_read_tenant(state, &parts.headers).await?;
 
         let route_mode = upload_route_mode(parts.uri.path())?;
 
@@ -663,7 +655,10 @@ async fn bind_media_read_tenant(
         .unwrap_or("");
     crate::tenant::bind_community(&state.db, raw_host)
         .await
-        .map_err(|_| MediaError::NotFound)
+        .map_err(|_| {
+            crate::nip_fi_shadow::observe_unbound(state, headers);
+            MediaError::NotFound
+        })
 }
 
 /// Extract and signature-verify the Blossom auth event for a GET/HEAD read.

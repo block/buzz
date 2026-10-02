@@ -139,6 +139,8 @@ pub(crate) struct Nip98Proof<X = ()> {
     pubkey: PublicKey,
     /// Side-data threaded through from the extraction closure.
     pub(crate) extra: X,
+    /// False for a dev-mode `X-Pubkey` identity, which is never an enforce proof.
+    signed: bool,
 }
 
 impl<X> Nip98Proof<X> {
@@ -146,7 +148,19 @@ impl<X> Nip98Proof<X> {
     /// and the media/git surfaces (which already hold a proven pubkey from a
     /// prior extractor) can build the token without leaking the key.
     pub(crate) fn new(pubkey: PublicKey, extra: X) -> Self {
-        Self { pubkey, extra }
+        Self {
+            pubkey,
+            extra,
+            signed: true,
+        }
+    }
+
+    /// A dev-mode `X-Pubkey` identity: admitted where legacy allows it.
+    pub(crate) fn unsigned(pubkey: PublicKey, extra: X) -> Self {
+        Self {
+            signed: false,
+            ..Self::new(pubkey, extra)
+        }
     }
 }
 
@@ -298,22 +312,18 @@ where
     if !mode.restricts() {
         let proof = extract_nip98();
         if mode.observes_only() {
-            let verdict = evaluate_enforce_steps(headers, communities, verifier, deny_map, || {
-                proof
-                    .as_ref()
-                    .map(|p| Nip98Proof::new(p.pubkey, ()))
-                    .map_err(drop)
-            });
+            let verdict =
+                evaluate_enforce_steps(headers, communities, verifier, deny_map, || match &proof {
+                    Ok(p) if p.signed => Ok(Nip98Proof::new(p.pubkey, ())),
+                    _ => Err(()),
+                });
             crate::nip_fi_shadow::record("http", headers, communities, verdict.map(drop));
         }
-        let Nip98Proof {
-            pubkey: proven_pubkey,
-            extra,
-        } = proof?;
+        let proof = proof?;
         return Ok(NipFiAdmission {
-            proven_pubkey,
+            proven_pubkey: proof.pubkey,
             assertion: None,
-            extra,
+            extra: proof.extra,
         });
     }
 
@@ -1471,6 +1481,50 @@ mod tests {
     // failure is the legacy error, not a NIP-FI denial. Mutation: attaching
     // the verdict's assertion fails `is_none`; skipping evaluation fails the
     // call count.
+    // Pins: with the dev fallback allowed, shadow admits an `X-Pubkey`
+    // identity as Off does but records it as a NIP-98 would-deny, never an
+    // admit. Mutation: feeding the unsigned proof to the enforce steps
+    // records `admit` and calls the verifier.
+    #[test]
+    fn shadow_never_counts_x_pubkey_as_an_enforce_proof() {
+        let key = any_pubkey();
+        let verifier = ScriptedVerifier::new(Ok(Some(key)));
+        let mut headers = bearer_headers("Bearer a.b.c");
+        headers.insert("x-pubkey", HeaderValue::from_str(&key.to_hex()).unwrap());
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let admission = metrics::with_local_recorder(&recorder, || {
+            admit_nip_fi_http(
+                &headers,
+                || {
+                    crate::api::bridge::verify_bridge_auth_with_options(
+                        &headers, "GET", "u", None, false, false,
+                    )
+                    .map(|auth| auth.proof(()))
+                    .map_err(axum::response::IntoResponse::into_response)
+                },
+                &communities(),
+                Some(&verifier as &dyn VerifyAssertion),
+                NipFiMode::Shadow,
+                &AlwaysAdmitStubDenyMap,
+            )
+        })
+        .expect("shadow admits the dev fallback like Off");
+        assert_eq!(admission.proven_pubkey, key);
+        let stages: Vec<String> = recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(k, ..)| {
+                k.key()
+                    .labels()
+                    .find(|l| l.key() == "stage")
+                    .map(|l| l.value().to_owned())
+            })
+            .collect();
+        assert_eq!((stages, verifier.calls()), (vec!["nip98".to_owned()], 0));
+    }
+
     #[test]
     fn shadow_evaluates_assertion_without_changing_admission() {
         let key = any_pubkey();
