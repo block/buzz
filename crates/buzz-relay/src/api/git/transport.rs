@@ -4162,6 +4162,10 @@ mod off_mode_precedence_tests {
                     let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
                     s.db = db;
                     Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    Arc::make_mut(&mut s.config).nip_fi.communities =
+                        crate::nip_fi_core::test_support::any_host(
+                            "https://git-ban-lookup.relay.invalid",
+                        );
                     s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion(keys.public_key())));
                 }
                 let scheme = if state.config.relay_url.starts_with("wss://") {
