@@ -1,3 +1,4 @@
+import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'dart:async';
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
@@ -119,12 +120,15 @@ void main() {
       final roster = 'c' * 64;
       var directoryName = 'Honey';
       final calls = <Map<Object?, Object?>>[];
+      final mergedProfiles = <Object?, Object?>{};
       final completion = Completer<Map<String, Object?>>();
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         NativeMessagePresentation.channel,
         (call) async {
           if (call.method == 'reactions' || call.method == 'updateProfiles') {
-            calls.add(call.arguments as Map<Object?, Object?>);
+            final args = call.arguments as Map<Object?, Object?>;
+            mergedProfiles.addAll(args['profiles'] as Map);
+            calls.add({...args, 'profiles': Map.of(mergedProfiles)});
           }
           if (call.method == 'reactions') return completion.future;
           return <String, Object?>{};
@@ -203,6 +207,98 @@ void main() {
       container.invalidate(channelIdentityNamesProvider('channel'));
       await tester.pumpAndSettle();
       expect(calls, hasLength(count));
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native hydration sends bounded diffs and preserves emoji avatars',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final pubkeys = [
+        for (var i = 1; i <= 2500; i++) i.toRadixString(16).padLeft(64, '0'),
+      ];
+      final completion = Completer<Map<String, Object?>>();
+      final updates = <Map>[];
+      Map? initial;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          final args = call.arguments as Map;
+          if (call.method == 'reactions') {
+            initial = args['profiles'] as Map;
+            return completion.future;
+          }
+          if (call.method == 'updateProfiles') {
+            updates.add(args['profiles'] as Map);
+          }
+          return <String, Object?>{};
+        },
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) => IdentityNameSources(
+                profiles: ref.watch(userCacheProvider),
+              ).scope(pubkeys),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [_reaction(userPubkeys: pubkeys)],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ReactionRow)),
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      expect(initial, hasLength(2500));
+      final cache = <String, UserProfile>{};
+      for (var start = 0; start < pubkeys.length; start += 1000) {
+        for (final key in pubkeys.skip(start).take(1000)) {
+          cache[key] = UserProfile(
+            pubkey: key,
+            displayName: 'Person $key',
+            avatarUrl: key == pubkeys.first
+                ? emojiAvatarDataUrl('😊', 0xFFFF6B9A)
+                : null,
+          );
+        }
+        (container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier)
+            .replace(Map.of(cache));
+        await tester.pumpAndSettle();
+      }
+      expect(
+        updates.length,
+        10,
+      ); // 4 + 4 + 2 chunks, rather than full-set payloads.
+      expect(updates.every((p) => p.length <= 256), isTrue);
+      expect(updates.fold<int>(0, (sum, p) => sum + p.length), 2500);
+      final avatar = updates.first[pubkeys.first] as Map;
+      expect(avatar['avatarEmoji'], '😊');
+      expect(avatar['avatarColor'], 0xFFFF6B9A);
+      expect(avatar.containsKey('url'), isFalse);
+      cache['f' * 64] = UserProfile(pubkey: 'f' * 64, displayName: 'Unrelated');
+      (container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier)
+          .replace(Map.of(cache));
+      await tester.pumpAndSettle();
+      expect(updates, hasLength(10));
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      );
       debugDefaultTargetPlatformOverride = null;
     },
   );

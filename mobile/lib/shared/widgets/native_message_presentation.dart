@@ -13,6 +13,19 @@ class NativeMessagePresentation {
 
   static final _presentedCallbacks = <String, VoidCallback>{};
   static var _nextRequest = 0;
+  static bool _active = false;
+
+  /// Owns preflight through dismissal across message and reaction surfaces.
+  /// An overlapping request is consumed instead of opening a fallback surface.
+  static Future<bool> withLease(Future<bool> Function() presentation) async {
+    if (_active) return true;
+    _active = true;
+    try {
+      return await presentation();
+    } finally {
+      _active = false;
+    }
+  }
 
   /// Completes after dismissal so callers can safely open the next surface.
   static Future<Map<Object?, Object?>?> present(

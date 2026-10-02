@@ -112,6 +112,22 @@ private final class MessageImageProtocol: URLProtocol {
 
 
 final class NativeReactionDetailsTests: XCTestCase {
+  @MainActor func testInlineEmojiAvatarRendersEmojiAndBackground() {
+    let controller = NativeReactionDetailsViewController(data: [
+      "reactions": [["emoji": "❤️", "label": "Heart", "users": ["person"]]],
+      "profiles": ["person": ["name": "Kenny", "avatarEmoji": "😊", "avatarColor": NSNumber(value: UInt32(0xFFFF6B9A))]],
+    ])
+    let cell = controller.tableView(UITableView(), cellForRowAt: IndexPath(row: 0, section: 0))
+    let row = cell.contentView.subviews.compactMap { $0 as? UIStackView }.first!
+    let avatar = row.arrangedSubviews[0] as! NativeMessageGlyph
+    XCTAssertEqual(avatar.subviews.compactMap { $0 as? UILabel }.first?.text, "😊")
+    XCTAssertEqual(avatar.backgroundColor, UIColor(red: 1, green: 107.0 / 255, blue: 154.0 / 255, alpha: 1))
+    controller.updateProfiles(["person": ["name": "Kenny", "avatarEmoji": "🎉", "avatarColor": NSNumber(value: UInt32(0xFFFFE75C))]])
+    let updated = controller.tableView(UITableView(), cellForRowAt: IndexPath(row: 0, section: 0))
+    let updatedRow = updated.contentView.subviews.compactMap { $0 as? UIStackView }.first!
+    XCTAssertEqual(updatedRow.arrangedSubviews[0].subviews.compactMap { $0 as? UILabel }.first?.text, "🎉")
+  }
+
   @MainActor func testFiltersPreserveRowsAndUpdatedAccessibilityNames() {
     let controller = NativeReactionDetailsViewController(data: [
       "initialEmoji": "❤️",
@@ -145,7 +161,7 @@ final class NativeReactionDetailsTests: XCTestCase {
     controller.updateProfiles(["agent": ["name": "Helper (agent)"]])
     XCTAssertEqual(labels(), ["Helper (agent), Fire"])
     select("Heart 2")
-    XCTAssertEqual(labels(), ["human, Heart", "Helper (agent), Heart"])
+    XCTAssertEqual(labels(), ["Honey, Heart", "Helper (agent), Heart"])
   }
 }
 

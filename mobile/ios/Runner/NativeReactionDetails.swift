@@ -174,8 +174,12 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   }
 
   func updateProfiles(_ profiles: [String: [String: Any]]) {
-    self.profiles = profiles
-    if isViewLoaded { table.reloadData() }
+    self.profiles.merge(profiles) { _, new in new }
+    guard isViewLoaded else { return }
+    let affected = (table.indexPathsForVisibleRows ?? []).filter {
+      profiles[rows[$0.row].0] != nil
+    }
+    if !affected.isEmpty { table.reloadRows(at: affected, with: .none) }
   }
 
   func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
@@ -187,8 +191,15 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
     cell.backgroundColor = .clear
     cell.selectionStyle = .none
-    let avatar = NativeMessageGlyph(data: profile.merging(["emoji": String(name.prefix(1))]) { _, new in new }, size: 18)
-    avatar.backgroundColor = .tertiarySystemFill
+    let avatar = NativeMessageGlyph(data: profile.merging(["emoji": profile["avatarEmoji"] as? String ?? String(name.prefix(1))]) { _, new in new }, size: 18)
+    if let color = profile["avatarColor"] as? NSNumber {
+      let argb = color.uint32Value
+      avatar.backgroundColor = UIColor(red: CGFloat((argb >> 16) & 255) / 255,
+        green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255,
+        alpha: CGFloat((argb >> 24) & 255) / 255)
+    } else {
+      avatar.backgroundColor = .tertiarySystemFill
+    }
     avatar.layer.cornerRadius = 20
     avatar.clipsToBounds = true
     let label = UILabel()

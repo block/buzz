@@ -1,9 +1,5 @@
 part of '../message_actions.dart';
 
-// Own the entire preflight/capture/presentation lifecycle before taking focus.
-// A second long press is consumed while the current owner is still active.
-bool _nativeMessagePresentationActive = false;
-
 Future<bool> _showNativeMessageActions({
   required BuildContext context,
   required WidgetRef ref,
@@ -22,10 +18,8 @@ Future<bool> _showNativeMessageActions({
   required VoidCallback? onPopoverDismissed,
 }) async {
   if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
-  if (captureAnchorSnapshot == null) return false;
-  if (_nativeMessagePresentationActive) return true;
-  _nativeMessagePresentationActive = true;
-  try {
+  return NativeMessagePresentation.withLease(() async {
+    if (captureAnchorSnapshot == null) return false;
     final hadComposerFocus = composerFocusNode?.hasFocus ?? false;
     final support = await NativeMessagePresentation.present(
       'supportsMessage',
@@ -216,7 +210,10 @@ Future<bool> _showNativeMessageActions({
         onPopoverPreviewVisibilityChanged?.call(false);
         if (context.mounted) onPopoverDismissed?.call();
       }
-      if (hadComposerFocus && response?['action'] == null && context.mounted) {
+      if (hadComposerFocus &&
+          response?['busy'] != true &&
+          response?['action'] == null &&
+          context.mounted) {
         restoreComposerFocus?.call();
       }
     }
@@ -242,7 +239,5 @@ Future<bool> _showNativeMessageActions({
       callbacks[selected]?.call();
     }
     return true;
-  } finally {
-    _nativeMessagePresentationActive = false;
-  }
+  });
 }

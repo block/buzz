@@ -39,13 +39,13 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       return
     }
     // Ignore a second long press while presentation/dismissal is in flight.
-    guard pendingResult == nil else { result([:]); return }
+    guard pendingResult == nil else { result(["busy": true]); return }
     let root = parent ?? UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
       .filter { $0.activationState == .foregroundActive }
       .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
-    guard let parent = root, parent.view.window != nil,
-      parent.presentedViewController == nil else { result(nil); return }
+    guard let parent = root, parent.view.window != nil else { result(nil); return }
+    guard parent.presentedViewController == nil else { result(["busy": true]); return }
     let controller: UIViewController
     if call.method == "message" {
       guard let rect = NativeMessageMenuViewController.sourceRect(data),

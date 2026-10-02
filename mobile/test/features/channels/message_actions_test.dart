@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
+import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
@@ -801,6 +802,137 @@ void main() {
       );
       debugDefaultTargetPlatformOverride = null;
     });
+  }
+
+  for (final (reactionFirst, missingSnapshot) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets(
+      'cross-surface native ownership reactionFirst=$reactionFirst missingSnapshot=$missingSnapshot',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final focus = FocusNode();
+        late Completer<Map<String, Object?>> result;
+        late Completer<Map<String, Object?>> support;
+        late Completer<void> entered;
+        late Completer<void> ready;
+        await tester.runAsync(() async {
+          result = Completer();
+          support = Completer();
+          entered = Completer();
+          ready = Completer();
+        });
+        var messages = 0;
+        var reactions = 0;
+        var restores = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          (call) async {
+            if (call.method == 'supportsMessage') {
+              entered.complete();
+              return support.future;
+            }
+            if (call.method == 'message') messages++;
+            if (call.method == 'reactions') reactions++;
+            ready.complete();
+            return result.future;
+          },
+        );
+        late BuildContext pageContext;
+        late WidgetRef pageRef;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(await _mockPrefs()),
+              myPubkeyProvider.overrideWithValue('self'),
+              readStateProvider.overrideWith(
+                () => _FakeReadStateNotifier(
+                  _readState(const {_channelId: 100000}),
+                ),
+              ),
+              reminderServiceProvider.overrideWithValue(null),
+            ],
+            child: MaterialApp(
+              home: Consumer(
+                builder: (context, ref, _) {
+                  pageContext = context;
+                  pageRef = ref;
+                  return Scaffold(
+                    body: TextField(focusNode: focus, showCursor: false),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+        focus.requestFocus();
+        await tester.pump();
+        Future<void> message() => showMessageActions(
+          context: pageContext,
+          ref: pageRef,
+          message: _message(),
+          channelId: _channelId,
+          canManageMessage: false,
+          anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+          captureAnchorSnapshot: missingSnapshot ? null : _testMessageSnapshot,
+          composerFocusNode: focus,
+          restoreComposerFocus: () {
+            restores++;
+            focus.requestFocus();
+          },
+        );
+        Future<void> reaction() => showReactionDetailSheet(
+          context: pageContext,
+          channelId: _channelId,
+          reactions: const [
+            TimelineReaction(
+              emoji: '❤️',
+              count: 1,
+              reactedByCurrentUser: false,
+              userPubkeys: [],
+            ),
+          ],
+          initialEmoji: '❤️',
+        );
+        late Future<void> owner;
+        await tester.runAsync(() async {
+          if (reactionFirst) {
+            owner = reaction();
+            await ready.future;
+            await message();
+          } else {
+            owner = message();
+            await entered.future;
+            await reaction();
+            expect(reactions, 0);
+            support.complete({'supported': true});
+            await ready.future;
+          }
+        });
+        await tester.pump();
+        expect(messages, reactionFirst ? 0 : 1);
+        expect(reactions, reactionFirst ? 1 : 0);
+        expect(restores, 0);
+        expect(focus.hasFocus, reactionFirst);
+        expect(find.byType(BottomSheet), findsNothing);
+        await tester.runAsync(() async {
+          result.complete({});
+          await owner;
+        });
+        await tester.pumpAndSettle();
+        expect(focus.hasFocus, isTrue);
+        expect(restores, reactionFirst ? 0 : 1);
+        await tester.pumpWidget(const SizedBox.shrink());
+        focus.dispose();
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
   }
 
   testWidgets('native dismissal does not open the Flutter sheet', (
