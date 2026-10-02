@@ -245,10 +245,11 @@ JOIN communities c ON lower(c.host) = lower(s.host)
 LOCK TABLE relay_admin_actions IN SHARE ROW EXCLUSIVE MODE;
 CREATE TEMP VIEW seed_report AS
 SELECT r.* FROM moderation_reports r
-WHERE r.community_id = :'local_community_id'
-    AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000000__'
-  OR r.community_id IN (SELECT community_id FROM seeded)
-    AND r.id::text LIKE 'a11d0000-0000-4000-8000-0000000001__';
+JOIN seeded s ON s.community_id = r.community_id
+JOIN (SELECT 'localhost:3000', to_hex(n) FROM generate_series(1, 11) n
+      UNION ALL VALUES ('beta.localhost:3000', '61'), ('beta.localhost:3000', '62'),
+                       ('gamma.localhost:3000', '63')) k(host, byte)
+  ON k.host = s.host AND r.report_event_id = decode(repeat(lpad(k.byte, 2, '0'), 32), 'hex');
 DO $$
 BEGIN
   PERFORM 1 FROM moderation_reports r JOIN seed_report f USING (community_id, id) FOR UPDATE OF r NOWAIT;
