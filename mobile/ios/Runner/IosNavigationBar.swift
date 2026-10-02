@@ -178,7 +178,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Compact chat headers can open over a bottom-anchored timeline before
     // Flutter emits any scroll notification. Keep their title readable at rest.
     material.alpha = largeTitle ? min(1, offset / 12) : 1
-    materialFade.locations = largeTitle ? [0, 0.55, 1] : [0, 1, 1]
+    // Use the same ultra-thin material and soft lower edge on every page.
+    // Compact titles have a member-count line, so begin their fade below it
+    // rather than washing out the subtitle or ending in a hard rectangle.
+    materialFade.locations = largeTitle ? [0, 0.55, 1] : [0, 0.85, 1]
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {

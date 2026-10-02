@@ -43,6 +43,41 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testCompactChannelMaterialPersistsAtTimelineBottom() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let bar = factory.create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 120),
+      viewIdentifier: 999997,
+      arguments: ["title": "general", "subtitle": "36 members", "titleEnabled": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
+    // Reversed timelines reach their newest message at zero, then overscroll
+    // into negative offsets. Neither state should clear the compact material.
+    for offset in [0.0, 52.0, 12.0, 0.0, -20.0, 0.0] {
+      messenger.scroll(to: offset)
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      try await Task.sleep(nanoseconds: 100_000_000)
+      XCTAssertNotNil(material.effect as? UIBlurEffect)
+      let fade = try XCTUnwrap(material.layer.mask as? CAGradientLayer)
+      let locations = try XCTUnwrap(fade.locations)
+      XCTAssertEqual(locations.first?.doubleValue, 0)
+      XCTAssertEqual(locations.last?.doubleValue, 1)
+      XCTAssertLessThan(locations[1].doubleValue, 1, "Compact material needs a soft lower edge")
+      XCTAssertEqual(material.alpha, 1, "Channel material cleared at offset \(offset)")
+      XCTAssertEqual(material.frame, bar.view().bounds)
+    }
+  }
+
+  @MainActor
   func testNativeNavigationTitleExpandsAgainAtTop() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
