@@ -197,29 +197,37 @@ impl Db {
         archived_at: DateTime<Utc>,
         apply: impl FnOnce() -> T,
     ) -> Result<Option<T>> {
-        let mut tx = self.pool.begin().await?;
-        let matches = sqlx::query_scalar::<_, bool>(
-            r#"SELECT COALESCE(archived_at = $2, FALSE)
+        let (mut tx, transaction_timer) = crate::observability::begin_transaction(
+            &self.pool,
+            crate::observability::TransactionOperation::CommunityArchiveFence,
+        )
+        .await?;
+        transaction_timer
+            .observe(async move {
+                let matches = sqlx::query_scalar::<_, bool>(
+                    r#"SELECT COALESCE(archived_at = $2, FALSE)
                FROM communities
                WHERE id = $1
                  AND deletion_state = 'active'
                  AND deleted_at IS NULL
                FOR UPDATE"#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(archived_at)
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(false);
+                )
+                .bind(community_id.as_uuid())
+                .bind(archived_at)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(false);
 
-        if !matches {
-            tx.rollback().await?;
-            return Ok(None);
-        }
+                if !matches {
+                    tx.rollback().await?;
+                    return Ok(None);
+                }
 
-        let result = apply();
-        tx.commit().await?;
-        Ok(Some(result))
+                let result = apply();
+                tx.commit().await?;
+                Ok(Some(result))
+            })
+            .await
     }
 
     /// Runs `apply` while holding the community row lock only when the
@@ -235,30 +243,38 @@ impl Db {
         community_id: CommunityId,
         apply: impl FnOnce(Option<DateTime<Utc>>) -> T,
     ) -> Result<Option<T>> {
-        let mut tx = self.pool.begin().await?;
-        let lifecycle = sqlx::query_as::<_, (Option<DateTime<Utc>>, bool)>(
-            r#"SELECT archived_at,
+        let (mut tx, transaction_timer) = crate::observability::begin_transaction(
+            &self.pool,
+            crate::observability::TransactionOperation::InactiveCommunityFence,
+        )
+        .await?;
+        transaction_timer
+            .observe(async move {
+                let lifecycle = sqlx::query_as::<_, (Option<DateTime<Utc>>, bool)>(
+                    r#"SELECT archived_at,
                       deleted_at IS NOT NULL OR deletion_state <> 'active'
                FROM communities
                WHERE id = $1
                FOR UPDATE"#,
-        )
-        .bind(community_id.as_uuid())
-        .fetch_optional(&mut *tx)
-        .await?;
+                )
+                .bind(community_id.as_uuid())
+                .fetch_optional(&mut *tx)
+                .await?;
 
-        let archived_at = match lifecycle {
-            Some((None, false)) => {
-                tx.rollback().await?;
-                return Ok(None);
-            }
-            Some((archived_at, false)) => archived_at,
-            Some((_, true)) | None => None,
-        };
+                let archived_at = match lifecycle {
+                    Some((None, false)) => {
+                        tx.rollback().await?;
+                        return Ok(None);
+                    }
+                    Some((archived_at, false)) => archived_at,
+                    Some((_, true)) | None => None,
+                };
 
-        let result = apply(archived_at);
-        tx.commit().await?;
-        Ok(Some(result))
+                let result = apply(archived_at);
+                tx.commit().await?;
+                Ok(Some(result))
+            })
+            .await
     }
 
     /// Returns a community by host regardless of lifecycle state. Operator-plane only.

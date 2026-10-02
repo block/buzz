@@ -226,17 +226,21 @@ pub(crate) enum TransactionOperation {
     AcceptPushLeaseEvent,
     BeginCommunityDeletionQuiescing,
     FenceCommunityDeletion,
+    CommunityArchiveFence,
+    InactiveCommunityFence,
 }
 
 impl TransactionOperation {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::ReplaceParameterizedEvent,
         Self::ReplaceAddressableEvent,
         Self::PublishNip43MembershipLocked,
         Self::AcceptPushLeaseEvent,
         Self::BeginCommunityDeletionQuiescing,
         Self::FenceCommunityDeletion,
+        Self::CommunityArchiveFence,
+        Self::InactiveCommunityFence,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -247,6 +251,8 @@ impl TransactionOperation {
             Self::AcceptPushLeaseEvent => "accept_push_lease_event",
             Self::BeginCommunityDeletionQuiescing => "begin_community_deletion_quiescing",
             Self::FenceCommunityDeletion => "fence_community_deletion",
+            Self::CommunityArchiveFence => "community_archive_fence",
+            Self::InactiveCommunityFence => "inactive_community_fence",
         }
     }
 
@@ -256,9 +262,10 @@ impl TransactionOperation {
             | Self::ReplaceAddressableEvent
             | Self::PublishNip43MembershipLocked
             | Self::AcceptPushLeaseEvent => WriterOperation::EventWrite,
-            Self::BeginCommunityDeletionQuiescing | Self::FenceCommunityDeletion => {
-                WriterOperation::Maintenance
-            }
+            Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion
+            | Self::CommunityArchiveFence
+            | Self::InactiveCommunityFence => WriterOperation::Maintenance,
         }
     }
 }
@@ -636,6 +643,8 @@ mod tests {
                 "accept_push_lease_event",
                 "begin_community_deletion_quiescing",
                 "fence_community_deletion",
+                "community_archive_fence",
+                "inactive_community_fence",
             ]
         );
     }
