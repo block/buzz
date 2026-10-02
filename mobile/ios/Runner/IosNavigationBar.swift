@@ -22,6 +22,15 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
+private final class NavigationTitleButton: UIButton {
+  override var intrinsicContentSize: CGSize {
+    let titleSize = titleLabel?.intrinsicContentSize ?? .zero
+    let subtitleSize = subtitleLabel?.intrinsicContentSize ?? .zero
+    return CGSize(width: max(titleSize.width, subtitleSize.width) + 16,
+                  height: max(44, titleSize.height + subtitleSize.height))
+  }
+}
+
 private final class NavigationClipView: UIView {
   var onLayout: (() -> Void)?
   override func layoutSubviews() {
@@ -129,6 +138,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Compact chat headers can open over a bottom-anchored timeline before
     // Flutter emits any scroll notification. Keep their title readable at rest.
     material.alpha = largeTitle ? min(1, offset / 12) : 1
+    materialFade.locations = largeTitle ? [0, 0.55, 1] : [0, 1, 1]
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
@@ -151,7 +161,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         attributes.foregroundColor = UIColor.secondaryLabel
         return attributes
       }
-      let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
+      let button = NavigationTitleButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
         self?.channel.invokeMethod("action", arguments: "title")
       })
       button.accessibilityIdentifier = "channel-navigation-title"
