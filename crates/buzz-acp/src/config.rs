@@ -197,12 +197,14 @@ pub struct AuthAgentArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
-    /// Arguments passed to the agent binary.
+    /// Arguments passed to the agent binary. Supports either comma-delimited or
+    /// space-delimited arguments (e.g. "acp" or "-m my-model --reasoning low acp").
     #[arg(
         long,
         env = "BUZZ_ACP_AGENT_ARGS",
         default_value = "acp",
-        value_delimiter = ','
+        value_delimiter = ',',
+        allow_hyphen_values = true
     )]
     pub agent_args: Vec<String>,
 }
@@ -257,11 +259,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
+    /// Arguments passed to the agent binary. Supports either comma-delimited or
+    /// space-delimited arguments (e.g. "acp" or "-m my-model --reasoning low acp").
     #[arg(
         long,
         env = "BUZZ_ACP_AGENT_ARGS",
         default_value = "acp",
-        value_delimiter = ','
+        value_delimiter = ',',
+        allow_hyphen_values = true
     )]
     pub agent_args: Vec<String>,
 
@@ -870,7 +875,30 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
-    let normalized = agent_args
+    // If a single argument entry contains whitespace, it was supplied as a
+    // space-separated string (e.g. via BUZZ_ACP_AGENT_ARGS without commas).
+    // Use shell-style splitting so flags become distinct argv entries (#6017).
+    let raw_args = if agent_args.len() == 1 {
+        let first = &agent_args[0];
+        if first.contains(' ') || first.contains('\t') {
+            match shlex::split(first) {
+                Some(split) if !split.is_empty() => split,
+                _ => {
+                    tracing::warn!(
+                        raw_args = %first,
+                        "Failed to shell-parse space-separated agent args; falling back to whitespace split"
+                    );
+                    first.split_whitespace().map(str::to_string).collect()
+                }
+            }
+        } else {
+            agent_args
+        }
+    } else {
+        agent_args
+    };
+
+    let normalized = raw_args
         .into_iter()
         .map(|arg| arg.trim().to_string())
         .filter(|arg| !arg.is_empty())
@@ -1226,11 +1254,11 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} agent_args={:?} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
-            self.agent_args.join(" "),
+            self.agent_args,
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
@@ -1686,6 +1714,36 @@ mod tests {
         assert_eq!(
             normalize_agent_args("custom-agent", vec!["".into(), "serve".into()]),
             vec!["serve"]
+        );
+    }
+
+    #[test]
+    fn splits_space_separated_agent_args_without_commas() {
+        // Space-separated flags passed as a single string (issue #6017)
+        assert_eq!(
+            normalize_agent_args("hermes", vec!["-m my-model --reasoning low acp".into()]),
+            vec!["-m", "my-model", "--reasoning", "low", "acp"]
+        );
+
+        // Quotes preserve embedded spaces within an argument
+        assert_eq!(
+            normalize_agent_args("hermes", vec!["--model 'Claude 3.5 Sonnet' --acp".into()]),
+            vec!["--model", "Claude 3.5 Sonnet", "--acp"]
+        );
+
+        // Unclosed quotes fall back cleanly to whitespace splitting
+        assert_eq!(
+            normalize_agent_args("hermes", vec!["-m 'unclosed acp".into()]),
+            vec!["-m", "'unclosed", "acp"]
+        );
+    }
+
+    #[test]
+    fn preserves_comma_delimited_arguments_with_spaces() {
+        // Multi-element vectors (e.g. from comma-separated input) preserve spaces in elements
+        assert_eq!(
+            normalize_agent_args("custom", vec!["--prompt".into(), "hello world".into()]),
+            vec!["--prompt", "hello world"]
         );
     }
 
@@ -2948,6 +3006,31 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn agent_args_space_separated_string_splits_into_separate_argv_entries() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "hermes",
+            "--agent-args",
+            "-m my-model --reasoning low acp",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config from args");
+        assert_eq!(
+            config.agent_args,
+            vec!["-m", "my-model", "--reasoning", "low", "acp"]
+        );
+        let summary = config.summary();
+        assert!(
+            summary
+                .contains("agent_args=[\"-m\", \"my-model\", \"--reasoning\", \"low\", \"acp\"]"),
+            "summary should show argv list: {summary}"
+        );
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
