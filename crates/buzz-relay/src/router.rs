@@ -4130,6 +4130,27 @@ mod tests {
         );
     }
 
+    // Pins the guard's remaining enforce rows before shadow replays them: a
+    // mapped Host with no assertion is 401 before verification, and an exempt
+    // path passes the guard untouched.
+    // Mutation: dropping the guard's assertion step lets the handler answer;
+    // guarding `/health` turns its 200 into 401.
+    #[tokio::test]
+    async fn characterize_guard_missing_assertion_is_401_and_exempt_passes() {
+        let (state, verifier) = guard_state_with(Ok(None)).await;
+        let resp = nip_fi_gate_response(state.clone(), GUARD_PROTECTED_PATH, None, None).await;
+        assert_eq!(
+            status_and_body(resp).await,
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                b"authentication required\n".to_vec()
+            )
+        );
+        let resp = nip_fi_gate_response(state, "/health", None, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(verifier.calls(), 0);
+    }
+
     // Pins: the guard verifies but does not pair keys. A claimless assertion
     // passes the guard (one verify) and reaches the handler, whose path
     // extractor rejects the non-UUID workflow id with 400 before any NIP-98
