@@ -6,7 +6,7 @@
 //! Design goals: tiny surface, no protocol-specific branching, and a
 //! "reasonable resolution" that fits comfortably inside both Anthropic's
 //! recommended ≤1568px / ≤5 MiB image budget and OpenAI's high-detail tile
-//! size sweet spot. The MCP host translates `Content::image(data, mime)`
+//! size sweet spot. The MCP host translates `ContentBlock::image(data, mime)`
 //! into the right provider-native shape on our behalf (see Goose's
 //! `providers::utils::convert_image` for a reference implementation).
 
@@ -18,7 +18,7 @@ use image::{
     DynamicImage, ExtendedColorType, ImageEncoder, ImageReader, Limits,
 };
 use rmcp::{
-    model::{CallToolResult, Content},
+    model::{CallToolResult, ContentBlock},
     ErrorData,
 };
 use schemars::JsonSchema;
@@ -101,8 +101,8 @@ pub async fn run(state: &SharedState, p: ViewImageParams) -> Result<CallToolResu
     );
 
     Ok(CallToolResult::success(vec![
-        Content::text(header),
-        Content::image(encoded, prepared.mime.to_string()),
+        ContentBlock::text(header),
+        ContentBlock::image(encoded, prepared.mime.to_string()),
     ]))
 }
 
