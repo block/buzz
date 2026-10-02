@@ -365,6 +365,63 @@ fn valid_link_preview_text(value: &str, max: usize, allow_newlines: bool) -> boo
             .any(|character| character.is_control() && !(allow_newlines && character == '\n'))
 }
 
+/// Yield the URL-shaped candidates in message `content`: whitespace-delimited
+/// tokens, markdown `[label](target)` payloads, and angle- or quote-wrapped
+/// paste forms. Each piece is yielded raw and with edge punctuation stripped so
+/// wrappers like `[x](https://a)` or `<https://a>` still reach the parser while
+/// a URL ending in legitimate punctuation keeps its untrimmed candidate too.
+fn content_url_candidates(content: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    for token in content.split_whitespace() {
+        // Markdown link targets ride inside `[label](target)`.
+        for piece in token.split("](") {
+            candidates.push(piece);
+            // Adjacent links `[a](u1)[b](u2)` leave `u1)[b` behind; the prefix
+            // up to the first `)` recovers `u1` without breaking URLs that
+            // legitimately end in `)` (the raw piece above still covers them).
+            if let Some((before_paren, _)) = piece.split_once(')') {
+                candidates.push(before_paren);
+            }
+            let trimmed = piece
+                .trim_start_matches(['(', '<', '"', '\'', '`', '['])
+                .trim_end_matches([
+                    ')', '>', '"', '\'', '`', ']', '.', ',', ';', '!', '*', '_', '~',
+                ]);
+            if trimmed != piece {
+                candidates.push(trimmed);
+            }
+        }
+    }
+    candidates
+}
+
+/// True when `content` carries a link that normalizes to `canonical`.
+///
+/// Clients canonicalize preview URLs through the WHATWG parser before signing
+/// the snapshot tag, so the stored canonical legitimately differs from the
+/// literal text: `https://host` serializes with a trailing `/`, non-ASCII
+/// segments percent-encode, and scheme/host fold to lowercase. A byte-for-byte
+/// substring check rejects those sends outright, so compare each URL-shaped
+/// token in the content after the same normalization instead.
+fn content_links_to(content: &str, canonical: &url::Url) -> bool {
+    if content.contains(canonical.as_str()) {
+        return true;
+    }
+    content_url_candidates(content).iter().any(|candidate| {
+        url::Url::parse(candidate)
+            .or_else(|_| {
+                // Scheme-less mentions (`example.com/x`) only count when they
+                // carry a dot — a bare word must not match an intranet host.
+                if candidate.contains('.') {
+                    url::Url::parse(&format!("https://{candidate}"))
+                } else {
+                    Err(url::ParseError::EmptyHost)
+                }
+            })
+            .is_ok_and(|url| url == *canonical)
+    })
+}
+
 fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(), String> {
     const MAX_SNAPSHOTS: usize = 8;
     const MAX_TITLE: usize = 300;
@@ -402,7 +459,7 @@ fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(),
             || canonical.password().is_some()
             || canonical.fragment().is_some()
             || !seen.insert(parts[3].clone())
-            || !event.content.contains(&parts[3])
+            || !content_links_to(&event.content, &canonical)
         {
             return Err("invalid link-preview canonical URL".into());
         }
@@ -4532,6 +4589,72 @@ mod postgres_tests {
         ] {
             let event = make_link_preview_event(title, site, description);
             assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    fn link_preview_event_for(content: &str, canonical: &str) -> Event {
+        make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            content,
+            &[&[
+                "link-preview",
+                "snapshot",
+                "1",
+                canonical,
+                "Title",
+                "Site",
+                "Description",
+                "",
+                "",
+                "",
+                "",
+            ]],
+        )
+    }
+
+    // The desktop client canonicalizes preview URLs through the WHATWG parser,
+    // so the signed canonical can differ from the literal message text — a bare
+    // `https://host` serializes with a trailing `/`. The send must still pass.
+    #[test]
+    fn link_preview_accepts_root_url_canonical_trailing_slash() {
+        for content in [
+            "check https://b2b-demo.devfor.link please",
+            "see [demo](https://b2b-demo.devfor.link)",
+            "<https://b2b-demo.devfor.link>",
+            "b2b-demo.devfor.link",
+        ] {
+            let event = link_preview_event_for(content, "https://b2b-demo.devfor.link/");
+            assert!(
+                validate_link_preview_tags(&event, "https://media.example.com").is_ok(),
+                "content {content:?} should satisfy the canonical containment check"
+            );
+        }
+    }
+
+    #[test]
+    fn link_preview_accepts_percent_encoded_canonical_of_utf8_link() {
+        let event = link_preview_event_for(
+            "읽어봐 https://ko.wikipedia.org/wiki/한글",
+            "https://ko.wikipedia.org/wiki/%ED%95%9C%EA%B8%80",
+        );
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_rejects_canonical_absent_from_content() {
+        for (content, canonical) in [
+            // No link at all.
+            ("no links here", "https://example.com/"),
+            // A different host must not satisfy the check.
+            ("https://b2b-demo.devfor.link", "https://evil.example.com/"),
+            // A bare word is not a link to an intranet-style host.
+            ("we dev daily", "https://dev/"),
+        ] {
+            let event = link_preview_event_for(content, canonical);
+            assert!(
+                validate_link_preview_tags(&event, "https://media.example.com").is_err(),
+                "content {content:?} must not satisfy canonical {canonical:?}"
+            );
         }
     }
 
