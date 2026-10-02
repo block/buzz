@@ -1341,6 +1341,25 @@ pub async fn find_by_owner_and_name(
 
 // -- Run and approval Db API --------------------------------------------------
 
+/// Consume a pending approval once and leave a durable recovery marker.
+/// Only the winning caller may dispatch the continuation. The marker must not
+/// be retried automatically: a crash can happen after an external side effect.
+pub async fn claim_approval_resume(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    signer: &[u8],
+) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT platform_claim_approval($1,$2,$3)")
+            .bind(community_id.as_uuid())
+            .bind(token_hash)
+            .bind(signer)
+            .fetch_one(connection)
+            .await?,
+    )
+}
+
 impl Db {
     /// Create a new workflow run.
     #[datastore_span(name = "create_workflow_run", system = "postgresql")]
