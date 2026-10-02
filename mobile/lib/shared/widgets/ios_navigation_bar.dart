@@ -20,6 +20,7 @@ class IosNavigationAction {
     this.imageUrl,
     this.avatarInitial,
     this.avatarIdentity,
+    this.avatarIsAgent = false,
     this.onPressed,
     this.children = const [],
     this.selected = false,
@@ -30,6 +31,7 @@ class IosNavigationAction {
   final String? imageUrl;
   final String? avatarInitial;
   final String? avatarIdentity;
+  final bool avatarIsAgent;
   final VoidCallback? onPressed;
   final List<IosNavigationAction> children;
   final bool selected;
@@ -39,6 +41,7 @@ class IosNavigationAction {
     'label': label,
     'symbol': avatarInitial == null ? symbol : null,
     'avatarInitial': avatarInitial,
+    'avatarIsAgent': avatarIsAgent,
     'imageUrl': imageUrl,
     'enabled': onPressed != null || children.isNotEmpty,
     'selected': selected,
@@ -85,6 +88,8 @@ class IosNavigationBar extends HookConsumerWidget {
     super.key,
     required this.title,
     this.subtitle,
+    this.titleAvatar,
+    this.titlePresenceColor,
     this.onTitlePressed,
     this.largeTitle = false,
     this.leading,
@@ -97,6 +102,8 @@ class IosNavigationBar extends HookConsumerWidget {
 
   final String title;
   final String? subtitle;
+  final IosNavigationAction? titleAvatar;
+  final Color? titlePresenceColor;
   final VoidCallback? onTitlePressed;
   final bool largeTitle;
   final IosNavigationAction? leading;
@@ -111,6 +118,7 @@ class IosNavigationBar extends HookConsumerWidget {
     final offset = IosNavigationScrollScope.maybeOf(context);
     final collapseRange = IosNavigationMetrics.of(context).largeTitleHeight;
     final avatarActions = <String, IosNavigationAction>{
+      'titleAvatar': ?titleAvatar,
       if (leading?.avatarInitial != null) 'leading': leading!,
       for (var i = 0; i < actions.length; i++)
         if (actions[i].avatarInitial != null) '$i': actions[i],
@@ -122,6 +130,7 @@ class IosNavigationBar extends HookConsumerWidget {
       action.avatarIdentity,
       action.imageUrl,
       action.avatarInitial,
+      action.avatarIsAgent,
     ]);
     final retainedImages = useRef(<String, ({String key, String data})>{});
     final avatarKey = jsonEncode([
@@ -136,6 +145,7 @@ class IosNavigationBar extends HookConsumerWidget {
             final bytes = await nativeAvatarImage(
               url: entry.value.imageUrl,
               initial: entry.value.avatarInitial!,
+              isAgent: entry.value.avatarIsAgent,
               background: colors.primaryContainer,
               foreground: colors.onPrimaryContainer,
               networkImage: (url) =>
@@ -171,6 +181,10 @@ class IosNavigationBar extends HookConsumerWidget {
     final payload = <String, Object?>{
       'title': title,
       'subtitle': subtitle,
+      'titleAvatar': titleAvatar == null
+          ? null
+          : encodeAction(titleAvatar!, 'titleAvatar'),
+      'titlePresenceColor': titlePresenceColor?.toARGB32(),
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'back': onBack != null,

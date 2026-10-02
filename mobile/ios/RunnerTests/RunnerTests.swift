@@ -9,6 +9,39 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testNativeDmTitlePreservesAvatarPresenceAndAccessibility() throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let bar = factory.create(
+      withFrame: CGRect(x: 0, y: 0, width: 390, height: 120), viewIdentifier: 999996,
+      arguments: ["title": "Alice", "subtitle": "Online", "titleEnabled": false,
+                  "titleAvatar": ["avatarInitial": "A", "avatarBackground": 0xFFE0E0FF,
+                                  "avatarForeground": 0xFF000000],
+                  "titlePresenceColor": 0xFF00FF00]
+    )
+    parent.view.addSubview(bar.view())
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)
+    title.frame.size = title.intrinsicContentSize
+    title.layoutIfNeeded()
+    XCTAssertEqual(title.accessibilityLabel, "Alice, Online")
+    XCTAssertEqual(title.accessibilityTraits, .header)
+    XCTAssertFalse(title.accessibilityActivate())
+    let avatar = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "dm-navigation-avatar" } as? UIImageView)
+    XCTAssertNotNil(avatar.image)
+    XCTAssertEqual(avatar.frame.size, CGSize(width: 32, height: 32))
+    let presence = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "dm-navigation-presence" })
+    XCTAssertEqual(presence.backgroundColor, UIColor.green)
+    let labels = title.subviews.compactMap { $0 as? UILabel }
+    XCTAssertEqual(labels.map(\.text), ["Alice", "Online"])
+    for label in labels {
+      XCTAssertTrue(title.bounds.contains(label.frame))
+      XCTAssertFalse(label.frame.intersects(avatar.frame))
+    }
+  }
+
+  @MainActor
   func testChannelTitleHasUnclippedLabelsAndOpensSettings() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()

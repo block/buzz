@@ -161,6 +161,10 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Optional second line and action for a native channel title.
   final String? nativeSubtitle;
+
+  /// Reactive counterpart avatar and presence badge for a native DM title.
+  final IosNavigationAction? nativeTitleAvatar;
+  final Color? nativeTitlePresenceColor;
   final VoidCallback? onNativeTitlePressed;
 
   /// Whether UIKit should expand the title at the top of the page.
@@ -179,6 +183,8 @@ class FrostedAppBar extends StatelessWidget {
     super.key,
     this.nativeTitle,
     this.nativeSubtitle,
+    this.nativeTitleAvatar,
+    this.nativeTitlePresenceColor,
     this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
     this.nativeLeading,
@@ -246,6 +252,8 @@ class FrostedAppBar extends StatelessWidget {
                       nativeTitle ??
                       (title is Text ? (title as Text).data ?? '' : ''),
                   subtitle: nativeSubtitle,
+                  titleAvatar: nativeTitleAvatar,
+                  titlePresenceColor: nativeTitlePresenceColor,
                   onTitlePressed: onNativeTitlePressed,
                   largeTitle: nativeLargeTitle,
                   foregroundColor: iconColor,

@@ -10026,6 +10026,157 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
+    testWidgets('native DM header follows live identity avatar and presence', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final relay = PresenceTestRelay();
+      final dm = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dm,
+          relaySessionNotifier: relay,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final finder = find.byWidgetPredicate(
+        (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
+      );
+      final view = tester.widget<UiKitView>(finder);
+      Map<Object?, Object?> payload = view.creationParams! as Map;
+      expect(payload['subtitle'], 'Unknown');
+      expect(payload['titlePresenceColor'], isNull);
+      expect(payload['titleEnabled'], false);
+      expect(payload['titleAvatar'], containsPair('avatarInitial', 'A'));
+      const channel = MethodChannel('buzz/ios_navigation_bar/197');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        if (call.method == 'configure') payload = call.arguments as Map;
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      view.onPlatformViewCreated!(197);
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ChannelDetailPage)),
+      );
+      final users =
+          container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier;
+      users.replace(
+        const UserProfile(
+          pubkey: 'alice',
+          displayName: 'Alicia',
+          avatarUrl: 'https://example.com/alicia.png',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(payload['title'], 'Alicia');
+      expect(
+        payload['titleAvatar'],
+        containsPair('imageUrl', 'https://example.com/alicia.png'),
+      );
+      expect(payload['titleAvatar'], containsPair('avatarInitial', 'A'));
+      expect(relay.queries.single.authors, ['alice']);
+      relay.results.removeAt(0).complete([
+        presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+      ]);
+      await tester.pumpAndSettle();
+      expect(payload['subtitle'], 'Online');
+      final onlineColor = payload['titlePresenceColor'];
+      expect(onlineColor, isNotNull);
+      relay.emit(presenceEvent('alice', 'away', timestamp: 21));
+      await tester.pumpAndSettle();
+      expect(payload['subtitle'], 'Away');
+      expect(payload['titlePresenceColor'], isNot(onlineColor));
+      relay.emit(presenceEvent('alice', 'offline', timestamp: 22));
+      await tester.pumpAndSettle();
+      expect(payload['subtitle'], 'Offline');
+      users.replace(const UserProfile(pubkey: 'alice', displayName: 'Bob'));
+      await tester.pumpAndSettle();
+      expect(payload['title'], 'Bob');
+      expect(payload['titleAvatar'], containsPair('avatarInitial', 'B'));
+      expect(payload['titleAvatar'], containsPair('imageUrl', null));
+
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('native DM title disambiguates live participant namesakes', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const alice =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const bob =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final users = _FakeUserCacheNotifier(const {
+        alice: UserProfile(pubkey: alice, displayName: 'Alice'),
+        bob: UserProfile(pubkey: bob, displayName: 'Bob'),
+      });
+      final dm = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 3,
+        participants: const ['Self', 'Alice', 'Bob'],
+        participantPubkeys: const ['self', alice, bob],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dm,
+          userCacheNotifier: users,
+        ),
+      );
+      await tester.pumpAndSettle();
+      Map payload() =>
+          tester
+                  .widget<UiKitView>(
+                    find.byWidgetPredicate(
+                      (w) =>
+                          w is UiKitView &&
+                          w.viewType == 'buzz/ios_navigation_bar',
+                    ),
+                  )
+                  .creationParams!
+              as Map;
+      expect(payload()['title'], 'Alice, Bob');
+      users.replace(const UserProfile(pubkey: bob, displayName: 'Alice'));
+      await tester.pumpAndSettle();
+      final title = payload()['title'] as String;
+      expect(title, isNot('Alice'));
+      expect('Alice'.allMatches(title), hasLength(2));
+      expect(title, contains(', '));
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('native channel header preserves members settings and Huddle', (
       tester,
     ) async {

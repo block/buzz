@@ -4,6 +4,7 @@ part of 'avatar_image.dart';
 Future<Uint8List?> nativeAvatarImage({
   required String? url,
   required String initial,
+  bool isAgent = false,
   required Color background,
   required Color foreground,
   required ImageProvider Function(String) networkImage,
@@ -14,7 +15,12 @@ Future<Uint8List?> nativeAvatarImage({
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
-  canvas.clipPath(Path()..addOval(bounds));
+  canvas.clipRRect(
+    RRect.fromRectAndRadius(
+      bounds,
+      Radius.circular(dimension * (isAgent ? 0.3 : 0.5)),
+    ),
+  );
   canvas.drawColor(background, BlendMode.src);
   var rendered = false;
   try {

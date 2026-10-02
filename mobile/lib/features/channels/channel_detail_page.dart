@@ -573,6 +573,10 @@ class ChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, readTimestamp]);
 
+    final nativeDm =
+        resolvedChannel.isDm && defaultTargetPlatform == TargetPlatform.iOS
+        ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
+        : null;
     final nativeMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
     final nativeMemberCount =
         nativeMembers.value?.length ?? resolvedChannel.memberCount;
@@ -603,11 +607,31 @@ class ChannelDetailPage extends HookConsumerWidget {
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         nativeViewSuppressed: messageActionBackdropActive,
-        nativeTitle: resolveDmChannelDisplayLabel(
-          resolvedChannel,
-          currentPubkey: currentPubkey,
-        ),
-        nativeSubtitle: resolvedChannel.isDm ? null : nativeMemberLabel,
+        nativeTitle:
+            nativeDm?.label ??
+            resolveDmChannelDisplayLabel(
+              resolvedChannel,
+              currentPubkey: currentPubkey,
+            ),
+        nativeSubtitle: resolvedChannel.isDm
+            ? nativeDm?.presenceLabel
+            : nativeMemberLabel,
+        nativeTitleAvatar: nativeDm == null
+            ? null
+            : IosNavigationAction(
+                label: nativeDm.label,
+                avatarIdentity: nativeDm.pubkey,
+                avatarIsAgent: nativeDm.isAgent,
+                avatarInitial: nativeDm.initial,
+                imageUrl: nativeDm.avatarUrl,
+              ),
+        nativeTitlePresenceColor: nativeDm?.presence == null
+            ? null
+            : switch (nativeDm!.presence) {
+                'online' => context.appColors.success,
+                'away' => context.appColors.warning,
+                _ => context.colors.outline,
+              },
         onNativeTitlePressed: resolvedChannel.isDm ? null : openChannelDetails,
         nativeActions: [
           if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)

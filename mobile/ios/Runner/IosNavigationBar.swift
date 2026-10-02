@@ -26,6 +26,8 @@ private final class NavigationTitleView: UIView {
   var onActivate: (() -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
+  private var avatarView: UIImageView?
+  private var presenceView: UIView?
 
   init(title: String?, subtitle: String, color: UIColor) {
     super.init(frame: .zero)
@@ -46,6 +48,25 @@ private final class NavigationTitleView: UIView {
     addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(activate)))
   }
 
+  func setAvatar(_ image: UIImage?, presence: UIColor?) {
+    let avatar = UIImageView(image: image)
+    avatar.accessibilityIdentifier = "dm-navigation-avatar"
+    avatar.contentMode = .scaleAspectFit
+    addSubview(avatar)
+    avatarView = avatar
+    for label in [titleLabel, subtitleLabel] { label.textAlignment = .natural }
+    if let presence {
+      let badge = UIView()
+      badge.backgroundColor = presence
+      badge.layer.cornerRadius = 4
+      badge.layer.borderWidth = 1.5
+      badge.layer.borderColor = UIColor.systemBackground.cgColor
+      badge.accessibilityIdentifier = "dm-navigation-presence"
+      addSubview(badge)
+      presenceView = badge
+    }
+  }
+
   required init?(coder: NSCoder) { return nil }
 
   @objc private func activate() { onActivate?() }
@@ -57,7 +78,7 @@ private final class NavigationTitleView: UIView {
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16,
+    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16 + (avatarView == nil ? 0 : 40),
            height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
   }
 
@@ -66,8 +87,15 @@ private final class NavigationTitleView: UIView {
     let titleHeight = titleLabel.intrinsicContentSize.height
     let subtitleHeight = subtitleLabel.intrinsicContentSize.height
     let top = (bounds.height - titleHeight - subtitleHeight) / 2
-    titleLabel.frame = CGRect(x: 8, y: top, width: max(0, bounds.width - 16), height: titleHeight)
-    subtitleLabel.frame = CGRect(x: 8, y: top + titleHeight, width: max(0, bounds.width - 16), height: subtitleHeight)
+    let hasAvatar = avatarView != nil
+    let rtl = effectiveUserInterfaceLayoutDirection == .rightToLeft
+    let textX: CGFloat = hasAvatar && !rtl ? 48 : 8
+    let textWidth = max(0, bounds.width - 16 - (hasAvatar ? 40 : 0))
+    titleLabel.frame = CGRect(x: textX, y: top, width: textWidth, height: titleHeight)
+    subtitleLabel.frame = CGRect(x: textX, y: top + titleHeight, width: textWidth, height: subtitleHeight)
+    let avatarX: CGFloat = rtl ? bounds.width - 40 : 8
+    avatarView?.frame = CGRect(x: avatarX, y: (bounds.height - 32) / 2, width: 32, height: 32)
+    presenceView?.frame = CGRect(x: avatarX + (rtl ? 0 : 24), y: (bounds.height - 32) / 2 + 24, width: 8, height: 8)
   }
 }
 
@@ -197,8 +225,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         self?.channel.invokeMethod("action", arguments: "title")
       }
       button.accessibilityIdentifier = "channel-navigation-title"
-      button.accessibilityLabel = "Open settings for \(item.title ?? ""), \(subtitle)"
-      button.isUserInteractionEnabled = args["titleEnabled"] as? Bool == true
+      let enabled = args["titleEnabled"] as? Bool == true
+      button.accessibilityLabel = enabled
+        ? "Open settings for \(item.title ?? ""), \(subtitle)"
+        : "\(item.title ?? ""), \(subtitle)"
+      button.accessibilityTraits = enabled ? .button : .header
+      button.isUserInteractionEnabled = enabled
+      if let avatar = args["titleAvatar"] as? [String: Any] {
+        button.setAvatar(makeItem(avatar).image,
+                         presence: args["titlePresenceColor"] is NSNumber ? Self.color(args["titlePresenceColor"]) : nil)
+      }
       button.frame.size = button.intrinsicContentSize
       item.titleView = button
     } else {
@@ -314,7 +350,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       item.title = nil
       item.image = UIGraphicsImageRenderer(size: size).image { _ in
         Self.color(data["avatarBackground"]).setFill()
-        UIBezierPath(ovalIn: CGRect(origin: .zero, size: size)).fill()
+        UIBezierPath(roundedRect: CGRect(origin: .zero, size: size),
+                     cornerRadius: size.width * (data["avatarIsAgent"] as? Bool == true ? 0.3 : 0.5)).fill()
         let text = initial as NSString
         let attributes: [NSAttributedString.Key: Any] = [
           .font: UIFont.systemFont(ofSize: 16, weight: .medium),
