@@ -100,7 +100,15 @@ pub async fn ws_audio_handler(
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
         let communities = &state.config.nip_fi.communities;
-        match check_nip_fi_at_upgrade(&headers, communities, verifier, mode).into_assertions() {
+        match check_nip_fi_at_upgrade(
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            &headers,
+            communities,
+            verifier,
+            mode,
+        )
+        .into_assertions()
+        {
             Ok(assertions) => assertions,
             Err(resp) => return resp.into_response(),
         }

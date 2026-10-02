@@ -649,11 +649,14 @@ async fn nip11_or_ws_handler(
         let is_h2_ws_connect = req.version() == axum::http::Version::HTTP_2
             && req.method() == axum::http::Method::CONNECT;
         if is_h1_ws_upgrade || is_h2_ws_connect {
+            use crate::nip_fi_session::NipFiWsRoute::Root;
             use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = &state.config.nip_fi.communities;
-            match check_nip_fi_at_upgrade(&headers, communities, verifier, mode).into_assertions() {
+            match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+                .into_assertions()
+            {
                 Ok((assertion, shadow)) => (true, assertion, shadow),
                 Err(resp) => return (*resp).into_response(),
             }
@@ -734,11 +737,12 @@ async fn nip11_or_ws_handler(
             // we get here).
             let (nip_fi_assertion, shadow_assertion) = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
+                use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
                 let mode = state.config.nip_fi.mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = &state.config.nip_fi.communities;
-                match check_nip_fi_at_upgrade(&headers, communities, verifier, mode)
+                match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
                     .into_assertions()
                 {
                     Ok(assertions) => assertions,

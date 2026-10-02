@@ -239,6 +239,15 @@ pub(crate) mod tests {
     /// admission record as `stage/outcome` and every session end as
     /// `end/reason`, sorted.
     pub(crate) fn shadow_records(body: impl Future<Output = ()>) -> Vec<String> {
+        collect(body, false)
+    }
+
+    /// [`shadow_records`], each prefixed with its `route` label.
+    pub(crate) fn shadow_records_by_route(body: impl Future<Output = ()>) -> Vec<String> {
+        collect(body, true)
+    }
+
+    fn collect(body: impl Future<Output = ()>, by_route: bool) -> Vec<String> {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -262,6 +271,10 @@ pub(crate) mod tests {
                     format!("end/{}", label("reason").unwrap())
                 }
                 _ => continue,
+            };
+            let record = match (by_route, label("route")) {
+                (true, Some(route)) => format!("{route} {record}"),
+                _ => record,
             };
             let DebugValue::Counter(n) = value else {
                 unreachable!()
