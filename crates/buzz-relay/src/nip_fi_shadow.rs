@@ -75,7 +75,10 @@ fn emit(route: &'static str, community: String, stage: &'static str, outcome: &'
         "community" => community.clone()
     )
     .increment(1);
-    tracing::info!(route, stage, outcome, community, "nip-fi shadow verdict");
+    // The counter is the record; only a would-deny earns a (debug) line.
+    if stage != "admit" {
+        tracing::debug!(route, stage, outcome, community, "nip-fi shadow would-deny");
+    }
 }
 
 const fn class_label(class: DenialClass) -> &'static str {
