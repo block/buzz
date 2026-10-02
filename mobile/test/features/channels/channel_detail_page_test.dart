@@ -3509,6 +3509,18 @@ void main() {
               debugDefaultTargetPlatformOverride = null;
               messageActionBackdropActive.value = false;
             });
+            // Exercise the composable fallback when native menus are unavailable.
+            const presentation = MethodChannel(
+              'buzz/native_message_presentation',
+            );
+            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+              presentation,
+              (_) async => {'supported': false},
+            );
+            addTearDown(
+              () => tester.binding.defaultBinaryMessenger
+                  .setMockMethodCallHandler(presentation, null),
+            );
             final event = reactionOnly
                 ? _systemMsg(
                     id: 'native-backdrop',
