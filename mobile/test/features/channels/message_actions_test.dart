@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:ui' as ui;
+import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
@@ -671,6 +673,116 @@ void main() {
     expect(find.byType(BottomSheet), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  for (final selectedAction in <String?>[
+    null,
+    'follow',
+    'unmount',
+    'unmountFailure',
+  ]) {
+    testWidgets('native focus and source lifecycle for $selectedAction', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final focus = FocusNode();
+      late Completer<void> ready;
+      late Completer<Map<String, Object?>> result;
+      await tester.runAsync(() async {
+        ready = Completer<void>();
+        result = Completer<Map<String, Object?>>();
+      });
+      final visibility = <bool>[];
+      var dismissed = 0;
+      late BuildContext pageContext;
+      late WidgetRef pageRef;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'supportsMessage') return {'supported': true};
+          expect(visibility, isEmpty);
+          final args = call.arguments as Map;
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            NativeMessagePresentation.channel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('messagePresented', args['requestId']),
+            ),
+            (_) {},
+          );
+          ready.complete();
+          return result.future;
+        },
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(await _mockPrefs()),
+            myPubkeyProvider.overrideWithValue('self'),
+            readStateProvider.overrideWith(
+              () => _FakeReadStateNotifier(
+                _readState(const {_channelId: 100000}),
+              ),
+            ),
+            reminderServiceProvider.overrideWithValue(null),
+          ],
+          child: MaterialApp(
+            home: Consumer(
+              builder: (context, ref, _) {
+                pageContext = context;
+                pageRef = ref;
+                return Scaffold(body: TextField(focusNode: focus));
+              },
+            ),
+          ),
+        ),
+      );
+      focus.requestFocus();
+      await tester.pump();
+      late Future<void> presentation;
+      await tester.runAsync(() async {
+        presentation = showMessageActions(
+          context: pageContext,
+          ref: pageRef,
+          message: _message(),
+          channelId: _channelId,
+          canManageMessage: false,
+          anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+          captureAnchorSnapshot: _testMessageSnapshot,
+          composerFocusNode: focus,
+          restoreComposerFocus: focus.requestFocus,
+          onPopoverPreviewVisibilityChanged: visibility.add,
+          onPopoverDismissed: () => dismissed++,
+        );
+        await ready.future;
+      });
+      await tester.pump();
+      expect(focus.hasFocus, isFalse);
+      expect(visibility, [true]);
+      if (selectedAction?.startsWith('unmount') == true) {
+        await tester.pumpWidget(const SizedBox.shrink());
+      }
+      await tester.runAsync(() async {
+        if (selectedAction == 'unmountFailure') {
+          result.completeError(PlatformException(code: 'presentation-failed'));
+        } else {
+          result.complete({
+            if (selectedAction == 'follow') 'action': selectedAction,
+          });
+        }
+        await presentation;
+      });
+      await tester.pump();
+      expect(focus.hasFocus, selectedAction == null);
+      expect(visibility, [true, false]);
+      expect(dismissed, selectedAction?.startsWith('unmount') == true ? 0 : 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+      focus.dispose();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 
   testWidgets('native dismissal does not open the Flutter sheet', (
     tester,

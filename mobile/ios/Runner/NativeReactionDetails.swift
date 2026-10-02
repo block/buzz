@@ -164,9 +164,8 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
 
 /// Short-lived image loader. Auth is supplied for the specific URL by Buzz's
 /// existing media auth service; redirects are refused to avoid forwarding it.
-final class NativeMessageGlyph: UIView, URLSessionTaskDelegate {
-  private var task: URLSessionDataTask?
-  private var session: URLSession?
+final class NativeMessageGlyph: UIView {
+  private var cancelLoad: (() -> Void)?
   private let label = UILabel()
   private let image = UIImageView()
 
@@ -193,49 +192,168 @@ final class NativeMessageGlyph: UIView, URLSessionTaskDelegate {
     var request = URLRequest(url: url)
     request.allHTTPHeaderFields = data["headers"] as? [String: String]
     request.timeoutInterval = 10
-    let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
-    self.session = session
-    task = session.dataTask(with: request) { [weak self, weak session] bytes, response, _ in
-      defer { session?.finishTasksAndInvalidate() }
-      guard let bytes, bytes.count <= 8 * 1024 * 1024,
-        (response as? HTTPURLResponse)?.statusCode == 200,
-        let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { return }
-      let frameCount = CGImageSourceGetCount(source)
-      let stride = max(1, Int(ceil(Double(frameCount) / 60)))
-      var frames: [UIImage] = []
-      var duration: TimeInterval = 0
-      for index in Swift.stride(from: 0, to: frameCount, by: stride) {
-        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, index, [
-          kCGImageSourceCreateThumbnailFromImageAlways: true,
-          kCGImageSourceThumbnailMaxPixelSize: 120,
-          kCGImageSourceCreateThumbnailWithTransform: true,
-        ] as CFDictionary) else { continue }
-        frames.append(UIImage(cgImage: thumbnail))
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any]
-        let animation = (properties?[kCGImagePropertyGIFDictionary as String]
-          ?? properties?[kCGImagePropertyPNGDictionary as String]
-          ?? properties?["{WebP}"]) as? [String: Any]
-        let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
-        duration += max(0.02, delay) * Double(stride)
-      }
-      DispatchQueue.main.async {
-        guard let first = frames.first else { return }
-        self?.image.image = frames.count > 1 && !UIAccessibility.isReduceMotionEnabled
-          ? UIImage.animatedImage(with: frames, duration: duration) : first
-        self?.label.isHidden = true
-      }
+    cancelLoad = NativeMessageImageLoader.shared.load(request) { [weak self] loaded in
+      guard let self, let loaded else { return }
+      image.image = UIAccessibility.isReduceMotionEnabled ? loaded.images?.first ?? loaded : loaded
+      label.isHidden = true
     }
-    task?.resume()
   }
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+  deinit { cancelLoad?() }
+}
+
+/// Shared, main-queue-owned loader. Requests include auth headers in their cache
+/// key; duplicate consumers share one download and cancellation releases their
+/// subscription. No more than four bodies are admitted, each capped at 8 MiB.
+final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
+  static let shared = NativeMessageImageLoader()
+  static let maximumBytes = 8 * 1024 * 1024
+  private final class Download {
+    let request: URLRequest
+    var callbacks: [UUID: (UIImage?) -> Void] = [:]
+    var task: URLSessionDataTask?
+    var bytes = Data()
+    init(_ request: URLRequest) { self.request = request }
+  }
+  private let configuration: URLSessionConfiguration
+  private let limit: Int
+  private lazy var session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+  private var downloads: [URLRequest: Download] = [:]
+  private var active: [Int: Download] = [:]
+  private var queue: [Download] = []
+  private let cache = NSCache<NSURLRequest, UIImage>()
+
+  init(configuration: URLSessionConfiguration = .ephemeral, maximumConcurrent: Int = 4) {
+    precondition(maximumConcurrent > 0)
+    self.configuration = configuration
+    self.limit = maximumConcurrent
+    super.init()
+    cache.totalCostLimit = 16 * 1024 * 1024
+  }
+
+  /// Call on the main queue; the returned cancellation is safe from any queue.
+  func load(_ request: URLRequest, completion: @escaping (UIImage?) -> Void) -> () -> Void {
+    dispatchPrecondition(condition: .onQueue(.main))
+    if let image = cache.object(forKey: request as NSURLRequest) {
+      completion(image)
+      return {}
+    }
+    let id = UUID()
+    let download = downloads[request] ?? Download(request)
+    download.callbacks[id] = completion
+    if downloads[request] == nil {
+      downloads[request] = download
+      queue.append(download)
+      admit()
+    }
+    return { [weak self, weak download] in
+      DispatchQueue.main.async {
+        guard let self, let download else { return }
+        download.callbacks.removeValue(forKey: id)
+        if download.callbacks.isEmpty {
+          download.task?.cancel()
+          self.finish(download, image: nil)
+        }
+      }
+    }
+  }
+
+  private func admit() {
+    while active.count < limit, !queue.isEmpty {
+      let download = queue.removeFirst()
+      let task = session.dataTask(with: download.request)
+      download.task = task
+      active[task.taskIdentifier] = download
+      task.resume()
+    }
+  }
+
+  private func finish(_ download: Download, image: UIImage?) {
+    guard downloads[download.request] === download else { return }
+    downloads.removeValue(forKey: download.request)
+    queue.removeAll { $0 === download }
+    if let task = download.task { active.removeValue(forKey: task.taskIdentifier) }
+    if let image {
+      let frames = image.images ?? [image]
+      let cost = frames.reduce(0) { $0 + ($1.cgImage.map { $0.bytesPerRow * $0.height } ?? 0) }
+      cache.setObject(image, forKey: download.request as NSURLRequest, cost: cost)
+    }
+    let callbacks = Array(download.callbacks.values)
+    download.callbacks.removeAll()
+    admit()
+    for callback in callbacks { callback(image) }
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+    didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+    guard let download = active[dataTask.taskIdentifier] else { completionHandler(.cancel); return }
+    let declaredLength = (response as? HTTPURLResponse)?
+      .value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init) ?? -1
+    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+      declaredLength <= Int64(Self.maximumBytes),
+      response.expectedContentLength <= Int64(Self.maximumBytes) else {
+      completionHandler(.cancel)
+      finish(download, image: nil)
+      return
+    }
+    completionHandler(.allow)
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    guard let download = active[dataTask.taskIdentifier] else { return }
+    guard data.count <= Self.maximumBytes - download.bytes.count else {
+      dataTask.cancel()
+      finish(download, image: nil)
+      return
+    }
+    download.bytes.append(data)
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    guard let download = active[task.taskIdentifier] else { return }
+    guard error == nil else { finish(download, image: nil); return }
+    let bytes = download.bytes
+    download.bytes = Data()
+    // Keep the admission slot through decoding, bounding CPU and decoded images
+    // as well as network bodies. Cancellation still suppresses delivery/cache.
+    DispatchQueue.global(qos: .userInitiated).async { [weak self, weak download] in
+      let image = Self.decode(bytes)
+      DispatchQueue.main.async {
+        guard let self, let download else { return }
+        self.finish(download, image: image)
+      }
+    }
+  }
+
   func urlSession(_ session: URLSession, task: URLSessionTask,
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
     completionHandler: @escaping (URLRequest?) -> Void) {
-    completionHandler(nil)
+    completionHandler(nil) // Never forward supplied auth to another URL.
   }
 
-  deinit { task?.cancel(); session?.invalidateAndCancel() }
+  private static func decode(_ bytes: Data) -> UIImage? {
+    guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { return nil }
+    let count = CGImageSourceGetCount(source)
+    let step = max(1, Int(ceil(Double(count) / 60)))
+    var frames: [UIImage] = []
+    var duration: TimeInterval = 0
+    for index in stride(from: 0, to: count, by: step) {
+      guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceThumbnailMaxPixelSize: 120,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+      ] as CFDictionary) else { continue }
+      frames.append(UIImage(cgImage: image))
+      let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any]
+      let animation = (properties?[kCGImagePropertyGIFDictionary as String]
+        ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
+      let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
+      duration += max(0.02, delay) * Double(step)
+    }
+    guard let first = frames.first else { return nil }
+    return frames.count > 1 ? UIImage.animatedImage(with: frames, duration: duration) : first
+  }
 }

@@ -106,6 +106,10 @@ Future<void> showMessageActions({
         isArchived: isArchived,
         anchorRect: anchorRect,
         captureAnchorSnapshot: captureAnchorSnapshot,
+        composerFocusNode: composerFocusNode,
+        restoreComposerFocus: restoreComposerFocus,
+        onPopoverPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
+        onPopoverDismissed: onPopoverDismissed,
       )) {
     return;
   }

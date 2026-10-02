@@ -12,9 +12,14 @@ Future<bool> _showNativeMessageActions({
   required bool isArchived,
   required Rect anchorRect,
   required Future<ui.Image> Function()? captureAnchorSnapshot,
+  required FocusNode? composerFocusNode,
+  required VoidCallback? restoreComposerFocus,
+  required ValueChanged<bool>? onPopoverPreviewVisibilityChanged,
+  required VoidCallback? onPopoverDismissed,
 }) async {
   if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
   if (captureAnchorSnapshot == null) return false;
+  final hadComposerFocus = composerFocusNode?.hasFocus ?? false;
   final support = await NativeMessagePresentation.present(
     'supportsMessage',
     {},
@@ -163,30 +168,51 @@ Future<bool> _showNativeMessageActions({
     customShortcodes: {for (final e in palette) e.shortcode.toLowerCase()},
   );
   final dataset = ref.read(emojiDatasetOrEmptyProvider);
-  final response = await NativeMessagePresentation.present('message', {
-    'x': anchorRect.left,
-    'y': anchorRect.top,
-    'width': anchorRect.width,
-    'height': anchorRect.height,
-    'dark': Theme.of(context).brightness == Brightness.dark,
-    'previewLabel': message.content,
-    'previewBytes': previewBytes,
-    'actions': actions,
-    'reactions': [
-      for (final emoji in emojis)
-        {
-          'emoji': emoji,
-          'label': dataset.displayName(emoji),
-          'selected': message.reactions.any(
-            (r) => r.emoji == emoji && r.reactedByCurrentUser,
-          ),
-          if (reactionEmojiUrl(emoji, palette) case final String url) ...{
-            'url': url,
-            'headers': mediaGetHeadersFor(ref, url),
-          },
-        },
-    ],
-  });
+  Map<Object?, Object?>? response;
+  var ownsPreview = false;
+  if (hadComposerFocus) composerFocusNode!.unfocus();
+  try {
+    response = await NativeMessagePresentation.present(
+      'message',
+      {
+        'x': anchorRect.left,
+        'y': anchorRect.top,
+        'width': anchorRect.width,
+        'height': anchorRect.height,
+        'dark': Theme.of(context).brightness == Brightness.dark,
+        'previewLabel': message.content,
+        'previewBytes': previewBytes,
+        'actions': actions,
+        'reactions': [
+          for (final emoji in emojis)
+            {
+              'emoji': emoji,
+              'label': dataset.displayName(emoji),
+              'selected': message.reactions.any(
+                (r) => r.emoji == emoji && r.reactedByCurrentUser,
+              ),
+              if (reactionEmojiUrl(emoji, palette) case final String url) ...{
+                'url': url,
+                'headers': mediaGetHeadersFor(ref, url),
+              },
+            },
+        ],
+      },
+      onPresented: () {
+        if (!context.mounted || ownsPreview) return;
+        ownsPreview = true;
+        onPopoverPreviewVisibilityChanged?.call(true);
+      },
+    );
+  } finally {
+    if (ownsPreview) {
+      onPopoverPreviewVisibilityChanged?.call(false);
+      if (context.mounted) onPopoverDismissed?.call();
+    }
+    if (hadComposerFocus && response?['action'] == null && context.mounted) {
+      restoreComposerFocus?.call();
+    }
+  }
   if (response == null) return false;
   // A native controller can outlive the Flutter page that opened it.
   if (!context.mounted || ref.read(relayConfigProvider) != community) {

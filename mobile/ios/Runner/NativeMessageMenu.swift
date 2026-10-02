@@ -3,6 +3,7 @@ import UIKit
 /// Signal-style context presentation composed entirely of public UIKit views.
 /// Flutter supplies an anchor and action IDs; it retains all mutation authority.
 final class NativeMessageMenuViewController: UIViewController {
+  var onPreviewReady: ((@escaping () -> Void) -> Void)?
   var onSelect: (([String: String]) -> Void)?
   private let data: [String: Any]
   private let sourceRect: CGRect
@@ -234,8 +235,17 @@ final class NativeMessageMenuViewController: UIViewController {
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    guard !closing, let previewHost else { return }
+    guard !closing, previewHost != nil else { return }
     view.layoutIfNeeded()
+    if let onPreviewReady {
+      onPreviewReady { [weak self] in self?.animateIn() }
+    } else {
+      animateIn()
+    }
+  }
+
+  private func animateIn() {
+    guard !closing, let previewHost else { return }
     let reducedMotion = UIAccessibility.isReduceMotionEnabled
     let target = previewHost.convert(previewHost.bounds, to: view)
     sourceTransform = CGAffineTransform(

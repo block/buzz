@@ -49,6 +49,7 @@
 		AB1200002F40400100A17E01 /* NativeMessagePresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */; };
 		AB1200012F40400100A17E01 /* NativeMessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200112F40400100A17E01 /* NativeMessageMenu.swift */; };
 		AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200122F40400100A17E01 /* NativeReactionDetails.swift */; };
+		AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -143,6 +144,7 @@
 		AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessagePresentationCoordinator.swift; sourceTree = "<group>"; };
 		AB1200112F40400100A17E01 /* NativeMessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageMenu.swift; sourceTree = "<group>"; };
 		AB1200122F40400100A17E01 /* NativeReactionDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeReactionDetails.swift; sourceTree = "<group>"; };
+		AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageImageLoaderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -178,6 +180,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
 				BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */,
 				331C80A0294A618700263BE5 /* Fixtures */,
 			);
@@ -573,6 +576,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
 				BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

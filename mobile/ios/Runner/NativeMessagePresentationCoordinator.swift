@@ -56,6 +56,9 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       let snapshot = UIImageView(image: image)
       snapshot.contentMode = .scaleAspectFit
       let menu = NativeMessageMenuViewController(data: data, sourceRect: rect, preview: snapshot)
+      menu.onPreviewReady = { [weak self] ready in
+        self?.channel.invokeMethod("messagePresented", arguments: data["requestId"]) { _ in ready() }
+      }
       menu.onSelect = { [weak self] value in self?.dismiss(value) }
       menu.modalPresentationStyle = .overFullScreen
       controller = menu
