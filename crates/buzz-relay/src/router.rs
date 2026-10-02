@@ -2629,7 +2629,8 @@ mod tests {
                         req.body(axum::body::Body::empty()).unwrap()
                     },
                 )
-                .await;
+                .await
+                .0;
                 for label in [
                     format!("\"stage\", \"{stage}\""),
                     format!("\"outcome\", \"{outcome}\""),
@@ -2697,6 +2698,164 @@ mod tests {
                 })
                 .collect();
             assert_eq!((stages, verifier.calls()), (vec!["nip98".to_owned()], 1));
+        }
+
+        fn nip98(keys: &nostr::Keys, url: &str, method: &str) -> String {
+            use base64::Engine as _;
+            let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                .tags([
+                    nostr::Tag::parse(["u", url]).unwrap(),
+                    nostr::Tag::parse(["method", method]).unwrap(),
+                    // A distinct event per call: Off and Shadow share Redis.
+                    nostr::Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+                ])
+                .sign_with_keys(keys)
+                .unwrap();
+            let json = serde_json::to_string(&event).unwrap();
+            format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD.encode(json)
+            )
+        }
+
+        /// Off and Shadow states on a seeded, mapped Host whose assertion
+        /// names `key`; each gets its own pool so a row may close it.
+        async fn seeded_pair(
+            key: nostr::PublicKey,
+        ) -> (String, buzz_core::CommunityId, [Arc<AppState>; 2]) {
+            let probe = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-row-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(probe.db.pool())
+                .await
+                .expect("seed community");
+            let mut states = Vec::new();
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Shadow] {
+                let mut state = (*real_db_state().await.unwrap()).clone();
+                let config = Arc::make_mut(&mut state.config);
+                config.relay_url = "wss://relay.example".to_owned();
+                config.require_relay_membership = true;
+                config.nip_fi.mode = mode;
+                config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                    &format!("https://{host}"),
+                    &["https://issuer.test"],
+                );
+                // Real Redis so admission reaches the handler, not the
+                // fail-closed rate limiter.
+                let redis = deadpool_redis::Config::from_url(
+                    std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+                )
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .unwrap();
+                state.admission_rate_limiter = Arc::new(
+                    buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis.clone()),
+                );
+                state.nip98_replay =
+                    Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis.clone()));
+                state.redis_pool = redis;
+                state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Ok(Some(key)))));
+                states.push(Arc::new(state));
+            }
+            let community = buzz_core::CommunityId::from_uuid(community_id);
+            (host, community, states.try_into().ok().unwrap())
+        }
+
+        // Pins Off parity on a seeded Host for the bridge's payload strictness
+        // and junk proofs, Blossom reads, and the Git membership lookup
+        // failure. Each row matches Off byte for byte, leaves exactly one
+        // shadow verdict, and the expected strict-proof side checks.
+        // Mutation: recording the bridge strict proof twice, requiring the
+        // payload tag in shadow, or answering the Git lookup failure with the
+        // NIP-FI 503 in shadow each fails a row.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_seeded_host_rows_match_off() {
+            let keys = nostr::Keys::generate();
+            let sha = "a".repeat(64);
+            let body = serde_json::to_vec(
+                &nostr::EventBuilder::new(nostr::Kind::TextNote, "hi")
+                    .sign_with_keys(&keys)
+                    .unwrap(),
+            )
+            .unwrap();
+            let git = "/git/o/r.git/info/refs?service=git-upload-pack";
+            // (method, path, proof, body, strict-proof outcomes, close the pool)
+            type Row<'a> = (
+                &'a str,
+                String,
+                Option<&'a str>,
+                Vec<u8>,
+                Vec<&'a str>,
+                bool,
+            );
+            let rows: Vec<Row> = vec![
+                (
+                    "POST",
+                    "/events".into(),
+                    None,
+                    body.clone(),
+                    vec!["rejected"],
+                    false,
+                ),
+                (
+                    "POST",
+                    "/events".into(),
+                    Some("Nostr !!junk!!"),
+                    body,
+                    vec!["rejected"],
+                    false,
+                ),
+                (
+                    "GET",
+                    format!("/media/{sha}"),
+                    None,
+                    Vec::new(),
+                    vec!["rejected"],
+                    false,
+                ),
+                ("GET", git.into(), None, Vec::new(), vec![], true),
+            ];
+            for (method, path, proof, body, strict, close) in rows {
+                let (host, community, [off, shadow]) = seeded_pair(keys.public_key()).await;
+                let signed_path = path.split("/info/refs").next().unwrap();
+                let url = format!("https://{host}{signed_path}");
+                if close {
+                    // Fail the membership lookup after the tenant bound: Off
+                    // runs first, then Shadow, each against its own pool.
+                    use crate::nip_fi_test_hooks::git_membership_hook::arm;
+                    let (off_pool, shadow_pool) = (off.db.pool().clone(), shadow.db.pool().clone());
+                    let mut gate = arm(community);
+                    tokio::spawn(async move {
+                        for pool in [off_pool, shadow_pool] {
+                            let (arrived, release) = gate;
+                            arrived.await.unwrap();
+                            pool.close().await;
+                            // Re-arm before releasing, so Shadow's request
+                            // cannot reach the hook unarmed.
+                            gate = arm(community);
+                            release.notify_one();
+                        }
+                    });
+                }
+                let (_, outcomes) = shadow_matches_off_with_one_record(off, shadow, || {
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header("host", &host)
+                        .header(
+                            "authorization",
+                            proof.map_or_else(|| nip98(&keys, &url, method), str::to_owned),
+                        )
+                        .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
+                        .body(axum::body::Body::from(body.clone()))
+                        .unwrap()
+                })
+                .await;
+                assert_eq!(outcomes, strict, "{method} {path} {proof:?}");
+            }
         }
 
         async fn real_db_state() -> Option<Arc<AppState>> {
@@ -3912,12 +4071,13 @@ mod tests {
 
     /// Sends one request through the built router in Off and in Shadow.
     /// Asserts identical status, challenge and body, no Off record, and one
-    /// Shadow record; returns that record's labels.
+    /// Shadow record; returns that record's labels and the shadow
+    /// strict-proof outcomes.
     async fn shadow_matches_off_with_one_record(
         off: Arc<AppState>,
         shadow: Arc<AppState>,
         request: impl Fn() -> axum::http::Request<axum::body::Body>,
-    ) -> String {
+    ) -> (String, Vec<String>) {
         use tower::ServiceExt;
         let mut outcomes = Vec::new();
         for state in [off, shadow] {
@@ -3926,24 +4086,44 @@ mod tests {
             let _guard = metrics::set_default_local_recorder(&recorder);
             let resp = build_router(state).oneshot(request()).await.unwrap();
             let challenge = resp.headers().get("WWW-Authenticate").cloned();
-            let records: Vec<_> = snapshotter
-                .snapshot()
-                .into_vec()
-                .into_iter()
+            let snapshot = snapshotter.snapshot().into_vec();
+            let records: Vec<_> = snapshot
+                .iter()
                 .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
                 .map(|(key, .., value)| {
                     let labels = format!("{:?}", key.key().labels().collect::<Vec<_>>());
-                    (labels, value)
+                    (labels, counter(value))
                 })
                 .collect();
-            outcomes.push(((challenge, status_and_body(resp).await), records));
+            let strict: Vec<String> = snapshot
+                .iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_strict_proof_total")
+                .flat_map(|(key, .., value)| {
+                    let outcome = key.key().labels().find(|l| l.key() == "outcome");
+                    let outcome = outcome.map_or("-", |l| l.value()).to_owned();
+                    std::iter::repeat_n(outcome, counter(value) as usize)
+                })
+                .collect();
+            outcomes.push(((challenge, status_and_body(resp).await), records, strict));
         }
         let (shadow, off) = (outcomes.pop().unwrap(), outcomes.pop().unwrap());
+        eprintln!(
+            "DBG {} {}",
+            off.0 .1 .0,
+            String::from_utf8_lossy(&off.0 .1 .1)
+        );
         assert_eq!(shadow.0, off.0, "rejection unchanged");
-        assert!(off.1.is_empty(), "off records nothing");
+        assert!(off.1.is_empty() && off.2.is_empty(), "off records nothing");
         let [(labels, value)] = <[_; 1]>::try_from(shadow.1).expect("exactly one shadow record");
-        assert_eq!(value, metrics_util::debugging::DebugValue::Counter(1));
-        labels
+        assert_eq!(value, 1);
+        (labels, shadow.2)
+    }
+
+    fn counter(value: &metrics_util::debugging::DebugValue) -> u64 {
+        match value {
+            metrics_util::debugging::DebugValue::Counter(n) => *n,
+            _ => 0,
+        }
     }
 
     // Pins D8 on every handler that returns before NIP-FI admission: an empty
@@ -3996,7 +4176,8 @@ mod tests {
                 nip_fi_state(buzz_auth::NipFiMode::Shadow).await,
                 request,
             )
-            .await;
+            .await
+            .0;
             for label in [
                 "\"stage\", \"community\"",
                 "\"outcome\", \"unavailable\"",

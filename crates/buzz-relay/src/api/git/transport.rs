@@ -224,6 +224,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                 legacy
             }
         };
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_git_membership(tenant.community()).await;
         match crate::api::relay_members::check_relay_membership(
             state,
             tenant.community(),

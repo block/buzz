@@ -195,6 +195,10 @@ make_hook!(audio_auth_verify_hook, before_auth_verify);
 // `check_cancel!` fence. Arms cancel here → proves the cleanup branch
 // (`room.remove_peer` + `cleanup_if_empty`) runs before the handler returns.
 make_hook!(audio_membership_check_hook, before_membership_check);
+// `before_git_membership`: fires in the Git transport after NIP-FI admission,
+// immediately before the relay membership lookup. Closing the pool here makes
+// that lookup fail with the tenant already bound.
+make_hook!(git_membership_hook, before_git_membership);
 make_hook!(audio_membership_lock_hook, before_membership_lock);
 make_hook!(audio_participant_commit_hook, before_participant_commit);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
