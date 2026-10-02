@@ -312,12 +312,8 @@ where
     if !mode.restricts() {
         let proof = extract_nip98();
         if mode.observes_only() {
-            let verdict =
-                evaluate_enforce_steps(headers, communities, verifier, deny_map, || match &proof {
-                    Ok(p) if p.signed => Ok(Nip98Proof::new(p.pubkey, ())),
-                    _ => Err(()),
-                });
-            crate::nip_fi_shadow::record("http", headers, communities, verdict.map(drop));
+            let signed = proof.as_ref().ok().filter(|p| p.signed).map(|p| p.pubkey);
+            observe_shadow_verdict(headers, communities, verifier, deny_map, signed);
         }
         let proof = proof?;
         return Ok(NipFiAdmission {
@@ -348,6 +344,37 @@ where
         assertion: Some(assertion),
         extra: proof.extra,
     })
+}
+
+/// Record the verdict enforce would reach for a request whose NIP-98 step
+/// proved `signed` (`None`: missing, rejected or unsigned).
+fn observe_shadow_verdict<D: HttpDenyMap>(
+    headers: &HeaderMap,
+    communities: &NipFiCommunities,
+    verifier: Option<&dyn VerifyAssertion>,
+    deny_map: &D,
+    signed: Option<PublicKey>,
+) {
+    let verdict = evaluate_enforce_steps(headers, communities, verifier, deny_map, || {
+        signed.map(|key| Nip98Proof::new(key, ())).ok_or(())
+    });
+    crate::nip_fi_shadow::record("http", headers, communities, verdict.map(drop));
+}
+
+/// Shadow only: record the enforce verdict for a request whose NIP-98 proof
+/// already failed, without any DB work. Off and enforce are untouched.
+pub(crate) fn observe_failed_proof(state: &crate::state::AppState, headers: &HeaderMap) {
+    let nip_fi = &state.config.nip_fi;
+    if nip_fi.mode.observes_only() {
+        let verifier = state.nip_fi_verifier.as_deref();
+        observe_shadow_verdict(
+            headers,
+            &nip_fi.communities,
+            verifier,
+            &NoDenyMapConfigured,
+            None,
+        );
+    }
 }
 
 /// Enforce admission steps 1–7 in normative order. A denial names the step
