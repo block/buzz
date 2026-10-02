@@ -1619,4 +1619,29 @@ mod tests {
             "{err}"
         );
     }
+
+    // Pins the lifetime refusal operators see in each evaluating mode.
+    #[test]
+    fn missing_lifetime_error_is_exact_in_enforce_and_shadow() {
+        let _guard = super::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let communities = serde_json::json!([community_entry(
+            "https://a.relay.test",
+            &["https://issuer.test", "https://issuer-b.test"]
+        )]);
+        enforce_with_communities(communities).expect("enforce fixture is valid");
+        std::env::remove_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS");
+        for mode in ["enforce", "shadow"] {
+            std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+            let err = NipFiRelayConfig::from_env().expect_err("lifetime is required");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid config: BUZZ_NIP_FI_MODE={mode} but \
+                     BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
+                     every enforce deployment must configure a positive finite value"
+                )
+            );
+        }
+    }
 }
