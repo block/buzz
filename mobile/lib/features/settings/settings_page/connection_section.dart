@@ -12,58 +12,58 @@ class _ConnectionSection extends ConsumerWidget {
     final nsec = config.nsec;
     final community = authState?.community;
 
+    if (nsec == null || nsec.isEmpty || community == null) {
+      return const SizedBox.shrink();
+    }
+
     return AppListCard(
-      label: 'Connection',
       verticalPadding: Grid.twelve,
       children: [
-        if (nsec != null && nsec.isNotEmpty && community != null) ...[
-          _IdentityRow(nsec: nsec),
-          AppListRow(
-            icon: LucideIcons.scanQrCode,
-            title: 'Send identity to desktop',
-            subtitle: 'Scan a recovery code shown by Buzz Desktop',
-            trailing: const _RowChevron(),
-            onTap: () async {
-              final pairing = ref.read(pairingProvider.notifier);
-              final authorized = await pairing.authorizeIdentityExport(
-                community: community,
-              );
-              if (!authorized) {
-                if (!context.mounted) return;
-                final message = ref.read(pairingProvider).errorMessage;
-                if (message != null) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text(message)));
+        AppListRow(
+          icon: LucideIcons.scanQrCode,
+          title: 'Send identity to desktop',
+          subtitle: 'Scan a recovery code shown by Buzz Desktop',
+          trailing: const _RowChevron(),
+          onTap: () async {
+            final pairing = ref.read(pairingProvider.notifier);
+            final authorized = await pairing.authorizeIdentityExport(
+              community: community,
+            );
+            if (!authorized) {
+              if (!context.mounted) return;
+              final message = ref.read(pairingProvider).errorMessage;
+              if (message != null) {
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text(message)));
+              }
+              return;
+            }
+
+            try {
+              if (!context.mounted) return;
+              final resumed = await _waitForResumedFrame();
+              if (!resumed) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Buzz did not return to the foreground. Try again.',
+                      ),
+                    ),
+                  );
                 }
                 return;
               }
-
-              try {
-                if (!context.mounted) return;
-                final resumed = await _waitForResumedFrame();
-                if (!resumed) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Buzz did not return to the foreground. Try again.',
-                        ),
-                      ),
-                    );
-                  }
-                  return;
-                }
-                if (!context.mounted) return;
-                await Navigator.of(context).push(
-                  MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
-                );
-              } finally {
-                pairing.reset();
-              }
-            },
-          ),
-        ],
+              if (!context.mounted) return;
+              await Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
+              );
+            } finally {
+              pairing.reset();
+            }
+          },
+        ),
       ],
     );
   }
@@ -112,7 +112,7 @@ class _IdentityRow extends StatelessWidget {
       value: npub ?? 'Identity unavailable',
       child: AppListRow(
         icon: LucideIcons.key,
-        title: 'Identity (pubkey)',
+        title: 'Copy public key',
         trailing: Icon(
           LucideIcons.copy,
           size: 18,

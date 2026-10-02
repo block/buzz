@@ -3,13 +3,11 @@ part of '../settings_page.dart';
 class _ProfileSection extends StatelessWidget {
   const _ProfileSection({
     required this.profileEditPageBuilder,
-    this.onSetStatus,
     this.onEditDisplayName,
     this.onEditProfileDescription,
   });
 
   final WidgetBuilder profileEditPageBuilder;
-  final void Function(BuildContext context)? onSetStatus;
   final Future<void> Function(BuildContext context)? onEditDisplayName;
   final Future<void> Function(BuildContext context)? onEditProfileDescription;
 
@@ -20,15 +18,6 @@ class _ProfileSection extends StatelessWidget {
     dividerIndent: Grid.xs,
     verticalPadding: Grid.twelve,
     children: [
-      AppListRow(
-        key: const ValueKey('edit-profile-status'),
-        title: 'Set status',
-        trailing: const _RowChevron(),
-        onTap: () {
-          unawaited(HapticFeedback.selectionClick());
-          onSetStatus?.call(context);
-        },
-      ),
       AppListRow(
         key: const ValueKey('edit-profile-display-name'),
         title: 'Display name',

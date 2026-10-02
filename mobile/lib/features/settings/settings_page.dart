@@ -25,6 +25,7 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/immediate_page_route.dart';
 
 part 'settings_page/profile_section.dart';
+part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
 part 'settings_page/notifications_section.dart';
 
@@ -109,9 +110,9 @@ class SettingsPage extends HookConsumerWidget {
               padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
               children: [
                 profileHeader,
+                _StatusSection(onSetStatus: onSetStatus),
                 _ProfileSection(
                   profileEditPageBuilder: profileEditPageBuilder,
-                  onSetStatus: onSetStatus,
                   onEditDisplayName: onEditDisplayName,
                   onEditProfileDescription: onEditProfileDescription,
                 ),

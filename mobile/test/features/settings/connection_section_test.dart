@@ -5,6 +5,7 @@ import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -46,7 +47,7 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.ensureVisible(find.text('Identity (pubkey)'));
+    await tester.ensureVisible(find.text('Copy public key'));
     await tester.pumpAndSettle();
 
     final expectedPubkey = nostr.Keys(
@@ -56,6 +57,28 @@ void main() {
     // identity row, hardcoded so the codec itself stays under test.
     const expectedNpub =
         'npub1fu64hh9hes90w2808n8tjc2ajp5yhddjef0ctx4s7zmsgp6cwx4qgy4eg9';
+    final statusCard = find.byKey(const ValueKey('status-identity-options'));
+    expect(
+      find.descendant(of: statusCard, matching: find.text('Set status')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: statusCard, matching: find.text('Copy public key')),
+      findsOneWidget,
+    );
+    expect(
+      tester.getTopLeft(find.text('Copy public key')).dy,
+      lessThan(tester.getTopLeft(find.text('Edit profile')).dy),
+    );
+    expect(find.text('Connection'), findsNothing);
+    final sendCard = find.ancestor(
+      of: find.text('Send identity to desktop'),
+      matching: find.byType(AppListCard),
+    );
+    expect(
+      find.descendant(of: sendCard, matching: find.text('Copy public key')),
+      findsNothing,
+    );
     expect(find.text('Connected to'), findsNothing);
     expect(find.text('https://relay.test'), findsNothing);
     // Neither the raw hex key nor the full npub is rendered visually — the
@@ -65,7 +88,7 @@ void main() {
     // The identity row's a11y value carries the full npub (not raw hex).
     expect(
       find.ancestor(
-        of: find.text('Identity (pubkey)'),
+        of: find.text('Copy public key'),
         matching: find.byWidgetPredicate(
           (widget) =>
               widget is Semantics && widget.properties.value == expectedNpub,
@@ -77,7 +100,7 @@ void main() {
     final chevron = tester.getRect(find.byIcon(LucideIcons.chevronRight).first);
     expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
 
-    await tester.tap(find.text('Identity (pubkey)'));
+    await tester.tap(find.text('Copy public key'));
     await tester.pump();
     expect(clipboardCall?.method, 'Clipboard.setData');
     expect(clipboardCall?.arguments, {'text': expectedNpub});

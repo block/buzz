@@ -289,7 +289,7 @@ void main() {
 
   for (final brightness in Brightness.values) {
     testWidgets(
-      'shows profile editing as the first settings section and routes photo directly in ${brightness.name}',
+      'shows status above profile editing and routes photo directly in ${brightness.name}',
       (tester) async {
         if (Platform.environment.containsKey('PROFILE_SCREENSHOTS')) {
           await tester.runAsync(() async {
@@ -356,8 +356,8 @@ void main() {
         );
         expect(find.byType(BottomSheet), findsNothing);
         expect(
-          tester.widget<AppListCard>(find.byType(AppListCard).first).label,
-          'Edit profile',
+          tester.widget<AppListCard>(find.byType(AppListCard).first).key,
+          const ValueKey('status-identity-options'),
         );
         if (Platform.environment['PROFILE_SCREENSHOTS'] case final directory?) {
           final boundary = tester
