@@ -351,9 +351,14 @@ pub(crate) mod tests {
     }
 
     /// A shadow test state whose deny map lists `denied` under the
-    /// `for_test` issuer.
+    /// `for_test` issuer. Its database is unreachable with a 100 ms acquire
+    /// timeout, so a path that reaches Postgres fails fast whether or not
+    /// one runs locally.
     pub(crate) async fn shadow_state(denied: Option<PublicKey>) -> AppState {
-        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut state =
+            (*crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none")
+                .await)
+                .clone();
         let capacity = vec![IssuerCapacity {
             issuer: "test-issuer".to_owned(),
             capacity: 8,
