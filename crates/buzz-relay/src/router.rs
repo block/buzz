@@ -2858,6 +2858,55 @@ mod tests {
             }
         }
 
+        // Pins Off parity on a seeded Host for the remaining NIP-FI routes:
+        // a signed NIP-98 proof and an attached assertion leave Off's exact
+        // response and exactly one shadow verdict.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_seeded_host_remaining_routes_match_off() {
+            let keys = nostr::Keys::generate();
+            let sha = "a".repeat(64);
+            let branch = format!("/git/{sha}/r/default-branch");
+            let filter = br#"{"kinds":[1],"limit":1}"#.to_vec();
+            let rows = [
+                ("POST", "/query".to_owned(), filter.clone()),
+                ("POST", "/count".to_owned(), filter),
+                ("GET", "/moderation/reports".to_owned(), Vec::new()),
+                ("HEAD", format!("/media/{sha}"), Vec::new()),
+                ("GET", format!("/media/{sha}"), Vec::new()),
+                ("GET", branch.clone(), Vec::new()),
+                ("POST", branch, br#"{"branch":"main"}"#.to_vec()),
+                (
+                    "POST",
+                    "/gifs/search".to_owned(),
+                    br#"{"q":"cat"}"#.to_vec(),
+                ),
+                ("POST", "/gifs/share".to_owned(), br#"{"id":"x"}"#.to_vec()),
+                ("POST", "/api/invites".to_owned(), b"{}".to_vec()),
+                (
+                    "GET",
+                    format!("/workflows/{}/runs", uuid::Uuid::nil()),
+                    Vec::new(),
+                ),
+            ];
+            for (method, path, body) in rows {
+                let (host, _, [off, shadow]) = seeded_pair(keys.public_key()).await;
+                let url = format!("https://{host}{path}");
+                shadow_matches_off_with_one_record(off, shadow, || {
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header("host", &host)
+                        .header("content-type", "application/json")
+                        .header("authorization", nip98(&keys, &url, method))
+                        .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
+                        .body(axum::body::Body::from(body.clone()))
+                        .unwrap()
+                })
+                .await;
+            }
+        }
+
         async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
