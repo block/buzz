@@ -56,11 +56,13 @@ type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 export type PersonaModelOption = {
   id: string;
   label: string;
+  description?: string;
 };
 
 export type PersonaDropdownOption = {
   disabled?: boolean;
   label: string;
+  description?: string;
   value: string;
 };
 

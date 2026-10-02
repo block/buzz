@@ -439,3 +439,33 @@ test("discoveredRow_defaultCatalogSuffixedName_winsOverRegistry", () => {
     { id: "databricks-gpt-5-5", label: "GPT-5.5 (default catalog)" },
   ]);
 });
+
+test("Claude Code options keep the adapter's name and description, and label the default row by name", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "opus[1m]",
+      models: [
+        {
+          id: "opus[1m]",
+          name: "Opus",
+          description:
+            "Opus with 1M context · Best for everyday, complex tasks",
+        },
+        { id: "haiku", name: "Haiku", description: "Haiku 4.5 · Fastest" },
+        { id: "claude-sonnet-4-6", name: "Sonnet 4.6", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options, [
+    { id: "", label: "Default model (Opus)" },
+    {
+      id: "opus[1m]",
+      label: "Opus",
+      description: "Opus with 1M context · Best for everyday, complex tasks",
+    },
+    { id: "haiku", label: "Haiku", description: "Haiku 4.5 · Fastest" },
+    { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  ]);
+});

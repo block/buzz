@@ -68,7 +68,13 @@ export function getDiscoveredPersonaModelOptions(
               provider === "relay-mesh"
                 ? "Default (auto)"
                 : agentDefaultModel
-                  ? `Default model (${resolveModelLabel(agentDefaultModel, null, provider)})`
+                  ? `Default model (${resolveModelLabel(
+                      agentDefaultModel,
+                      response.models.find(
+                        (model) => model.id === agentDefaultModel,
+                      )?.name ?? null,
+                      provider,
+                    )})`
                   : "Default model",
           },
         ];
@@ -83,6 +89,7 @@ export function getDiscoveredPersonaModelOptions(
       explicitModels.map((model) => ({
         id: model.id,
         label: resolveModelLabel(model.id, model.name, provider),
+        ...(model.description ? { description: model.description } : {}),
       })),
       provider,
     ),
