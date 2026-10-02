@@ -9933,6 +9933,53 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
+    testWidgets('native channel header preserves members settings and Huddle', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(_buildTestable(messages: const []));
+      await tester.pumpAndSettle();
+      final view = tester.widget<UiKitView>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is UiKitView &&
+              widget.viewType == 'buzz/ios_navigation_bar',
+        ),
+      );
+      final payload = view.creationParams! as Map<String, Object?>;
+      expect(payload['title'], 'general');
+      expect(payload['subtitle'], '0 members');
+      expect(payload['titleEnabled'], isTrue);
+      final actions = payload['actions']! as List;
+      expect(actions, hasLength(1));
+      expect(actions.single, containsPair('label', 'Start Huddle'));
+      expect(actions.single, containsPair('enabled', true));
+      const channel = MethodChannel('buzz/ios_navigation_bar/97');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      view.onPlatformViewCreated!(97);
+      await tester.pump();
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        channel.name,
+        channel.codec.encodeMethodCall(const MethodCall('action', 'title')),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets(
       'keeps the native iOS glass header aligned at large text sizes',
       (tester) async {

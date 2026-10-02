@@ -128,6 +128,37 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     bar.prefersLargeTitles = largeTitle
     let item = content.navigationItem
     item.title = args["title"] as? String
+    if let subtitle = args["subtitle"] as? String {
+      var configuration = UIButton.Configuration.plain()
+      configuration.title = item.title
+      configuration.subtitle = subtitle
+      configuration.titleAlignment = .center
+      configuration.titleLineBreakMode = .byTruncatingTail
+      configuration.subtitleLineBreakMode = .byTruncatingTail
+      configuration.contentInsets = .zero
+      configuration.baseForegroundColor = color
+      configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+        var attributes = incoming
+        attributes.font = UIFont.preferredFont(forTextStyle: .headline)
+        return attributes
+      }
+      configuration.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+        var attributes = incoming
+        attributes.font = UIFont.preferredFont(forTextStyle: .caption1)
+        attributes.foregroundColor = UIColor.secondaryLabel
+        return attributes
+      }
+      let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
+        self?.channel.invokeMethod("action", arguments: "title")
+      })
+      button.accessibilityIdentifier = "channel-navigation-title"
+      button.accessibilityLabel = "Open settings for \(item.title ?? ""), \(subtitle)"
+      button.isUserInteractionEnabled = args["titleEnabled"] as? Bool == true
+      button.sizeToFit()
+      item.titleView = button
+    } else {
+      item.titleView = nil
+    }
     item.largeTitleDisplayMode = bar.prefersLargeTitles ? .always : .never
     if let leading = args["leading"] as? [String: Any] {
       item.leftBarButtonItems = [makeItem(leading)]

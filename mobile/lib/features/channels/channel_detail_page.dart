@@ -572,6 +572,31 @@ class ChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, readTimestamp]);
 
+    final nativeMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
+    final nativeMemberCount =
+        nativeMembers.value?.length ?? resolvedChannel.memberCount;
+    final nativeMemberLabel =
+        '$nativeMemberCount ${nativeMemberCount == 1 ? 'member' : 'members'}';
+    Future<void> openChannelDetails() async {
+      final shouldClose = await showChannelDetailsPage(
+        context: context,
+        channel: resolvedChannel,
+        currentPubkey: currentPubkey,
+        onMemberTap: (context, pubkey) => showUserProfileSheet(
+          context,
+          pubkey,
+          names: channelIdentityNamesProvider(resolvedChannel.id),
+        ),
+        sectionId: ref
+            .read(channelSectionsProvider)
+            .store
+            .assignments[resolvedChannel.id],
+      );
+      if (shouldClose == true && context.mounted) {
+        Navigator.of(context).pop();
+      }
+    }
+
     return FrostedScaffold(
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
@@ -580,8 +605,15 @@ class ChannelDetailPage extends HookConsumerWidget {
           resolvedChannel,
           currentPubkey: currentPubkey,
         ),
+        nativeSubtitle: resolvedChannel.isDm ? null : nativeMemberLabel,
+        onNativeTitlePressed: resolvedChannel.isDm ? null : openChannelDetails,
         nativeActions: [
-          if (_showsMembersAction(resolvedChannel))
+          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+            _huddleNavigationAction(context, ref, resolvedChannel, [
+              ...messagesState.value ?? const [],
+              ...huddleLifecycle,
+            ]),
+          if (resolvedChannel.isDm && _showsMembersAction(resolvedChannel))
             IosNavigationAction(
               label: 'View members',
               symbol: 'person.2',
@@ -596,24 +628,25 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ),
               ),
             ),
-          IosNavigationAction(
-            label: 'Channel actions',
-            symbol: 'ellipsis',
-            onPressed: () async {
-              final shouldClose = await showChannelActionsSheet(
-                context: context,
-                channel: resolvedChannel,
-                isUnread: false,
-                sectionId: ref
-                    .read(channelSectionsProvider)
-                    .store
-                    .assignments[resolvedChannel.id],
-              );
-              if (shouldClose == true && context.mounted) {
-                Navigator.of(context).pop();
-              }
-            },
-          ),
+          if (resolvedChannel.isDm)
+            IosNavigationAction(
+              label: 'Channel actions',
+              symbol: 'ellipsis',
+              onPressed: () async {
+                final shouldClose = await showChannelActionsSheet(
+                  context: context,
+                  channel: resolvedChannel,
+                  isUnread: false,
+                  sectionId: ref
+                      .read(channelSectionsProvider)
+                      .store
+                      .assignments[resolvedChannel.id],
+                );
+                if (shouldClose == true && context.mounted) {
+                  Navigator.of(context).pop();
+                }
+              },
+            ),
         ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
@@ -631,25 +664,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 )
               : _ChannelAppBarTitle(
                   channel: resolvedChannel,
-                  onTap: () async {
-                    final shouldClose = await showChannelDetailsPage(
-                      context: context,
-                      channel: resolvedChannel,
-                      currentPubkey: currentPubkey,
-                      onMemberTap: (context, pubkey) => showUserProfileSheet(
-                        context,
-                        pubkey,
-                        names: channelIdentityNamesProvider(resolvedChannel.id),
-                      ),
-                      sectionId: ref
-                          .read(channelSectionsProvider)
-                          .store
-                          .assignments[resolvedChannel.id],
-                    );
-                    if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
-                    }
-                  },
+                  onTap: openChannelDetails,
                 ),
         ),
         actions: resolvedChannel.isDm

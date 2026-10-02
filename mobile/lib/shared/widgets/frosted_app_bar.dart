@@ -159,6 +159,10 @@ class FrostedAppBar extends StatelessWidget {
   /// Explicit UIKit title for headers whose Flutter title is a custom widget.
   final String? nativeTitle;
 
+  /// Optional second line and action for a native channel title.
+  final String? nativeSubtitle;
+  final VoidCallback? onNativeTitlePressed;
+
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
 
@@ -171,6 +175,8 @@ class FrostedAppBar extends StatelessWidget {
   const FrostedAppBar({
     super.key,
     this.nativeTitle,
+    this.nativeSubtitle,
+    this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
     this.nativeLeading,
     this.nativeActions,
@@ -224,6 +230,8 @@ class FrostedAppBar extends StatelessWidget {
                   title:
                       nativeTitle ??
                       (title is Text ? (title as Text).data ?? '' : ''),
+                  subtitle: nativeSubtitle,
+                  onTitlePressed: onNativeTitlePressed,
                   largeTitle: nativeLargeTitle,
                   foregroundColor: iconColor,
                   leading: nativeLeading ?? _nativeAction(leading),

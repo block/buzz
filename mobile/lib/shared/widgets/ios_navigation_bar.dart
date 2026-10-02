@@ -84,6 +84,8 @@ class IosNavigationBar extends HookConsumerWidget {
   const IosNavigationBar({
     super.key,
     required this.title,
+    this.subtitle,
+    this.onTitlePressed,
     this.largeTitle = false,
     this.leading,
     this.actions = const [],
@@ -94,6 +96,8 @@ class IosNavigationBar extends HookConsumerWidget {
   static const viewType = 'buzz/ios_navigation_bar';
 
   final String title;
+  final String? subtitle;
+  final VoidCallback? onTitlePressed;
   final bool largeTitle;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
@@ -165,6 +169,8 @@ class IosNavigationBar extends HookConsumerWidget {
 
     final payload = <String, Object?>{
       'title': title,
+      'subtitle': subtitle,
+      'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
@@ -193,7 +199,9 @@ class IosNavigationBar extends HookConsumerWidget {
         if (call.method != 'action') return;
         final id = call.arguments as String;
         final config = latest.value;
-        if (id == 'back') {
+        if (id == 'title') {
+          config.onTitlePressed?.call();
+        } else if (id == 'back') {
           config.onBack?.call();
         } else {
           final path = id.split('.');
