@@ -23,9 +23,8 @@ pub enum NipFiMode {
     /// enforce-mode deployment was misconfigured and must fail closed while
     /// the operator repairs configuration. [FI-INV-14]
     DenyProtected,
-    /// Observation: the relay loads and validates the full enforce
-    /// configuration and evaluates evidence exactly as `Enforce` would, but
-    /// only records the would-be outcome; admission is identical to `Off`.
+    /// Evaluates evidence as `Enforce` would but only records the verdict;
+    /// admission is identical to `Off`.
     Shadow,
 }
 
@@ -35,14 +34,12 @@ impl NipFiMode {
         matches!(self, Self::Off)
     }
 
-    /// Admission may deny a request on NIP-FI grounds (`Enforce`,
-    /// `DenyProtected`). Every other mode admits exactly as `Off`.
+    /// Admission may deny on NIP-FI grounds; other modes admit as `Off`.
     pub const fn restricts(self) -> bool {
         matches!(self, Self::Enforce | Self::DenyProtected)
     }
 
-    /// The full enforce configuration is loaded and evidence is evaluated
-    /// (`Enforce`, `Shadow`).
+    /// The full enforce configuration is loaded and evidence is evaluated.
     pub const fn evaluates(self) -> bool {
         matches!(self, Self::Enforce | Self::Shadow)
     }

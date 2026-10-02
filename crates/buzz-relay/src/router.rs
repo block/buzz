@@ -177,8 +177,7 @@ async fn nip_fi_assertion_guard(
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    // Off and Shadow: fully transparent. [FI-INV-15] Shadow records its
-    // verdict at handler admission and the WebSocket upgrade, not here.
+    // Off and Shadow: fully transparent. [FI-INV-15]
     if !state.config.nip_fi.mode.restricts() {
         return next.run(request).await;
     }

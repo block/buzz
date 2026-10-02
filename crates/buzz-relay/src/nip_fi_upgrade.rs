@@ -51,9 +51,7 @@ pub(crate) fn check_nip_fi_at_upgrade(
     mode: NipFiMode,
 ) -> NipFiUpgradeOutcome {
     if !mode.restricts() {
-        // Shadow: evaluate as enforce would and record it, but admit exactly
-        // as Off. The assertion is dropped here, so no connection ever holds
-        // one in shadow mode.
+        // Shadow records the verdict and drops the assertion: no connection holds one.
         if mode.observes_only() {
             let verdict = resolve_community(headers, communities)
                 .map_err(|class| ("community", class))

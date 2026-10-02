@@ -503,8 +503,7 @@ fn parse_mode() -> Result<NipFiMode, ConfigError> {
     }
 }
 
-/// A missing-setting startup error naming the configured mode, e.g.
-/// `BUZZ_NIP_FI_MODE=enforce but BUZZ_NIP_FI_ISSUERS is not set; …`.
+/// A missing-setting startup error naming the configured mode.
 fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
     let value = match mode {
         NipFiMode::Enforce => "enforce",

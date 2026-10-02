@@ -207,11 +207,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
         let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        // A failed policy lookup is 503 (the canonical NIP-FI body outside
-        // Off mode); only a real refusal is 403.
-        let unavailable = |legacy: Response| match mode {
-            buzz_auth::NipFiMode::Off => legacy,
-            _ => crate::nip_fi_http::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable),
+        // A failed policy lookup is 503 (the canonical NIP-FI body when the
+        // mode restricts); only a real refusal is 403.
+        let unavailable = |legacy: Response| {
+            if mode.restricts() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+            } else {
+                legacy
+            }
         };
         match crate::api::relay_members::check_relay_membership(
             state,
@@ -4139,6 +4142,7 @@ mod off_mode_precedence_tests {
                 fn verify_assertion(
                     &self,
                     _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
                 ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
                 {
                     Ok(buzz_auth::VerifiedAssertion::new_for_test(self.0))

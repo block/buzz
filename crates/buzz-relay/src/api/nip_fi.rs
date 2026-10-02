@@ -136,8 +136,7 @@ pub async fn disconnect(
             let pubkey_bytes = cmd.target_pubkey.to_bytes();
             // Issuer-scoped: the deny entry is keyed by (caller_iss, k), so only
             // sessions admitted under caller_iss are closed. [FI-TRACE-DENY-SET]
-            // Shadow keeps the deny entry (so admission records would-denies)
-            // but closes nothing; the response is unchanged.
+            // Shadow keeps the deny entry but closes nothing.
             let closed = if !state.config.nip_fi.mode.observes_only() {
                 state
                     .conn_manager
@@ -323,8 +322,7 @@ pub fn apply_nip_fi_disconnect(
     use buzz_auth::CrossPodMergeResult;
     let merge_result = deny_map.merge_cross_pod_deny(&message.issuer, &pubkey, until, now);
 
-    // Close sessions for all merge outcomes except UnknownIssuer — never in
-    // shadow mode, where the merged entry only feeds would-deny records.
+    // Close sessions for all merge outcomes except UnknownIssuer, never in shadow.
     let close_sessions = |reason: &str| {
         if state.config.nip_fi.mode.observes_only() {
             return;

@@ -475,6 +475,29 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 
 #[cfg(test)]
 mod tests {
+    // Clients attach evidence only when the relay advertises NIP-FI, so a
+    // shadow relay must serve enforce's exact document. Mutation: gating on
+    // `enforces()` makes shadow serve Off's document → RED.
+    #[tokio::test]
+    async fn shadow_serves_the_same_nip11_document_as_enforce() {
+        use buzz_auth::NipFiMode;
+        let base =
+            crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+        let mut docs = Vec::new();
+        for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
+            let mut state = (*base).clone();
+            let mut config = (*state.config).clone();
+            config.nip_fi.mode = mode;
+            state.config = std::sync::Arc::new(config);
+            docs.push(
+                serde_json::to_string(&super::nip11_document(&state, "relay.example").await)
+                    .unwrap(),
+            );
+        }
+        assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
+        assert_eq!(docs[2], docs[1]);
+    }
+
     use super::*;
 
     #[test]

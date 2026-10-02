@@ -293,11 +293,8 @@ where
         return Err(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
-    // Off and Shadow: NIP-FI not required.  Run the NIP-98 closure and
-    // propagate its result unchanged (legacy behavior) — no community
-    // resolution and no cardinality gate.  [FI-INV-15 exemption]
-    // Shadow additionally replays the enforce steps on the same proof and
-    // records the verdict; it never changes this result.
+    // Off and Shadow: the NIP-98 result passes through unchanged (legacy
+    // behavior); shadow only records the enforce verdict.  [FI-INV-15 exemption]
     if !mode.restricts() {
         let proof = extract_nip98();
         if mode.observes_only() {
@@ -320,38 +317,31 @@ where
         });
     }
 
-    let (
-        Nip98Proof {
-            pubkey: proven_pubkey,
-            extra,
-        },
-        assertion,
-    ) = evaluate_enforce_steps(headers, communities, verifier, deny_map, extract_nip98).map_err(
-        |(stage, class)| {
-            let reason = match stage {
-                "pairing" => Some("nip_fi_http_key_mismatch"),
-                "deny_set" => Some("nip_fi_http_denied_pubkey"),
-                _ => None,
-            };
-            if let Some(reason) = reason {
-                metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
-            }
-            http_denial(class)
-        },
-    )?;
+    let (proof, assertion) =
+        evaluate_enforce_steps(headers, communities, verifier, deny_map, extract_nip98).map_err(
+            |(stage, class)| {
+                let reason = match stage {
+                    "pairing" => Some("nip_fi_http_key_mismatch"),
+                    "deny_set" => Some("nip_fi_http_denied_pubkey"),
+                    _ => None,
+                };
+                if let Some(reason) = reason {
+                    metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
+                }
+                http_denial(class)
+            },
+        )?;
 
     // Step 8: admit.
     Ok(NipFiAdmission {
-        proven_pubkey,
+        proven_pubkey: proof.pubkey,
         assertion: Some(assertion),
-        extra,
+        extra: proof.extra,
     })
 }
 
-/// Enforce admission steps 1–7 for one request, in their normative order.
-/// On denial, returns the step that denied (a `buzz_nip_fi_shadow_total`
-/// `stage` label) and its class. Pure apart from running `extract_nip98`
-/// after the community and cardinality steps.
+/// Enforce admission steps 1–7 in normative order. A denial names the step
+/// (the shadow `stage` label) and its class.
 fn evaluate_enforce_steps<D, X, E, F>(
     headers: &HeaderMap,
     communities: &NipFiCommunities,
@@ -381,9 +371,7 @@ where
         return Err(("cardinality", DenialClass::EvidenceRejected));
     }
 
-    // Step 3: NIP-98.  A closure failure MUST produce a NIP-FI DenialClass,
-    // not a legacy JSON error: absent header → MissingEvidence (401);
-    // present-but-invalid → EvidenceRejected (403).
+    // Step 3: NIP-98.  Failure is a NIP-FI DenialClass, not a legacy error.
     // [NIP-FI.md §Admission procedure step 3; FI-TRACE-DENIAL-ORACLE]
     let proof = extract_nip98().map_err(|_legacy| {
         let class = if headers.contains_key("authorization") {
