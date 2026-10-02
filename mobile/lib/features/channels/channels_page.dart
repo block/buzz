@@ -337,7 +337,7 @@ class ChannelsPage extends HookConsumerWidget {
           : context.colors.surface,
       backgroundGradient: topSectionGradient,
       appBar: FrostedAppBar(
-        nativeTitle: 'Home',
+        nativeTitle: communityName.isEmpty ? 'Community' : communityName,
         nativeLargeTitle: true,
         nativeLeading: IosNavigationAction(
           label: 'Switch community',
