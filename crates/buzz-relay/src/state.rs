@@ -116,20 +116,14 @@ impl CommunityConnectionControl {
         }
     }
 
-    /// Carries the socket's shadow session to its AUTH handler, retiring it
-    /// when the socket is cancelled however long its references outlive it.
+    /// Carries the socket's shadow session to its AUTH handler, fenced by
+    /// the socket's cancellation so it records nothing once cancelled.
     pub(crate) fn attach_nip_fi_shadow(
         &self,
         session: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
     ) {
         if let Some(session) = session {
-            let (cancel, weak) = (self.cancel.clone(), Arc::downgrade(&session));
-            tokio::spawn(async move {
-                cancel.cancelled().await;
-                if let Some(session) = weak.upgrade() {
-                    session.retire();
-                }
-            });
+            session.fence(self.cancel.clone());
             let _ = self.nip_fi_shadow.set(session);
         }
     }

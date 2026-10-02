@@ -1,27 +1,37 @@
 //! Shadow-mode observation of a NIP-FI WebSocket session whose upgrade passed.
 //! The assertion lives only here: never on the connection, the issuer-scoped
 //! identity registries, the admission gate, a terminal frame or cancellation.
-//! A session records at most one admission verdict: at the AUTH enforce would
-//! admit or deny, or `deadline` when enforce's deadline passes first. An
+//! A session records at most one admission verdict: a pairing or deny-set
+//! would-deny where enforce checks them, the admit once the connection is
+//! actually admitted, or `deadline` when enforce's deadline passes first. An
 //! admitted session then records at most one end: `expired` at the deadline,
-//! or `revoked` when a deny for its key arrives once it registered. An AUTH
-//! that ends unadmitted for a non-NIP-FI reason, or the socket's cancellation,
-//! retires the session without a record.
+//! or `revoked` when a deny for its key arrives once it registered. Every
+//! transition runs under one session lock, and a session whose socket was
+//! cancelled, or whose AUTH ended unadmitted for a non-NIP-FI reason, retires
+//! without a record.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use axum::http::HeaderMap;
 use buzz_auth::{DenialClass, VerifiedAssertion};
 use nostr::PublicKey;
+use tokio_util::sync::CancellationToken;
 
 use crate::nip_fi_shadow::{Stage, WouldDeny};
 use crate::state::AppState;
 
-const PENDING: u8 = 0;
-const ADMITTED: u8 = 1;
-const ENDED: u8 = 2;
+#[derive(Clone, Copy)]
+enum Phase {
+    /// `revoked`: a deny for the key arrived after registration, which
+    /// enforce's registered-session scan acts on whatever the phase.
+    Pending {
+        revoked: bool,
+    },
+    Admitted,
+    Ended,
+}
 
 /// Sessions that reached the deny-set check, matched by a shadow disconnect.
 /// Separate from every registry enforce's close scan reads.
@@ -39,8 +49,9 @@ impl ShadowSessions {
     }
 
     /// Records one `revoked` end for each registered session of `pubkey`
-    /// under `issuer`, once it is admitted; a session already ended records
-    /// nothing, so re-sent denies are idempotent.
+    /// under `issuer`, at once if admitted or at its admit if still pending;
+    /// a session already ended records nothing, so re-sent denies are
+    /// idempotent.
     pub(crate) fn would_close(&self, issuer: &str, pubkey: &[u8]) {
         let live: Vec<_> = self
             .registered()
@@ -52,8 +63,7 @@ impl ShadowSessions {
             if session.assertion.identity().issuer() == issuer
                 && key.as_ref().map(|k| &k[..]) == Some(pubkey)
             {
-                session.revoked.store(true, Ordering::SeqCst);
-                session.end("revoked");
+                session.revoke();
             }
         }
     }
@@ -64,8 +74,9 @@ pub(crate) struct ShadowSession {
     route: &'static str,
     community: String,
     assertion: VerifiedAssertion,
-    phase: AtomicU8,
-    revoked: AtomicBool,
+    phase: Mutex<Phase>,
+    /// The socket's cancellation, read only to stop recording.
+    cancel: OnceLock<CancellationToken>,
     sessions: Arc<ShadowSessions>,
     expiry: OnceLock<tokio::task::AbortHandle>,
 }
@@ -92,8 +103,8 @@ impl ShadowSession {
             route,
             community: crate::nip_fi_shadow::community_label(headers, &nip_fi.communities),
             assertion,
-            phase: AtomicU8::new(PENDING),
-            revoked: AtomicBool::new(false),
+            phase: Mutex::new(Phase::Pending { revoked: false }),
+            cancel: OnceLock::new(),
             sessions,
             expiry: OnceLock::new(),
         });
@@ -102,12 +113,16 @@ impl ShadowSession {
             let remaining = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
             tokio::time::sleep(remaining).await;
             if let Some(session) = weak.upgrade() {
-                session.decide(Err((Stage::Deadline, DenialClass::EvidenceRejected)));
-                session.end("expired");
+                session.expire();
             }
         });
         let _ = session.expiry.set(timer.abort_handle());
         session
+    }
+
+    /// Stops recording once `cancel` fires, checked inside every transition.
+    pub(crate) fn fence(&self, cancel: CancellationToken) {
+        let _ = self.cancel.set(cancel);
     }
 
     /// At enforce's key-pairing point: records the would-deny when the
@@ -119,76 +134,113 @@ impl ShadowSession {
     }
 
     /// At enforce's post-registration deny-set check: registers the session,
-    /// then records the deny-set would-deny or the admit.
-    pub(crate) fn observe_admission(self: &Arc<Self>, state: &AppState) {
-        if self.phase.load(Ordering::SeqCst) != PENDING {
-            return;
+    /// so a later deny marks it, then records the deny-set would-deny.
+    pub(crate) fn observe_deny_set(self: &Arc<Self>, state: &AppState) {
+        self.sessions
+            .registered()
+            .insert(self.id, Arc::downgrade(self));
+        if deny_listed(state, &self.assertion) {
+            self.decide(Err((Stage::DenySet, DenialClass::AuthorizationDenied)));
         }
-        self.register();
-        self.admit(deny_listed(state, &self.assertion));
     }
 
-    fn register(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        self.sessions.registered().insert(self.id, weak);
+    /// Where the connection is actually admitted: records the admit, then
+    /// `revoked` if a deny marked the session since its deny-set check.
+    pub(crate) fn admit(&self) {
+        self.decide(Ok(()));
     }
 
-    /// A deny landing after registration either is in the map read for
-    /// `denied`, or marked this session, whose admit then ends `revoked`, as
-    /// enforce's registered-session scan closes it whatever its phase.
-    fn admit(&self, denied: bool) {
-        self.decide(if denied {
-            Err((Stage::DenySet, DenialClass::AuthorizationDenied))
-        } else {
-            Ok(())
+    /// Enforce's deadline: the admission verdict while pending, else the end.
+    /// A pending session a deny already marked records nothing, as enforce's
+    /// scan closed it first.
+    pub(crate) fn expire(&self) {
+        self.transition(|phase| match *phase {
+            Phase::Pending { revoked: false } => {
+                *phase = Phase::Ended;
+                let verdict = Err((Stage::Deadline, DenialClass::EvidenceRejected));
+                crate::nip_fi_shadow::record_for(self.route, self.community.clone(), verdict);
+            }
+            Phase::Admitted => self.end(phase, "expired"),
+            _ => {}
         });
-        if self.revoked.load(Ordering::SeqCst) {
-            self.end("revoked");
-        }
+    }
+
+    fn revoke(&self) {
+        self.transition(|phase| match phase {
+            Phase::Pending { revoked } => *revoked = true,
+            Phase::Admitted => self.end(phase, "revoked"),
+            Phase::Ended => {}
+        });
     }
 
     fn decide(&self, verdict: Result<(), WouldDeny>) {
-        let next = if verdict.is_ok() { ADMITTED } else { ENDED };
-        if self.advance(PENDING, next) {
+        self.transition(|phase| {
+            let Phase::Pending { revoked } = *phase else {
+                return;
+            };
+            let admitted = verdict.is_ok();
             crate::nip_fi_shadow::record_for(self.route, self.community.clone(), verdict);
-        }
-    }
-
-    /// Stops the session in any phase, without a record.
-    pub(crate) fn retire(&self) {
-        self.phase.store(ENDED, Ordering::SeqCst);
+            *phase = if admitted {
+                Phase::Admitted
+            } else {
+                Phase::Ended
+            };
+            if admitted && revoked {
+                self.end(phase, "revoked");
+            }
+        });
     }
 
     /// Ends an admitted session.
-    fn end(&self, reason: &'static str) {
-        if self.advance(ADMITTED, ENDED) {
-            metrics::counter!(
-                "buzz_nip_fi_shadow_session_end_total",
-                "route" => self.route,
-                "reason" => reason,
-                "community" => self.community.clone()
-            )
-            .increment(1);
-        }
+    fn end(&self, phase: &mut Phase, reason: &'static str) {
+        *phase = Phase::Ended;
+        metrics::counter!(
+            "buzz_nip_fi_shadow_session_end_total",
+            "route" => self.route,
+            "reason" => reason,
+            "community" => self.community.clone()
+        )
+        .increment(1);
     }
 
-    fn advance(&self, from: u8, to: u8) -> bool {
-        self.phase
-            .compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+    /// Runs one transition under the session lock, after retiring a session
+    /// whose socket is already cancelled.
+    fn transition(&self, step: impl FnOnce(&mut Phase)) {
+        let mut phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
+        if self
+            .cancel
+            .get()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            *phase = Phase::Ended;
+        }
+        step(&mut phase);
     }
 }
 
-/// One root AUTH attempt: dropped without a verdict, the AUTH ended for a
-/// non-NIP-FI reason (NIP-42 failure, ordinary policy refusal), so a pending
-/// session retires without a record.
+/// One AUTH attempt, audio's through its join commit: refused, or dropped,
+/// while the session is still pending, it ended unadmitted for a non-NIP-FI
+/// reason (NIP-42 failure, ordinary policy refusal), so the session retires
+/// without a record.
 pub(crate) struct AuthAttempt<'a>(pub(crate) Option<&'a Arc<ShadowSession>>);
+
+impl AuthAttempt<'_> {
+    /// Retires a pending session where the refusal is decided, before the
+    /// refusal's frames and cleanup are awaited.
+    pub(crate) fn refused(&self) {
+        if let Some(session) = self.0 {
+            session.transition(|phase| {
+                if let Phase::Pending { .. } = phase {
+                    *phase = Phase::Ended;
+                }
+            });
+        }
+    }
+}
 
 impl Drop for AuthAttempt<'_> {
     fn drop(&mut self) {
-        if let Some(session) = self.0 {
-            session.advance(PENDING, ENDED);
-        }
+        self.refused();
     }
 }
 
@@ -239,19 +291,26 @@ pub(crate) mod tests {
     /// admission record as `stage/outcome` and every session end as
     /// `end/reason`, sorted.
     pub(crate) fn shadow_records(body: impl Future<Output = ()>) -> Vec<String> {
-        collect(body, false)
+        collect(body, false, false)
     }
 
     /// [`shadow_records`], each prefixed with its `route` label.
     pub(crate) fn shadow_records_by_route(body: impl Future<Output = ()>) -> Vec<String> {
-        collect(body, true)
+        collect(body, true, false)
     }
 
-    fn collect(body: impl Future<Output = ()>, by_route: bool) -> Vec<String> {
+    /// [`shadow_records`] on paused Tokio time, which `tokio::time::advance`
+    /// moves; a timer reads its delay from the wall clock when first polled.
+    fn shadow_records_paused(body: impl Future<Output = ()>) -> Vec<String> {
+        collect(body, false, true)
+    }
+
+    fn collect(body: impl Future<Output = ()>, by_route: bool, paused: bool) -> Vec<String> {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .start_paused(paused)
             .build()
             .unwrap();
         metrics::with_local_recorder(&recorder, || rt.block_on(body));
@@ -307,14 +366,27 @@ pub(crate) mod tests {
         state
     }
 
-    fn session(state: &AppState, key: Option<PublicKey>, lifetime: Duration) -> Arc<ShadowSession> {
+    pub(crate) fn session(
+        state: &AppState,
+        key: Option<PublicKey>,
+        lifetime: Duration,
+    ) -> Arc<ShadowSession> {
         let assertion = VerifiedAssertion::for_test(key, vec![Utc::now() + lifetime]);
         ShadowSession::start(state, "ws", &HeaderMap::new(), assertion, Utc::now())
     }
 
     fn auth(session: &Arc<ShadowSession>, state: &AppState, pubkey: PublicKey) {
         session.observe_pairing(pubkey);
-        session.observe_admission(state);
+        session.observe_deny_set(state);
+        session.admit();
+    }
+
+    /// Lets every spawned timer read its deadline, then moves paused time
+    /// past `ms` milliseconds.
+    async fn advance_ms(ms: u64) {
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(ms)).await;
+        tokio::task::yield_now().await;
     }
 
     fn revoke(state: &AppState, key: &PublicKey) {
@@ -375,7 +447,7 @@ pub(crate) mod tests {
     }
 
     /// Delivers a real cross-pod disconnect for `key` to a shadow pod.
-    fn deliver(state: &AppState, key: &PublicKey) -> buzz_auth::CrossPodMergeResult {
+    pub(crate) fn deliver(state: &AppState, key: &PublicKey) -> buzz_auth::CrossPodMergeResult {
         let msg = buzz_pubsub::NipFiDisconnect {
             issuer: "test-issuer".to_owned(),
             pubkey_bytes: key.to_bytes().to_vec(),
@@ -388,7 +460,9 @@ pub(crate) mod tests {
         }
     }
 
-    async fn pod(capacity: usize) -> AppState {
+    /// A shadow pod whose deny map holds `capacity` entries for the
+    /// `for_test` issuer.
+    pub(crate) async fn pod(capacity: usize) -> AppState {
         let mut state = shadow_state(None).await;
         let mut config = (*state.config).clone();
         config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
@@ -415,11 +489,12 @@ pub(crate) mod tests {
         state
     }
 
-    // A deny landing between the clean deny-map read and the admit, whether
-    // merged or refused for capacity, ends the admitted session `revoked`,
-    // as enforce's registered-session scan closes it in any phase.
-    // Mutation: dropping the revocation mark, or checking it before the
-    // admit, loses the `revoked` end.
+    // A deny landing between the clean deny-set check and the admit,
+    // whether merged or refused for capacity, ends the admitted session
+    // `revoked`, as enforce's registered-session scan closes it in any phase;
+    // expiry contending on either side of the admit cannot take that end.
+    // Mutation: dropping the revocation mark, or letting a marked pending
+    // session expire, loses the `revoked` end.
     #[test]
     fn deny_between_map_read_and_admit_records_admit_then_revoked() {
         let records = shadow_records(async {
@@ -431,14 +506,15 @@ pub(crate) mod tests {
                 }
                 let s = session(&state, Some(key), Duration::hours(1));
                 s.observe_pairing(key);
-                s.register();
-                let denied = deny_listed(&state, &s.assertion);
+                s.observe_deny_set(&state);
                 let merged = deliver(&state, &key);
                 assert_eq!(
                     merged == buzz_auth::CrossPodMergeResult::Merged,
                     capacity == 8
                 );
-                s.admit(denied);
+                s.expire();
+                s.admit();
+                s.expire();
             }
         });
         let both = ["admit/admit", "admit/admit", "end/revoked", "end/revoked"];
@@ -450,55 +526,85 @@ pub(crate) mod tests {
     // nothing.
     #[test]
     fn deadline_records_one_expired_end_before_or_after_admission() {
-        let records = shadow_records(async {
+        let records = shadow_records_paused(async {
             let state = shadow_state(None).await;
             let key = Keys::generate().public_key();
-            let early = session(&state, Some(key), Duration::milliseconds(20));
-            let late = session(&state, Some(key), Duration::milliseconds(40));
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let early = session(&state, Some(key), Duration::seconds(10));
+            let late = session(&state, Some(key), Duration::seconds(30));
+            advance_ms(20_000).await;
             auth(&early, &state, key);
             auth(&late, &state, key);
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            advance_ms(20_000).await;
             revoke(&state, &key);
         });
         assert_eq!(records, ["admit/admit", "deadline/rejected", "end/expired"]);
+    }
+
+    // The deadline passing while the socket is still bootstrapping, before
+    // AUTH, records one `deadline` verdict and no end, and the observer
+    // cancels nothing.
+    #[test]
+    fn deadline_during_bootstrap_records_one_verdict_and_cancels_nothing() {
+        let records = shadow_records_paused(async {
+            let state = shadow_state(None).await;
+            let key = Keys::generate().public_key();
+            let s = session(&state, Some(key), Duration::seconds(10));
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let control = crate::state::CommunityConnectionControl::new(cancel.clone());
+            control.attach_nip_fi_shadow(Some(Arc::clone(&s)));
+            advance_ms(20_000).await;
+            assert!(!cancel.is_cancelled(), "shadow never cancels the socket");
+            auth(&s, &state, key);
+            revoke(&state, &key);
+        });
+        assert_eq!(records, ["deadline/rejected"]);
     }
 
     // A connection closed before its deadline records no end. Mutation: not
     // unregistering on drop leaves a stale registry entry.
     #[test]
     fn dropped_session_records_no_end() {
-        let records = shadow_records(async {
+        let records = shadow_records_paused(async {
             let state = shadow_state(None).await;
             let key = Keys::generate().public_key();
-            let s = session(&state, Some(key), Duration::milliseconds(20));
+            let s = session(&state, Some(key), Duration::seconds(10));
             auth(&s, &state, key);
             let weak = Arc::downgrade(&s);
             drop(s);
             assert!(weak.upgrade().is_none());
             assert!(state.nip_fi_shadow_sessions.registered().is_empty());
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            advance_ms(20_000).await;
         });
         assert_eq!(records, ["admit/admit"]);
     }
 
-    // Cancelling the socket retires its session even while the connection
-    // still holds references, so neither the deadline nor a deny records.
-    // Mutation: removing the cancellation fence records `end/expired`.
+    // Once the socket is cancelled, no transition records, even while the
+    // connection still holds references and before anything else runs: an
+    // admitted session takes no `revoked` end from an immediate real deny,
+    // and a pending one records no verdict or deadline. Mutation: skipping
+    // the cancellation check in `transition` records both.
     #[test]
-    fn cancelled_socket_retires_session_held_by_references() {
+    fn cancelled_socket_records_nothing_without_yielding() {
         let records = shadow_records(async {
-            let state = shadow_state(None).await;
+            let state = pod(8).await;
             let key = Keys::generate().public_key();
-            let s = session(&state, Some(key), Duration::milliseconds(20));
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let control = crate::state::CommunityConnectionControl::new(cancel.clone());
-            control.attach_nip_fi_shadow(Some(Arc::clone(&s)));
-            auth(&s, &state, key);
+            let watch = |s: &Arc<ShadowSession>| {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let control = crate::state::CommunityConnectionControl::new(cancel.clone());
+                control.attach_nip_fi_shadow(Some(Arc::clone(s)));
+                (cancel, control)
+            };
+            let admitted = session(&state, Some(key), Duration::hours(1));
+            let (cancel, _control) = watch(&admitted);
+            auth(&admitted, &state, key);
             cancel.cancel();
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            revoke(&state, &key);
-            drop(control);
+            deliver(&state, &key);
+
+            let pending = session(&state, Some(key), Duration::hours(1));
+            let (cancel, _control) = watch(&pending);
+            cancel.cancel();
+            pending.observe_pairing(Keys::generate().public_key());
+            pending.expire();
         });
         assert_eq!(records, ["admit/admit"]);
     }

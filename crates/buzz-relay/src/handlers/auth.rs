@@ -726,7 +726,8 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
             if let Some(shadow) = shadow {
-                shadow.observe_admission(&state);
+                shadow.observe_deny_set(&state);
+                shadow.admit();
             }
             // A concurrent `disconnect_nip_fi` may have closed this session
             // after the deny-set check; its denial is the terminal reply.
@@ -1487,30 +1488,44 @@ mod tests {
 
     const HOUR: chrono::Duration = chrono::Duration::hours(1);
 
-    /// Waits past a 20 ms test assertion's deadline.
-    async fn past_deadline() {
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    /// Fires the connection's shadow deadline once its AUTH has finished,
+    /// in place of waiting for the timer.
+    fn expire_shadow(t: &crate::connection::tests::TestConn) {
+        t.conn.community_control.nip_fi_shadow().unwrap().expire();
     }
 
-    // A NIP-42 failure ends the AUTH without a NIP-FI decision; the socket
-    // stays open until its auth timeout, but its observation is retired, so
-    // the deadline records nothing. Mutation: dropping the `AuthAttempt`
-    // guard records `deadline/rejected`.
+    // A NIP-42 failure, a wrong challenge or a corrupted signature, ends the
+    // AUTH without a NIP-FI decision; the socket stays open until its auth
+    // timeout, but its observation is retired, so the deadline records
+    // nothing. Mutation: dropping the `AuthAttempt` guard records
+    // `deadline/rejected`.
     #[test]
     fn shadow_root_invalid_nip42_retires_without_record() {
         use crate::nip_fi_shadow_session::tests::{shadow_records, shadow_state};
         let records = shadow_records(async {
             let state = std::sync::Arc::new(shadow_state(None).await);
             let key = Keys::generate();
-            let lifetime = chrono::Duration::milliseconds(20);
-            let (t, _) = shadow_root_conn(&state, key.public_key(), &key, lifetime);
-            let forged = EventBuilder::new(Kind::Authentication, "")
+            let wrong_challenge = EventBuilder::new(Kind::Authentication, "")
                 .tag(Tag::parse(["challenge", "other-challenge"]).unwrap())
                 .sign_with_keys(&key)
                 .unwrap();
-            handle_auth(forged, std::sync::Arc::clone(&t.conn), state).await;
-            assert!(!t.conn.cancel.is_cancelled(), "socket stays open");
-            past_deadline().await;
+            let (_, signed) = shadow_root_conn(&state, key.public_key(), &key, HOUR);
+            let mut corrupted = serde_json::to_value(&signed).unwrap();
+            let sig = corrupted["sig"].as_str().unwrap();
+            let flipped = if sig.starts_with('0') { "1" } else { "0" };
+            corrupted["sig"] = format!("{flipped}{}", &sig[1..]).into();
+            let corrupted: nostr::Event = serde_json::from_value(corrupted).unwrap();
+            for event in [wrong_challenge, corrupted] {
+                let (t, _) = shadow_root_conn(&state, key.public_key(), &key, HOUR);
+                handle_auth(
+                    event,
+                    std::sync::Arc::clone(&t.conn),
+                    std::sync::Arc::clone(&state),
+                )
+                .await;
+                assert!(!t.conn.cancel.is_cancelled(), "socket stays open");
+                expire_shadow(&t);
+            }
         });
         assert!(records.is_empty(), "{records:?}");
     }
@@ -1561,16 +1576,15 @@ mod tests {
                 state.config = std::sync::Arc::new(config);
                 state.nip_fi_deny_map = shadow_state(None).await.nip_fi_deny_map;
                 let state = std::sync::Arc::new(state);
-                let lifetime = chrono::Duration::milliseconds(500);
                 let (mut t, event) =
-                    super::shadow_root_conn(&state, key.public_key(), &key, lifetime);
+                    super::shadow_root_conn(&state, key.public_key(), &key, super::HOUR);
                 handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
                 let refused = t.send_rx.try_recv();
                 assert!(
                     format!("{refused:?}").contains("not a relay member"),
                     "{refused:?}"
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                super::expire_shadow(&t);
             });
             assert!(records.is_empty(), "{records:?}");
         }

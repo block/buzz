@@ -710,7 +710,8 @@ pub(crate) async fn handle_active_audio_connection(
         }
     }
     if let Some(shadow) = control.nip_fi_shadow() {
-        shadow.observe_admission(&state);
+        shadow.observe_deny_set(&state);
+        shadow.admit();
     }
     #[cfg(test)]
     crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
