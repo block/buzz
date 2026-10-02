@@ -564,14 +564,19 @@ class ComposeBar extends HookConsumerWidget {
       );
 
       // Mentioning anyone outside the channel, person or agent, prompts
-      // "Invite" / "Do nothing" (portable mention rules, section 7).
-      if (scan.outside.isNotEmpty) {
+      // "Invite" / "Do nothing" (portable mention rules, section 7). Nobody
+      // can be added to a DM, so a DM sends them as references without asking.
+      if (scan.outside.isNotEmpty && scan.isDm) {
+        outgoing.resolveOutsideChoice(
+          _NonMemberMentionChoice.sendWithoutInviting,
+          scan.outside,
+        );
+      } else if (scan.outside.isNotEmpty) {
         if (!context.mounted) return;
         final choice = await _promptNonMemberMention(
           context,
           names: [for (final candidate in scan.outside) candidate.label],
           canInvite: scan.canAddMembers,
-          isDm: scan.isDm,
         );
         if (choice == null) return; // Dismissed — keep the draft, send nothing.
         outgoing.resolveOutsideChoice(choice, scan.outside);

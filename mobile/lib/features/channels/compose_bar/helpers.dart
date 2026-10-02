@@ -335,20 +335,14 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
   BuildContext context, {
   required List<String> names,
   required bool canInvite,
-  bool isDm = false,
 }) {
   final verb = names.length == 1 ? 'is' : 'are';
-  final place = isDm ? 'DM' : 'channel';
   return showBuzzDialog<_NonMemberMentionChoice>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: Text('Mention people outside this $place?'),
+      title: const Text('Mention people outside this channel?'),
       content: Text(
-        isDm
-            ? '${names.join(', ')} $verb not in this DM. People cannot be '
-                  'added to a DM. You can still send. They will not be '
-                  'notified.'
-            : canInvite
+        canInvite
             ? '${names.join(', ')} $verb not in this channel. Invite them to '
                   'the channel, or send without inviting them.'
             : '${names.join(', ')} $verb not in this channel. '
@@ -502,7 +496,8 @@ class _NonMemberMentionScan {
   final List<MentionCandidate> outside;
   final bool canAddMembers;
 
-  /// Whether the destination is a DM, which names its own prompt copy.
+  /// Whether the destination is a DM. Nobody can be added to a DM, so its
+  /// outside people are sent as references without a prompt.
   final bool isDm;
 
   const _NonMemberMentionScan({
