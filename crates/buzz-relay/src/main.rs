@@ -259,8 +259,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
-        health_port = config.health_port,
-        metrics_port = config.metrics_port,
+        health_bind_addr = %config.health_bind_addr,
+        metrics_bind_addr = %config.metrics_bind_addr,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
         push_enabled = config.push_enabled,
@@ -277,7 +277,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         );
     let (boot, ()) = boot.run_required(
         StartupPhase::MetricsBind,
-        || relay_metrics::try_install(config.metrics_port, usage_idle_timeout_secs),
+        || relay_metrics::try_install(config.metrics_bind_addr, usage_idle_timeout_secs),
         |error| match error.failure() {
             relay_metrics::MetricsInstallFailure::Bind => LifecycleReason::Bind,
             relay_metrics::MetricsInstallFailure::RecorderConflict => {
@@ -290,7 +290,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
-        port = config.metrics_port,
+        addr = %config.metrics_bind_addr,
         idle_timeout_secs = usage_idle_timeout_secs,
         completion_republish_secs = dependency_sample_completion_republish_interval.as_secs(),
         "Prometheus metrics exporter started"
@@ -1776,9 +1776,11 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// ┌─────────────────────────────────────────────────────────┐
 /// │  Listener 1: TCP BUZZ_BIND_ADDR:3000  (app router)   │
 /// │  Listener 2: UDS BUZZ_UDS_PATH        (app, optional)│
-/// │  Listener 3: TCP 0.0.0.0:8080           (health only)  │
-/// │  Listener 4: TCP 0.0.0.0:9102           (metrics, via  │
-/// │              PrometheusBuilder — already bound)         │
+/// │  Listener 3: TCP health_bind_addr:health_port         │
+/// │              (health only; 0.0.0.0:8080 by default)   │
+/// │  Listener 4: TCP metrics_bind_addr:metrics_port       │
+/// │              (metrics, via PrometheusBuilder — already │
+/// │              bound; 0.0.0.0:9102 by default)           │
 /// │                                                         │
 /// │  SIGTERM → shutting_down=true → readiness 503           │
 /// │         → graceful drain (30s) → exit                   │
@@ -1824,10 +1826,15 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
-    let health_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.health_port))
+    let health_listener = tokio::net::TcpListener::bind(config.health_bind_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
-    info!(port = config.health_port, "Health probe listener started");
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to bind health address {}: {e}",
+                config.health_bind_addr
+            )
+        })?;
+    info!(addr = %config.health_bind_addr, "Health probe listener started");
     tokio::spawn(async move {
         axum::serve(health_listener, health_router).await.ok();
     });

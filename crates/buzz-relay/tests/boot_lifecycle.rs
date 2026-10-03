@@ -163,6 +163,80 @@ fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
     wait_for_scraped_metric(process, port, "buzz_audit_enabled")
 }
 
+fn reserve_ipv6_port() -> u16 {
+    let listener = TcpListener::bind(("::1", 0)).expect("reserve IPv6 loopback port");
+    let port = listener.local_addr().expect("IPv6 loopback address").port();
+    let _ipv4 = TcpListener::bind(("127.0.0.1", port)).expect("reserve IPv4 counterpart");
+    port
+}
+
+/// Exercise the real HTTP listener and prove it does not also accept IPv4.
+fn assert_ipv6_only_listener(process: &mut RelayProcess, port: u16, path: &str) {
+    let address = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+    let ipv4 = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
+    loop {
+        assert!(
+            process.try_wait().is_none(),
+            "relay exited before serving {path}"
+        );
+        if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("bound HTTP read");
+            stream
+                .set_write_timeout(Some(Duration::from_millis(500)))
+                .expect("bound HTTP write");
+            write!(stream, "GET {path} HTTP/1.0\r\nHost: [::1]\r\n\r\n")
+                .expect("request loopback endpoint");
+            let mut response = String::new();
+            stream
+                .take(MAX_CAPTURE_BYTES)
+                .read_to_string(&mut response)
+                .expect("read loopback endpoint");
+            assert!(
+                response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"),
+                "{path} must serve successfully on {address}: {response}"
+            );
+            break;
+        }
+        assert!(
+            TcpStream::connect_timeout(&ipv4, Duration::from_millis(100)).is_err(),
+            "{path} listener accepted IPv4 loopback {ipv4} despite the ::1 setting"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "relay did not serve {path} on {address}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let error = TcpStream::connect_timeout(&ipv4, Duration::from_millis(100))
+        .expect_err("IPv6-only listener must refuse IPv4 loopback");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    assert!(process.try_wait().is_none(), "relay must still be running");
+}
+
+#[test]
+fn metrics_listener_honors_configured_interface() {
+    // Metrics installs before the database connection, so no Postgres is needed.
+    let fake_database = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake database");
+    let database_url = format!(
+        "postgres://buzz@127.0.0.1:{}/buzz",
+        fake_database.local_addr().expect("database address").port()
+    );
+    let port = reserve_ipv6_port();
+    let port_value = port.to_string();
+    let mut process = RelayProcess::spawn(&[
+        ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+        ("BUZZ_HEALTH_BIND_ADDR", "::1"),
+        ("BUZZ_METRICS_BIND_ADDR", "::1"),
+        ("BUZZ_METRICS_PORT", &port_value),
+        ("DATABASE_URL", &database_url),
+    ]);
+    assert_ipv6_only_listener(&mut process, port, "/metrics");
+    process.terminate();
+}
+
 /// Polls the relay's own `/metrics` until `needle` appears, bounded by
 /// [`METRICS_SCRAPE_DEADLINE`]. A relay that exits first is a failure, not a
 /// timeout, so the panic names the real cause.
@@ -518,6 +592,31 @@ fn successful_main_emits_complete_lifecycle_without_startup_metrics() {
 /// through `DATABASE_URL`.
 mod postgres_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn health_listener_honors_configured_interface() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = std::env::var("REDIS_URL").expect("postgres lane provides REDIS_URL");
+        let health_port = reserve_ipv6_port();
+        let health_port_value = health_port.to_string();
+        let metrics_port_value = reserve_ipv6_port().to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let mut process = RelayProcess::spawn(&[
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_HEALTH_BIND_ADDR", "::1"),
+            ("BUZZ_METRICS_BIND_ADDR", "::1"),
+            ("BUZZ_HEALTH_PORT", &health_port_value),
+            ("BUZZ_METRICS_PORT", &metrics_port_value),
+            ("BUZZ_BIND_ADDR", &bind_addr),
+            ("DATABASE_URL", &database_url),
+            ("REDIS_URL", &redis_url),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+        ]);
+        assert_ipv6_only_listener(&mut process, health_port, "/_liveness");
+        process.terminate();
+    }
 
     const REDIS_BOOTSTRAP_BUDGET: Duration = Duration::from_secs(5);
     const REDIS_BOOTSTRAP_SCHEDULING_SLACK: Duration = Duration::from_secs(3);

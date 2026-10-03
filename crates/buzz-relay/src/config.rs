@@ -191,9 +191,18 @@ pub struct Config {
     /// Optional Unix Domain Socket path. When set, the relay also listens on this
     /// UDS for traffic (e.g. service mesh sidecar). Health probes still use TCP.
     pub uds_path: Option<String>,
-    /// TCP port for the health-only router (`/_liveness`, `/_readiness`, `/_status`).
+    /// Address the health-only router binds to (`/_liveness`, `/_readiness`, `/_status`).
     /// Separate from the app router so K8s probes bypass Istio and auth middleware.
+    /// The port comes from [`Config::health_port`]; the interface is configurable
+    /// so a bare-metal or VPS host can keep the probe off the public interface.
+    pub health_bind_addr: SocketAddr,
+    /// TCP port for the health-only router (`/_liveness`, `/_readiness`, `/_status`).
     pub health_port: u16,
+    /// Address the Prometheus metrics exporter binds to (`GET /metrics`).
+    /// The port comes from [`Config::metrics_port`]; the interface is configurable
+    /// because the exporter publishes per-community figures and auth failure
+    /// counts that an operator would not expect to be publicly reachable.
+    pub metrics_bind_addr: SocketAddr,
     /// TCP port for the Prometheus metrics exporter (`GET /metrics`).
     pub metrics_port: u16,
     /// Interval between read-only partition catalog audits.
@@ -390,6 +399,29 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+/// Resolves a listener's bind address from a separate interface and port variable.
+///
+/// The health and metrics listeners each keep a `*_PORT` variable for
+/// compatibility, so their `*_BIND_ADDR` variables carry only the interface
+/// (`127.0.0.1`, `::`, or the `0.0.0.0` default). Binding every interface is the
+/// right default in a pod, but on a bare-metal or VPS host it puts the probe and
+/// the Prometheus exporter — which publishes per-community figures and auth
+/// failure counts — on the public interface, where only a firewall stands
+/// between them and the Internet.
+///
+/// An unparseable value is a startup error, never a silent fallback to
+/// `0.0.0.0`: an operator who asked for a loopback-only metrics endpoint and
+/// silently got a public one has been given the opposite of what they asked for.
+fn parse_listener_bind_addr(name: &str, raw: &str, port: u16) -> Result<SocketAddr, ConfigError> {
+    let ip: std::net::IpAddr = raw.parse().map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "invalid {name}: {e} (expected an IP address such as 127.0.0.1 or 0.0.0.0; \
+             the port comes from the matching *_PORT variable)"
+        ))
+    })?;
+    Ok(SocketAddr::new(ip, port))
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -904,10 +936,38 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
 
+        let health_bind_addr = match std::env::var("BUZZ_HEALTH_BIND_ADDR") {
+            Ok(raw) => parse_listener_bind_addr("BUZZ_HEALTH_BIND_ADDR", raw.trim(), health_port)?,
+            Err(std::env::VarError::NotPresent) => SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                health_port,
+            ),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_HEALTH_BIND_ADDR must be valid Unicode".to_string(),
+                ));
+            }
+        };
+
         let metrics_port = std::env::var("BUZZ_METRICS_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
+
+        let metrics_bind_addr = match std::env::var("BUZZ_METRICS_BIND_ADDR") {
+            Ok(raw) => {
+                parse_listener_bind_addr("BUZZ_METRICS_BIND_ADDR", raw.trim(), metrics_port)?
+            }
+            Err(std::env::VarError::NotPresent) => SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                metrics_port,
+            ),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_METRICS_BIND_ADDR must be valid Unicode".to_string(),
+                ));
+            }
+        };
 
         // Catalog-only and cheap, but clamp operator mistakes away from a hot
         // loop or a multi-day observability gap.
@@ -1354,7 +1414,9 @@ impl Config {
             cors_origins,
             relay_private_key,
             uds_path,
+            health_bind_addr,
             health_port,
+            metrics_bind_addr,
             metrics_port,
             partition_audit_interval,
             partition_manager_create_enabled,
@@ -2669,6 +2731,98 @@ mod tests {
             parse_bind_addr("not-an-addr"),
             Err(ConfigError::InvalidBindAddr(_))
         ));
+    }
+
+    #[test]
+    fn health_and_metrics_listeners_default_to_every_interface() {
+        let _guards = env_guards();
+        let config = Config::from_env().expect("config");
+        assert_eq!(
+            config.health_bind_addr,
+            SocketAddr::from(([0, 0, 0, 0], config.health_port)),
+            "health listener default must stay 0.0.0.0 on the configured port"
+        );
+        assert_eq!(
+            config.metrics_bind_addr,
+            SocketAddr::from(([0, 0, 0, 0], config.metrics_port)),
+            "metrics listener default must stay 0.0.0.0 on the configured port"
+        );
+    }
+
+    #[test]
+    fn health_and_metrics_bind_addrs_restrict_the_interface_and_keep_the_port() {
+        let _guards = env_guards();
+        std::env::set_var("BUZZ_HEALTH_BIND_ADDR", "127.0.0.1");
+        std::env::set_var("BUZZ_METRICS_BIND_ADDR", "127.0.0.1");
+        std::env::set_var("BUZZ_HEALTH_PORT", "18080");
+        std::env::set_var("BUZZ_METRICS_PORT", "19102");
+        let config = Config::from_env().expect("config");
+        for name in [
+            "BUZZ_HEALTH_BIND_ADDR",
+            "BUZZ_METRICS_BIND_ADDR",
+            "BUZZ_HEALTH_PORT",
+            "BUZZ_METRICS_PORT",
+        ] {
+            std::env::remove_var(name);
+        }
+        assert_eq!(
+            config.health_bind_addr,
+            "127.0.0.1:18080"
+                .parse::<SocketAddr>()
+                .expect("valid address"),
+            "the interface must come from BUZZ_HEALTH_BIND_ADDR and the port from BUZZ_HEALTH_PORT"
+        );
+        assert_eq!(
+            config.metrics_bind_addr,
+            "127.0.0.1:19102".parse::<SocketAddr>().expect("valid address"),
+            "the interface must come from BUZZ_METRICS_BIND_ADDR and the port from BUZZ_METRICS_PORT"
+        );
+    }
+
+    #[test]
+    fn health_bind_addr_accepts_ipv6_loopback() {
+        let _guards = env_guards();
+        std::env::set_var("BUZZ_HEALTH_BIND_ADDR", "::1");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_HEALTH_BIND_ADDR");
+        assert!(config.health_bind_addr.is_ipv6());
+        assert_eq!(config.health_bind_addr.ip().to_string(), "::1");
+    }
+
+    /// An operator who asked for a restricted interface and got a silent
+    /// wildcard fallback has been handed the exact exposure they were trying to
+    /// close, so an unparseable value must stop startup instead.
+    #[test]
+    fn unparseable_listener_bind_addr_is_a_startup_error_not_a_wildcard_fallback() {
+        for (name, bad) in [
+            ("BUZZ_HEALTH_BIND_ADDR", "localhost"),
+            ("BUZZ_METRICS_BIND_ADDR", "127.0.0.1:9102"),
+        ] {
+            let _guards = env_guards();
+            std::env::set_var(name, bad);
+            let result = Config::from_env();
+            std::env::remove_var(name);
+            match result {
+                Err(ConfigError::InvalidValue(message)) => {
+                    assert!(
+                        message.contains(name),
+                        "error must name {name}, got: {message}"
+                    );
+                }
+                other => panic!("{name}={bad} must be a startup error, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn listener_bind_addr_port_comes_from_the_port_variable() {
+        assert_eq!(
+            parse_listener_bind_addr("BUZZ_METRICS_BIND_ADDR", "127.0.0.1", 9102)
+                .expect("loopback address is valid"),
+            "127.0.0.1:9102"
+                .parse::<SocketAddr>()
+                .expect("valid address"),
+        );
     }
 
     #[test]
