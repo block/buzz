@@ -28,8 +28,11 @@ use tracing::{error, info};
 ///
 /// Git sets automatically (quarantine):
 /// - `GIT_OBJECT_DIRECTORY` — quarantine object store
-/// - `GIT_ALTERNATE_OBJECT_DIRECTORIES` — includes the real object store
-const PRE_RECEIVE_HOOK: &str = r#"#!/usr/bin/env bash
+/// Default interpreter path for the pre-receive hook script.
+pub const DEFAULT_PRE_RECEIVE_INTERPRETER: &str = "/usr/bin/env bash";
+
+/// Pre-receive hook script content installed into managed repositories.
+pub const PRE_RECEIVE_HOOK: &str = r#"#!/usr/bin/env bash
 # Buzz pre-receive hook — FAIL-CLOSED
 # ANY error, timeout, or non-200 response → reject the push.
 set -eo pipefail
@@ -144,6 +147,25 @@ fi
 exit 0
 "#;
 
+/// Render the pre-receive hook script using `BUZZ_BASH_PATH` if set,
+/// falling back to [`PRE_RECEIVE_HOOK`].
+pub fn render_pre_receive_hook() -> String {
+    match std::env::var("BUZZ_BASH_PATH") {
+        Ok(interpreter) if !interpreter.trim().is_empty() => {
+            render_pre_receive_hook_with_interpreter(&interpreter)
+        }
+        _ => PRE_RECEIVE_HOOK.to_string(),
+    }
+}
+
+/// Render the pre-receive hook script with a custom interpreter path.
+pub fn render_pre_receive_hook_with_interpreter(interpreter: &str) -> String {
+    let body = PRE_RECEIVE_HOOK
+        .strip_prefix("#!/usr/bin/env bash\n")
+        .unwrap_or(PRE_RECEIVE_HOOK);
+    format!("#!{interpreter}\n{body}")
+}
+
 /// Install the pre-receive hook into a bare repository.
 ///
 /// Creates a `hooks/` directory and writes the hook script with execute permission.
@@ -157,7 +179,8 @@ pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
     })?;
 
     let hook_path = hooks_dir.join("pre-receive");
-    fs::write(&hook_path, PRE_RECEIVE_HOOK).await.map_err(|e| {
+    let hook_content = render_pre_receive_hook();
+    fs::write(&hook_path, hook_content).await.map_err(|e| {
         error!(path = %hook_path.display(), error = %e, "failed to write hook");
         anyhow::anyhow!("failed to write pre-receive hook: {e}")
     })?;
@@ -203,5 +226,12 @@ mod tests {
                 "relay runtime image must install {tool}; the git pre-receive hook uses it and fails closed without it"
             );
         }
+    }
+
+    #[test]
+    fn custom_interpreter_path_rendered() {
+        let hook = super::render_pre_receive_hook_with_interpreter("/custom/bin/bash");
+        assert!(hook.starts_with("#!/custom/bin/bash\n"));
+        assert!(hook.contains("Buzz pre-receive hook"));
     }
 }
