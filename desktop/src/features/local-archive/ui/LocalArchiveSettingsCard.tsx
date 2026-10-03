@@ -3,11 +3,15 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  archiveSizeStats,
   createSaveSubscription,
   deleteSaveSubscription,
+  getObserverRetentionDays,
   listSaveSubscriptions,
   mergeSaveSubscriptionKinds,
   removeSaveSubscriptionKind,
+  setObserverRetentionDays,
+  type ArchiveSizeStats,
   type SaveSubscription,
   type ScopeType,
 } from "@/shared/api/tauriArchive";
@@ -27,6 +31,7 @@ import {
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { setExplicitAgentMetricArchiveChoice } from "../agentMetricArchivePreference";
 import { setExplicitObserverArchiveChoice } from "../observerArchivePreference";
+import { deriveSizeReadout, parseRetentionDays } from "../retentionSettings";
 
 import {
   buildSubscriptionRequest,
@@ -60,6 +65,30 @@ function kindSummary(kinds: number[]): string {
   if (kinds.length === 0) return "no kinds";
   if (kinds.length <= 4) return kinds.join(", ");
   return `${kinds.slice(0, 3).join(", ")} +${kinds.length - 3} more`;
+}
+
+/** Load lifecycle for the two independently-fetched sections below. */
+export type LoadStatus = "loading" | "error" | "loaded";
+
+/** Inline failure row with a retry action, scoped to a single section so a
+ * failed read never wedges the rest of the card. */
+function LoadErrorRow({
+  message,
+  onRetry,
+  testId,
+}: {
+  message: string;
+  onRetry: () => void;
+  testId: string;
+}) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-4" data-testid={testId}>
+      <p className="min-w-0 flex-1 text-sm text-destructive">{message}</p>
+      <Button onClick={onRetry} size="sm" type="button" variant="outline">
+        Retry
+      </Button>
+    </div>
+  );
 }
 
 // ── Observer-feed archive section ─────────────────────────────────────────────
@@ -148,6 +177,165 @@ function AgentMetricArchiveSection({
             onCheckedChange={onToggle}
           />
         </SettingsOptionRow>
+      </SettingsOptionGroup>
+    </div>
+  );
+}
+
+// ── Observer retention section ────────────────────────────────────────────────
+
+type RetentionSectionProps = {
+  /** Persisted value, or `null` while unavailable (loading or errored). */
+  savedDays: number | null;
+  /** Load lifecycle; drives the error/retry affordance. */
+  status: LoadStatus;
+  onRetry: () => void;
+  onSaved: (days: number) => void;
+};
+
+export function ObserverRetentionSection({
+  savedDays,
+  status,
+  onRetry,
+  onSaved,
+}: RetentionSectionProps) {
+  const [draft, setDraft] = React.useState("");
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  // Seed the field from the persisted value once it loads, and re-seed whenever
+  // it changes underneath us (e.g. a successful save elsewhere).
+  React.useEffect(() => {
+    if (savedDays !== null) setDraft(String(savedDays));
+  }, [savedDays]);
+
+  const parsed = parseRetentionDays(draft);
+  const invalid = !parsed.ok;
+  const showError = invalid && draft.trim() !== "";
+  const unchanged =
+    parsed.ok && savedDays !== null && parsed.days === savedDays;
+  const canSave = parsed.ok && !unchanged && !isSaving;
+
+  const handleSave = React.useCallback(async () => {
+    if (!parsed.ok) return;
+    setIsSaving(true);
+    try {
+      await setObserverRetentionDays(parsed.days);
+      onSaved(parsed.days);
+      toast.success("Retention window updated.");
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update retention.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }, [parsed, onSaved]);
+
+  return (
+    <div data-testid="local-archive-retention-section">
+      <SettingsOptionGroup
+        title="Observer frame retention"
+        description="Observer frames older than this many days are pruned from the local archive. NIP-AM turn metrics and every other archived kind are kept forever."
+      >
+        {status === "error" ? (
+          <LoadErrorRow
+            message="Couldn't load the retention window."
+            onRetry={onRetry}
+            testId="local-archive-retention-error-state"
+          />
+        ) : (
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-end gap-2">
+              <div className="min-w-0">
+                <label
+                  className="mb-1.5 block text-sm font-medium"
+                  htmlFor="local-archive-retention-days"
+                >
+                  Keep for (days)
+                </label>
+                <input
+                  aria-describedby={
+                    showError ? "local-archive-retention-error" : undefined
+                  }
+                  aria-invalid={showError}
+                  className="w-32 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  data-testid="local-archive-retention-days"
+                  disabled={savedDays === null}
+                  id="local-archive-retention-days"
+                  inputMode="numeric"
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="30"
+                  type="text"
+                  value={draft}
+                />
+              </div>
+              <Button
+                data-testid="local-archive-retention-save"
+                disabled={!canSave}
+                onClick={() => void handleSave()}
+                type="button"
+              >
+                {isSaving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+            {showError && (
+              <p
+                className="text-xs text-destructive"
+                data-testid="local-archive-retention-error"
+                id="local-archive-retention-error"
+              >
+                {parsed.error}
+              </p>
+            )}
+          </div>
+        )}
+      </SettingsOptionGroup>
+    </div>
+  );
+}
+
+// ── Archive size readout section ──────────────────────────────────────────────
+
+export function ArchiveSizeSection({
+  stats,
+  status,
+  onRetry,
+}: {
+  stats: ArchiveSizeStats | null;
+  status: LoadStatus;
+  onRetry: () => void;
+}) {
+  const readout = stats ? deriveSizeReadout(stats) : null;
+  return (
+    <div data-testid="local-archive-size-section">
+      <SettingsOptionGroup title="Storage">
+        {status === "error" ? (
+          <LoadErrorRow
+            message="Couldn't load the archive size."
+            onRetry={onRetry}
+            testId="local-archive-size-error-state"
+          />
+        ) : (
+          <SettingsOptionRow>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium">Archive size on disk</p>
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
+                {readout === null
+                  ? "Loading…"
+                  : `Physical size ${readout.physicalLabel} (database + write-ahead log). ${readout.reclaimableLabel} is reclaimable after pruning — freed pages become reusable space; the file only shrinks after an offline compaction.`}
+              </p>
+            </div>
+            <span
+              className="shrink-0 text-sm font-medium tabular-nums"
+              data-testid="local-archive-size-physical"
+            >
+              {readout?.physicalLabel ?? "—"}
+            </span>
+          </SettingsOptionRow>
+        )}
       </SettingsOptionGroup>
     </div>
   );
@@ -397,6 +585,13 @@ export function LocalArchiveSettingsCard() {
   const [isAddingOpen, setIsAddingOpen] = React.useState(false);
   const [observerToggling, setObserverToggling] = React.useState(false);
   const [metricToggling, setMetricToggling] = React.useState(false);
+  const [retentionDays, setRetentionDays] = React.useState<number | null>(null);
+  const [retentionStatus, setRetentionStatus] =
+    React.useState<LoadStatus>("loading");
+  const [sizeStats, setSizeStats] = React.useState<ArchiveSizeStats | null>(
+    null,
+  );
+  const [sizeStatus, setSizeStatus] = React.useState<LoadStatus>("loading");
 
   const pubkey = identityQuery.data?.pubkey ?? "";
 
@@ -427,6 +622,40 @@ export function LocalArchiveSettingsCard() {
   React.useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Retention window + size readout load independently of the subscription
+  // list; a failure in either is non-fatal — the affected section shows an
+  // inline error with a retry action and never blanks the rest of the card.
+  const loadRetention = React.useCallback(() => {
+    setRetentionStatus("loading");
+    void getObserverRetentionDays()
+      .then((days) => {
+        setRetentionDays(days);
+        setRetentionStatus("loaded");
+      })
+      .catch((err) => {
+        console.warn("[LocalArchiveSettingsCard] retention load failed:", err);
+        setRetentionStatus("error");
+      });
+  }, []);
+
+  const loadSize = React.useCallback(() => {
+    setSizeStatus("loading");
+    void archiveSizeStats()
+      .then((stats) => {
+        setSizeStats(stats);
+        setSizeStatus("loaded");
+      })
+      .catch((err) => {
+        console.warn("[LocalArchiveSettingsCard] size load failed:", err);
+        setSizeStatus("error");
+      });
+  }, []);
+
+  React.useEffect(() => {
+    loadRetention();
+    loadSize();
+  }, [loadRetention, loadSize]);
 
   const handleDelete = React.useCallback(
     async (scopeType: ScopeType, scopeValue: string) => {
@@ -541,6 +770,21 @@ export function LocalArchiveSettingsCard() {
           enabled={metricEnabled}
           onToggle={(checked) => void handleMetricToggle(checked)}
           toggling={metricToggling}
+        />
+
+        {/* Observer frame retention window */}
+        <ObserverRetentionSection
+          onRetry={loadRetention}
+          onSaved={setRetentionDays}
+          savedDays={retentionDays}
+          status={retentionStatus}
+        />
+
+        {/* Archive size readout */}
+        <ArchiveSizeSection
+          onRetry={loadSize}
+          stats={sizeStats}
+          status={sizeStatus}
         />
 
         {/* Channel subscriptions */}
