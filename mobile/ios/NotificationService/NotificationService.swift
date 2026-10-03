@@ -65,6 +65,10 @@ final class NotificationService: UNNotificationServiceExtension {
       finish(request.content)
       return
     }
+    // The public APNs profile carries no class or sound (NIP-PL), and mobile
+    // leases are all `default`, so every wake is presented as a standard
+    // alert with the default sound (still subject to ringer and app settings).
+    content.sound = .default
     bestAttemptContent = content
     var cleanUserInfo = content.userInfo
     cleanUserInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
@@ -153,6 +157,7 @@ final class NotificationService: UNNotificationServiceExtension {
     fallback.subtitle = ""
     fallback.body = "Open Buzz to view this message."
     fallback.threadIdentifier = ""
+    fallback.sound = .default
     var userInfo = fallback.userInfo
     userInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
     fallback.userInfo = userInfo
