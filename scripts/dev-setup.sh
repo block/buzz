@@ -31,8 +31,9 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
-if ! docker info &>/dev/null; then
-  error "Docker daemon is not running. Start Docker Desktop and try again."
+# shellcheck source=scripts/lib/docker_preflight.sh
+source "${SCRIPT_DIR}/lib/docker_preflight.sh"
+if ! docker_preflight_or_die; then
   exit 1
 fi
 
