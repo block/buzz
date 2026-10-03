@@ -58,6 +58,12 @@ pub(super) fn summarize_from_disk(
 mod create_fields;
 use create_fields::{normalize_relay_mesh, resolve_created_avatar_url, trim_to_optional_string};
 
+#[path = "agents_create_idempotency.rs"]
+mod create_idempotency;
+use create_idempotency::{
+    commit_created_managed_agent, ensure_persona_deployment_identity_available,
+};
+
 #[cfg(feature = "mesh-llm")]
 async fn ensure_relay_mesh_for_record<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -401,6 +407,12 @@ pub async fn create_managed_agent(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let requested_team_id = input
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     validate_create_definition(&name, requested_persona_id.as_deref(), &input)?;
     if let Some(parallelism) = input.parallelism {
         if !(1..=32).contains(&parallelism) {
@@ -449,6 +461,18 @@ pub async fn create_managed_agent(
         if let Some(persona_id) = requested_persona_id.as_deref() {
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
+        }
+        if let Some(team_id) = requested_team_id.as_deref() {
+            if !load_teams(&app)?.iter().any(|team| team.id == team_id) {
+                return Err(format!("team {team_id} not found"));
+            }
+        }
+        if !input.force_new_instance {
+            ensure_persona_deployment_identity_available(
+                &records,
+                requested_persona_id.as_deref(),
+                requested_team_id.as_deref(),
+            )?;
         }
         let keys = Keys::generate();
         let pubkey = keys.public_key().to_hex();
@@ -523,6 +547,11 @@ pub async fn create_managed_agent(
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
         }
+        if let Some(team_id) = requested_team_id.as_deref() {
+            if !load_teams(&app)?.iter().any(|team| team.id == team_id) {
+                return Err(format!("team {team_id} not found"));
+            }
+        }
         // Provider config was already validated in Pre-Phase 2; cache the discovered binary path for deploy_to_provider.
         let provider_binary_path = if let BackendKind::Provider { ref id, .. } = input.backend {
             // Use resolve_provider_binary (discovered candidates only).
@@ -577,17 +606,7 @@ pub async fn create_managed_agent(
             None => String::new(),
         };
 
-        let team_id = input
-            .team_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        if let Some(team_id) = &team_id {
-            if !load_teams(&app)?.iter().any(|team| &team.id == team_id) {
-                return Err(format!("team {team_id} not found"));
-            }
-        }
+        let team_id = requested_team_id.clone();
 
         // Resolve the avatar URL once at creation and persist it on the record.
         // Explicit input wins, then the persona's own avatar, then the runtime
@@ -744,9 +763,9 @@ pub async fn create_managed_agent(
             effort_level: None,
         };
 
-        records.push(record);
-
-        save_managed_agents(&app, &records)?;
+        commit_created_managed_agent(&mut records, record, input.force_new_instance, |records| {
+            save_managed_agents(&app, records)
+        })?;
 
         let record = records
             .iter()

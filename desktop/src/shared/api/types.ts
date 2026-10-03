@@ -302,6 +302,8 @@ export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
   name: string;
+  /** False for an archived local record; omitted only by legacy fixtures. */
+  isActive?: boolean;
   personaId: string | null;
   /**
    * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
@@ -394,6 +396,8 @@ export type RelayMeshConfig = {
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
+  /** Explicitly mint another persona identity instead of reusing its binding. */
+  forceNewInstance?: boolean;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;
   relayUrl?: string;
