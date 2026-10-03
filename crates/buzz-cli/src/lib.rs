@@ -404,6 +404,63 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Publish the owner-signed managed-agent policy record (kind 30177) for an
+    /// agent you run outside Buzz Desktop
+    #[command(
+        after_help = "Run this AS THE OWNER (BUZZ_PRIVATE_KEY = your identity key), not as the agent. \
+Buzz clients build their agent directory — and the @-mention picker — from three \
+signed records: the agent's kind:0 profile carrying a NIP-OA `auth` tag that names \
+you as owner, relay-signed channel membership, and this kind:30177 policy record \
+signed by you. Buzz Desktop publishes the policy record for agents it manages; \
+for an agent you run yourself (buzz-acp on a server, a CI job, a VPS) nothing does, \
+so the agent stays invisible to mention autocomplete even though it is a channel \
+member. This command fills that gap.\n\n\
+Preflight: fetches the agent's kind:0 and refuses unless its sole `auth` tag names \
+your key, so a policy record is never published for an identity that has not \
+attested to you. Pass --force to skip the preflight (for example when the profile \
+is still propagating).\n\n\
+Examples:\n  \
+# The agent side, once: publish its profile with the owner attestation attached\n  \
+BUZZ_PRIVATE_KEY=<agent nsec> BUZZ_AUTH_TAG='[\"auth\",...]' buzz users set-profile --name Scout\n\n  \
+# The owner side: publish the policy record\n  \
+BUZZ_PRIVATE_KEY=<owner nsec> buzz agents register <AGENT_PUBKEY> --name Scout --respond-to anyone"
+    )]
+    /// Mint a NIP-OA owner attestation (`auth` tag) for an agent you run
+    /// outside Buzz Desktop — prints JSON, touches no network
+    #[command(
+        after_help = "Run this AS THE OWNER. The printed tag is what the agent sets as \
+BUZZ_AUTH_TAG: buzz-acp presents it for relay admission and owner resolution, and \
+`buzz users set-profile` attaches it to the agent's kind:0 so clients can verify \
+who owns the agent. It contains no secret — only your public key and a signature \
+over the agent's public key — so it is safe to store in the agent's environment.\n\n\
+Examples:\n  \
+BUZZ_PRIVATE_KEY=<owner nsec> buzz agents attest <AGENT_PUBKEY>\n  \
+# time-boxed: only valid for auth events created before the given unix time\n  \
+BUZZ_PRIVATE_KEY=<owner nsec> buzz agents attest <AGENT_PUBKEY> --conditions 'created_at<1800000000'"
+    )]
+    Attest {
+        /// Agent identity pubkey (hex)
+        agent_pubkey: String,
+        /// NIP-OA conditions string (empty = unrestricted)
+        #[arg(long, default_value = "")]
+        conditions: String,
+    },
+    Register {
+        /// Agent identity pubkey (hex)
+        agent_pubkey: String,
+        /// Display name clients show for the agent
+        #[arg(long)]
+        name: String,
+        /// Inbound author gate the agent runs with (must match the harness's --respond-to)
+        #[arg(long, value_enum, default_value = "owner-only")]
+        respond_to: RespondToArg,
+        /// Number of agent subprocesses the harness runs (informational; matches --agents)
+        #[arg(long, default_value_t = 1)]
+        parallelism: u32,
+        /// Skip the kind:0 owner-attestation preflight
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
