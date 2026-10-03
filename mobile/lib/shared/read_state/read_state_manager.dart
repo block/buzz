@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
+import 'read_marker_clamp.dart';
 import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_time.dart';
@@ -175,6 +176,13 @@ class ReadStateManager {
     required bool publishable,
   }) {
     if (_disposed || unixTimestamp < 0) return;
+
+    // Every caller derives its timestamp from event data — a message's
+    // createdAt, a channel's lastMessageAt, an inbox item's latestActivityAt —
+    // and none of them is a trusted clock reading. This is the single writer
+    // reaching _effectiveState for both markContextRead and seedContextRead, so
+    // clamping here covers all of them at once.
+    unixTimestamp = clampReadMarker(unixTimestamp);
 
     final current = _effectiveState[contextId] ?? 0;
     if (unixTimestamp <= current) {
@@ -354,7 +362,10 @@ class ReadStateManager {
   }) {
     final sourceCreatedAt = _contextSourceCreatedAt[contextId] ?? 0;
     final current = _effectiveState[contextId] ?? 0;
-    final next = max(current, timestamp);
+    // A peer that never applied this policy — an older build, or another client
+    // — can publish a poisoned marker. Repair it on the way in rather than
+    // letting max() adopt it permanently.
+    final next = max(current, clampReadMarker(timestamp));
     final result = next == current
         ? _ApplyRemoteContextResult.unchanged
         : _ApplyRemoteContextResult.advanced;
@@ -507,9 +518,13 @@ class ReadStateManager {
 
   void _hydrateFromLocalStorage() {
     final stored = _storage.read(pubkey);
+    // Markers written before this policy existed are still on disk, and they are
+    // monotonic, so nothing later will lower them. Repair on the way in — values
+    // only; every key survives, because dropping read state judged against a
+    // possibly-wrong local clock is not recoverable.
     _effectiveState
       ..clear()
-      ..addAll(stored.contexts);
+      ..addAll(clampReadMarkers(stored.contexts));
     _publishableContextIds
       ..clear()
       ..addAll(stored.publishableContextIds);
