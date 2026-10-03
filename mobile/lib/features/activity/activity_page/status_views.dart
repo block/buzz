@@ -137,10 +137,18 @@ class _EmptyFilterState extends StatelessWidget {
         LucideIcons.activity,
         'No recent channel activity',
       ),
-      InboxFilter.agentActivity => (LucideIcons.bot, 'No agent updates'),
+      InboxFilter.agentActivity => (
+        LucideIcons.bot,
+        'No agent updates',
+      ),
       _ => (LucideIcons.bell, 'No activity yet'),
     };
-    return _EmptySurface(icon: icon, message: message);
+    final detail = switch (filter) {
+      InboxFilter.agentActivity =>
+        'While an agent is working in a channel, tap the activity icon in the channel header — or open Members → View activity — to watch its live transcript.',
+      _ => null,
+    };
+    return _EmptySurface(icon: icon, message: message, detail: detail);
   }
 }
 

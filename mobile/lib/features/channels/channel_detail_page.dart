@@ -43,6 +43,7 @@ import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
+import 'agent_activity/show_agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
@@ -627,6 +628,7 @@ class ChannelDetailPage extends HookConsumerWidget {
         ),
         actions: resolvedChannel.isDm
             ? [
+                _AgentActivityButton(channelId: resolvedChannel.id),
                 if (showsHuddleAction)
                   _HuddleButton(
                     channel: resolvedChannel,
@@ -662,6 +664,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ),
               ]
             : [
+                _AgentActivityButton(channelId: resolvedChannel.id),
                 if (showsComposer)
                   _HuddleButton(
                     channel: resolvedChannel,
