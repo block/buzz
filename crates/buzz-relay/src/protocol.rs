@@ -24,6 +24,9 @@ pub enum ClientMessage {
         filters: Vec<Filter>,
         /// Optional per-filter composite cursor tiebreaks from raw extension fields.
         before_ids: Vec<Option<Vec<u8>>>,
+        /// Per-filter NIP-50 matching semantics from the raw `search_mode`
+        /// extension field; full text unless the filter asked for `prefix`.
+        search_modes: Vec<buzz_search::SearchMode>,
     },
     /// A CLOSE message cancelling an active subscription.
     Close(String),
@@ -54,6 +57,25 @@ fn reject_artifact_query_filters(filters: &[serde_json::Value]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read the `search_mode` (or `searchMode`) extension off a raw filter object.
+///
+/// Shared by the WebSocket REQ parser and the HTTP bridge so both transports
+/// agree on the vocabulary: `prefix` selects
+/// [`buzz_search::SearchMode::Prefix`]; absence or any other value is full
+/// text. Unknown keys are ignored by the `Filter` deserializer, so a client
+/// that sends the extension to a relay without this support gets full-text
+/// results rather than an error.
+pub(crate) fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
+    match raw
+        .get("search_mode")
+        .or_else(|| raw.get("searchMode"))
+        .and_then(Value::as_str)
+    {
+        Some("prefix") => buzz_search::SearchMode::Prefix,
+        _ => buzz_search::SearchMode::FullText,
+    }
 }
 
 impl ClientMessage {
@@ -154,10 +176,12 @@ impl ClientMessage {
                         Ok(Some(bytes))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let search_modes = filter_values.iter().map(extract_search_mode).collect();
                 Ok(ClientMessage::Req {
                     sub_id,
                     filters,
                     before_ids,
+                    search_modes,
                 })
             }
             "COUNT" => {
@@ -414,6 +438,35 @@ mod tests {
             } => {
                 assert_eq!(filters.len(), 2);
                 assert_eq!(before_ids, vec![None, Some(vec![0xab; 32])]);
+            }
+            _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn parse_req_extracts_prefix_search_mode_per_filter() {
+        let raw = serde_json::json!([
+            "REQ",
+            "sub-search-mode",
+            { "kinds": [9], "search": "pro" },
+            { "kinds": [0], "search": "wes", "search_mode": "prefix" }
+        ])
+        .to_string();
+
+        match ClientMessage::parse(&raw).unwrap() {
+            ClientMessage::Req {
+                filters,
+                search_modes,
+                ..
+            } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(
+                    search_modes,
+                    vec![
+                        buzz_search::SearchMode::FullText,
+                        buzz_search::SearchMode::Prefix
+                    ]
+                );
             }
             _ => panic!("expected Req"),
         }

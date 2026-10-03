@@ -705,7 +705,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 55);
+        assert_eq!(migrations.len(), 56);
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -713,6 +713,7 @@ mod postgres_tests {
         assert_eq!(migrations[52].version, 53);
         assert_eq!(migrations[53].version, 54);
         assert_eq!(migrations[54].version, 55);
+        assert_eq!(migrations[55].version, 56);
         assert!(migrations[48]
             .sql
             .as_str()
@@ -948,6 +949,45 @@ mod postgres_tests {
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql")
             .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+
+        // Kind-0 profile search indexes text fields, not avatar bytes (0056):
+        // the IMMUTABLE wrapper is created unconditionally, and the generated
+        // column is rewritten only on an empty `events` table (0008 shape).
+        // Populated databases take scripts/maintenance/profile_search_text_fields.sql.
+        // The desired-state schema carries the same function and kind-0 arm
+        // ahead of the privacy blocklist it leaves intact.
+        assert_eq!(migrations[55].version, 56);
+        let profile_search = migrations[55].sql.as_str();
+        assert!(profile_search.contains("CREATE FUNCTION profile_search_tsv(content TEXT)"));
+        assert!(profile_search.contains("pg_input_is_valid(content, 'jsonb')"));
+        // PostgreSQL 16 floor: the preflight must run before CREATE FUNCTION so
+        // an older server reports the requirement, not a missing-function error.
+        let preflight = profile_search
+            .find("current_setting('server_version_num')::int < 160000")
+            .expect("0056 preflights the PostgreSQL 16 floor");
+        let create_function = profile_search
+            .find("CREATE FUNCTION profile_search_tsv")
+            .expect("0056 creates profile_search_tsv");
+        assert!(preflight < create_function);
+        // The lock wait is bounded before the emptiness check takes its table
+        // lock, so a busy relay fails and retries instead of queueing writers.
+        let lock_timeout = profile_search
+            .find("SET LOCAL lock_timeout = '5s'")
+            .expect("0056 bounds its lock wait");
+        let lock_table = profile_search
+            .find("LOCK TABLE events IN SHARE ROW EXCLUSIVE MODE")
+            .expect("0056 serializes the emptiness check with writers");
+        assert!(lock_timeout < lock_table);
+        assert!(profile_search.contains("IF NOT EXISTS (SELECT 1 FROM events LIMIT 1)"));
+        assert!(profile_search.contains("CASE WHEN kind = 0 THEN profile_search_tsv(content)"));
+        assert!(!migrations[0].sql.as_str().contains("profile_search_tsv"));
+        let desired_schema = include_str!("../../../../schema/schema.sql");
+        assert!(desired_schema.contains("CREATE FUNCTION profile_search_tsv(content TEXT)"));
+        assert!(desired_schema.contains("CASE WHEN kind = 0 THEN profile_search_tsv(content)"));
+        assert!(
+            include_str!("../../../../scripts/maintenance/profile_search_text_fields.sql")
+                .contains("CASE WHEN kind = 0 THEN profile_search_tsv(content) ELSE (%s) END")
+        );
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -2595,13 +2635,44 @@ mod postgres_tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn populated_upgrade_preserves_search_policy_except_for_private_kinds() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
+    /// A kind-0 profile whose inline avatar carries the probe lexeme inside its
+    /// base64, the shape that let a hundred agent profiles match a name prefix.
+    const AVATAR_NEEDLE_PROFILE: &str =
+        r#"{"name":"Pollen","picture":"data:image/png;base64,iVBORw0KGgo+needle+AAAA"}"#;
+
+    /// `search_tsv @@ 'needle'` per row, ordered by kind. `None` is a NULL
+    /// vector (storage-level excluded kind); `Some(false)` is an indexed row
+    /// that no longer carries the lexeme.
+    async fn needle_matches_by_kind(pool: &PgPool) -> Vec<(i32, Option<bool>)> {
+        sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("read search behavior by kind")
+    }
+
+    async fn search_tsv_expression(pool: &PgPool) -> String {
+        sqlx::query_scalar(
+            "SELECT pg_get_expr(d.adbin, d.adrelid) \
+             FROM pg_attrdef d \
+             JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             WHERE d.adrelid = 'events'::regclass AND a.attname = 'search_tsv'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read events.search_tsv generated expression")
+    }
+
+    /// Seed a pre-0008 (blocklist) database with one row per search policy
+    /// class so later migrations run against a populated `events` table: a
+    /// kind-0 profile matching only through its avatar, a kind-1 chat control,
+    /// and the two private kinds 0014 and 0033 exclude.
+    async fn seed_pre_0008_brownfield_search_rows(pool: &PgPool) {
+        reset_public_schema(pool).await;
         MIGRATOR
-            .run_to(7, &pool)
+            .run_to(7, pool)
             .await
             .expect("apply migrations 1-7");
 
@@ -2609,38 +2680,52 @@ mod postgres_tests {
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(community_id)
             .bind(format!("pre-0008-{}.example", community_id.simple()))
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("insert community");
 
-        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32), (3_u8, 30_179_i32)] {
+        for (marker, kind, content) in [
+            (1_u8, 1_i32, "brownfield needle"),
+            (2_u8, 30_350_i32, "brownfield needle"),
+            (3_u8, 30_179_i32, "brownfield needle"),
+            (4_u8, 0_i32, AVATAR_NEEDLE_PROFILE),
+        ] {
             sqlx::query(
                 "INSERT INTO events \
                  (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
-                 VALUES ($1, $2, $3, NOW(), $4, '[]'::jsonb, 'brownfield needle', $5, NOW())",
+                 VALUES ($1, $2, $3, NOW(), $4, '[]'::jsonb, $5, $6, NOW())",
             )
             .bind(community_id)
             .bind(vec![marker; 32])
             .bind(vec![marker + 10; 32])
             .bind(kind)
+            .bind(content)
             .bind(vec![marker + 20; 64])
-            .execute(&pool)
+            .execute(pool)
             .await
             .expect("insert brownfield event");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_upgrade_preserves_search_policy_except_for_private_kinds() {
+        let pool = connect_test_pool().await;
+        seed_pre_0008_brownfield_search_rows(&pool).await;
 
         MIGRATOR
             .run_to(11, &pool)
             .await
             .expect("apply main migrations through 11");
-        let before: Vec<(i32, bool)> = sqlx::query_as(
-            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
-             FROM events ORDER BY kind",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read pre-push search behavior");
-        assert_eq!(before, vec![(1, true), (30_179, true), (30_350, true)]);
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![
+                (0, Some(true)),
+                (1, Some(true)),
+                (30_179, Some(true)),
+                (30_350, Some(true))
+            ]
+        );
 
         // 0014 fixes 30350 only. A brownfield database that stopped here still
         // tokenized kind:30179 ciphertext — the gap 0033 closes.
@@ -2648,29 +2733,347 @@ mod postgres_tests {
             .run_to(32, &pool)
             .await
             .expect("apply migrations through 32");
-        let pre_0033: Vec<(i32, Option<bool>)> = sqlx::query_as(
-            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
-             FROM events ORDER BY kind",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read pre-0033 search behavior");
         assert_eq!(
-            pre_0033,
-            vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
+            needle_matches_by_kind(&pool).await,
+            vec![
+                (0, Some(true)),
+                (1, Some(true)),
+                (30_179, Some(true)),
+                (30_350, None)
+            ]
         );
 
+        // 0056 creates profile_search_tsv but must not rewrite a populated
+        // table at startup: the avatar-only kind-0 match survives until the
+        // operator runs the maintenance script.
         run_migrations(&pool)
             .await
             .expect("apply remaining migrations to populated database");
-        let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
-            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
-             FROM events ORDER BY kind",
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![
+                (0, Some(true)),
+                (1, Some(true)),
+                (30_179, None),
+                (30_350, None)
+            ]
+        );
+        assert!(
+            !search_tsv_expression(&pool)
+                .await
+                .contains("profile_search_tsv"),
+            "0056 must not rewrite search_tsv on a populated database"
+        );
+    }
+
+    /// The relay's startup warning and `buzz-admin profile-search-policy` read
+    /// one probe. It owes nothing before the schema exists, reports the rewrite
+    /// pending on a populated database that upgraded through 0056, keeps
+    /// reporting it after that table is emptied (0056 does not rerun, so a
+    /// profile published then still indexes its avatar bytes), clears once the
+    /// maintenance script runs, and never flags a fresh install.
+    ///
+    /// Mutate-bite: make 0056 rewrite unconditionally and the pending assertion
+    /// fails; gate `rewrite_pending` on a populated table again and the
+    /// emptied-table assertion fails while the profile published after it
+    /// still matches `needle` through its avatar.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn profile_search_policy_probe_tracks_the_maintenance_rewrite() {
+        let pool = connect_test_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
+
+        reset_public_schema(&pool).await;
+        assert_eq!(
+            db.profile_search_policy()
+                .await
+                .expect("probe a schema without events"),
+            None
+        );
+
+        seed_pre_0008_brownfield_search_rows(&pool).await;
+        run_migrations(&pool)
+            .await
+            .expect("upgrade populated database through 0056");
+        let policy = db
+            .profile_search_policy()
+            .await
+            .expect("probe populated database")
+            .expect("events.search_tsv exists");
+        assert_eq!(policy.expression, search_tsv_expression(&pool).await);
+        assert!(!policy.indexes_profile_text_fields());
+        assert!(
+            policy.rewrite_pending(),
+            "populated upgrade must report the rewrite pending: {policy:?}"
+        );
+
+        // Emptying the table afterwards changes nothing: the migration has
+        // already run, the expression stays, and the next profile published
+        // indexes whole JSON again.
+        sqlx::query("DELETE FROM events")
+            .execute(&pool)
+            .await
+            .expect("empty events after the populated upgrade");
+        let policy = db
+            .profile_search_policy()
+            .await
+            .expect("probe emptied database")
+            .expect("events.search_tsv exists");
+        assert!(
+            policy.rewrite_pending(),
+            "an emptied table still owes the rewrite: {policy:?}"
+        );
+        let community_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM communities")
+            .fetch_one(&pool)
+            .await
+            .expect("brownfield community survives the delete");
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             VALUES ($1, $2, $3, NOW(), 0, '[]'::jsonb, $4, $5)",
+        )
+        .bind(community_id)
+        .bind(vec![5_u8; 32])
+        .bind(vec![15_u8; 32])
+        .bind(AVATAR_NEEDLE_PROFILE)
+        .bind(vec![25_u8; 64])
+        .execute(&pool)
+        .await
+        .expect("publish a profile after the table emptied");
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![(0, Some(true))],
+            "a profile published after the table emptied still matches through its avatar"
+        );
+
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/maintenance/profile_search_text_fields.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("run maintenance rewrite");
+        let policy = db
+            .profile_search_policy()
+            .await
+            .expect("probe rewritten database")
+            .expect("events.search_tsv exists");
+        assert!(policy.indexes_profile_text_fields());
+        assert!(!policy.rewrite_pending(), "rewrite must clear: {policy:?}");
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![(0, Some(false))],
+            "the rewrite reindexes the profile on its text fields"
+        );
+
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("fresh install");
+        let policy = db
+            .profile_search_policy()
+            .await
+            .expect("probe fresh install")
+            .expect("events.search_tsv exists");
+        assert!(policy.indexes_profile_text_fields());
+        assert!(
+            !policy.rewrite_pending(),
+            "fresh install owes nothing: {policy:?}"
+        );
+    }
+
+    /// Migration-lane twin of `kind0_avatar_data_url_token_is_not_searchable`
+    /// in buzz-search: a fresh install reaches the kind-0 arm through 0056's
+    /// empty-table rewrite, so a profile matches on its name fields and never
+    /// on its avatar bytes.
+    ///
+    /// Mutate-bite: drop the `kind = 0` arm from 0056's ADD COLUMN and the
+    /// Pollen row matches `wes:*` through its base64 again.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fresh_install_profile_search_uses_text_fields() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("run migrations");
+
+        let expression = search_tsv_expression(&pool).await;
+        assert!(
+            expression.contains("profile_search_tsv(content)"),
+            "fresh install must route kind 0 through profile_search_tsv: {expression}"
+        );
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("fresh-profile-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        for (marker, content) in [
+            (
+                1_u8,
+                r#"{"name":"Pollen","picture":"data:image/png;base64,iVBORw0KGgo+Wes+AAAA"}"#,
+            ),
+            (2_u8, r#"{"display_name":"Wes"}"#),
+        ] {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+                 VALUES ($1, $2, $3, NOW(), 0, '[]'::jsonb, $4, $5, NOW())",
+            )
+            .bind(community_id)
+            .bind(vec![marker; 32])
+            .bind(vec![marker + 10; 32])
+            .bind(content)
+            .bind(vec![marker + 20; 64])
+            .execute(&pool)
+            .await
+            .expect("insert profile");
+        }
+
+        let matches: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT coalesce(content::jsonb ->> 'display_name', content::jsonb ->> 'name'), \
+                    search_tsv @@ to_tsquery('simple', 'wes:*') \
+             FROM events WHERE kind = 0 ORDER BY id",
         )
         .fetch_all(&pool)
         .await
-        .expect("read post-upgrade search behavior");
-        assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
+        .expect("probe wes:* against fresh-install profiles");
+        assert_eq!(
+            matches,
+            vec![("Pollen".to_owned(), false), ("Wes".to_owned(), true)]
+        );
+    }
+
+    /// The out-of-band maintenance script is the only path a populated
+    /// database has to the kind-0 arm, and nothing else exercises it. Apply
+    /// it to the brownfield (blocklist) fixture: the avatar-only profile stops
+    /// matching, the chat control keeps matching, the private kinds stay NULL,
+    /// the GIN index is rebuilt, and a second run is a no-op.
+    ///
+    /// Mutate-bite: drop the `WHEN kind = 0 THEN profile_search_tsv(content)`
+    /// wrap from the script's EXECUTE and the Pollen row keeps matching.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn maintenance_profile_search_rewrite_drops_avatar_tokens_on_populated_database() {
+        let pool = connect_test_pool().await;
+        seed_pre_0008_brownfield_search_rows(&pool).await;
+        run_migrations(&pool)
+            .await
+            .expect("apply remaining migrations to populated database");
+        assert_eq!(needle_matches_by_kind(&pool).await[0], (0, Some(true)));
+
+        let script = include_str!("../../../../scripts/maintenance/profile_search_text_fields.sql");
+        sqlx::raw_sql(script)
+            .execute(&pool)
+            .await
+            .expect("apply profile search maintenance script");
+
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![
+                (0, Some(false)),
+                (1, Some(true)),
+                (30_179, None),
+                (30_350, None)
+            ]
+        );
+        let rewritten = search_tsv_expression(&pool).await;
+        assert!(
+            rewritten.contains("WHEN (kind = 0) THEN profile_search_tsv(content)"),
+            "maintenance script must wrap the live expression: {rewritten}"
+        );
+        // The 0005 blocklist, still wrapped by 0014 and 0033, sits inside the
+        // new arm's ELSE: the script wraps the live expression, never replaces it.
+        assert!(
+            rewritten.contains("ARRAY[1059, 30300, 30622, 44100, 44101, 44200]"),
+            "maintenance script must keep the brownfield blocklist: {rewritten}"
+        );
+        let indexed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes \
+             WHERE tablename = 'events' AND indexname = 'idx_events_search_tsv')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look up search GIN index");
+        assert!(
+            indexed,
+            "maintenance script must recreate idx_events_search_tsv"
+        );
+
+        sqlx::raw_sql(script)
+            .execute(&pool)
+            .await
+            .expect("rerun profile search maintenance script");
+        assert_eq!(
+            search_tsv_expression(&pool).await,
+            rewritten,
+            "a second run must leave the expression untouched"
+        );
+    }
+
+    /// Same script against the other expression shape in the field: a
+    /// post-0008 install carries the allowlist wrapped by 0014 and 0033, and
+    /// kind 0 sits inside `ARRAY[0, 9, 40002, 45001, 45003]`. Populate it
+    /// before 0056 so startup leaves the column alone, then apply the script.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn maintenance_profile_search_rewrite_wraps_fresh_install_allowlist() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(55, &pool)
+            .await
+            .expect("apply migrations 1-55");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("allowlist-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        for (marker, kind, content) in [
+            (1_u8, 0_i32, AVATAR_NEEDLE_PROFILE),
+            (2_u8, 9_i32, "chat needle"),
+            (3_u8, 30_179_i32, "private needle"),
+        ] {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+                 VALUES ($1, $2, $3, NOW(), $4, '[]'::jsonb, $5, $6, NOW())",
+            )
+            .bind(community_id)
+            .bind(vec![marker; 32])
+            .bind(vec![marker + 10; 32])
+            .bind(kind)
+            .bind(content)
+            .bind(vec![marker + 20; 64])
+            .execute(&pool)
+            .await
+            .expect("insert allowlist event");
+        }
+
+        run_migrations(&pool)
+            .await
+            .expect("apply 0056 to populated allowlist database");
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![(0, Some(true)), (9, Some(true)), (30_179, None)]
+        );
+
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/maintenance/profile_search_text_fields.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply profile search maintenance script");
+        assert_eq!(
+            needle_matches_by_kind(&pool).await,
+            vec![(0, Some(false)), (9, Some(true)), (30_179, None)]
+        );
+        let rewritten = search_tsv_expression(&pool).await;
+        assert!(
+            rewritten.contains("WHEN (kind = 0) THEN profile_search_tsv(content)")
+                && rewritten.contains("ARRAY[0, 9, 40002, 45001, 45003]"),
+            "maintenance script must wrap the allowlist, not replace it: {rewritten}"
+        );
     }
 
     /// Migration-upgrade half of the owner-provenance contract.
@@ -2740,9 +3143,15 @@ mod postgres_tests {
         .fetch_one(&pool)
         .await
         .expect("read fresh-install search expression");
+        // Kind 0 left the allowlist array for its own `profile_search_tsv`
+        // arm in 0056; it is still searchable, through the text-field vector.
         assert!(
-            search_expression.contains("ARRAY[0, 9, 40002, 45001, 45003]"),
+            search_expression.contains("ARRAY[9, 40002, 45001, 45003]"),
             "fresh-install search allowlist has the wrong kinds: {search_expression}"
+        );
+        assert!(
+            search_expression.contains("WHEN (kind = 0) THEN profile_search_tsv(content)"),
+            "fresh installs must route kind 0 through profile_search_tsv: {search_expression}"
         );
         assert!(
             search_expression.contains("ELSE NULL::tsvector"),

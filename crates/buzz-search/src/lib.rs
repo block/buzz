@@ -3,11 +3,18 @@
 //! Buzz search — community-scoped Postgres full-text search over Buzz events.
 //!
 //! The index lives in the `events` table: `search_tsv TSVECTOR GENERATED
-//! ALWAYS AS (to_tsvector('simple', content)) STORED`, with `GIN
-//! (search_tsv)` as the access path. Because the column is `GENERATED ALWAYS`,
+//! ALWAYS AS (...) STORED`, with `GIN (search_tsv)` as the access path. The
+//! expression is `to_tsvector('simple', content)` for chat kinds, `NULL` for
+//! privacy-sensitive kinds, and `profile_search_tsv(content)` for kind 0,
+//! which indexes a profile's name (weight A), contact (B), and `about` (D)
+//! fields rather than the whole JSON document, so an inline avatar's base64
+//! never matches a name prefix. Because the column is `GENERATED ALWAYS`,
 //! every row write *is* the index update — there is no separate indexer, no
 //! mpsc queue, no reindex job, no consistency window to reason about. A
 //! client cannot forge the tsvector out of sync with the content it signed.
+//! Populated databases gain the kind-0 arm through an operator-run
+//! maintenance script, not at startup, so the kind-0 query path also orders
+//! name matches first rather than relying on the weights alone.
 //!
 //! This crate is the **query** side. Indexing is the SQL row insert — owned
 //! by `buzz-db`. The relay refetches canonical events through `buzz-db`'s

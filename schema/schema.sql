@@ -200,6 +200,40 @@ CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
 -- Cross-community dedup: same signed event may exist in two communities;
 -- (community_id, created_at, id) dedupes within one, allows across.
 
+-- Kind-0 profile search vector: index the profile's text fields, not the
+-- whole JSON document. An inline base64 avatar (`picture`) tokenizes into
+-- thousands of lexemes, and a shared agent avatar can make a hundred profiles
+-- match a name prefix that none of them carry. Name fields weigh A, contact
+-- fields B, `about` D; `picture`, `banner`, `image`, and unknown keys are not
+-- indexed. Invalid or non-object JSON (rows that predate ingest validation)
+-- falls back to the raw-text vector so no row becomes less discoverable.
+-- `pg_input_is_valid` is STABLE, so this IMMUTABLE wrapper is what lets the
+-- generated column below call it; the declaration is truthful because
+-- `jsonb_in` is IMMUTABLE, and `CASE` guarantees `content::jsonb` is never
+-- evaluated for invalid input. Requires PostgreSQL 16 or later.
+-- Never DROP this function: `events.search_tsv` depends on it and a CASCADE
+-- would drop the column. Never fix it in place either: CREATE OR REPLACE
+-- recomputes nothing already stored, so a change to this body ships with its
+-- own maintenance rewrite, the way 0056 ships
+-- scripts/maintenance/profile_search_text_fields.sql. Keep in sync with
+-- migrations/0056.
+CREATE FUNCTION profile_search_tsv(content TEXT) RETURNS TSVECTOR
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT CASE
+        WHEN pg_input_is_valid(content, 'jsonb') THEN
+            (SELECT CASE WHEN jsonb_typeof(j) = 'object' THEN
+                    setweight(to_tsvector('simple'::regconfig, concat_ws(' ',
+                        j ->> 'name', j ->> 'display_name', j ->> 'displayName')), 'A')
+                 || setweight(to_tsvector('simple'::regconfig, concat_ws(' ',
+                        j ->> 'nip05', j ->> 'lud16', j ->> 'website')), 'B')
+                 || setweight(to_tsvector('simple'::regconfig,
+                        coalesce(j ->> 'about', '')), 'D')
+                 ELSE to_tsvector('simple'::regconfig, content) END
+             FROM (SELECT content::jsonb AS j) AS parsed)
+        ELSE to_tsvector('simple'::regconfig, content)
+    END
+$$;
+
 CREATE TABLE events (
     community_id UUID NOT NULL REFERENCES communities(id),
     id          BYTEA NOT NULL,
@@ -219,9 +253,14 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033).
+    -- Kind 0 routes through profile_search_tsv (above) so profile lookups
+    -- match names, not avatar bytes.
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033 +
+    -- 0056). Populated databases reach the kind-0 arm only through
+    -- scripts/maintenance/profile_search_text_fields.sql.
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind = 0 THEN profile_search_tsv(content)
+             WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,

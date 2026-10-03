@@ -53,6 +53,7 @@ pub async fn handle_req(
     sub_id: String,
     filters: Vec<Filter>,
     before_ids: Vec<Option<Vec<u8>>>,
+    search_modes: Vec<buzz_search::SearchMode>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
@@ -317,6 +318,7 @@ pub async fn handle_req(
                 &sub_id,
                 owner,
                 &filters,
+                &search_modes,
                 &accessible_channels,
                 token_channel_ids.is_none(),
                 &conn.tenant,
@@ -679,11 +681,15 @@ pub(crate) fn build_search_channel_scope_filter(
 
 /// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
 /// Search subscriptions are one-shot — no persistent subscription is registered.
+///
+/// `search_modes` is aligned with `filters` by index, like `before_ids` on the
+/// non-search path; a missing entry means full text.
 #[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
     owner: u64,
     filters: &[Filter],
+    search_modes: &[buzz_search::SearchMode],
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
     tenant: &TenantContext,
@@ -706,11 +712,15 @@ async fn handle_search_req(
 
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
 
-    for filter in filters {
+    for (idx, filter) in filters.iter().enumerate() {
         let search_text = match &filter.search {
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
+        let mode = search_modes
+            .get(idx)
+            .copied()
+            .unwrap_or(buzz_search::SearchMode::FullText);
 
         let limit = filter
             .limit
@@ -766,6 +776,15 @@ async fn handle_search_req(
         // exhausted the search result set. Post-filtering discards an unpredictable
         // share of each page, so continuing past short yields gives the scan a
         // chance — not a guarantee — of filling the requested limit.
+        //
+        // The `page` filter extension is deliberately not honoured here. On this
+        // path `page` is an internal scan cursor over raw FTS candidates while
+        // `limit` counts accepted rows after post-filtering, so a client-supplied
+        // offset would count a different thing than the limit it pairs with and
+        // could not compose with the scan budget pinned by
+        // `search_scan_capacity_covers_advertised_nip11_max_limit`. Offset paging
+        // stays a bridge-only contract (`extract_search_page` in `api/bridge.rs`),
+        // where one page is one query with no post-filter scan.
         let mut emitted: u32 = 0;
 
         for page in 1..=MAX_SEARCH_PAGES {
@@ -783,7 +802,7 @@ async fn handle_search_req(
                 until,
                 page,
                 per_page: SEARCH_PAGE_SIZE,
-                mode: buzz_search::SearchMode::FullText,
+                mode,
             };
 
             let search_result = match state.search.search(&search_query).await {
@@ -3351,8 +3370,9 @@ mod tests {
 
         let conn2 = Arc::clone(&conn);
         let state2 = Arc::clone(&state);
-        let handle =
-            tokio::spawn(async move { handle_req(sub_id, filters, vec![], conn2, state2).await });
+        let handle = tokio::spawn(async move {
+            handle_req(sub_id, filters, vec![], vec![], conn2, state2).await
+        });
 
         // Wait for the handler to reach the permit boundary.
         tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
@@ -3506,8 +3526,9 @@ mod tests {
 
         let conn2 = Arc::clone(&conn);
         let state2 = Arc::clone(&state);
-        let handle =
-            tokio::spawn(async move { handle_req(sub_id, filters, vec![], conn2, state2).await });
+        let handle = tokio::spawn(async move {
+            handle_req(sub_id, filters, vec![], vec![], conn2, state2).await
+        });
 
         // Wait for the handler to reach the permit boundary.
         tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
@@ -3621,6 +3642,7 @@ mod tests {
         let handle = tokio::spawn(handle_req(
             "stalled-read".to_string(),
             vec![filter],
+            vec![],
             vec![],
             Arc::clone(&conn),
             state,
@@ -3773,6 +3795,7 @@ mod tests {
             handle_req(
                 "timed-out".to_string(),
                 filters,
+                vec![],
                 vec![],
                 Arc::clone(&conn),
                 Arc::clone(&state),

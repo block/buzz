@@ -31,7 +31,11 @@ use std::time::Instant;
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
-use buzz_db::{partition::PartitionAuditReport, Db, DbConfig};
+use buzz_db::partition::PartitionAuditReport;
+use buzz_db::search_policy::{
+    ProfileSearchPolicy, PROFILE_SEARCH_DEPLOYMENT_DOC, PROFILE_SEARCH_MAINTENANCE_SCRIPT,
+};
+use buzz_db::{Db, DbConfig};
 use buzz_media::{BucketSnapshot, MediaConfig, MediaStorage, S3AddressingStyle, SweepError};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
@@ -97,6 +101,13 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         months_ahead: u32,
     },
+    /// Report how the live `events.search_tsv` column indexes kind-0 profiles,
+    /// using a read-only database session.
+    ///
+    /// Exit 0 when kind 0 routes through `profile_search_tsv`, 2 when a
+    /// populated database still owes the maintenance rewrite from migration
+    /// 0056, 5 when the column does not exist.
+    ProfileSearchPolicy,
     /// Inspect deployment-wide Buzz product feedback.
     ProductFeedback {
         #[command(subcommand)]
@@ -175,6 +186,7 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Command::StorageSnapshot { max_objects } => cmd_storage_snapshot(max_objects).await,
         Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
+        Command::ProfileSearchPolicy => cmd_profile_search_policy().await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
@@ -324,7 +336,7 @@ fn storage_config_from_env() -> Result<MediaConfig> {
 }
 
 #[derive(Serialize)]
-struct PartitionAuditIdentity {
+struct ReadOnlyAuditIdentity {
     database: String,
     user: String,
     schema: String,
@@ -341,13 +353,15 @@ struct PartitionAuditOutput {
     build_url: &'static str,
     outcome: &'static str,
     months_ahead: u32,
-    identity: PartitionAuditIdentity,
+    identity: ReadOnlyAuditIdentity,
     report: PartitionAuditReport,
 }
 
-async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
+/// Open the single read-only session the audit commands share, and prove it is
+/// read-only before anything runs on it.
+async fn connect_read_only_audit(command: &str) -> Result<(sqlx::PgPool, ReadOnlyAuditIdentity)> {
     let db_url = std::env::var("DATABASE_URL")
-        .map_err(|_| anyhow::anyhow!("DATABASE_URL is required for partition-audit"))?;
+        .map_err(|_| anyhow::anyhow!("DATABASE_URL is required for {command}"))?;
     let config = DbConfig {
         database_url: db_url,
         max_connections: 1,
@@ -366,7 +380,7 @@ async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
     )
     .fetch_one(&pool)
     .await?;
-    let identity = PartitionAuditIdentity {
+    let identity = ReadOnlyAuditIdentity {
         database: row.try_get("database")?,
         user: row.try_get("user")?,
         schema: row.try_get("schema")?,
@@ -374,9 +388,13 @@ async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
         transaction_read_only: row.try_get("transaction_read_only")?,
     };
     if !identity.default_transaction_read_only || !identity.transaction_read_only {
-        anyhow::bail!("partition-audit connection is not read-only");
+        anyhow::bail!("{command} connection is not read-only");
     }
+    Ok((pool, identity))
+}
 
+async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
+    let (pool, identity) = connect_read_only_audit("partition-audit").await?;
     let report = Db::from_pool(pool)
         .audit_partitions_report(months_ahead)
         .await;
@@ -406,6 +424,60 @@ async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
             months_ahead,
             identity,
             report,
+        })?
+    );
+    Ok(code)
+}
+
+#[derive(Serialize)]
+struct ProfileSearchPolicyOutput {
+    schema_version: u32,
+    mode: &'static str,
+    source_sha: &'static str,
+    build_id: &'static str,
+    build_url: &'static str,
+    outcome: &'static str,
+    next_step: String,
+    identity: ReadOnlyAuditIdentity,
+    policy: Option<ProfileSearchPolicy>,
+}
+
+/// Outcome label, exit code, and operator instruction for a policy probe.
+fn profile_search_outcome(policy: Option<&ProfileSearchPolicy>) -> (&'static str, i32, String) {
+    match policy {
+        None => (
+            "missing",
+            5,
+            "events.search_tsv does not exist; apply the schema (buzz-admin migrate) first".into(),
+        ),
+        Some(policy) if policy.rewrite_pending() => (
+            "rewrite_pending",
+            2,
+            format!(
+                "run {PROFILE_SEARCH_MAINTENANCE_SCRIPT} in a maintenance window; \
+                 procedure in {PROFILE_SEARCH_DEPLOYMENT_DOC}"
+            ),
+        ),
+        Some(_) => ("ok", 0, "none".into()),
+    }
+}
+
+async fn cmd_profile_search_policy() -> Result<i32> {
+    let (pool, identity) = connect_read_only_audit("profile-search-policy").await?;
+    let policy = Db::from_pool(pool).profile_search_policy().await?;
+    let (outcome, code, next_step) = profile_search_outcome(policy.as_ref());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ProfileSearchPolicyOutput {
+            schema_version: 1,
+            mode: "read_only",
+            source_sha: option_env!("BUZZ_SOURCE_SHA").unwrap_or("unknown"),
+            build_id: option_env!("BUZZ_BUILD_ID").unwrap_or("local"),
+            build_url: option_env!("BUZZ_BUILD_URL").unwrap_or("unknown"),
+            outcome,
+            next_step,
+            identity,
+            policy,
         })?
     );
     Ok(code)
@@ -910,5 +982,36 @@ mod tests {
             cli.command,
             Command::PartitionAudit { months_ahead: 6 }
         ));
+    }
+
+    #[test]
+    fn parses_profile_search_policy_command() {
+        let cli = Cli::try_parse_from(["buzz-admin", "profile-search-policy"])
+            .expect("parse profile-search-policy command");
+        assert!(matches!(cli.command, Command::ProfileSearchPolicy));
+    }
+
+    #[test]
+    fn profile_search_outcome_exit_codes_follow_the_pending_rewrite() {
+        let pending = ProfileSearchPolicy {
+            expression: "to_tsvector('simple'::regconfig, content)".into(),
+        };
+        let (outcome, code, next_step) = profile_search_outcome(Some(&pending));
+        assert_eq!((outcome, code), ("rewrite_pending", 2));
+        assert!(next_step.contains(PROFILE_SEARCH_MAINTENANCE_SCRIPT));
+        assert!(next_step.contains(PROFILE_SEARCH_DEPLOYMENT_DOC));
+
+        let rewritten = ProfileSearchPolicy {
+            expression: "CASE WHEN (kind = 0) THEN profile_search_tsv(content) ELSE NULL END"
+                .into(),
+        };
+        assert_eq!(
+            profile_search_outcome(Some(&rewritten)).0,
+            "ok",
+            "rewritten database is clean"
+        );
+        assert_eq!(profile_search_outcome(Some(&rewritten)).1, 0);
+
+        assert_eq!(profile_search_outcome(None).1, 5);
     }
 }

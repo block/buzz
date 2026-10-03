@@ -50,6 +50,8 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Live `events.search_tsv` kind-0 policy inspection.
+pub mod search_policy;
 /// Durable completed snapshots from the isolated media-storage worker.
 pub mod storage_accounting;
 /// Thread metadata persistence.

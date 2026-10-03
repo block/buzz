@@ -928,9 +928,15 @@ Docker Compose provides the full local development stack. All services include h
 
 Search runs over the `events.search_tsv` generated `tsvector` column on the
 `events` table (no separate collection or service). The column is populated on
-insert — `to_tsvector('simple', content)` — and excludes privacy-sensitive
-kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
-storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
+insert — `to_tsvector('simple', content)` for chat kinds — and excludes
+privacy-sensitive kinds via `CASE WHEN kind IN (1059, 30300, 30622, ...) THEN
+NULL`, so those rows are storage-level unsearchable (a `NULL` tsvector never
+matches `@@`). Kind 0 uses `profile_search_tsv(content)`, which indexes the
+profile's text fields rather than the whole JSON so avatar bytes never match a
+name; populated databases pick that arm up through
+`scripts/maintenance/profile_search_text_fields.sql`, not at startup, because
+replacing a generated column rewrites every partition (procedure in
+[docs/profile-search-deployment.md](docs/profile-search-deployment.md)). A GIN index
 (`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
 community-leading btree filters BitmapAnd with the GIN probe so every query is
 fenced to its `community_id`.

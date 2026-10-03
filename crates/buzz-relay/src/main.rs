@@ -348,6 +348,21 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         }
     };
 
+    // Non-fatal: 0056 leaves a database that held events on its old kind-0
+    // search expression until an operator runs the maintenance rewrite. Say so
+    // at every boot until then; profile search works meanwhile, only noisier.
+    match db.profile_search_policy().await {
+        Ok(Some(policy)) if policy.rewrite_pending() => warn!(
+            script = buzz_db::search_policy::PROFILE_SEARCH_MAINTENANCE_SCRIPT,
+            procedure = buzz_db::search_policy::PROFILE_SEARCH_DEPLOYMENT_DOC,
+            "Profile search still indexes whole kind-0 JSON on this database; \
+             run the maintenance rewrite"
+        ),
+        Ok(Some(_)) => {}
+        Ok(None) => warn!("events.search_tsv not found; profile search policy was not checked"),
+        Err(error) => warn!(%error, "Profile search policy probe failed"),
+    }
+
     db.validate_deletion_serving_catalog().await.map_err(|e| {
         error!("Community deletion serving-fence validation failed: {e}");
         anyhow::anyhow!("Community deletion serving fence is unsafe: {e}")

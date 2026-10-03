@@ -16,7 +16,7 @@ use buzz_search::{ChannelScope, SearchQuery, SearchService};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
-const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
     // The PostgreSQL lane supplies an isolated desired-state database. Outside
@@ -200,8 +200,8 @@ async fn search_does_not_return_other_community_events() {
 #[ignore = "requires Postgres"]
 async fn kind0_search_by_display_name_works_without_flattening() {
     // The case I worried might regress without the kind:0 content-flattening
-    // hack. Postgres FTS over raw JSON content tokenizes through the
-    // punctuation and finds display_name/nip05 values.
+    // hack. `profile_search_tsv` indexes display_name/name at weight A and
+    // nip05 at weight B, so each field is found without flattening.
     let (pool, schema) = setup().await;
 
     let c = mk_community(&pool, "a.example").await;
@@ -298,6 +298,325 @@ async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
 
     assert_eq!(first_page.hits.len(), 3);
     assert_eq!(first_page.hits[0].event_id, exact_id);
+
+    teardown(pool, &schema).await;
+}
+
+/// Kind-0 rows index their profile text fields through `profile_search_tsv`,
+/// so an inline avatar's base64 never contributes lexemes. Before that arm,
+/// `to_tsvector('simple', content)` over the whole JSON let 111 agent profiles
+/// sharing one avatar match `wes:*` and bury the one person named Wes.
+///
+/// Mutate-bite: drop the `kind = 0` arm from `search_tsv` in `schema.sql` and
+/// the Pollen row matches again, so the search returns two hits.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn kind0_avatar_data_url_token_is_not_searchable() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "avatar-tokens.example").await;
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        0,
+        r#"{"name":"Pollen","picture":"data:image/png;base64,iVBORw0KGgo+Wes+AAAA"}"#,
+        None,
+        1_700_000_100,
+    )
+    .await;
+    let wes_id = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        wes_id,
+        rand_bytes32(),
+        0,
+        r#"{"display_name":"Wes"}"#,
+        None,
+        1_700_000_000,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let result = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "wes".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![0]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::Prefix,
+        })
+        .await
+        .expect("profile prefix search ok");
+
+    let ids: Vec<[u8; 32]> = result.hits.iter().map(|h| h.event_id).collect();
+    assert_eq!(
+        ids,
+        vec![wes_id],
+        "only the profile named Wes may match wes:*; avatar bytes are not indexed"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// A profile whose `about` text repeats a matching word outranks a one-word
+/// display name on `ts_rank_cd` alone (twelve weight-D covers score 1.2
+/// against 1.0 for a single weight-A name lexeme). Kind-0 queries order rows
+/// whose name fields match ahead of body-only matches so the person the
+/// typeahead is looking for lands on page 1.
+///
+/// Mutate-bite: drop the `name_match DESC` ORDER BY term in `query.rs` and Wes
+/// falls behind the four newer, higher-ranked body matches onto page 2.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn kind0_prefix_orders_name_match_before_newer_body_match() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "profile-name-first.example").await;
+    let wes_id = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        wes_id,
+        rand_bytes32(),
+        0,
+        r#"{"display_name":"Wes"}"#,
+        None,
+        1_700_000_000,
+    )
+    .await;
+
+    // Newer profiles that match wes:* only through body text, each with a
+    // higher cover-density rank than a single name lexeme.
+    let about = ["west"; 12].join(" ");
+    for i in 0..4 {
+        insert_event(
+            &pool,
+            c,
+            rand_bytes32(),
+            rand_bytes32(),
+            0,
+            &format!(r#"{{"name":"Pollen {i}","about":"{about}"}}"#),
+            None,
+            1_700_000_100 + i,
+        )
+        .await;
+    }
+
+    let svc = SearchService::new(pool.clone());
+    let first_page = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "wes".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![0]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 3,
+            mode: buzz_search::SearchMode::Prefix,
+        })
+        .await
+        .expect("profile prefix search ok");
+
+    assert_eq!(first_page.hits.len(), 3);
+    assert_eq!(
+        first_page.hits[0].event_id, wes_id,
+        "name match must outrank newer body-only matches"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// Kind 0 is replaceable, but the replaceable path admits that earlier bugs
+/// may have left more than one live row per pubkey, and nothing in the schema
+/// forbids it. Kind-0 queries return one row per pubkey, resolved to the
+/// newest live head, so a bounded page counts people rather than rows.
+///
+/// Mutate-bite: drop `DISTINCT ON (pubkey)` from the head subquery in
+/// `query.rs` and the two-slot page fills with both of Wes's heads, pushing
+/// Wesley off it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn kind0_prefix_collapses_duplicate_live_heads_to_one_row_per_pubkey() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "duplicate-heads.example").await;
+    // Both heads are inserted directly, bypassing the replaceable path that
+    // would normally retire the older one.
+    let wes_pk = rand_bytes32();
+    let stale_wes = rand_bytes32();
+    let current_wes = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        stale_wes,
+        wes_pk,
+        0,
+        r#"{"display_name":"Wes","about":"stale head"}"#,
+        None,
+        1_700_000_010,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        current_wes,
+        wes_pk,
+        0,
+        r#"{"display_name":"Wes","about":"current head"}"#,
+        None,
+        1_700_000_020,
+    )
+    .await;
+
+    // An older person who also matches. Without deduplication, Wes's two
+    // newer heads fill the two-slot page before this row.
+    let wesley_pk = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        wesley_pk,
+        0,
+        r#"{"display_name":"Wesley"}"#,
+        None,
+        1_700_000_000,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let first_page = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "wes".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![0]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 2,
+            mode: buzz_search::SearchMode::Prefix,
+        })
+        .await
+        .expect("profile prefix search ok");
+
+    let pubkeys: Vec<[u8; 32]> = first_page.hits.iter().map(|h| h.pubkey).collect();
+    assert_eq!(pubkeys.len(), 2);
+    assert!(
+        pubkeys.contains(&wes_pk) && pubkeys.contains(&wesley_pk),
+        "one row per pubkey, got {pubkeys:?}"
+    );
+    let wes_hit = first_page
+        .hits
+        .iter()
+        .find(|h| h.pubkey == wes_pk)
+        .expect("wes on the first page");
+    assert_eq!(
+        wes_hit.event_id, current_wes,
+        "a duplicate head must resolve to the newest live row"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// The head is resolved before the search predicate runs. Matching first
+/// would let a superseded row that still matches stand in for the current one
+/// that does not: a user who renamed from Wes to Alice would keep appearing
+/// for `wes`, with the name and `about` text they removed. A store holding one
+/// row per person would return nothing here, and so must this query. Time
+/// fences likewise apply to the head, not to the rows it superseded.
+///
+/// Mutate-bite: move `search_tsv @@ search_query.query` into the head
+/// subquery's WHERE (the pre-fix shape) and the stale Wes row comes back for
+/// both `wes` searches.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn kind0_search_resolves_the_current_head_before_matching() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "superseded-head.example").await;
+    let pk = rand_bytes32();
+    let stale = rand_bytes32();
+    let current = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        stale,
+        pk,
+        0,
+        r#"{"display_name":"Wes","about":"old contact details"}"#,
+        None,
+        1_700_000_010,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        current,
+        pk,
+        0,
+        r#"{"display_name":"Alice"}"#,
+        None,
+        1_700_000_020,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let profile_query = |q: &str, until: Option<i64>| SearchQuery {
+        community: c,
+        q: q.into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![0]),
+        authors: None,
+        since: None,
+        until,
+        page: 1,
+        per_page: 10,
+        mode: buzz_search::SearchMode::Prefix,
+    };
+
+    let wes = svc
+        .search(&profile_query("wes", None))
+        .await
+        .expect("profile prefix search ok");
+    assert!(
+        wes.hits.is_empty(),
+        "a superseded head must not match: {:?}",
+        wes.hits
+    );
+
+    let alice = svc
+        .search(&profile_query("alice", None))
+        .await
+        .expect("profile prefix search ok");
+    let ids: Vec<[u8; 32]> = alice.hits.iter().map(|h| h.event_id).collect();
+    assert_eq!(
+        ids,
+        vec![current],
+        "the current head matches on its own name"
+    );
+
+    // A window that excludes the current head finds nobody, rather than the
+    // superseded row that falls inside it.
+    let windowed = svc
+        .search(&profile_query("wes", Some(1_700_000_015)))
+        .await
+        .expect("profile prefix search ok");
+    assert!(
+        windowed.hits.is_empty(),
+        "`until` fences the head, it does not resurrect a superseded row: {:?}",
+        windowed.hits
+    );
 
     teardown(pool, &schema).await;
 }

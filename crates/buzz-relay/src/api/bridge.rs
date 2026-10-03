@@ -20,6 +20,7 @@ use buzz_core::TenantContext;
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
+use crate::protocol::extract_search_mode;
 use crate::state::AppState;
 
 use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_400};
@@ -533,17 +534,6 @@ fn extract_feed_types(raw: &Value) -> Option<Vec<String>> {
         None
     } else {
         Some(types)
-    }
-}
-
-fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
-    match raw
-        .get("search_mode")
-        .or_else(|| raw.get("searchMode"))
-        .and_then(Value::as_str)
-    {
-        Some("prefix") => buzz_search::SearchMode::Prefix,
-        _ => buzz_search::SearchMode::FullText,
     }
 }
 
@@ -5073,11 +5063,13 @@ mod postgres_tests {
     const HANDLER_TEST_ISSUER: &str = "https://issuer.example";
     const HANDLER_TEST_AUDIENCE: &str = "https://relay.example";
     const HANDLER_TEST_KID: &str = "test-key-1";
-    const HANDLER_TEST_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-        WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-        zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-        -----END PRIVATE KEY-----\n";
+    const HANDLER_TEST_EC_PEM: &str = concat!(
+        "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only P-256 fixture
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+        "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+        "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+        "-----END PRIVATE KEY-----\n",
+    );
 
     /// Build a NIP-FI Enforce AppState with a real injected P-256 verifier.
     ///
@@ -6959,11 +6951,13 @@ mod postgres_tests {
         const TEST_KID: &str = "test-key-1";
         // PKCS#8 private key matching TEST_JWK_X/Y — same key used by
         // nip_fi_guard_rejects_crypto_invalid_assertion_before_handler_fires.
-        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const TEST_EC_PKCS8_PEM: &str = concat!(
+            "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only P-256 fixture
+            "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+            "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+            "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+            "-----END PRIVATE KEY-----\n",
+        );
 
         let jwks: JwkSet = serde_json::from_value(serde_json::json!({
             "keys": [{
@@ -7908,7 +7902,14 @@ mod postgres_tests {
                 serde_json::from_value(self.search_filter()).expect("filter");
             let state = self.state.clone();
             self.ws(|conn| {
-                crate::handlers::req::handle_req("s".into(), vec![filter], vec![None], conn, state)
+                crate::handlers::req::handle_req(
+                    "s".into(),
+                    vec![filter],
+                    vec![None],
+                    vec![buzz_search::SearchMode::FullText],
+                    conn,
+                    state,
+                )
             })
             .await
         }
@@ -8043,6 +8044,7 @@ mod postgres_tests {
             "x".into(),
             vec![live],
             vec![None],
+            vec![buzz_search::SearchMode::FullText],
             conn.clone(),
             fx.state.clone(),
         )
@@ -8073,6 +8075,7 @@ mod postgres_tests {
             "x".into(),
             vec![search],
             vec![None],
+            vec![buzz_search::SearchMode::FullText],
             conn.clone(),
             fx.state.clone(),
         ));
