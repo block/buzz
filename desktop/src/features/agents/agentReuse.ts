@@ -63,6 +63,19 @@ export function findReusablePersonaAgent(
   return pickPreferredManagedAgent(candidates);
 }
 
+export function findPersonaAgentInChannel(
+  agents: ManagedAgent[],
+  personaId: string,
+  channelMemberPubkeys: ReadonlySet<string>,
+): ManagedAgent | undefined {
+  const candidates = agents.filter(
+    (agent) =>
+      agent.personaId === personaId &&
+      channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
+  );
+  return pickPreferredManagedAgent(candidates);
+}
+
 export function findReusableGenericAgent(
   agents: ManagedAgent[],
   command: string,
