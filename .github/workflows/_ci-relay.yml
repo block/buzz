@@ -58,7 +58,7 @@ jobs:
             target/ci/backend-integration-tests.tar.zst
             target/ci/postgres-tests.tar.zst
           key: relay-artifacts-${{ runner.os }}-${{ hashFiles('crates/**', 'migrations/**', 'Dockerfile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.config/nextest.toml', 'scripts/postgres-test-*.sh', 'scripts/check-postgres-test-discovery.py', '.github/workflows/ci.yml', '.github/workflows/_ci-*.yml') }}
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
