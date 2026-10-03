@@ -69,6 +69,50 @@ void main() {
       },
     );
 
+    test('legacy pairing fails when relay connect or auth fails', () async {
+      final socket = _FailingValidationSocket(
+        Exception('restricted: not a relay member'),
+      );
+      final auth = FakeAuthNotifier();
+      final notifier = PairingNotifier(
+        validationSocketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              socket.onDisconnected = onDisconnected;
+              return socket;
+            },
+      );
+      container = ProviderContainer(
+        overrides: [
+          pairingProvider.overrideWith(() => notifier),
+          authProvider.overrideWith(() => auth),
+        ],
+      );
+      final input = base64Url.encode(
+        utf8.encode(
+          jsonEncode({
+            'relayUrl': 'https://relay.example',
+            'nsec': 'rejected-key',
+          }),
+        ),
+      );
+
+      await container.read(pairingProvider.notifier).pair(input);
+
+      expect(auth.lastCommunity, isNull);
+      expect(container.read(pairingProvider).status, PairingStatus.error);
+      expect(
+        container.read(pairingProvider).errorMessage,
+        contains('not a relay member'),
+      );
+      expect(socket.disposed, isTrue);
+    });
+
     test('starts in idle state', () {
       container = createContainer();
       final state = container.read(pairingProvider);
@@ -1146,6 +1190,30 @@ class _ControllableSocket extends PairingSocket {
     );
     relayMessageCallback(['EVENT', 'pair', event.toMap()]);
   }
+}
+
+class _FailingValidationSocket extends RelaySocket {
+  _FailingValidationSocket(this.error)
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  final Object error;
+  void Function(Object? error)? onDisconnected;
+  bool disposed = false;
+
+  @override
+  Future<void> connect() async {
+    // Match RelaySocket: report the failure, then return instead of throwing.
+    onDisconnected?.call(error);
+  }
+
+  @override
+  Future<void> disconnect() async => disposed = true;
 }
 
 class _PendingValidationSocket extends RelaySocket {
