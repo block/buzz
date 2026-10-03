@@ -134,6 +134,13 @@ By default the app connects to `ws://localhost:3000`. To point it at a relay you
 
 ### I want my own hosted relay
 
+To host a relay for your team using 1-click installation, you can use Hostinger:
+
+[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/applications/buzz)
+
+Check the knowledge base article [here](https://www.hostinger.com/support/how-to-install-buzz-on-a-hostinger-vps-using-docker/) for details.
+
+
 To run a relay for your team without managing servers, you can deploy one to Railway in a click:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
