@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager};
 use crate::managed_agents::discovery::known_skill_dirs;
 #[cfg(unix)]
 use crate::util::create_symlink;
+use crate::util::{create_dir_link, remove_dir_link};
 
 /// Subdirectories created inside the nest.
 /// `REPOS` is intentionally absent: it is provisioned by
@@ -278,10 +279,29 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Link target for `<skill_dir>/buzz-cli`, given the nest `root`.
+///
+/// Unix uses a target relative to the link so the nest stays movable. Windows
+/// cannot: when symlink creation is denied, [`create_dir_link`] falls back to a
+/// junction, and junctions store only absolute targets. Pinning to `root` is
+/// the cost of not requiring Developer Mode or elevation.
+fn skill_link_target(root: &Path, skill_dir: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let _ = root;
+        let depth = Path::new(skill_dir).components().count();
+        PathBuf::from(format!("{}{CANONICAL_SKILL_DIR}", "../".repeat(depth)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = skill_dir;
+        root.join(CANONICAL_SKILL_DIR)
+    }
+}
+
 /// Create harness-specific skill symlinks for each known provider.
 /// Idempotent: skips any path where `symlink_metadata` succeeds — real
 /// directories, valid symlinks, and dangling symlinks are all left alone.
-#[cfg(unix)]
 fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
     for skill_dir in known_skill_dirs() {
         let parent = root.join(skill_dir);
@@ -290,17 +310,10 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
         if link.symlink_metadata().is_ok() {
             continue; // symlink or real path exists — skip
         }
-        let depth = std::path::Path::new(skill_dir).components().count();
-        let prefix = "../".repeat(depth);
-        let target = format!("{prefix}{CANONICAL_SKILL_DIR}");
-        create_symlink(std::path::Path::new(&target), &link)
-            .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
+        let target = skill_link_target(root, skill_dir);
+        create_dir_link(&target, &link)
+            .map_err(|e| format!("skill link {} → {}: {e}", link.display(), target.display()))?;
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -482,27 +495,26 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
             .map_err(|e| format!("remove {}: {e}", old_skill_dir.display()))?;
     }
 
-    // Create/replace the .claude/skills/buzz-cli symlink.
-    #[cfg(unix)]
+    // Create/replace the .claude/skills/buzz-cli symlink. The old real
+    // directory is removed above on every platform, so this must run on every
+    // platform too or Windows is left with no link at all until the next boot.
     {
         let claude_skills_dir = root.join(".claude/skills");
         fs::create_dir_all(&claude_skills_dir)
             .map_err(|e| format!("create {}: {e}", claude_skills_dir.display()))?;
-        let symlink_path = root.join(".claude/skills/buzz-cli");
+        let symlink_path = claude_skills_dir.join("buzz-cli");
         // Remove any stale symlink before (re)creating.
         let symlink_exists = symlink_path
             .symlink_metadata()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
         if symlink_exists {
-            fs::remove_file(&symlink_path)
+            remove_dir_link(&symlink_path)
                 .map_err(|e| format!("remove symlink {}: {e}", symlink_path.display()))?;
         }
-        create_symlink(
-            std::path::Path::new("../../.agents/skills/buzz-cli"),
-            &symlink_path,
-        )
-        .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
+        let target = skill_link_target(root, ".claude/skills");
+        create_dir_link(&target, &symlink_path)
+            .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
     }
 
     fs::write(&version_path, format!("{NEST_SKILL_VERSION}\n"))
