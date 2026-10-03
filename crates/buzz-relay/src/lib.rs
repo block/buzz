@@ -11,6 +11,8 @@ pub(crate) mod nip_fi_core;
 /// NIP-FI session admission gate — per-connection effect-permit and quiescence barrier.
 pub(crate) mod nip_fi_gate;
 pub(crate) mod nip_fi_session;
+pub(crate) mod nip_fi_shadow;
+pub(crate) mod nip_fi_shadow_session;
 /// NIP-FI test hooks — production barriers for deterministic B1/B2 witnesses.
 #[cfg(test)]
 pub(crate) mod nip_fi_test_hooks;

@@ -353,12 +353,13 @@ pub(crate) fn compute_session_deadline(
 
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
-pub async fn handle_connection(
+pub(crate) async fn handle_connection(
     socket: WebSocket,
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
     nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
+    nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let conn_id = Uuid::new_v4();
@@ -383,6 +384,7 @@ pub async fn handle_connection(
     };
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
     let control = CommunityConnectionControl::new(cancel);
+    control.attach_nip_fi_shadow(nip_fi_shadow);
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = pre_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -3103,6 +3105,7 @@ pub(crate) mod tests {
                                     "127.0.0.1:9999".parse().unwrap(),
                                     tenant_i,
                                     Some(assertion_i),
+                                    None,
                                     conn_time,
                                 )
                                 .await

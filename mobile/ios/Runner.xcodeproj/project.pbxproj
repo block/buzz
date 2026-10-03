@@ -46,6 +46,10 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		AB1200002F40400100A17E01 /* NativeMessagePresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */; };
+		AB1200012F40400100A17E01 /* NativeMessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200112F40400100A17E01 /* NativeMessageMenu.swift */; };
+		AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200122F40400100A17E01 /* NativeReactionDetails.swift */; };
+		AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -137,6 +141,10 @@
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		CD6B899582D0416ADBD8A68F /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessagePresentationCoordinator.swift; sourceTree = "<group>"; };
+		AB1200112F40400100A17E01 /* NativeMessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageMenu.swift; sourceTree = "<group>"; };
+		AB1200122F40400100A17E01 /* NativeReactionDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeReactionDetails.swift; sourceTree = "<group>"; };
+		AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageImageLoaderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -172,6 +180,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
 				BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */,
 				331C80A0294A618700263BE5 /* Fixtures */,
 			);
@@ -245,6 +254,9 @@
 				BZZ0000000000000000000A /* Runner.entitlements */,
 				1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */,
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
+				AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */,
+				AB1200112F40400100A17E01 /* NativeMessageMenu.swift */,
+				AB1200122F40400100A17E01 /* NativeReactionDetails.swift */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				BZZ00000000000000000024 /* PushNativeState.swift */,
 				BZZ00000000000000000027 /* PushEndpointGrantStore.swift */,
@@ -564,6 +576,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
 				BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -572,6 +585,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AB1200002F40400100A17E01 /* NativeMessagePresentationCoordinator.swift in Sources */,
+				AB1200012F40400100A17E01 /* NativeMessageMenu.swift in Sources */,
+				AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				BZZ00000000000000000023 /* PushNativeState.swift in Sources */,
 				BZZ00000000000000000026 /* PushEndpointGrantStore.swift in Sources */,

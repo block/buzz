@@ -772,3 +772,30 @@ fn live_switch_null_models_parses_to_no_current_model() {
     );
     assert!(available.is_empty());
 }
+
+#[test]
+fn claude_code_effort_option_uses_adapter_names() {
+    // Trimmed from a real `claude-agent-acp` 0.36.1 `session/new` response.
+    let raw = serde_json::json!([{
+        "id": "effort",
+        "name": "Effort",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": "high",
+        "options": [
+            { "value": "low", "name": "Low" },
+            { "value": "xhigh", "name": "Xhigh" }
+        ]
+    }]);
+
+    let entries = parse_config_options(Some(&raw));
+
+    assert_eq!(entries[0].display_name.as_deref(), Some("Effort"));
+    assert_eq!(entries[0].current_value.as_deref(), Some("high"));
+    let labels: Vec<_> = entries[0]
+        .options
+        .iter()
+        .map(|o| o.display_name.as_deref())
+        .collect();
+    assert_eq!(labels, [Some("Low"), Some("Xhigh")]);
+}

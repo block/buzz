@@ -46,13 +46,19 @@ for line in sys.stdin:
     result = {'protocolVersion': 1, 'argv': sys.argv[1:],
               'hermes': os.environ.get('HERMES_ACP_SKIP_CONFIGURED_MCP'),
               'codex': os.environ.get('CODEX_CONFIG'),
-              'prefix': os.environ.get('BUZZ_ACP_LAUNCH_PREFIX')}
+              'prefix': os.environ.get('BUZZ_ACP_LAUNCH_PREFIX'),
+              'sessionId': 'ses_test', 'meta': request.get('params', {}).get('_meta')}
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
 "#,
             )
             .unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
+        // A CLI new enough for `--thinking-display`, so only the prefix can
+        // keep summaries off.
+        let claude = dir.join("claude");
+        fs::write(&claude, "#!/bin/sh\necho '2.1.284 (Claude Code)'\n").unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o700)).unwrap();
         Self(dir)
     }
     fn prefix(&self) -> String {
@@ -75,6 +81,7 @@ for line in sys.stdin:
             .env(CHILD, mode)
             .env_remove("CODEX_CONFIG")
             .env_remove("HERMES_ACP_SKIP_CONFIGURED_MCP")
+            .env("CLAUDE_CODE_EXECUTABLE", self.0.join("claude"))
             .current_dir(&self.0);
         if let Some(prefix) = prefix {
             cmd.env(PREFIX_ENV, prefix);
@@ -216,6 +223,21 @@ async fn spawn_child() {
                     _ => None,
                 };
                 assert_eq!(client.standard_adapter, adapter);
+                if name == "claude-agent-acp" {
+                    let meta = client
+                        .session_new_full("/tmp", vec![], None, None)
+                        .await
+                        .unwrap()
+                        .raw["meta"]
+                        .clone();
+                    let expected = match std::env::var_os(PREFIX_ENV) {
+                        Some(_) => Value::Null,
+                        None => json!({"claudeCode": {"options": {"extraArgs": {
+                            "thinking-display": "summarized"
+                        }}}}),
+                    };
+                    assert_eq!(meta, expected, "prefix leaves summaries off");
+                }
                 client.shutdown().await;
             }
         }

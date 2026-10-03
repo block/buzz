@@ -24,11 +24,28 @@ use crate::nip_fi_core::{
 pub(crate) enum NipFiUpgradeOutcome {
     /// Assertion validated successfully. Carry the result into the connection.
     Admitted(VerifiedAssertion),
-    /// Enforcement is off — no assertion required.
+    /// Off, or Shadow without a passing assertion — none is required.
     NotRequired,
+    /// Shadow: the assertion passed and is only observed from here on.
+    Observed(VerifiedAssertion),
     /// Enforcement active but assertion absent/rejected — return the HTTP
     /// denial response.
     Denied(Response<Body>),
+}
+
+/// The enforced and the shadow-observed assertion slots of an admitted upgrade.
+pub(crate) type UpgradeAssertions = (Option<VerifiedAssertion>, Option<VerifiedAssertion>);
+
+impl NipFiUpgradeOutcome {
+    /// The enforced and the shadow-observed assertion, or the denial response.
+    pub(crate) fn into_assertions(self) -> Result<UpgradeAssertions, Box<Response<Body>>> {
+        match self {
+            Self::NotRequired => Ok((None, None)),
+            Self::Admitted(assertion) => Ok((Some(assertion), None)),
+            Self::Observed(assertion) => Ok((None, Some(assertion))),
+            Self::Denied(response) => Err(Box::new(response)),
+        }
+    }
 }
 
 /// Validate the NIP-FI assertion on a WebSocket upgrade request.
@@ -45,16 +62,38 @@ pub(crate) enum NipFiUpgradeOutcome {
 /// denied" would be false. "authorization unavailable, retry after repair" is
 /// the accurate and correct signal. [FI-TRACE-DENIAL-ORACLE]
 pub(crate) fn check_nip_fi_at_upgrade(
+    route: crate::nip_fi_session::NipFiWsRoute,
     headers: &HeaderMap,
     communities: &NipFiCommunities,
     verifier: Option<&dyn VerifyAssertion>,
     mode: NipFiMode,
 ) -> NipFiUpgradeOutcome {
-    if matches!(mode, NipFiMode::Off) {
+    if !mode.restricts() {
+        // Shadow records an upgrade would-deny; a passing assertion is
+        // observed until AUTH, where its admission verdict is recorded.
+        if mode.observes_only() {
+            let verdict = resolve_community(headers, communities)
+                .map_err(|class| (crate::nip_fi_shadow::Stage::Community, class))
+                .and_then(|community| {
+                    evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
+                        (
+                            crate::nip_fi_shadow::Stage::Assertion,
+                            rejection.denial_class(),
+                        )
+                    })
+                });
+            match verdict {
+                Ok(assertion) => return NipFiUpgradeOutcome::Observed(assertion),
+                Err(deny) => {
+                    let route = route.shadow_label();
+                    crate::nip_fi_shadow::record(route, headers, communities, Err(deny));
+                }
+            }
+        }
         return NipFiUpgradeOutcome::NotRequired;
     }
 
-    if matches!(mode, NipFiMode::DenyProtected) {
+    if mode.denies_unconditionally() {
         return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
@@ -77,6 +116,8 @@ pub(crate) fn check_nip_fi_at_upgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ROOT: crate::nip_fi_session::NipFiWsRoute = crate::nip_fi_session::NipFiWsRoute::Root;
     use crate::nip_fi_core::extract_bearer_token;
     use crate::nip_fi_core::test_support::{communities, host_headers};
     use crate::nip_fi_core::tests::ScriptedVerifier;
@@ -346,8 +387,13 @@ mod tests {
             CLIENT_ATTACHED_HEADER,
             axum::http::HeaderValue::from_static("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
         );
-        let outcome =
-            check_nip_fi_at_upgrade(&h, &communities(), None, buzz_auth::NipFiMode::Enforce);
+        let outcome = check_nip_fi_at_upgrade(
+            ROOT,
+            &h,
+            &communities(),
+            None,
+            buzz_auth::NipFiMode::Enforce,
+        );
         match outcome {
             NipFiUpgradeOutcome::Denied(resp) => {
                 assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
@@ -362,6 +408,7 @@ mod tests {
     fn enforce_missing_header_returns_401_exact_bytes() {
         let headers = host_headers();
         let outcome = check_nip_fi_at_upgrade(
+            ROOT,
             &headers,
             &communities(),
             None,
@@ -386,12 +433,17 @@ mod tests {
         }
     }
 
-    // Off mode → NotRequired (no assertion needed — OSS default, no regression)
+    // Off → NotRequired (no assertion needed — OSS default, no regression)
     #[test]
     fn off_mode_returns_not_required() {
         let headers = host_headers(); // no assertion header
-        let outcome =
-            check_nip_fi_at_upgrade(&headers, &communities(), None, buzz_auth::NipFiMode::Off);
+        let outcome = check_nip_fi_at_upgrade(
+            ROOT,
+            &headers,
+            &communities(),
+            None,
+            buzz_auth::NipFiMode::Off,
+        );
         assert!(
             matches!(outcome, NipFiUpgradeOutcome::NotRequired),
             "Off mode must not require assertion — OSS default must not regress"
@@ -414,6 +466,7 @@ mod tests {
     fn deny_protected_returns_503_authorization_unavailable() {
         let headers = host_headers();
         let outcome = check_nip_fi_at_upgrade(
+            ROOT,
             &headers,
             &communities(),
             None,
@@ -467,6 +520,7 @@ mod tests {
         for (err, status, body) in rows {
             let verifier = ScriptedVerifier::new(Err(err));
             let (got_status, got_body) = denied_parts(check_nip_fi_at_upgrade(
+                ROOT,
                 &headers_with("Bearer a.b.c"),
                 &communities(),
                 Some(&verifier),
@@ -482,6 +536,7 @@ mod tests {
     #[test]
     fn characterize_upgrade_transport_precedes_verifier_presence() {
         let (status, body) = denied_parts(check_nip_fi_at_upgrade(
+            ROOT,
             &headers_with("junk"),
             &communities(),
             None,
@@ -498,6 +553,7 @@ mod tests {
     fn characterize_upgrade_admits_claimless_assertion_for_later_pairing() {
         let verifier = ScriptedVerifier::new(Ok(None));
         match check_nip_fi_at_upgrade(
+            ROOT,
             &headers_with("Bearer a.b.c"),
             &communities(),
             Some(&verifier),
@@ -519,10 +575,17 @@ mod tests {
         let verifier = ScriptedVerifier::new(Ok(Some(nostr::Keys::generate().public_key())));
         let headers = headers_with("Bearer a.b.c");
         assert!(matches!(
-            check_nip_fi_at_upgrade(&headers, &communities(), Some(&verifier), NipFiMode::Off),
+            check_nip_fi_at_upgrade(
+                ROOT,
+                &headers,
+                &communities(),
+                Some(&verifier),
+                NipFiMode::Off
+            ),
             NipFiUpgradeOutcome::NotRequired
         ));
         let (status, _) = denied_parts(check_nip_fi_at_upgrade(
+            ROOT,
             &headers,
             &communities(),
             Some(&verifier),
@@ -530,5 +593,71 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(verifier.calls(), 0);
+    }
+
+    // Pins: shadow evaluates the assertion but only observes it: the enforced
+    // slot stays empty, so no connection is handed a verified assertion, and a
+    // rejected one admits as Off. Mutation: returning `Admitted` in shadow, or
+    // `Observed` for a rejection, fails the split.
+    #[test]
+    fn shadow_upgrade_observes_but_never_admits_an_assertion() {
+        let verifier = ScriptedVerifier::new(Ok(Some(nostr::Keys::generate().public_key())));
+        let headers = headers_with("Bearer a.b.c");
+        let check = || {
+            check_nip_fi_at_upgrade(
+                ROOT,
+                &headers,
+                &communities(),
+                Some(&verifier),
+                NipFiMode::Shadow,
+            )
+        };
+        let Ok((None, Some(_))) = check().into_assertions() else {
+            panic!("a passing shadow assertion is observed, never enforced");
+        };
+        assert_eq!(verifier.calls(), 1, "shadow must evaluate the assertion");
+        let Ok((None, None)) = check_nip_fi_at_upgrade(
+            ROOT,
+            &host_headers(),
+            &communities(),
+            Some(&verifier),
+            NipFiMode::Shadow,
+        )
+        .into_assertions() else {
+            panic!("a missing shadow assertion admits as Off");
+        };
+    }
+
+    // Pins: a shadow upgrade would-deny records under its own ingress, so
+    // audio refusals never count toward root's rate. Mutation: hard-coding
+    // the `ws` route moves the audio records.
+    #[test]
+    fn shadow_upgrade_would_deny_records_its_ingress_route() {
+        use crate::nip_fi_session::NipFiWsRoute::Audio;
+        use crate::nip_fi_shadow_session::tests::shadow_records_by_route;
+        let rejecting =
+            ScriptedVerifier::new(Err(buzz_auth::VerifierError::InvalidSignatureOrClaims));
+        let records = shadow_records_by_route(async {
+            for route in [ROOT, Audio] {
+                for headers in [host_headers(), headers_with("Bearer a.b.c")] {
+                    let verifier = Some(&rejecting as &dyn VerifyAssertion);
+                    let outcome = check_nip_fi_at_upgrade(
+                        route,
+                        &headers,
+                        &communities(),
+                        verifier,
+                        NipFiMode::Shadow,
+                    );
+                    assert!(matches!(outcome, NipFiUpgradeOutcome::NotRequired));
+                }
+            }
+        });
+        let expected = [
+            "audio assertion/missing",
+            "audio assertion/rejected",
+            "ws assertion/missing",
+            "ws assertion/rejected",
+        ];
+        assert_eq!(records, expected);
     }
 }

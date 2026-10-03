@@ -379,10 +379,11 @@ pub struct Config {
 
     /// NIP-FI federated-identity enforcement configuration.
     ///
-    /// Present when `BUZZ_NIP_FI_MODE` is `enforce` or `deny_protected`; in
-    /// those modes the relay validates assertions at HTTP ingress and (via S3)
-    /// at WebSocket upgrade. `Off` mode (the default) leaves all identity
-    /// enforcement to NIP-42 alone.
+    /// Selected by `BUZZ_NIP_FI_MODE`: `enforce` validates assertions at HTTP
+    /// ingress and (via S3) at WebSocket upgrade; `deny_protected` denies
+    /// protected requests without evaluating; `shadow` evaluates and records
+    /// the enforce verdict but admits exactly as `off`. `Off` (the default)
+    /// leaves all identity enforcement to NIP-42 alone.
     pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
 }
 
@@ -1417,7 +1418,9 @@ impl Config {
             .lock()
             .unwrap()
             .push(std::thread::current().id());
-        let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
+        let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::from_env().expect("default config must load for test fixture")
     }
 }
@@ -1454,7 +1457,9 @@ mod tests {
         std::sync::MutexGuard<'static, ()>,
         std::sync::MutexGuard<'static, ()>,
     ) {
-        let fi = crate::nip_fi_config::NIP_FI_ENV_LOCK.lock().unwrap();
+        let fi = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
     }

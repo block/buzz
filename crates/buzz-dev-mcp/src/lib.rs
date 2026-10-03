@@ -2,7 +2,7 @@
 #![cfg_attr(windows, deny(unsafe_code))]
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData, ServerHandler, ServiceExt,
@@ -125,8 +125,8 @@ impl DevMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DevMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
                 "buzz-dev-mcp",
                 env!("CARGO_PKG_VERSION"),

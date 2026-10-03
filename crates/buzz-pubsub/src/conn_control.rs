@@ -42,6 +42,10 @@ pub fn conn_control_channel(ctx: &TenantContext) -> String {
 /// connected to at that moment is irrelevant.
 pub const NIP_FI_DISCONNECT_CHANNEL: &str = "buzz:nip-fi:disconnect";
 
+/// Channel for disconnects accepted in shadow mode.  Only shadow pods
+/// subscribe, so a shadow command never reaches an enforce pod.
+pub const NIP_FI_SHADOW_DISCONNECT_CHANNEL: &str = "buzz:nip-fi:shadow-disconnect";
+
 /// A NIP-FI admin-disconnect command broadcast cross-pod after the local deny
 /// entry is inserted.  Every pod merges this entry into its own deny map and
 /// closes any matching sessions (same `max(until)` rule as the local path).
@@ -217,17 +221,18 @@ async fn connect_and_subscribe(
 
 // ── NIP-FI disconnect subscriber ──────────────────────────────────────────────
 
-/// Subscribes to [`NIP_FI_DISCONNECT_CHANNEL`] and forwards commands to the
+/// Subscribes to `channels` and forwards commands to the
 /// broadcast.  Mirrors [`run_conn_control_subscriber`]: reconnect loop with
 /// exponential backoff.  Never returns.
 pub async fn run_nip_fi_disconnect_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<NipFiDisconnect>,
+    channels: &'static [&'static str],
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
 
     loop {
-        match connect_and_subscribe_nip_fi(&redis_url, &broadcast_tx).await {
+        match connect_and_subscribe_nip_fi(&redis_url, &broadcast_tx, channels).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
                 tracing::warn!(
@@ -249,15 +254,14 @@ pub async fn run_nip_fi_disconnect_subscriber(
 async fn connect_and_subscribe_nip_fi(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<NipFiDisconnect>,
+    channels: &[&str],
 ) -> Result<(), redis::RedisError> {
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_async_pubsub().await?;
 
-    conn.subscribe(NIP_FI_DISCONNECT_CHANNEL).await?;
+    conn.subscribe(channels).await?;
 
-    tracing::info!(
-        "Redis NIP-FI disconnect subscriber connected — listening on {NIP_FI_DISCONNECT_CHANNEL}"
-    );
+    tracing::info!("Redis NIP-FI disconnect subscriber connected — listening on {channels:?}");
 
     let mut stream = conn.on_message();
     while let Some(msg) = stream.next().await {

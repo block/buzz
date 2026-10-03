@@ -102,8 +102,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // must be verified against the tenant-bound host, not a process-global
         // domain.
         let mode = state.config.nip_fi.mode;
-        if matches!(mode, buzz_auth::NipFiMode::Off) {
-            parse_git_auth_header(&parts.headers, method)?;
+        if !mode.restricts() {
+            if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
+                // Off returns `rejection` as is; shadow also records the
+                // enforce verdict for the failed proof, still with no DB work.
+                crate::nip_fi_http::observe_failed_proof(state, &parts.headers);
+                return Err(rejection);
+            }
         }
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved
@@ -111,14 +116,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // headers; the signed `u` tag is checked against the host that resolved
         // through the authoritative communities table, not a deployment-global
         // `config.relay_url` and not any client-supplied community value.
-        let raw_host = parts
-            .headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        let tenant = crate::nip_fi_shadow::bind_tenant(state, &parts.headers)
             .await
-            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,
@@ -207,12 +207,17 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
         let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        // A failed policy lookup is 503 (the canonical NIP-FI body outside
-        // Off mode); only a real refusal is 403.
-        let unavailable = |legacy: Response| match mode {
-            buzz_auth::NipFiMode::Off => legacy,
-            _ => crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable),
+        // A failed policy lookup is 503 (the canonical NIP-FI body when the
+        // mode restricts); only a real refusal is 403.
+        let unavailable = |legacy: Response| {
+            if mode.restricts() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+            } else {
+                legacy
+            }
         };
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_git_membership(tenant.community()).await;
         match crate::api::relay_members::check_relay_membership(
             state,
             tenant.community(),

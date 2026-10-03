@@ -556,7 +556,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // channel capacity) instead of being dropped until the consumer below runs.
     let mut nip_fi_disconnect_rx = pubsub.subscribe_nip_fi_disconnect();
     let pubsub_for_nip_fi = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_nip_fi.run_nip_fi_disconnect_subscriber().await });
+    let nip_fi_channels =
+        buzz_relay::api::nip_fi::disconnect_subscribe_channels(config.nip_fi.mode);
+    tokio::spawn(async move {
+        pubsub_for_nip_fi
+            .run_nip_fi_disconnect_subscriber(nip_fi_channels)
+            .await
+    });
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -619,7 +625,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 &nip_fi.command_configs,
             )
             .map_err(|e| anyhow::anyhow!("NIP-FI startup failed: {e}"))?;
-        } else if nip_fi.is_enforce() {
+        } else if nip_fi.mode.evaluates() {
             return Err(anyhow::anyhow!(
                 "NIP-FI: failed to construct JWKS key source \
                  (empty or duplicate issuer config)"
@@ -1298,6 +1304,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // minimal and makes the exact production path testable end-to-end.
     {
         let state_for_nip_fi = Arc::clone(&state);
+        let nip_fi_mode = state.config.nip_fi.mode;
         tokio::spawn(async move {
             loop {
                 match nip_fi_disconnect_rx.recv().await {
@@ -1310,7 +1317,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                         );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_nip_fi_disconnect_lag_total").increment(n);
+                        buzz_relay::api::nip_fi::count_disconnect_event(
+                            nip_fi_mode,
+                            "buzz_nip_fi_disconnect_lag_total",
+                            "cross_pod",
+                            "lag",
+                            n,
+                        );
                         tracing::warn!("NIP-FI disconnect consumer lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
