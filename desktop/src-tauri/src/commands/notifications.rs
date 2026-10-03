@@ -39,10 +39,16 @@ pub async fn show_native_notification(
         crate::macos_notifications::show(title, body, target).await
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::show(app, title, body, target);
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = (&app, &title, &body, &target);
-        Err("show_native_notification is only supported on Linux and macOS".to_string())
+        Err("show_native_notification is not supported on this platform".to_string())
     }
 }
 
@@ -103,6 +109,54 @@ mod linux {
                 // every other platform uses), so we only forward the target.
                 let _ = app.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, target);
             });
+        });
+    }
+}
+
+// ── Windows ────────────────────────────────────────────────────────────────
+//
+// Uses `tauri-winrt-notification` to post Windows toast notifications. This
+// registers the app with Windows Settings > System > Notifications (so the
+// user can control per-app notification preferences) and surfaces click
+// actions through the WinRT `Activated` handler, which we forward to the
+// frontend via the same `native-notification-activated` event that Linux uses.
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
+    use tauri::Emitter;
+    use tauri_winrt_notification::{Duration, Toast};
+
+    pub fn show(
+        app: tauri::AppHandle,
+        title: String,
+        body: Option<String>,
+        target: Option<serde_json::Value>,
+    ) {
+        // The Tauri identifier (e.g. "xyz.block.buzz.app") is the
+        // AppUserModelID that Windows uses to group notifications and
+        // surface the app in Settings > Notifications.
+        let app_id = app.config().identifier.clone();
+
+        std::thread::spawn(move || {
+            let app_clone = app.clone();
+            let result = Toast::new(&app_id)
+                .title(&title)
+                .text1(body.as_deref().unwrap_or(""))
+                .sound(None)
+                .duration(Duration::Short)
+                .on_activated(move |_action| {
+                    // _action is None for the default (body) click and
+                    // Some(arg) for button clicks. We only use the default
+                    // click, matching the Linux behaviour.
+                    let _ = app_clone.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, &target);
+                    Ok(())
+                })
+                .show();
+
+            if let Err(error) = result {
+                eprintln!("buzz-desktop: failed to post Windows notification: {error}");
+            }
         });
     }
 }
