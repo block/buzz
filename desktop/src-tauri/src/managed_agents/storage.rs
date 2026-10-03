@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -7,11 +7,140 @@ use std::{
 
 use tauri::{AppHandle, Manager};
 
-use crate::app_state::keyring_service;
+use crate::app_state::{keyring_service, AppState};
 use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
 use crate::secret_store::{KeyringProbe, SecretStore};
+
+/// Filename prefix of the per-community agent store shards. Each community
+/// (canonical relay URL) gets `managed-agents-community.<key>.json` next to
+/// the legacy global store, where `<key>` comes from [`community_key_of`]. The prefix is deliberately distinct from
+/// `managed-agents.json` so hand-made backup copies (e.g.
+/// `managed-agents.my-community.json`) are never mistaken for a shard.
+const COMMUNITY_SHARD_PREFIX: &str = "managed-agents-community.";
+const COMMUNITY_SHARD_SUFFIX: &str = ".json";
+
+/// Community identity of a relay URL, encoded as a filename-safe shard key.
+///
+/// The identity is the repository's canonical relay URL
+/// (`buzz_core::relay::normalize_relay_url`: scheme, lowercased host, loopback
+/// folded to `127.0.0.1`, non-default port, path and query all preserved), so
+/// `ws://localhost:3000` and `ws://localhost:3030` are two communities, while
+/// `ws://localhost:3000/` and `ws://127.0.0.1:3000` are one. The key is
+/// `<host>-<port>.<hash>`: a readable host/port label (characters outside
+/// `[a-z0-9.-]` folded to `-`) plus the first 16 hex chars of the SHA-256 of
+/// the canonical URL, which keeps keys distinct for relays that differ only
+/// by scheme, path or query.
+///
+/// Returns `None` when the URL is empty or not a valid relay URL. A `None`
+/// means the record cannot be scoped to a community and must stay in the
+/// legacy global store (fail-open to the pre-#7184 behavior) — never silently
+/// dropped.
+fn community_key_of(relay_url: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let trimmed = relay_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let canonical = buzz_core_pkg::relay::normalize_relay_url(trimmed).ok()?;
+    let authority = canonical
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&canonical)
+        .split(['/', '?'])
+        .next()
+        .unwrap_or_default();
+    let mut label = String::with_capacity(authority.len());
+    for c in authority.chars() {
+        let c = c.to_ascii_lowercase();
+        let keep = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.';
+        let next = if keep { c } else { '-' };
+        // Never emit ".." into a filename.
+        if next == '.' && label.ends_with('.') {
+            continue;
+        }
+        label.push(next);
+    }
+    let label = label.trim_matches(|c| c == '.' || c == '-');
+    let digest = hex::encode(Sha256::digest(canonical.as_bytes()));
+    let hash = &digest[..16];
+    if label.is_empty() {
+        Some(hash.to_string())
+    } else {
+        Some(format!("{label}.{hash}"))
+    }
+}
+
+/// Shard filename for a community key (from [`community_key_of`], already
+/// filename-safe).
+fn community_shard_file_name(key: &str) -> String {
+    format!("{COMMUNITY_SHARD_PREFIX}{key}{COMMUNITY_SHARD_SUFFIX}")
+}
+
+/// The community key encoded in a shard path, or `None` for any other file.
+fn community_key_of_shard_path(path: &Path) -> Option<String> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix(COMMUNITY_SHARD_PREFIX)?
+        .strip_suffix(COMMUNITY_SHARD_SUFFIX)
+        .map(str::to_string)
+}
+
+/// Enumerate existing community shard files under `base_dir`, sorted by name
+/// for deterministic load order. Only files whose middle segment parses as a
+/// sanitized relay host are returned; anything else (backups, hand copies,
+/// `.invalid` preserves) is ignored.
+pub(crate) fn community_shard_paths(base_dir: &Path) -> Vec<PathBuf> {
+    let mut shards = Vec::new();
+    let Ok(entries) = fs::read_dir(base_dir) else {
+        return shards;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(host) = name
+            .strip_prefix(COMMUNITY_SHARD_PREFIX)
+            .and_then(|rest| rest.strip_suffix(COMMUNITY_SHARD_SUFFIX))
+        else {
+            continue;
+        };
+        let safe = !host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.');
+        if safe {
+            shards.push(entry.path());
+        }
+    }
+    shards.sort();
+    shards
+}
+
+/// Partition keyed instances by destination store: records carrying a
+/// valid relay URL go to that community's shard (keyed by
+/// [`community_key_of`]); everything else
+/// (unpinned legacy records, and by construction all key-less definitions,
+/// which callers keep separate anyway) stays in the legacy global store.
+fn partition_by_community(
+    instances: Vec<ManagedAgentRecord>,
+) -> (
+    Vec<ManagedAgentRecord>,
+    BTreeMap<String, Vec<ManagedAgentRecord>>,
+) {
+    let mut legacy = Vec::new();
+    let mut shards: BTreeMap<String, Vec<ManagedAgentRecord>> = BTreeMap::new();
+    for record in instances {
+        match community_key_of(&record.relay_url) {
+            Some(key) => shards.entry(key).or_default().push(record),
+            None => legacy.push(record),
+        }
+    }
+    (legacy, shards)
+}
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
@@ -241,26 +370,92 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
-fn load_agent_store<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<ManagedAgentRecord>, String> {
-    let path = managed_agents_store_path(app)?;
+///
+/// Reads the legacy global store PLUS every community shard found on disk and
+/// concatenates their records (legacy first, then shards in filename order).
+/// Fail-loud contract per file: a malformed shard is preserved as
+/// `<shard>.invalid` and its parse error propagates exactly like the global
+/// store's (a later save would rewrite it wholesale, so silent swallowing
+/// would destroy a malformed hand edit).
+fn read_store_file(path: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read agent store: {error}"))?;
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read agent store {}: {error}", path.display()))?;
     serde_json::from_str(&content).map_err(|error| {
-        // Fail loudly and preserve the evidence: a later in-app save rewrites
-        // this file wholesale, which would silently destroy a malformed hand
-        // edit. Best-effort file-authoring contract (see managed_agents::
-        // reconcile): the broken content survives as `.invalid` for the user
-        // to recover, and the parse error propagates instead of being
-        // swallowed into an empty store.
-        backup_invalid_store(&path);
-        format!("failed to parse agent store (preserved as .invalid): {error}")
+        backup_invalid_store(path);
+        format!(
+            "failed to parse agent store {} (preserved as .invalid): {error}",
+            path.display()
+        )
     })
+}
+
+fn load_agent_store<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ManagedAgentRecord>, String> {
+    load_agent_store_in_dir(&managed_agents_base_dir(app)?)
+}
+
+/// Path-level core of [`load_agent_store`]: legacy store plus every shard,
+/// with each keyed instance returned exactly once.
+///
+/// A pubkey can legitimately sit in two files for a moment — a save writes a
+/// record's new home before it clears the old one (see
+/// [`write_agent_store_in_dir`]), and stores written by earlier builds of
+/// this change carried every scoped record in both the legacy store and its
+/// shard. The copy kept is the one in the file the record's own `relay_url`
+/// maps to (its canonical home); otherwise the last copy read wins (shards
+/// are read after the legacy store, in filename order). The next save then
+/// rewrites the files without the extra copy.
+fn load_agent_store_in_dir(base_dir: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
+    let mut sourced: Vec<(Option<String>, ManagedAgentRecord)> =
+        read_store_file(&legacy_store_path(base_dir))?
+            .into_iter()
+            .map(|record| (None, record))
+            .collect();
+    for shard in community_shard_paths(base_dir) {
+        let key = community_key_of_shard_path(&shard);
+        sourced.extend(
+            read_store_file(&shard)?
+                .into_iter()
+                .map(|record| (key.clone(), record)),
+        );
+    }
+
+    let mut records: Vec<ManagedAgentRecord> = Vec::with_capacity(sourced.len());
+    let mut home_of_kept: Vec<bool> = Vec::with_capacity(sourced.len());
+    let mut index_by_pubkey: HashMap<String, usize> = HashMap::new();
+    for (source, record) in sourced {
+        if record.pubkey.is_empty() {
+            // Key-less definitions only ever live in the legacy store.
+            records.push(record);
+            home_of_kept.push(true);
+            continue;
+        }
+        let at_home = source == community_key_of(&record.relay_url);
+        match index_by_pubkey.get(&record.pubkey) {
+            Some(&index) => {
+                if at_home || !home_of_kept[index] {
+                    records[index] = record;
+                    home_of_kept[index] = at_home;
+                }
+            }
+            None => {
+                index_by_pubkey.insert(record.pubkey.clone(), records.len());
+                records.push(record);
+                home_of_kept.push(at_home);
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// Legacy (pre-sharding) store filename, still used for key-less definitions
+/// and unpinned records. Path = `<base>/managed-agents.json`.
+fn legacy_store_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("managed-agents.json")
 }
 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
@@ -273,6 +468,53 @@ pub fn load_managed_agents<R: tauri::Runtime>(
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
     Ok(records)
+}
+
+/// Community key ([`community_key_of`]) of the active workspace relay, or
+/// `None` when it cannot be resolved.
+///
+/// Precedence mirrors `relay::relay_ws_url_with_override`: workspace override
+/// first (community switch), then env/build vars, then the default. Resolving
+/// through `relay_ws_url_with_override` (not the override alone) keeps the
+/// pre-apply boot path working: before the frontend applies the first
+/// workspace, no override is set and the default/env relay is the one used.
+fn active_community_key<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let state = app.try_state::<AppState>()?;
+    let url = crate::relay::relay_ws_url_with_override(&state);
+    community_key_of(&url)
+}
+
+/// Keep only the records visible to the community with key `active`.
+///
+/// A record is visible when its `relay_url` does not resolve to a community
+/// (unpinned legacy record — fail-open, matches the pre-sharding
+/// shared-roster behavior) or when it resolves to exactly the active
+/// community (full canonical relay identity, so two ports on one host are
+/// two communities).
+fn retain_visible_in_community(records: &mut Vec<ManagedAgentRecord>, active: &str) {
+    records.retain(|record| {
+        community_key_of(&record.relay_url)
+            .map(|key| key == active)
+            .unwrap_or(true) // unpinned → visible everywhere (fail-open)
+    });
+}
+
+/// Filter already-loaded keyed instances down to the ones VISIBLE to the
+/// active community (#7184). Read-side only: callers must never save the
+/// filtered list — they keep saving the FULL roster from
+/// [`load_managed_agents`], because a save
+/// rewrites every community's file and clears the ones with no records.
+///
+/// Fail-open rule: when the active community cannot be resolved at all (no
+/// state, unparseable URL) every instance is kept — isolation degrades to the
+/// pre-fix behavior, never to an empty roster that would look like data loss.
+pub fn retain_active_community<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    records: &mut Vec<ManagedAgentRecord>,
+) {
+    if let Some(active) = active_community_key(app) {
+        retain_visible_in_community(records, &active);
+    }
 }
 
 /// Load the key-less agent *definitions* (former personas) from the unified
@@ -408,27 +650,162 @@ pub(crate) fn save_agent_definitions<R: tauri::Runtime>(
     write_agent_store(app, definitions, instances)
 }
 
-/// Serialize definitions + instances into the single unified store file.
-/// Definitions sort first (by slug) for stable diffs; instances keep the
-/// name/pubkey order their save path established.
+/// Serialize definitions + instances into the store files.
+///
+/// Definitions (key-less) and unpinned instances always land in the legacy
+/// global store (`managed-agents.json`). Keyed instances whose `relay_url`
+/// resolves to a community are written to that community's shard
+/// (`managed-agents-community.<key>.json`, see [`community_key_of`]) — the
+/// #7184 tenant-isolation boundary. `instances` is the WHOLE roster: every
+/// record lands in exactly one file, and an existing shard with no records
+/// left is cleared. The fail-open rule (unresolvable relay → legacy store)
+/// means a record is never dropped by a save.
 fn write_agent_store<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    mut definitions: Vec<ManagedAgentRecord>,
+    definitions: Vec<ManagedAgentRecord>,
     instances: Vec<ManagedAgentRecord>,
 ) -> Result<(), String> {
-    definitions.sort_by(|left, right| left.slug.cmp(&right.slug));
-    let mut all = definitions;
+    let base_dir = managed_agents_base_dir(app)?;
+    write_agent_store_in_dir(&base_dir, definitions, instances, persist_agent_keys)
+}
+
+/// Path-level core of [`write_agent_store`]; `persist_keys` is the keyring
+/// step ([`persist_agent_keys`] in production, a fake store in tests).
+///
+/// Secrets: `persist_keys` runs over EVERY record (definitions, legacy and
+/// scoped instances) BEFORE anything is partitioned or serialized, and every
+/// file is serialized from those stripped records, so a key that moved to the
+/// keyring never reaches any file. Only a key the keyring could not take
+/// stays inline (the keyringless fallback), in a `0o600` file.
+///
+/// One save = one recoverable commit (AGENTS.md "one user action = one
+/// atomic persist"):
+/// 1. every payload is serialized up front — nothing touches disk if any
+///    record fails to serialize;
+/// 2. each target file is snapshotted ([`snapshot_store`]) and unchanged
+///    files are skipped, so a save that only touches one community rewrites
+///    only that community's file;
+/// 3. each file is written atomically (temp file + rename,
+///    [`atomic_write_json_restricted`]) in an order where every prefix is
+///    consistent: shards that gain or keep records first, then the legacy
+///    store, then shards that became empty. A record moving between files is
+///    written to its new home before it leaves the old one, so no prefix
+///    loses it (a transient second copy is collapsed on load by
+///    [`load_agent_store_in_dir`]);
+/// 4. if any write fails, every file already written is restored from its
+///    snapshot ([`restore_store`]), and restore failures are reported with
+///    the original error — the same policy as
+///    [`commit_stores_with_snapshots`].
+fn write_agent_store_in_dir(
+    base_dir: &Path,
+    definitions: Vec<ManagedAgentRecord>,
+    instances: Vec<ManagedAgentRecord>,
+    persist_keys: impl FnOnce(&mut [ManagedAgentRecord]),
+) -> Result<(), String> {
+    // Keyring first, on every record, so nothing below can serialize a key
+    // that was just moved to the keyring.
+    let mut all: Vec<ManagedAgentRecord> = definitions;
     all.extend(instances);
+    persist_keys(&mut all);
 
-    let path = managed_agents_store_path(app)?;
-    let payload = serde_json::to_vec_pretty(&all)
-        .map_err(|error| format!("failed to serialize agent store: {error}"))?;
+    let mut definitions_out: Vec<ManagedAgentRecord> = Vec::new();
+    let mut keyed: Vec<ManagedAgentRecord> = Vec::new();
+    let mut seen_pubkeys: HashMap<String, usize> = HashMap::new();
+    for record in all {
+        if record.pubkey.is_empty() {
+            definitions_out.push(record);
+        } else if let Some(&index) = seen_pubkeys.get(&record.pubkey) {
+            // A caller holding a duplicate (e.g. loaded from a store written
+            // by an earlier build) must not persist it twice; last one wins.
+            keyed[index] = record;
+        } else {
+            seen_pubkeys.insert(record.pubkey.clone(), keyed.len());
+            keyed.push(record);
+        }
+    }
+    definitions_out.sort_by(|left, right| left.slug.cmp(&right.slug));
 
-    // `managed-agents.json` carries plaintext agent nsecs in the keyringless
-    // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
-    // keyring-backed case (it is the user's own agent store) and closes the
-    // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    // Each keyed record goes to exactly ONE file: its community shard, or the
+    // legacy store when its relay does not resolve to a community.
+    let (legacy_instances, shards) = partition_by_community(keyed);
+
+    let legacy_path = legacy_store_path(base_dir);
+    let legacy_payload = serde_json::to_vec_pretty(&{
+        let mut combined = definitions_out;
+        combined.extend(legacy_instances);
+        combined
+    })
+    .map_err(|error| format!("failed to serialize agent store: {error}"))?;
+
+    let mut shard_writes: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(shards.len());
+    for (key, mut shard_records) in shards {
+        shard_records.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.pubkey.cmp(&right.pubkey))
+        });
+        let payload = serde_json::to_vec_pretty(&shard_records)
+            .map_err(|error| format!("failed to serialize agent shard {key}: {error}"))?;
+        shard_writes.push((base_dir.join(community_shard_file_name(&key)), payload));
+    }
+
+    // A community whose last record was deleted (or moved) has no entry in
+    // the new partition, but its old shard is still enumerated on load.
+    // Rewrite it as `[]` rather than deleting it — deletion would race a
+    // concurrent reader, and `[]` keeps the fail-loud parse contract uniform
+    // (a missing file is also valid).
+    let empty_payload = serde_json::to_vec_pretty(&Vec::<ManagedAgentRecord>::new())
+        .map_err(|error| format!("failed to serialize empty agent shard: {error}"))?;
+    let stale_writes: Vec<(PathBuf, Vec<u8>)> = community_shard_paths(base_dir)
+        .into_iter()
+        .filter(|path| !shard_writes.iter().any(|(target, _)| target == path))
+        .map(|path| (path, empty_payload.clone()))
+        .collect();
+
+    let mut plan = shard_writes;
+    plan.push((legacy_path, legacy_payload));
+    plan.extend(stale_writes);
+    commit_store_plan(plan)
+}
+
+/// Apply an ordered list of `(path, payload)` atomic writes as one
+/// recoverable commit: snapshot every target, skip targets whose bytes are
+/// already equal, write the rest in order, and on the first failure restore
+/// every file already written (newest first) from its snapshot.
+fn commit_store_plan(plan: Vec<(PathBuf, Vec<u8>)>) -> Result<(), String> {
+    let mut pending: Vec<(PathBuf, Vec<u8>, StoreSnapshot)> = Vec::with_capacity(plan.len());
+    for (path, payload) in plan {
+        let snapshot = snapshot_store(&path)?;
+        if snapshot.as_deref() == Some(payload.as_slice()) {
+            continue;
+        }
+        pending.push((path, payload, snapshot));
+    }
+
+    let mut written: Vec<(PathBuf, StoreSnapshot)> = Vec::with_capacity(pending.len());
+    for (path, payload, snapshot) in pending {
+        // `managed-agents*.json` can carry plaintext agent nsecs in the
+        // keyringless fallback. Write owner-only (`0o600`) unconditionally —
+        // harmless for the keyring-backed case and closes the umask window a
+        // post-write `chmod` would leave open.
+        if let Err(error) = atomic_write_json_restricted(&path, &payload) {
+            let restore_errors: Vec<String> = written
+                .into_iter()
+                .rev()
+                .filter_map(|(path, snapshot)| restore_store(&path, snapshot).err())
+                .collect();
+            if restore_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(format!(
+                "{error} (and the agent store could not be restored: {})",
+                restore_errors.join("; ")
+            ));
+        }
+        written.push((path, snapshot));
+    }
+    Ok(())
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy
