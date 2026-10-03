@@ -544,6 +544,8 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
+        # NIP-GS commit/tag signing program using Nostr secp256k1 keys (infra-free).
+        cargo nextest run -p git-sign-nostr
     else
         ./scripts/run-tests.sh unit
     fi
