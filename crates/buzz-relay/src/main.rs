@@ -414,7 +414,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         if host.is_empty() {
             if config.require_relay_membership {
                 return Err(anyhow::anyhow!(
-                    "Cannot derive a community host from BUZZ_RELAY_URL ({:?}); a resolvable host is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true",
+                    "Cannot derive a community host from RELAY_URL ({:?}); a resolvable host is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true",
                     config.relay_url
                 ));
             }
