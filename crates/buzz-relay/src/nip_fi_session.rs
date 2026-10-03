@@ -31,6 +31,16 @@ pub(crate) enum NipFiWsRoute {
     Audio,
 }
 
+impl NipFiWsRoute {
+    /// The shadow metrics `route` label.
+    pub(crate) const fn shadow_label(self) -> &'static str {
+        match self {
+            Self::Root => "ws",
+            Self::Audio => "audio",
+        }
+    }
+}
+
 // ── Pairing seam ──────────────────────────────────────────────────────────────
 
 /// Outcome of [`enforce_nip_fi_key_pairing`].

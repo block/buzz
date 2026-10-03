@@ -19,9 +19,10 @@
 //!
 //! ## Environment variables
 //!
-//! The command API is enabled when `BUZZ_NIP_FI_MODE=enforce`.  S4 fields are
-//! read from the same `BUZZ_NIP_FI_ISSUERS` JSON array as the assertion
-//! policy; in enforce mode every issuer entry must carry them:
+//! The command API is enabled when `BUZZ_NIP_FI_MODE` is `enforce` or
+//! `shadow` (shadow keeps the deny entry but closes no session).  S4 fields
+//! are read from the same `BUZZ_NIP_FI_ISSUERS` JSON array as the assertion
+//! policy; in both modes every issuer entry must carry them:
 //!
 //! ```json
 //! {
@@ -136,23 +137,34 @@ pub async fn disconnect(
             let pubkey_bytes = cmd.target_pubkey.to_bytes();
             // Issuer-scoped: the deny entry is keyed by (caller_iss, k), so only
             // sessions admitted under caller_iss are closed. [FI-TRACE-DENY-SET]
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
-                + state
-                    .community_connections
-                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes);
+            // Shadow keeps the deny entry but closes nothing.
+            let closed = if !state.config.nip_fi.mode.observes_only() {
+                state
+                    .conn_manager
+                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
+                    + state
+                        .community_connections
+                        .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
+            } else {
+                state
+                    .nip_fi_shadow_sessions
+                    .would_close(&cmd.caller_iss, &pubkey_bytes);
+                0
+            };
             if closed > 0 {
                 // [FI-TRACE-PRIVACY-NONPUBLIC]: raw `iss` MUST NOT appear in
                 // logs, metrics, or traces.  Log only a count.
                 debug!(closed, "nip-fi disconnect: closed sessions");
             }
-            metrics::counter!("buzz_nip_fi_disconnect_total").increment(1);
-            metrics::counter!(
-                "buzz_nip_fi_sessions_closed_total",
-                "reason" => "admin_disconnect"
-            )
-            .increment(closed as u64);
+            let mode = state.config.nip_fi.mode;
+            count_disconnect_event(mode, "buzz_nip_fi_disconnect_total", "admin", "accepted", 1);
+            if !mode.observes_only() {
+                metrics::counter!(
+                    "buzz_nip_fi_sessions_closed_total",
+                    "reason" => "admin_disconnect"
+                )
+                .increment(closed as u64);
+            }
 
             // Cross-pod propagation: publish to global NIP-FI Redis channel
             // so remote pods can merge the deny entry and close their sessions.
@@ -160,12 +172,18 @@ pub async fn disconnect(
             {
                 let pubsub = Arc::clone(&state.pubsub);
                 let msg = nip_fi_disconnect_message(&cmd);
+                let channel = disconnect_publish_channel(state.config.nip_fi.mode);
                 state.nip_fi_publish_tasks.spawn(async move {
-                    if let Err(e) = pubsub.publish_nip_fi_disconnect(&msg).await {
+                    if let Err(e) = pubsub.publish_nip_fi_disconnect(channel, &msg).await {
                         // [FI-TRACE-PRIVACY-NONPUBLIC]: no iss or pubkey in logs
                         tracing::warn!("nip-fi: cross-pod propagation publish failed: {e}");
-                        metrics::counter!("buzz_nip_fi_disconnect_propagation_failures_total")
-                            .increment(1);
+                        count_disconnect_event(
+                            mode,
+                            "buzz_nip_fi_disconnect_propagation_failures_total",
+                            "admin",
+                            "propagation_failure",
+                            1,
+                        );
                     }
                 });
             }
@@ -175,7 +193,13 @@ pub async fn disconnect(
         Err(err) => {
             if err == CommandError::DenySetFull {
                 warn!("nip-fi disconnect: deny set full — command rejected, no sessions closed");
-                metrics::counter!("buzz_nip_fi_disconnect_capacity_rejections_total").increment(1);
+                count_disconnect_event(
+                    state.config.nip_fi.mode,
+                    "buzz_nip_fi_disconnect_capacity_rejections_total",
+                    "admin",
+                    "capacity",
+                    1,
+                );
             }
             command_denial(err)
         }
@@ -186,16 +210,16 @@ pub async fn disconnect(
 
 /// Per-issuer command configuration parsed from the `BUZZ_NIP_FI_ISSUERS` JSON.
 ///
-/// In enforce mode `maximum_command_age_seconds` and `authorized_principals`
-/// are required on every issuer and startup validation rejects any entry
-/// without them.  The fields remain `Option` for the off and `deny_protected`
+/// In enforce and shadow modes `maximum_command_age_seconds` and
+/// `authorized_principals` are required on every issuer and startup
+/// validation rejects any entry without them.  The fields remain `Option` for the off and `deny_protected`
 /// modes, which do not require them.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct CommandIssuerEnvConfig {
-    /// Maximum command JWT age in seconds, in `[1, 60]`.  Required in enforce mode.
+    /// Maximum command JWT age in seconds, in `[1, 60]`.  Required in enforce and shadow modes.
     pub maximum_command_age_seconds: Option<u64>,
     /// Non-empty list of authorized `sub` values, matched exactly
-    /// (case-sensitive).  Required in enforce mode.
+    /// (case-sensitive).  Required in enforce and shadow modes.
     pub authorized_principals: Option<Vec<String>>,
     /// Hard ceiling on live deny entries for this issuer; must be positive.
     /// Defaults to [`DEFAULT_DENY_SET_CAPACITY`] when absent.
@@ -208,6 +232,58 @@ pub struct NipFiCommandComponents<F: JwksFetcher = buzz_auth::HttpJwksFetcher> {
     pub deny_map: Arc<NipFiDenyMap>,
     /// The command verifier for the `POST /api/nip-fi/disconnect` endpoint.
     pub command_verifier: Arc<CommandVerifier<Arc<ProductionJwksSource<F>>>>,
+}
+
+/// Channel this pod publishes accepted disconnects on.  Shadow uses its own
+/// channel, so no enforce pod (of any build) ever acts on a shadow command.
+pub fn disconnect_publish_channel(mode: NipFiMode) -> &'static str {
+    if mode.observes_only() {
+        buzz_pubsub::conn_control::NIP_FI_SHADOW_DISCONNECT_CHANNEL
+    } else {
+        buzz_pubsub::conn_control::NIP_FI_DISCONNECT_CHANNEL
+    }
+}
+
+/// Channels this pod receives disconnects on.  Shadow also hears enforce's
+/// real disconnects so its deny record matches.
+pub fn disconnect_subscribe_channels(mode: NipFiMode) -> &'static [&'static str] {
+    use buzz_pubsub::conn_control::{NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL};
+    if mode.observes_only() {
+        &[NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL]
+    } else {
+        &[NIP_FI_DISCONNECT_CHANNEL]
+    }
+}
+
+/// Count a disconnect-path event on its `real` counter, or in shadow on
+/// `buzz_nip_fi_shadow_disconnect_total{route, outcome}` instead, so a
+/// shadow pod never moves an enforce disconnect metric.
+pub fn count_disconnect_event(
+    mode: NipFiMode,
+    real: &'static str,
+    route: &'static str,
+    outcome: &'static str,
+    n: u64,
+) {
+    if mode.observes_only() {
+        let labels = [("route", route), ("outcome", outcome)];
+        metrics::counter!("buzz_nip_fi_shadow_disconnect_total", &labels).increment(n);
+    } else {
+        metrics::counter!(real).increment(n);
+    }
+}
+
+/// Command replay guard for this pod.  Shadow claims under its own key
+/// prefix, so a shadow accept never uses up the enforce claim.
+pub fn command_replay_guard(
+    pool: deadpool_redis::Pool,
+    mode: NipFiMode,
+) -> Arc<dyn buzz_auth::CommandReplayGuard> {
+    if mode.observes_only() {
+        Arc::new(buzz_pubsub::RedisCommandReplayGuard::shadow(pool))
+    } else {
+        Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
+    }
 }
 
 /// Outcome of applying a cross-pod NIP-FI disconnect message.
@@ -317,8 +393,12 @@ pub fn apply_nip_fi_disconnect(
     use buzz_auth::CrossPodMergeResult;
     let merge_result = deny_map.merge_cross_pod_deny(&message.issuer, &pubkey, until, now);
 
-    // Close sessions for all merge outcomes except UnknownIssuer.
+    // Close sessions for all merge outcomes except UnknownIssuer, never in shadow.
     let close_sessions = |reason: &str| {
+        if state.config.nip_fi.mode.observes_only() {
+            let sessions = &state.nip_fi_shadow_sessions;
+            return sessions.would_close(&message.issuer, &message.pubkey_bytes);
+        }
         let closed = state
             .conn_manager
             .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes)
@@ -330,6 +410,13 @@ pub fn apply_nip_fi_disconnect(
         }
     };
 
+    let mode = state.config.nip_fi.mode;
+    // What a capacity or poison failsafe does to targeted sessions here.
+    let action = if mode.observes_only() {
+        "would-close recorded (shadow)"
+    } else {
+        "targeted sessions closed"
+    };
     match &merge_result {
         CrossPodMergeResult::Merged => {
             close_sessions("merged");
@@ -339,17 +426,21 @@ pub fn apply_nip_fi_disconnect(
         }
         CrossPodMergeResult::CapacityExceeded => {
             tracing::warn!(
-                "nip-fi cross-pod: deny set full for issuer — closing targeted sessions without map entry (capacity miss; issuer re-push is the recovery path)"
+                action,
+                "nip-fi cross-pod: deny set full for issuer — no map entry (capacity miss; issuer re-push is the recovery path)"
             );
             close_sessions("capacity-exceeded");
-            metrics::counter!("buzz_nip_fi_cross_pod_capacity_exceeded_total").increment(1);
+            let real = "buzz_nip_fi_cross_pod_capacity_exceeded_total";
+            count_disconnect_event(mode, real, "cross_pod", "capacity", 1);
         }
         CrossPodMergeResult::ShardPoisoned => {
             tracing::error!(
-                "nip-fi cross-pod: issuer shard is poisoned — sessions closed (fail-closed)"
+                action,
+                "nip-fi cross-pod: issuer shard is poisoned (fail-closed)"
             );
             close_sessions("poisoned shard failsafe");
-            metrics::counter!("buzz_nip_fi_cross_pod_shard_poison_total").increment(1);
+            let real = "buzz_nip_fi_cross_pod_shard_poison_total";
+            count_disconnect_event(mode, real, "cross_pod", "poison", 1);
         }
     }
 
@@ -370,7 +461,7 @@ pub fn build_nip_fi_command_components<F: JwksFetcher>(
     key_source: Arc<ProductionJwksSource<F>>,
     issuer_command_configs: &[(String, CommandIssuerEnvConfig)],
 ) -> Result<Option<NipFiCommandComponents<F>>, String> {
-    if matches!(mode, NipFiMode::Off) {
+    if mode.is_off() {
         return Ok(None);
     }
 
@@ -385,7 +476,7 @@ pub fn build_nip_fi_command_components<F: JwksFetcher>(
             None => {
                 // In enforce mode every issuer must be command-capable;
                 // from_env() already guarantees this, but be defensive here too.
-                if matches!(mode, NipFiMode::Enforce) {
+                if mode.evaluates() {
                     return Err(format!(
                         "nip-fi: enforce issuer [index {idx}] has no maximum_command_age_seconds — \
                          assertion-only issuers are not supported in enforce mode"
@@ -425,7 +516,7 @@ pub fn build_nip_fi_command_components<F: JwksFetcher>(
     }
 
     if command_policies.is_empty() {
-        if matches!(mode, NipFiMode::Enforce) {
+        if mode.evaluates() {
             // Enforce with no command-capable issuers is a misconfiguration:
             // from_env() guarantees every enforce issuer has command config, so
             // an empty set here means something was skipped or the configs are wrong.
@@ -482,7 +573,7 @@ pub fn install_nip_fi_command_components<F: JwksFetcher>(
     command_configs: &[(String, CommandIssuerEnvConfig)],
 ) -> Result<NipFiCommandStartupReport, String> {
     // Pre-flight: enforce mode with no command configs is always an error.
-    if matches!(mode, NipFiMode::Enforce) && command_configs.is_empty() {
+    if mode.evaluates() && command_configs.is_empty() {
         return Err(
             "NIP-FI install: enforce mode requires at least one command-capable issuer".to_owned(),
         );
@@ -1926,6 +2017,32 @@ mod route_integration_tests {
         );
     }
 
+    /// Shadow evaluates commands like enforce, so it shares enforce's
+    /// refusal to start without a command-capable issuer.
+    #[test]
+    fn installer_rejects_shadow_without_command_issuers() {
+        let key_source = Arc::new(
+            ProductionJwksSource::new(
+                vec![test_jwks_config()],
+                buzz_auth::ScriptedJwksFetcher::new([]),
+            )
+            .expect("valid key source"),
+        );
+        let err = super::install_nip_fi_command_components(
+            &mut None,
+            &mut None,
+            buzz_auth::NipFiMode::Shadow,
+            &IssuerRegistry::new(),
+            key_source,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "NIP-FI install: enforce mode requires at least one command-capable issuer"
+        );
+    }
+
     /// Mint a valid ES256 `nip-fi+jwt` assertion for `nostr_pubkey = key_hex`,
     /// signed by the route-integration-test key pair.
     /// Used by the startup-oracle test to verify the assertion verifier against
@@ -2156,6 +2273,64 @@ mod route_integration_tests {
             &state,
             buzz_auth::CrossPodMergeResult::ShardPoisoned,
         );
+    }
+
+    // Pins: the cross-pod capacity and poison failsafes count on the real
+    // counters only in enforce; a shadow pod counts them on its own shadow
+    // disconnect counter, never on an enforce series.
+    // Mutation: reverting either site to its raw counter adds a real series
+    // to the shadow run (or drops the shadow series).
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_pod_failsafe_counters_stay_off_enforce_series_in_shadow() {
+        for (mode, expected) in [
+            (
+                buzz_auth::NipFiMode::Enforce,
+                vec![
+                    "buzz_nip_fi_cross_pod_capacity_exceeded_total".to_owned(),
+                    "buzz_nip_fi_cross_pod_shard_poison_total".to_owned(),
+                ],
+            ),
+            (
+                buzz_auth::NipFiMode::Shadow,
+                vec![
+                    "buzz_nip_fi_shadow_disconnect_total cross_pod capacity".to_owned(),
+                    "buzz_nip_fi_shadow_disconnect_total cross_pod poison".to_owned(),
+                ],
+            ),
+        ] {
+            let with_mode = |state: Arc<crate::state::AppState>| {
+                let mut state = (*state).clone();
+                Arc::make_mut(&mut state.config).nip_fi.mode = mode;
+                state
+            };
+            let full = with_mode(cross_pod_state(1).await);
+            let poisoned = with_mode(cross_pod_state(10).await);
+            poisoned
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map present")
+                .poison_shard_for_test(TEST_ISS);
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            for state in [&full, &full, &poisoned] {
+                let key = nostr::Keys::generate().public_key();
+                apply_nip_fi_disconnect(state, &cross_pod_message(&key), chrono::Utc::now());
+            }
+            let mut series: Vec<String> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .map(|(key, ..)| {
+                    let key = key.key();
+                    let labels = key.labels().map(|l| format!(" {}", l.value()));
+                    format!("{}{}", key.name(), labels.collect::<String>())
+                })
+                .filter(|name| name.starts_with("buzz_nip_fi"))
+                .collect();
+            series.sort();
+            assert_eq!(series, expected, "{mode:?}");
+        }
     }
 
     // ── Cross-pod consumer: rejection and ceiling clamp ──────────────────────
@@ -2793,6 +2968,72 @@ mod route_integration_tests {
         .await;
     }
 
+    /// Pins: an admin disconnect counts its accept and its capacity rejection
+    /// on the real counters only in enforce; a shadow pod answers the same
+    /// way but counts both on its shadow disconnect counter.
+    /// Mutation: reverting either admin site to its raw counter puts a real
+    /// series in the shadow run.
+    #[test]
+    fn admin_disconnect_counters_stay_off_enforce_series_in_shadow() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        for (mode, expected) in [
+            (
+                NipFiMode::Enforce,
+                vec![
+                    "buzz_nip_fi_disconnect_capacity_rejections_total",
+                    "buzz_nip_fi_disconnect_total",
+                    "buzz_nip_fi_sessions_closed_total admin_disconnect",
+                ],
+            ),
+            (
+                NipFiMode::Shadow,
+                vec![
+                    "buzz_nip_fi_shadow_disconnect_total admin accepted",
+                    "buzz_nip_fi_shadow_disconnect_total admin capacity",
+                ],
+            ),
+        ] {
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = mode;
+            config.nip_fi.registry.insert(test_issuer_policy());
+            let state = Arc::new(rt.block_on(build_test_app_state(1, config)));
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let statuses = metrics::with_local_recorder(&recorder, || {
+                rt.block_on(async {
+                    let mut statuses = Vec::new();
+                    for _ in 0..2 {
+                        let t = target_hex();
+                        let token = mint_token(&t, 300, serde_json::json!({}));
+                        statuses.push(post_command(&state, &token, &t).await.0);
+                    }
+                    statuses
+                })
+            });
+            assert_eq!(
+                statuses,
+                [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE],
+                "{mode:?}"
+            );
+            let mut series: Vec<String> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .map(|(key, ..)| {
+                    let key = key.key();
+                    let labels = key.labels().map(|l| format!(" {}", l.value()));
+                    format!("{}{}", key.name(), labels.collect::<String>())
+                })
+                .filter(|name| name.starts_with("buzz_nip_fi"))
+                .collect();
+            series.sort();
+            assert_eq!(series, expected, "{mode:?}");
+        }
+    }
+
     /// `buzz_nip_fi_disconnect_capacity_rejections_total` counts exactly the
     /// `DenySetFull` rejections and no other command-error arm.
     ///
@@ -3270,6 +3511,245 @@ mod route_integration_tests {
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("redis pool");
             Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
+        }
+
+        async fn pod_in(mode: NipFiMode) -> Arc<AppState> {
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = mode;
+            config.nip_fi.registry.insert(test_issuer_policy());
+            let mut state = build_test_app_state(1000, config).await;
+            state.nip_fi_command_replay =
+                command_replay_guard(state.redis_pool.clone(), state.config.nip_fi.mode);
+            Arc::new(state)
+        }
+
+        /// Shadow startup goes through the same `AppState::new` as production:
+        /// it builds the assertion verifier, installs a command verifier on
+        /// the shared key source, and claims commands under the shadow replay
+        /// prefix, leaving the enforce claim for an enforce pod.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn app_state_new_in_shadow_builds_verifiers_and_shadow_replay_guard() {
+            use crate::nip_fi_config::NipFiRelayConfig;
+            use buzz_auth::CommandReplayGuard as _;
+
+            let mut config = crate::config::Config::for_test();
+            config.redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut registry = IssuerRegistry::new();
+            registry.insert(test_issuer_policy());
+            let command_configs = vec![(
+                TEST_ISS.to_owned(),
+                CommandIssuerEnvConfig {
+                    maximum_command_age_seconds: Some(30),
+                    authorized_principals: Some(vec![TEST_SUB.to_owned()]),
+                    deny_set_capacity: Some(100),
+                },
+            )];
+            config.nip_fi = NipFiRelayConfig {
+                mode: NipFiMode::Shadow,
+                registry: registry.clone(),
+                jwks_configs: vec![test_jwks_config()],
+                command_configs: command_configs.clone(),
+                max_connection_lifetime_secs: 3600,
+                communities: crate::nip_fi_core::test_support::any_host(TEST_AUD),
+            };
+            let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .unwrap();
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .unwrap(),
+            );
+            let (mut state, _) = crate::state::AppState::new(
+                config.clone(),
+                db.clone(),
+                redis_pool.clone(),
+                buzz_audit::AuditService::new(pool.clone()),
+                pubsub,
+                buzz_auth::AuthService::new(config.auth.clone()),
+                buzz_search::SearchService::new(pool),
+                Arc::new(buzz_workflow::WorkflowEngine::new(
+                    db,
+                    buzz_workflow::WorkflowConfig::default(),
+                )),
+                nostr::Keys::generate(),
+                buzz_media::MediaStorage::new(&config.media).unwrap(),
+            );
+            assert!(
+                state.nip_fi_verifier.is_some(),
+                "shadow must build the verifier"
+            );
+            let source = state.nip_fi_jwks_source.clone().expect("shared key source");
+            super::super::install_nip_fi_command_components(
+                &mut state.nip_fi_deny_map,
+                &mut state.nip_fi_command_verifier,
+                NipFiMode::Shadow,
+                &registry,
+                Arc::clone(&source),
+                &command_configs,
+            )
+            .expect("shadow installs the command verifier");
+            source.seed_snapshot_for_test(TEST_ISS, test_jwks()).await;
+            let target = nostr::Keys::generate().public_key();
+            let command = mint_token(&target.to_hex(), 300, serde_json::json!({}));
+            let verifier = state.nip_fi_command_verifier.as_ref().unwrap();
+            let verified =
+                verifier.verify_at(&command, "POST", TEST_PATH, &target, chrono::Utc::now());
+            assert!(verified.is_ok(), "shadow verifies commands: {verified:?}");
+
+            let jti = uuid::Uuid::new_v4().to_string();
+            assert!(state
+                .nip_fi_command_replay
+                .try_claim(TEST_ISS, &jti, 60)
+                .await
+                .unwrap());
+            let shadow = buzz_pubsub::RedisCommandReplayGuard::shadow(redis_pool.clone());
+            let enforce = buzz_pubsub::RedisCommandReplayGuard::new(redis_pool);
+            assert!(
+                !shadow.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
+                "claim is shadow-prefixed"
+            );
+            assert!(
+                enforce.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
+                "enforce claim untouched"
+            );
+        }
+
+        /// Run `state`'s production disconnect subscriber and apply what it
+        /// hears through the production consumer, like `main.rs`.  Yields
+        /// the target of each applied message.
+        fn listen(state: &Arc<AppState>) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+            let mut rx = state.pubsub.subscribe_nip_fi_disconnect();
+            let channels = disconnect_subscribe_channels(state.config.nip_fi.mode);
+            tokio::spawn(Arc::clone(&state.pubsub).run_nip_fi_disconnect_subscriber(channels));
+            let consumer = Arc::clone(state);
+            let (seen_tx, seen) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                while let Ok(msg) = rx.recv().await {
+                    apply_nip_fi_disconnect(&consumer, &msg, chrono::Utc::now());
+                    let _ = seen_tx.send(msg.pubkey_bytes);
+                }
+            });
+            seen
+        }
+
+        /// Return once a probe that `prober` publishes has been applied via
+        /// `seen`: the subscription is live, and anything published earlier
+        /// on the probe's channel has been applied.
+        async fn await_probe(
+            seen: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+            prober: &Arc<AppState>,
+        ) {
+            for _ in 0..50 {
+                let probe = nostr::Keys::generate().public_key();
+                let token = mint_token(&probe.to_hex(), 300, serde_json::json!({}));
+                post_command(prober, &token, &probe.to_hex()).await;
+                drain_publishes(prober).await;
+                let wait = std::time::Duration::from_millis(200);
+                while let Ok(Some(k)) = tokio::time::timeout(wait, seen.recv()).await {
+                    if k == probe.to_bytes().to_vec() {
+                        return;
+                    }
+                }
+            }
+            panic!("disconnect subscriber never received a probe");
+        }
+
+        /// Return once `seen` has applied a message for `key`.
+        async fn await_target(
+            seen: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+            key: &nostr::PublicKey,
+        ) {
+            let wait = std::time::Duration::from_secs(5);
+            while let Ok(Some(k)) = tokio::time::timeout(wait, seen.recv()).await {
+                if k == key.to_bytes().to_vec() {
+                    return;
+                }
+            }
+            panic!("disconnect subscriber never received the target");
+        }
+
+        // Pins finding 1 (disconnect half): a shadow disconnect goes out only
+        // on the shadow channel, so an enforce pod denies and closes nothing.
+        // Other shadow pods receive it and record the deny; no shadow pod
+        // closes a session, whether the command came from shadow or enforce.
+        // Mutation: publishing shadow commands on `NIP_FI_DISCONNECT_CHANNEL`
+        // closes the enforce session; letting a shadow pod close on a
+        // received command fails `assert_open` on the shadow pods.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn shadow_disconnect_never_reaches_an_enforce_pod() {
+            let shadow = pod_in(NipFiMode::Shadow).await;
+            let peer = pod_in(NipFiMode::Shadow).await;
+            let enforce = pod_in(NipFiMode::Enforce).await;
+            let mut enforce_seen = listen(&enforce);
+            let mut shadow_seen = listen(&shadow);
+            let mut peer_seen = listen(&peer);
+            await_probe(&mut enforce_seen, &enforce).await;
+            await_probe(&mut shadow_seen, &enforce).await;
+            await_probe(&mut peer_seen, &enforce).await;
+            let key = nostr::Keys::generate().public_key();
+            let on_shadow = IssuerSessions::register(&shadow, TEST_ISS, &key);
+            let on_peer = IssuerSessions::register(&peer, TEST_ISS, &key);
+            let on_enforce = IssuerSessions::register(&enforce, TEST_ISS, &key);
+
+            let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+            let (status, body) = post_command(&shadow, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(&body[..], br#"{"disconnected": true}"#);
+            assert!(is_denied(&shadow, &key), "shadow records its deny");
+            on_shadow.assert_open("shadow pod");
+            drain_publishes(&shadow).await;
+            // Anything the enforce pod would hear from that publish has
+            // arrived once a later enforce-channel probe has.
+            await_probe(&mut enforce_seen, &enforce).await;
+            assert!(!is_denied(&enforce, &key), "enforce records no shadow deny");
+            on_enforce.assert_open("enforce pod");
+            await_target(&mut peer_seen, &key).await;
+            assert!(
+                is_denied(&peer, &key),
+                "a second shadow pod records the deny"
+            );
+            on_peer.assert_open("second shadow pod");
+
+            // An enforce disconnect reaching a shadow pod records the deny
+            // and closes nothing there.
+            let target = nostr::Keys::generate().public_key();
+            let target_on_shadow = IssuerSessions::register(&shadow, TEST_ISS, &target);
+            let token = mint_token(&target.to_hex(), 300, serde_json::json!({}));
+            let (status, _) = post_command(&enforce, &token, &target.to_hex()).await;
+            assert_eq!(status, StatusCode::OK);
+            drain_publishes(&enforce).await;
+            await_target(&mut shadow_seen, &target).await;
+            assert!(is_denied(&shadow, &target), "shadow records enforce's deny");
+            target_on_shadow.assert_open("shadow pod, enforce command");
+        }
+
+        // Pins finding 1 (replay half): shadow and enforce share one Redis
+        // but claim under disjoint prefixes, so a shadow accept leaves the
+        // command usable by enforce, while shadow still rejects its own
+        // replay.  Mutation: a shadow guard on the enforce prefix makes the
+        // enforce use a 403.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn shadow_command_claim_never_uses_up_enforce_claim() {
+            let shadow = pod_in(NipFiMode::Shadow).await;
+            let enforce = pod_in(NipFiMode::Enforce).await;
+            let key = nostr::Keys::generate().public_key();
+            let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+
+            let (status, _) = post_command(&shadow, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::OK, "shadow accepts first use");
+            let (status, _) = post_command(&enforce, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::OK, "enforce still accepts it");
+            let (status, body) = post_command(&shadow, &token, &key.to_hex()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "shadow rejects its replay");
+            assert_eq!(body.as_ref(), b"authorization denied\n");
         }
 
         #[tokio::test]

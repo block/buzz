@@ -117,7 +117,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
           IosNavigationAction(label: 'Set', onPressed: applySelection),
         ],
         leading: _ThemePreviewCloseButton(onPressed: close),
-        title: const Text('Theme'),
+        title: const Text('Appearance'),
         actions: [_ThemePreviewSetButton(onPressed: applySelection)],
       ),
       body: Column(

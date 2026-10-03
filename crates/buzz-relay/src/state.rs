@@ -24,7 +24,7 @@ use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::rate_limiter::RedisRateLimiter;
-use buzz_pubsub::{PubSubManager, RedisCommandReplayGuard, RedisNip98ReplayGuard};
+use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
@@ -98,6 +98,8 @@ pub(crate) struct CommunityConnectionControl {
     pubkey: Arc<std::sync::OnceLock<[u8; 32]>>,
     /// Owner of an admitted agent; revoking the owner closes this socket.
     owner: Arc<std::sync::OnceLock<[u8; 32]>>,
+    /// Shadow-mode observation of this socket; no enforce path reads it.
+    nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
 }
 
 impl CommunityConnectionControl {
@@ -110,7 +112,26 @@ impl CommunityConnectionControl {
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
             pubkey: Arc::default(),
             owner: Arc::default(),
+            nip_fi_shadow: Arc::default(),
         }
+    }
+
+    /// Carries the socket's shadow session to its AUTH handler, fenced by
+    /// the socket's cancellation so it records nothing once cancelled.
+    pub(crate) fn attach_nip_fi_shadow(
+        &self,
+        session: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    ) {
+        if let Some(session) = session {
+            session.fence(self.cancel.clone());
+            let _ = self.nip_fi_shadow.set(session);
+        }
+    }
+
+    pub(crate) fn nip_fi_shadow(
+        &self,
+    ) -> Option<&Arc<crate::nip_fi_shadow_session::ShadowSession>> {
+        self.nip_fi_shadow.get()
     }
 
     /// Records the authenticated pubkey so pubkey-scoped disconnects reach this socket.
@@ -1337,6 +1358,8 @@ pub struct AppState {
     /// lets tests wait for every publish to finish; nothing waits on it in
     /// production.
     pub nip_fi_publish_tasks: tokio_util::task::TaskTracker,
+    /// Shadow-mode sessions a shadow disconnect records a would-close for.
+    pub(crate) nip_fi_shadow_sessions: Arc<crate::nip_fi_shadow_session::ShadowSessions>,
 }
 
 impl AppState {
@@ -1422,8 +1445,8 @@ impl AppState {
         );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
-        let nip_fi_command_replay: Arc<dyn CommandReplayGuard> =
-            Arc::new(RedisCommandReplayGuard::new(redis_pool.clone()));
+        let nip_fi_command_replay =
+            crate::api::nip_fi::command_replay_guard(redis_pool.clone(), config.nip_fi.mode);
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
@@ -1531,6 +1554,7 @@ impl AppState {
             nip_fi_command_verifier: None,
             nip_fi_command_replay,
             nip_fi_publish_tasks: tokio_util::task::TaskTracker::new(),
+            nip_fi_shadow_sessions: Arc::default(),
         };
         (
             state,
@@ -2088,12 +2112,9 @@ type NipFiComponents = (
 );
 
 fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
-    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, NipFiMode, ProductionJwksSource};
+    use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, ProductionJwksSource};
 
-    if matches!(
-        config.nip_fi.mode,
-        NipFiMode::Off | NipFiMode::DenyProtected
-    ) {
+    if !config.nip_fi.mode.evaluates() {
         // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
         return (None, None);
     }

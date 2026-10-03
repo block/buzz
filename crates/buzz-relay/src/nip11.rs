@@ -111,8 +111,9 @@ pub struct RelayLimitation {
     pub payment_required: bool,
     /// Whether writes are restricted to authorized pubkeys.
     pub restricted_writes: bool,
-    /// Whether NIP-FI federated identity assertions are required at upgrade.
-    /// Advertised `true` when the relay is in `Enforce` mode.
+    /// Whether the relay supports NIP-FI federated identity assertions.
+    /// Advertised `true` in `Enforce` and `Shadow` mode, so clients attach
+    /// evidence; in `Shadow` the relay evaluates it without requiring it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub federated_identity: bool,
     /// NIP-ER: how the relay delivers due reminders ("push" or "lazy").
@@ -345,7 +346,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
-    let advertise_fi = state.config.nip_fi.is_enforce();
+    let advertise_fi = state.config.nip_fi.mode.evaluates();
     let mut info = RelayInfo::build(
         relay_self.as_deref(),
         icon.as_deref(),
@@ -474,6 +475,29 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 
 #[cfg(test)]
 mod tests {
+    // Clients attach evidence only when the relay advertises NIP-FI, so a
+    // shadow relay must serve enforce's exact document. Mutation: gating on
+    // `enforces()` makes shadow serve Off's document → RED.
+    #[tokio::test]
+    async fn shadow_serves_the_same_nip11_document_as_enforce() {
+        use buzz_auth::NipFiMode;
+        let base =
+            crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+        let mut docs = Vec::new();
+        for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
+            let mut state = (*base).clone();
+            let mut config = (*state.config).clone();
+            config.nip_fi.mode = mode;
+            state.config = std::sync::Arc::new(config);
+            docs.push(
+                serde_json::to_string(&super::nip11_document(&state, "relay.example").await)
+                    .unwrap(),
+            );
+        }
+        assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
+        assert_eq!(docs[2], docs[1]);
+    }
+
     use super::*;
 
     #[test]

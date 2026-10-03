@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
 use futures_util::StreamExt;
@@ -125,13 +125,9 @@ async fn authenticate(
     path: &str,
     body: &[u8],
 ) -> Result<(buzz_core::TenantContext, nostr::PublicKey), Response> {
-    let raw_host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -400,7 +396,7 @@ mod tests {
     use super::*;
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{header, Request, StatusCode},
         routing::get,
         Router,
     };

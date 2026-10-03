@@ -29,6 +29,7 @@ import os.log
     endpointGrantStore: endpointGrantStore,
     keychainAccessGroup: pushKeychainAccessGroup
   )
+  private var hapticsChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -77,6 +78,20 @@ import os.log
     }
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
+    hapticsChannel = FlutterMethodChannel(
+      name: "buzz/haptics",
+      binaryMessenger: messenger
+    )
+    hapticsChannel?.setMethodCallHandler { call, result in
+      guard call.method == "success" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let generator = UINotificationFeedbackGenerator()
+      generator.prepare()
+      generator.notificationOccurred(.success)
+      result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(
       name: "buzz/qr_scanner",

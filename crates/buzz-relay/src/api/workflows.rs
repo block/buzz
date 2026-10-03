@@ -17,8 +17,6 @@ use uuid::Uuid;
 
 use buzz_core::TenantContext;
 
-use buzz_auth::NipFiMode;
-
 use crate::{
     api::{api_error, bridge, internal_error, parse_query_or_400},
     nip_fi_http::admit_nip_fi_http_on_state,
@@ -51,13 +49,9 @@ async fn authorize_workflow_read(
     raw_query: Option<&str>,
     workflow_id: Uuid,
 ) -> Result<TenantContext, Response> {
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -70,7 +64,7 @@ async fn authorize_workflow_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let nip_fi_active = state.config.nip_fi.mode.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let require_auth = state.config.require_auth_token || nip_fi_active;

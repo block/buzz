@@ -49,7 +49,7 @@ use crate::state::AppState;
 //
 // What is guaranteed: in Enforce, this guard rejects a missing or invalid
 // assertion on every non-exempt route; in DenyProtected it returns 503
-// without verifying; in Off it is transparent.  Key pairing
+// without verifying; in Off and Shadow it is transparent.  Key pairing
 // (`asserted_key == proven_pubkey`) and the deny map run only in handlers
 // that call `admit_nip_fi_http_on_state`.  In Enforce, a handler that omits
 // the call and does its own NIP-98 is still subject to the assertion guard,
@@ -65,10 +65,10 @@ use crate::state::AppState;
 //   Enforce mode, which is intentional: the default is DENY; public status is
 //   explicit.
 //
-// ## Relationship to Off mode
+// ## Relationship to Off and Shadow
 //
-// When `NipFiMode::Off` the guard is fully transparent — no request is
-// touched.  [FI-INV-15]
+// When `NipFiMode::Off` or `NipFiMode::Shadow` the guard is fully transparent —
+// no request is touched; Shadow records its verdict elsewhere.  [FI-INV-15]
 //
 // ## What this guard checks (and does NOT check)
 //
@@ -171,19 +171,68 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
 ///
-/// In Off mode the middleware is fully transparent.
+/// In Off mode the middleware is fully transparent; in Shadow it only records.
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    use buzz_auth::NipFiMode;
-
-    // Off mode: fully transparent. [FI-INV-15]
-    if matches!(state.config.nip_fi.mode, NipFiMode::Off) {
+    let mode = state.config.nip_fi.mode;
+    // Off: fully transparent. [FI-INV-15]
+    if mode.is_off() || nip_fi_guard_exempts(&state, &request) {
         return next.run(request).await;
     }
 
+    // DenyProtected: unconditional 503 regardless of assertion presence.
+    // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
+    if mode.denies_unconditionally() {
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+    }
+
+    let verdict = nip_fi_guard_steps(&state, request.headers());
+    // Shadow: transparent, but the guard's verdict is recorded in enforce's
+    // order, ahead of any handler step.
+    if mode.observes_only() {
+        let headers = request.headers().clone();
+        return crate::nip_fi_shadow::observe_guard(&state, &headers, verdict, next.run(request))
+            .await;
+    }
+    match verdict {
+        Ok(()) => next.run(request).await,
+        Err((_, class)) => http_denial(class),
+    }
+}
+
+/// The guard's enforce steps: the Host must map to a configured community,
+/// then the attached assertion must verify offline (transport, then
+/// signature, issuer, community, expiry and claims).  A forgotten-gate
+/// handler that omits `admit_nip_fi_http_on_state` can only be reached with a
+/// cryptographically valid assertion.  Key pairing and deny-map are performed
+/// by `admit_nip_fi_http_on_state` in the handler, not here.
+/// [FI-TRACE-TRANSPORT-CLOSED] [FI-TRACE-AUTHORITY-UNIFORM]
+fn nip_fi_guard_steps(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
+    let community =
+        crate::nip_fi_core::resolve_community(headers, &state.config.nip_fi.communities)
+            .map_err(|class| (crate::nip_fi_shadow::Stage::Community, class))?;
+    crate::nip_fi_core::evaluate_attached_assertion(
+        headers,
+        community,
+        state.nip_fi_verifier.as_deref(),
+    )
+    .map(drop)
+    .map_err(|rejection| {
+        (
+            crate::nip_fi_shadow::Stage::Assertion,
+            rejection.denial_class(),
+        )
+    })
+}
+
+/// Paths the assertion guard never checks.
+fn nip_fi_guard_exempts(state: &AppState, request: &Request<Body>) -> bool {
     let path = request.uri().path();
 
     // Exempt paths bypass the assertion-token check.
@@ -209,7 +258,7 @@ async fn nip_fi_assertion_guard(
     });
 
     if exempt {
-        return next.run(request).await;
+        return true;
     }
 
     // Admin SPA document routes are exempt when the request is on the admin
@@ -219,43 +268,9 @@ async fn nip_fi_assertion_guard(
     // go to `/api/admin/v1/...` (already exempt via the `/api/admin/` prefix).
     //
     // The exemption is host-qualified: `/reports` on a tenant host is NOT
-    // exempt and stays protected.  Off mode is already handled above.
+    // exempt and stays protected.
     // [FI-TRACE-AUTHORITY-UNIFORM]
-    if is_admin_spa_path(path) && api::admin::is_admin_host(&state, request.headers()) {
-        return next.run(request).await;
-    }
-
-    // Non-exempt path in Enforce or DenyProtected mode.
-    //
-    // DenyProtected: unconditional 503 regardless of assertion presence.
-    // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
-    if matches!(state.config.nip_fi.mode, NipFiMode::DenyProtected) {
-        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
-    }
-
-    // Enforce mode, step 1: the Host must map to a configured community.
-    let community = match crate::nip_fi_core::resolve_community(
-        request.headers(),
-        &state.config.nip_fi.communities,
-    ) {
-        Ok(community) => community,
-        Err(class) => return http_denial(class),
-    };
-
-    // Enforce mode: full offline assertion verification (transport, then
-    // signature, issuer, community, expiry and claims).  A forgotten-gate handler that
-    // omits `admit_nip_fi_http_on_state` can only be reached with a
-    // cryptographically valid assertion.  Key pairing and deny-map are
-    // performed by `admit_nip_fi_http_on_state` in the handler, not here.
-    // [FI-TRACE-TRANSPORT-CLOSED] [FI-TRACE-AUTHORITY-UNIFORM]
-    match crate::nip_fi_core::evaluate_attached_assertion(
-        request.headers(),
-        community,
-        state.nip_fi_verifier.as_deref(),
-    ) {
-        Ok(_) => next.run(request).await,
-        Err(rejection) => http_denial(rejection.denial_class()),
-    }
+    is_admin_spa_path(path) && api::admin::is_admin_host(state, request.headers())
 }
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -611,7 +626,7 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let nip_fi_assertion = {
+    let (upgrade_checked, nip_fi_assertion, shadow_assertion) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -634,20 +649,22 @@ async fn nip11_or_ws_handler(
         let is_h2_ws_connect = req.version() == axum::http::Version::HTTP_2
             && req.method() == axum::http::Method::CONNECT;
         if is_h1_ws_upgrade || is_h2_ws_connect {
-            use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+            use crate::nip_fi_session::NipFiWsRoute::Root;
+            use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = &state.config.nip_fi.communities;
-            match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
-                NipFiUpgradeOutcome::NotRequired => None,
-                NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
-                NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+            match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+                .into_assertions()
+            {
+                Ok((assertion, shadow)) => (true, assertion, shadow),
+                Err(resp) => return (*resp).into_response(),
             }
         } else {
             // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
             // The `Ok(ws)` arm below backstops any extractor-accepted shape this
             // predicate misses. [F3-H2-GATE]
-            None
+            (false, None, None)
         }
     };
 
@@ -677,6 +694,8 @@ async fn nip11_or_ws_handler(
             }
         }
     }
+    let shadow_assertion = shadow_assertion
+        .filter(|a| !crate::nip_fi_shadow_session::upgrade_denied(&state, &headers, a));
 
     // Row zero: bind the connection to its community from the request host
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
@@ -716,19 +735,21 @@ async fn nip11_or_ws_handler(
             // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
             // and this block is unreachable (the h1 denial is returned before
             // we get here).
-            let nip_fi_assertion = if nip_fi_assertion.is_none() {
+            let (nip_fi_assertion, shadow_assertion) = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
-                use crate::nip_fi_upgrade::{check_nip_fi_at_upgrade, NipFiUpgradeOutcome};
+                use crate::nip_fi_session::NipFiWsRoute::Root;
+                use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
                 let mode = state.config.nip_fi.mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = &state.config.nip_fi.communities;
-                match check_nip_fi_at_upgrade(&headers, communities, verifier, mode) {
-                    NipFiUpgradeOutcome::NotRequired => None,
-                    NipFiUpgradeOutcome::Admitted(assertion) => Some(assertion),
-                    NipFiUpgradeOutcome::Denied(resp) => return resp.into_response(),
+                match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+                    .into_assertions()
+                {
+                    Ok(assertions) => assertions,
+                    Err(resp) => return (*resp).into_response(),
                 }
             } else {
-                nip_fi_assertion
+                (nip_fi_assertion, shadow_assertion)
             };
 
             // Shutting down: refuse new sockets instead of accepting a
@@ -745,6 +766,15 @@ async fn nip11_or_ws_handler(
             // handshake, not the post-community-active-check instant.
             // [FI-TRACE-LEASE-BOUND]
             let connection_time = chrono::Utc::now();
+            let shadow = shadow_assertion.map(|a| {
+                crate::nip_fi_shadow_session::ShadowSession::start(
+                    &state,
+                    "ws",
+                    &headers,
+                    a,
+                    connection_time,
+                )
+            });
             limit_relay_websocket(ws, max_frame_bytes)
                 .on_upgrade(move |socket| {
                     handle_connection(
@@ -753,6 +783,7 @@ async fn nip11_or_ws_handler(
                         addr,
                         tenant,
                         nip_fi_assertion,
+                        shadow,
                         connection_time,
                     )
                 })
@@ -2497,6 +2528,389 @@ mod tests {
         use super::*;
         use std::sync::Arc;
 
+        // Pins: a real shadow root handshake runs the upgrade check once, and
+        // a passing assertion closed before AUTH records no verdict.
+        // Mutation: re-running the fallback whenever no assertion is held
+        // doubles the verifier call; recording at upgrade adds a record.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_root_handshake_is_checked_once() {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-ws-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(base.db.pool())
+                .await
+                .expect("seed community");
+            let verifier = Arc::new(ScriptedVerifier::new(Ok(Some(
+                nostr::Keys::generate().public_key(),
+            ))));
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{host}"),
+                &["https://issuer.test"],
+            );
+            state.nip_fi_verifier = Some(verifier.clone());
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let app = build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut().insert("host", host.parse().unwrap());
+            req.headers_mut()
+                .insert("nostr-federated-identity", "Bearer a.b.c".parse().unwrap());
+            let (client, resp) = connect_async(req)
+                .await
+                .expect("shadow admits the handshake");
+            assert_eq!(resp.status(), axum::http::StatusCode::SWITCHING_PROTOCOLS);
+            drop(client);
+            server.abort();
+
+            let records: u64 = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
+                .map(|(.., value)| match value {
+                    metrics_util::debugging::DebugValue::Counter(n) => n,
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!((verifier.calls(), records), (1, 0));
+        }
+
+        // Pins the guard order for a Host mapped in config but absent from the
+        // communities table: Off's rejection is unchanged and shadow records
+        // the verdict enforce's guard reaches first — `assertion/missing`
+        // without one (enforce: 401), an admit with a valid one (enforce:
+        // the guard passes and the handler's 404 is no NIP-FI denial).
+        // Mutation: recording `community` in `observe_unbound` whenever the
+        // Host is unbound, or replaying the handler order, fails both rows.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_db_unmapped_host_records_the_guard_verdict() {
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let host = format!("unmapped-{}.example", uuid::Uuid::new_v4().simple());
+            let with_mode = |mode| {
+                let mut state = (*base).clone();
+                let config = Arc::make_mut(&mut state.config);
+                config.nip_fi.mode = mode;
+                config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                    &format!("https://{host}"),
+                    &["https://issuer.test"],
+                );
+                state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Ok(Some(
+                    nostr::Keys::generate().public_key(),
+                )))));
+                Arc::new(state)
+            };
+            for (assertion, stage, outcome) in [
+                (None, "assertion", "missing"),
+                (Some("Bearer a.b.c"), "admit", "admit"),
+            ] {
+                let labels = shadow_matches_off_with_one_record(
+                    with_mode(buzz_auth::NipFiMode::Off),
+                    with_mode(buzz_auth::NipFiMode::Shadow),
+                    || {
+                        let mut req =
+                            axum::http::Request::post("/api/invites").header("host", &host);
+                        if let Some(token) = assertion {
+                            req = req.header(buzz_auth::CLIENT_ATTACHED_HEADER, token);
+                        }
+                        req.body(axum::body::Body::empty()).unwrap()
+                    },
+                )
+                .await
+                .0;
+                for label in [
+                    format!("\"stage\", \"{stage}\""),
+                    format!("\"outcome\", \"{outcome}\""),
+                    format!("\"community\", \"https://{host}\""),
+                ] {
+                    assert!(labels.contains(&label), "{assertion:?}: {labels}");
+                }
+            }
+        }
+
+        // Pins: the workflow handler's shared NIP-98 closure keeps the dev
+        // `X-Pubkey` proof unsigned, so shadow admits it as Off does but
+        // records a NIP-98 would-deny; only the guard verifies, as in enforce.
+        // Mutation: dropping the unsigned marker records `admit`.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_workflow_never_counts_x_pubkey_as_an_enforce_proof() {
+            use tower::ServiceExt;
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-wf-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(base.db.pool())
+                .await
+                .expect("seed community");
+            let key = nostr::Keys::generate().public_key();
+            let verifier = Arc::new(ScriptedVerifier::new(Ok(Some(key))));
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.require_auth_token = false;
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{host}"),
+                &["https://issuer.test"],
+            );
+            state.nip_fi_verifier = Some(verifier.clone());
+
+            let req = axum::http::Request::get(format!("/workflows/{}/runs", uuid::Uuid::nil()))
+                .header("host", &host)
+                .header("x-pubkey", key.to_hex())
+                .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = build_router(Arc::new(state)).oneshot(req).await.unwrap();
+            assert_ne!(
+                resp.status(),
+                axum::http::StatusCode::UNAUTHORIZED,
+                "admitted"
+            );
+
+            let stages: Vec<String> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(k, ..)| k.key().name() == "buzz_nip_fi_shadow_total")
+                .filter_map(|(k, ..)| {
+                    let stage = k.key().labels().find(|l| l.key() == "stage")?;
+                    Some(stage.value().to_owned())
+                })
+                .collect();
+            assert_eq!((stages, verifier.calls()), (vec!["nip98".to_owned()], 1));
+        }
+
+        fn nip98(keys: &nostr::Keys, url: &str, method: &str) -> String {
+            use base64::Engine as _;
+            let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                .tags([
+                    nostr::Tag::parse(["u", url]).unwrap(),
+                    nostr::Tag::parse(["method", method]).unwrap(),
+                    // A distinct event per call: Off and Shadow share Redis.
+                    nostr::Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+                ])
+                .sign_with_keys(keys)
+                .unwrap();
+            let json = serde_json::to_string(&event).unwrap();
+            format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD.encode(json)
+            )
+        }
+
+        /// Off and Shadow states on a seeded, mapped Host whose assertion
+        /// names `key`; each gets its own pool so a row may close it.
+        async fn seeded_pair(
+            key: nostr::PublicKey,
+        ) -> (String, buzz_core::CommunityId, [Arc<AppState>; 2]) {
+            let probe = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-row-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(probe.db.pool())
+                .await
+                .expect("seed community");
+            let mut states = Vec::new();
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Shadow] {
+                let mut state = (*real_db_state().await.unwrap()).clone();
+                let config = Arc::make_mut(&mut state.config);
+                config.relay_url = "wss://relay.example".to_owned();
+                config.require_relay_membership = true;
+                config.nip_fi.mode = mode;
+                config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                    &format!("https://{host}"),
+                    &["https://issuer.test"],
+                );
+                // Real Redis so admission reaches the handler, not the
+                // fail-closed rate limiter.
+                let redis = deadpool_redis::Config::from_url(
+                    std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+                )
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .unwrap();
+                state.admission_rate_limiter = Arc::new(
+                    buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis.clone()),
+                );
+                state.nip98_replay =
+                    Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis.clone()));
+                state.redis_pool = redis;
+                state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Ok(Some(key)))));
+                states.push(Arc::new(state));
+            }
+            let community = buzz_core::CommunityId::from_uuid(community_id);
+            (host, community, states.try_into().ok().unwrap())
+        }
+
+        // Pins Off parity on a seeded Host for the bridge's payload strictness
+        // and junk proofs, Blossom reads, and the Git membership lookup
+        // failure. Each row matches Off byte for byte, leaves exactly one
+        // shadow verdict, and the expected strict-proof side checks.
+        // Mutation: recording the bridge strict proof twice, requiring the
+        // payload tag in shadow, or answering the Git lookup failure with the
+        // NIP-FI 503 in shadow each fails a row.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_seeded_host_rows_match_off() {
+            let keys = nostr::Keys::generate();
+            let sha = "a".repeat(64);
+            let body = serde_json::to_vec(
+                &nostr::EventBuilder::new(nostr::Kind::TextNote, "hi")
+                    .sign_with_keys(&keys)
+                    .unwrap(),
+            )
+            .unwrap();
+            let git = "/git/o/r.git/info/refs?service=git-upload-pack";
+            // (method, path, proof, body, strict-proof outcomes, close the pool)
+            type Row<'a> = (
+                &'a str,
+                String,
+                Option<&'a str>,
+                Vec<u8>,
+                Vec<&'a str>,
+                bool,
+            );
+            let rows: Vec<Row> = vec![
+                (
+                    "POST",
+                    "/events".into(),
+                    None,
+                    body.clone(),
+                    vec!["rejected"],
+                    false,
+                ),
+                (
+                    "POST",
+                    "/events".into(),
+                    Some("Nostr !!junk!!"),
+                    body,
+                    vec!["rejected"],
+                    false,
+                ),
+                (
+                    "GET",
+                    format!("/media/{sha}"),
+                    None,
+                    Vec::new(),
+                    vec!["rejected"],
+                    false,
+                ),
+                ("GET", git.into(), None, Vec::new(), vec![], true),
+            ];
+            for (method, path, proof, body, strict, close) in rows {
+                let (host, community, [off, shadow]) = seeded_pair(keys.public_key()).await;
+                let signed_path = path.split("/info/refs").next().unwrap();
+                let url = format!("https://{host}{signed_path}");
+                if close {
+                    // Fail the membership lookup after the tenant bound: Off
+                    // runs first, then Shadow, each against its own pool.
+                    use crate::nip_fi_test_hooks::git_membership_hook::arm;
+                    let (off_pool, shadow_pool) = (off.db.pool().clone(), shadow.db.pool().clone());
+                    let mut gate = arm(community);
+                    tokio::spawn(async move {
+                        for pool in [off_pool, shadow_pool] {
+                            let (arrived, release) = gate;
+                            arrived.await.unwrap();
+                            pool.close().await;
+                            // Re-arm before releasing, so Shadow's request
+                            // cannot reach the hook unarmed.
+                            gate = arm(community);
+                            release.notify_one();
+                        }
+                    });
+                }
+                let (_, outcomes) = shadow_matches_off_with_one_record(off, shadow, || {
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header("host", &host)
+                        .header(
+                            "authorization",
+                            proof.map_or_else(|| nip98(&keys, &url, method), str::to_owned),
+                        )
+                        .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
+                        .body(axum::body::Body::from(body.clone()))
+                        .unwrap()
+                })
+                .await;
+                assert_eq!(outcomes, strict, "{method} {path} {proof:?}");
+            }
+        }
+
+        // Pins Off parity on a seeded Host for the remaining NIP-FI routes:
+        // a signed NIP-98 proof and an attached assertion leave Off's exact
+        // response and exactly one shadow verdict.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_seeded_host_remaining_routes_match_off() {
+            let keys = nostr::Keys::generate();
+            let sha = "a".repeat(64);
+            let branch = format!("/git/{sha}/r/default-branch");
+            let filter = br#"{"kinds":[1],"limit":1}"#.to_vec();
+            let rows = [
+                ("POST", "/query".to_owned(), filter.clone()),
+                ("POST", "/count".to_owned(), filter),
+                ("GET", "/moderation/reports".to_owned(), Vec::new()),
+                ("HEAD", format!("/media/{sha}"), Vec::new()),
+                ("GET", format!("/media/{sha}"), Vec::new()),
+                ("GET", branch.clone(), Vec::new()),
+                ("POST", branch, br#"{"branch":"main"}"#.to_vec()),
+                (
+                    "POST",
+                    "/gifs/search".to_owned(),
+                    br#"{"q":"cat"}"#.to_vec(),
+                ),
+                ("POST", "/gifs/share".to_owned(), br#"{"id":"x"}"#.to_vec()),
+                ("POST", "/api/invites".to_owned(), b"{}".to_vec()),
+                (
+                    "GET",
+                    format!("/workflows/{}/runs", uuid::Uuid::nil()),
+                    Vec::new(),
+                ),
+            ];
+            for (method, path, body) in rows {
+                let (host, _, [off, shadow]) = seeded_pair(keys.public_key()).await;
+                let url = format!("https://{host}{path}");
+                shadow_matches_off_with_one_record(off, shadow, || {
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header("host", &host)
+                        .header("content-type", "application/json")
+                        .header("authorization", nip98(&keys, &url, method))
+                        .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
+                        .body(axum::body::Body::from(body.clone()))
+                        .unwrap()
+                })
+                .await;
+            }
+        }
+
         async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
@@ -3708,6 +4122,120 @@ mod tests {
         );
     }
 
+    /// Sends one request through the built router in Off and in Shadow.
+    /// Asserts identical status, challenge and body, no Off record, and one
+    /// Shadow record; returns that record's labels and the shadow
+    /// strict-proof outcomes.
+    async fn shadow_matches_off_with_one_record(
+        off: Arc<AppState>,
+        shadow: Arc<AppState>,
+        request: impl Fn() -> axum::http::Request<axum::body::Body>,
+    ) -> (String, Vec<String>) {
+        use tower::ServiceExt;
+        let mut outcomes = Vec::new();
+        for state in [off, shadow] {
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let resp = build_router(state).oneshot(request()).await.unwrap();
+            let challenge = resp.headers().get("WWW-Authenticate").cloned();
+            let snapshot = snapshotter.snapshot().into_vec();
+            let records: Vec<_> = snapshot
+                .iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
+                .map(|(key, .., value)| {
+                    let labels = format!("{:?}", key.key().labels().collect::<Vec<_>>());
+                    (labels, counter(value))
+                })
+                .collect();
+            let strict: Vec<String> = snapshot
+                .iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_strict_proof_total")
+                .flat_map(|(key, .., value)| {
+                    let outcome = key.key().labels().find(|l| l.key() == "outcome");
+                    let outcome = outcome.map_or("-", |l| l.value()).to_owned();
+                    std::iter::repeat_n(outcome, counter(value) as usize)
+                })
+                .collect();
+            outcomes.push(((challenge, status_and_body(resp).await), records, strict));
+        }
+        let (shadow, off) = (outcomes.pop().unwrap(), outcomes.pop().unwrap());
+        assert_eq!(shadow.0, off.0, "rejection unchanged");
+        assert!(off.1.is_empty() && off.2.is_empty(), "off records nothing");
+        let [(labels, value)] = <[_; 1]>::try_from(shadow.1).expect("exactly one shadow record");
+        assert_eq!(value, 1);
+        (labels, shadow.2)
+    }
+
+    fn counter(value: &metrics_util::debugging::DebugValue) -> u64 {
+        match value {
+            metrics_util::debugging::DebugValue::Counter(n) => *n,
+            _ => 0,
+        }
+    }
+
+    // Pins D8 on every handler that returns before NIP-FI admission: an empty
+    // Host keeps Off's exact rejection and leaves one `community` record.
+    // Mutation: dropping the record at any site leaves no shadow record.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shadow_empty_host_keeps_off_rejection_and_records_community() {
+        use axum::body::Body;
+        use base64::Engine as _;
+        let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let signed = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_string(&event).unwrap())
+        );
+        let sha = "a".repeat(64);
+        let git = "/git/o/r.git/info/refs?service=git-upload-pack".to_owned();
+        let branch = format!("/git/{sha}/r/default-branch");
+        let rows = [
+            ("POST", "/events".to_owned(), Some(signed.as_str())),
+            ("PUT", "/upload".to_owned(), Some(&signed)),
+            ("GET", format!("/media/{sha}"), Some(&signed)),
+            ("GET", "/moderation/reports".to_owned(), Some(&signed)),
+            (
+                "GET",
+                format!("/workflows/{}/runs", uuid::Uuid::nil()),
+                Some(&signed),
+            ),
+            ("GET", git.clone(), Some(&signed)),
+            ("GET", git.clone(), None),
+            ("GET", git, Some("Nostr !!not-base64!!")),
+            ("POST", "/gifs/search".to_owned(), Some(&signed)),
+            ("POST", "/gifs/share".to_owned(), Some(&signed)),
+            ("GET", branch.clone(), Some(&signed)),
+            ("POST", branch, Some(&signed)),
+            ("POST", "/api/invites".to_owned(), Some(&signed)),
+        ];
+        for (method, path, auth) in rows {
+            let request = || {
+                let mut req = axum::http::Request::builder().method(method).uri(&path);
+                if let Some(auth) = auth {
+                    req = req.header("authorization", auth);
+                }
+                req.body(Body::empty()).unwrap()
+            };
+            let labels = shadow_matches_off_with_one_record(
+                nip_fi_state(buzz_auth::NipFiMode::Off).await,
+                nip_fi_state(buzz_auth::NipFiMode::Shadow).await,
+                request,
+            )
+            .await
+            .0;
+            for label in [
+                "\"stage\", \"community\"",
+                "\"outcome\", \"unavailable\"",
+                "\"community\", \"unmapped\"",
+            ] {
+                assert!(labels.contains(label), "{method} {path} {auth:?}: {labels}");
+            }
+        }
+    }
+
     // ── Characterization: HTTP guard evaluation contract ─────────────────────
 
     const GUARD_PROTECTED_PATH: &str = "/workflows/wf/runs";
@@ -3859,6 +4387,27 @@ mod tests {
                 b"evidence rejected\n".to_vec()
             )
         );
+    }
+
+    // Pins the guard's remaining enforce rows before shadow replays them: a
+    // mapped Host with no assertion is 401 before verification, and an exempt
+    // path passes the guard untouched.
+    // Mutation: dropping the guard's assertion step lets the handler answer;
+    // guarding `/health` turns its 200 into 401.
+    #[tokio::test]
+    async fn characterize_guard_missing_assertion_is_401_and_exempt_passes() {
+        let (state, verifier) = guard_state_with(Ok(None)).await;
+        let resp = nip_fi_gate_response(state.clone(), GUARD_PROTECTED_PATH, None, None).await;
+        assert_eq!(
+            status_and_body(resp).await,
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                b"authentication required\n".to_vec()
+            )
+        );
+        let resp = nip_fi_gate_response(state, "/health", None, None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(verifier.calls(), 0);
     }
 
     // Pins: the guard verifies but does not pair keys. A claimless assertion
