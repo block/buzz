@@ -1,4 +1,5 @@
 import 'dart:ui' as ui;
+import 'dart:convert';
 
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
@@ -33,6 +34,53 @@ void main() {
       expect(provider.decodedWidth, greaterThan(0));
     });
   });
+
+  for (final size in [const Size(1440, 720), const Size(720, 1440)]) {
+    testWidgets('bounds inline raster decode at $size before native painting', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final recorder = ui.PictureRecorder();
+        Canvas(recorder).drawColor(Colors.blue, BlendMode.src);
+        final picture = recorder.endRecording();
+        final image = await picture.toImage(
+          size.width.toInt(),
+          size.height.toInt(),
+        );
+        final bytes = (await image.toByteData(
+          format: ui.ImageByteFormat.png,
+        ))!.buffer.asUint8List();
+        image.dispose();
+        picture.dispose();
+        final decodedSizes = <Size>[];
+        final previous = ui.Image.onCreate;
+        ui.Image.onCreate = (image) {
+          decodedSizes.add(
+            Size(image.width.toDouble(), image.height.toDouble()),
+          );
+          previous?.call(image);
+        };
+        try {
+          final png = await nativeAvatarImage(
+            url: 'data:image/png;base64,${base64Encode(bytes)}',
+            initial: 'A',
+            background: Colors.white,
+            foreground: Colors.black,
+            networkImage: (_) => throw StateError('Unexpected network image'),
+          );
+          expect(png, isNotNull);
+          // The first image is the codec frame, before the final 72px canvas.
+          expect(decodedSizes.length, greaterThanOrEqualTo(2));
+          expect(decodedSizes.first.width, lessThanOrEqualTo(72));
+          expect(decodedSizes.first.height, lessThanOrEqualTo(72));
+          expect(decodedSizes.first.aspectRatio, size.aspectRatio);
+          expect(decodedSizes.first.longestSide, 72);
+        } finally {
+          ui.Image.onCreate = previous;
+        }
+      });
+    });
+  }
 
   for (final emoji in ['🥳', '🦝', '👩🏽‍💻']) {
     testWidgets('centers painted bounds of $emoji in the native avatar', (

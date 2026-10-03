@@ -48,7 +48,13 @@ Future<Uint8List?> nativeAvatarImage({
         picture.picture.dispose();
         rendered = true;
       case _RasterDataAvatarSource(:final bytes):
-        final codec = await ui.instantiateImageCodec(bytes);
+        final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+        final codec = await ui.instantiateImageCodecWithSize(
+          buffer,
+          getTargetSize: (width, height) => width >= height
+              ? ui.TargetImageSize(width: width.clamp(1, dimension.toInt()))
+              : ui.TargetImageSize(height: height.clamp(1, dimension.toInt())),
+        );
         try {
           final frame = await codec.getNextFrame();
           paintImage(
