@@ -13,12 +13,12 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "goose",
         label: "Goose",
-        commands: &["goose"],
+        commands: &["goose-acp", "goose"],
         aliases: &[],
         avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
+        mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: false,
-        underlying_cli: Some("goose"),
+        underlying_cli: None,
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
         // Goose's stable release currently publishes only the Unix installer;
         // its official Windows instructions intentionally point at this main-branch script.
