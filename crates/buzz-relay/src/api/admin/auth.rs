@@ -21,13 +21,14 @@
 //! Config outranks DB: a `relay_operators` DB row for a config-backed
 //! Operator pubkey is ignored; it never demotes a config grant.
 //!
-//! # disabled mode (read-only)
+//! # disabled mode (legacy reads only)
 //!
 //! `authorize()` succeeds for read requests but returns `None` for the
-//! principal — mutations and staffing routes call
-//! [`require_mutation_principal`], which 403s on `None`.
+//! principal, so only the legacy reads (reports, feedback, member
+//! restrictions) are served. Community reads, mutations and staffing routes
+//! require a resolved principal and 403 on `None`.
 
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, Method, Uri};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
@@ -243,6 +244,21 @@ pub async fn authorize(
     }
 
     Ok(principal)
+}
+
+/// [`authorize`] for a bodyless read, bound to the request's real method and
+/// full target. Axum serves `HEAD` through `GET` handlers, so hardcoding
+/// `"GET"` would reject a correctly signed `HEAD`.
+pub async fn authorize_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+) -> Result<Option<AdminPrincipal>, ApiError> {
+    let target = uri
+        .path_and_query()
+        .map_or_else(|| uri.path(), |pq| pq.as_str());
+    authorize(state, headers, target, method.as_str(), None).await
 }
 
 /// Resolve a 32-byte pubkey to an `AdminPrincipal` using config + DB.
