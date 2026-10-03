@@ -53,6 +53,7 @@ fn assert_merge(directory: &[Event], profile: &Event, policy: &Event, status: &s
     assert_eq!(serde_json::to_value(agent).unwrap()["status"], status);
     assert_eq!(agent.pubkey, profile.pubkey.to_hex());
     assert_eq!(agent.owner_pubkey, Some(policy.pubkey.to_hex()));
+    assert_eq!(agent.persona_id.as_deref(), Some("persona-1"));
     assert_eq!(agent.name, "Policy name");
     assert_eq!(
         agent.respond_to,

@@ -45,6 +45,7 @@ fn managed_agent_event(
 ) -> Event {
     let content = serde_json::json!({
         "name": name,
+        "persona_id": "persona-1",
         "parallelism": 1,
         "respond_to": respond_to,
         "respond_to_allowlist": respond_to_allowlist,
