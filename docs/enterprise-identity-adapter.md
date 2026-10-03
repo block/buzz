@@ -151,6 +151,8 @@ Content-Type: application/json
   should allow no more than 60 seconds of age.
 - The request body is limited to 4096 bytes and MUST NOT be content-encoded.
   Unknown fields are rejected.
+- Clients and adapters MUST NOT log the values of the `Authorization` or
+  `Nostr-Authorization` headers.
 
 Success response (`200`, `Cache-Control: no-store`):
 
@@ -162,27 +164,36 @@ Success response (`200`, `Cache-Control: no-store`):
 }
 ```
 
-`expires_at` is the assertion `exp` as Unix seconds. An assertion lives at most
-5 minutes and never outlives the adapter session; clients request a fresh one
-before it expires. The assertion's `nostr_pubkey` MUST be the key that signs the
+`expires_at` is the assertion `exp` as Unix seconds. Under this adapter contract
+an assertion lives at most 5 minutes and never outlives the adapter session;
+clients request a fresh one before it expires. The 5-minute cap is this
+contract's rule, not a relay constant: the relay enforces the token `exp` and
+its own deployment-configured `maximum_assertion_age`. The assertion itself
+follows [NIP-FI](nips/NIP-FI.md): a dedicated assertion's protected `typ` is
+`nip-fi+jwt`, and its `aud` MUST exactly match the canonical host URI of the
+community the relay resolves from the connection's `Host`. The assertion's `nostr_pubkey` MUST be the key that signs the
 NIP-42 relay login; the relay rejects any other key.
 
 Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 
-| Status | `error` | Meaning |
-|---|---|---|
-| 400 | `invalid_request` | Malformed body, missing or duplicated credential header, or unknown fields |
-| 401 | `session_required` | No usable adapter session was presented |
-| 401 | `session_expired` | The adapter session ended; log in again |
-| 403 | `authorization_denied` | The user or relay is not authorized for assertions |
-| 403 | `invalid_proof` | The NIP-98 proof failed verification |
-| 403 | `binding_mismatch` | The adapter has bound this user to a different Nostr key |
-| 413 | `request_too_large` | The body exceeds 4096 bytes |
-| 429 | `rate_limited` | Too many requests; retry later |
-| 503 | `issuance_unavailable` | The adapter could not issue an assertion; retry later |
+| Status | `error` | Meaning | Client action |
+|---|---|---|---|
+| 400 | `invalid_request` | Malformed body, unknown fields, a missing or repeated `Nostr-Authorization` header, a repeated `Authorization` header, or more than one kind of session credential | Keep the session, show the error, do not retry automatically |
+| 401 | `session_required` | No adapter session was presented, or the presented one is not usable | Clear the adapter session and return to browser login |
+| 401 | `session_expired` | The adapter session ended | Clear the adapter session and return to browser login |
+| 403 | `authorization_denied` | The user or relay is not authorized for assertions | Keep the session, disconnect from that relay, show access denied, do not retry automatically; a manual retry or app restart asks again |
+| 403 | `invalid_proof` | The NIP-98 proof failed verification | Keep the session, show the error, do not retry automatically |
+| 403 | `binding_mismatch` | The adapter has bound this user to a different Nostr key | Keep the session, show the error, do not retry automatically |
+| 413 | `request_too_large` | The body exceeds 4096 bytes | Keep the session, show the error, do not retry automatically |
+| 429 | `rate_limited` | Too many requests | Keep the session, retry with bounded backoff |
+| 503 | `issuance_unavailable` | The adapter could not issue an assertion | Keep the session, retry with bounded backoff |
 
-On `401` the client clears the adapter session and sends the user back through
-browser login. Other denials are not fixed by logging in again.
+A missing session is always 401 `session_required`, never 400. Network failures
+are handled like 429 and 503: keep the session and retry with bounded backoff.
+
+An invalid, expired or revoked credential may return `session_required`;
+adapters that distinguish ended sessions may return `session_expired`. Clients
+handle both identically.
 
 Assertions for agent keys are not covered by this contract yet and need a
 separate design.
