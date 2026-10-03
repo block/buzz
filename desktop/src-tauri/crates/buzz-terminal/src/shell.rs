@@ -99,24 +99,81 @@ fn validated(candidate: &str) -> bool {
 /// This is the step that matters for a Finder- or launchd-started app, which
 /// can have no `$SHELL` at all: without it we would hand a zsh user `/bin/sh`
 /// and call it their shell of choice.
+///
+/// Uses the reentrant `getpwuid_r` with caller-owned storage, not `getpwuid`.
+/// `getpwuid` hands back a pointer to libc-owned **static** storage that any
+/// thread's passwd-database call can rewrite mid-copy: Linux documents it as
+/// MT-Unsafe `race:pwuid`, and glibc drops its internal NSS lock before
+/// returning, so the copy out of the struct is itself the race window. The
+/// observed signature is a torn read — CI run 34631406730 saw two reads of
+/// the same uid disagree (`"/bin/bash"` vs `"/back"`) in a concurrently
+/// running test binary (#7589). A private mutex cannot close this window,
+/// because it cannot govern unrelated libc consumers in the same process;
+/// only reentrancy can.
 #[cfg(unix)]
 pub(crate) fn passwd_shell() -> Option<String> {
-    // SAFETY: `getpwuid` returns a pointer to a static passwd struct owned by
-    // libc, valid until the next passwd-database call. We copy the string out
-    // before returning and make no other libc calls in between.
-    let shell = unsafe {
-        let ent = libc::getpwuid(libc::getuid());
-        if ent.is_null() {
-            return None;
+    // Initial buffer size per POSIX guidance: sysconf(_SC_GETPW_R_SIZE_MAX),
+    // or a working guess on platforms that report no limit (Linux may return
+    // -1). The ERANGE retry below handles undersizing either way.
+    let initial_size = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
+        n if n > 0 => n as usize,
+        _ => 4096,
+    };
+    // Upper bound for the retry loop. A passwd entry that cannot fit in this
+    // is pathological (entries are a few hundred bytes); the bound guarantees
+    // termination and bounds the allocation a broken backend can force.
+    const MAX_BUF: usize = 1024 * 1024;
+    let mut buf_size = initial_size;
+
+    loop {
+        let mut buf = vec![0u8; buf_size];
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `entry` and `buf` are caller-owned storage that outlive the
+        // call. `getpwuid_r` writes the string fields of the entry into
+        // `buf` (at most `buf.len()` bytes), copies the fixed-size fields
+        // into `entry`, and stores either a pointer to `entry` or null into
+        // `result`. Unlike `getpwuid`, no libc-owned storage escapes this
+        // call, which is what makes it MT-Safe under concurrent
+        // passwd-database calls from any thread.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut entry,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            // The entry did not fit in the buffer; grow and retry.
+            if buf_size >= MAX_BUF {
+                return None;
+            }
+            buf_size = (buf_size * 2).min(MAX_BUF);
+            continue;
         }
-        let pw_shell = (*ent).pw_shell;
+        if status != 0 {
+            return None; // lookup error: fall through to the next candidate
+        }
+        if result.is_null() {
+            return None; // this uid has no passwd entry
+        }
+        // On success `result` points at our caller-owned `entry` (the
+        // getpwuid_r contract), so reading `pw_shell` touches our stack
+        // struct, not libc-owned statics. The string it names lives in
+        // `buf`, still alive here, and is NUL-terminated by contract.
+        let pw_shell = entry.pw_shell;
         if pw_shell.is_null() {
             return None;
         }
-        std::ffi::CStr::from_ptr(pw_shell).to_str().ok()?.to_owned()
-    };
-
-    Some(shell)
+        // SAFETY: `pw_shell` points to a NUL-terminated string inside `buf`.
+        let shell = unsafe { std::ffi::CStr::from_ptr(pw_shell) }
+            .to_str()
+            .ok()?
+            .to_owned();
+        return Some(shell);
+    }
 }
 
 /// The login-shell `argv[0]` convention: the shell's basename prefixed with
