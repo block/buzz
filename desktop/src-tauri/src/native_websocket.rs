@@ -12,7 +12,11 @@ use crate::native_websocket_batch::{is_auth_challenge, FrameBatch, BATCH_MAX_SER
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message},
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::USER_AGENT, HeaderValue},
+        protocol::{frame::coding::CloseCode, CloseFrame, Message},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -133,9 +137,16 @@ async fn open_connection(
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
+    request.headers_mut().insert(
+        USER_AGENT,
+        HeaderValue::from_static(concat!("Buzz Desktop/", env!("CARGO_PKG_VERSION"))),
+    );
     let (socket, _) = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
+        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
     };
@@ -373,7 +384,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::io::duplex;
-    use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+    use tokio_tungstenite::{
+        tungstenite::{
+            handshake::server::{Request, Response},
+            http::header::USER_AGENT,
+            protocol::Role,
+        },
+        WebSocketStream,
+    };
 
     fn silent_channel() -> Channel<InvokeResponseBody> {
         Channel::new(|_: InvokeResponseBody| Ok(()))
@@ -619,6 +637,48 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "TLS setup must not panic");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn websocket_upgrade_sends_versioned_user_agent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (user_agent_tx, user_agent_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut user_agent_tx = Some(user_agent_tx);
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &Request, response: Response| {
+                    user_agent_tx
+                        .take()
+                        .unwrap()
+                        .send(request.headers().get(USER_AGENT).cloned())
+                        .unwrap();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_))) {
+                    break;
+                }
+            }
+        });
+
+        let manager = WebSocketManager::default();
+        let id = open_connection(&manager, &format!("ws://{address}"), silent_channel())
+            .await
+            .unwrap();
+        assert_eq!(
+            user_agent_rx.await.unwrap().unwrap(),
+            concat!("Buzz Desktop/", env!("CARGO_PKG_VERSION"))
+        );
+
+        manager.disconnect(id).await;
         server.await.unwrap();
     }
 
