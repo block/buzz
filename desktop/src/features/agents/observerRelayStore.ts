@@ -348,41 +348,65 @@ function archiveChannelKey(agentPubkey: string, channelId: string): string {
 }
 
 /**
- * Append a decoded archived observer event to the channel-scoped archive
- * event journal. Unlike `appendAgentEvent`, this path does NOT cap or trim —
- * the channel archive window grows only by explicit paged loads from SQLite,
- * so unbounded growth from live relay events is impossible.
- *
- * Deduplicates on `(seq, timestamp)` — identical to `appendAgentEvent` — so
- * events that arrive on the live relay before the archive page is loaded are
- * silently skipped. The archive window and the live transcript are kept
- * strictly separate: live events never write here.
- *
- * Returns `true` if the event was added (state changed), `false` if it was a
- * duplicate and was skipped. The caller batches notifications.
+ * Identity of an archived event for dedup: the `(seq, timestamp)` pair
+ * `appendAgentEvent` and `mergeObserverEventWindows` also key on. NUL-joined
+ * so no timestamp spelling can borrow a digit from the seq beside it.
  */
-function appendArchivedChannelEvent(
+function archiveDedupKey(event: { seq: number; timestamp: string }): string {
+  return `${event.seq}\u0000${event.timestamp}`;
+}
+
+/**
+ * Merge a page of decoded archived observer events into the channel-scoped
+ * archive event journal. Unlike `appendAgentEvent`, this path does NOT cap or
+ * trim — the channel archive window grows only by explicit paged loads from
+ * SQLite, so unbounded growth from live relay events is impossible.
+ *
+ * Deduplicates on `(seq, timestamp)`, both against the events already in the
+ * window and within the incoming page. That dedup is *archive-local*: the
+ * archive window and the live transcript are deliberately separate stores and
+ * live events never write here, so an archived copy of an event that already
+ * arrived live is still stored. The two windows are reconciled at read time,
+ * by `mergeObserverEventWindows`.
+ *
+ * Takes the whole page at once. Merging event-by-event meant a linear dedup
+ * scan and a full re-sort of the window per event, so ingesting a page of P
+ * events into a window of M cost O(P x M) comparisons plus P sorts — and the
+ * archive window is deliberately uncapped, so M grows with the age of the
+ * channel. Per page it is now one pass to index the window, one to filter, and
+ * one sort.
+ *
+ * Returns `true` if anything was added (state changed), `false` if every event
+ * was a duplicate. The caller batches notifications.
+ */
+function appendArchivedChannelEvents(
   agentPubkey: string,
   channelId: string,
-  event: ObserverEvent,
+  events: ObserverEvent[],
 ): boolean {
+  if (events.length === 0) return false;
   const key = archiveChannelKey(agentPubkey, channelId);
   const current = archiveEventsByChannel.get(key) ?? [];
 
-  // Dedup: skip if (seq, timestamp) already present in the archive window.
-  if (
-    current.some(
-      (existing) =>
-        existing.seq === event.seq && existing.timestamp === event.timestamp,
-    )
-  ) {
-    return false;
+  // One pass over the existing window instead of one scan per incoming event.
+  // A page merged event-by-event cost O(page x window) in dedup alone, which is
+  // what made paging back through a long-lived channel slower the further back
+  // it went.
+  const seen = new Set(current.map(archiveDedupKey));
+  const accepted: ObserverEvent[] = [];
+  for (const event of events) {
+    const dedupKey = archiveDedupKey(event);
+    // Adding as we go also dedups within the incoming page, which the
+    // per-event version got for free by appending to `current` each time.
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    accepted.push(event);
   }
+  if (accepted.length === 0) return false;
 
-  // Archive pages arrive newest-first from SQLite, so each new event sorts
-  // BEFORE the existing entries. Sort the combined array to maintain ascending
-  // order for consumers that call buildTranscriptState over the window.
-  const sorted = [...current, event].sort(compareObserverEvents);
+  // Archive pages arrive newest-first from SQLite, so the merged array needs a
+  // sort — but once for the page, not once per event.
+  const sorted = [...current, ...accepted].sort(compareObserverEvents);
   archiveEventsByChannel.set(key, sorted);
   return true;
 }
@@ -832,10 +856,17 @@ export function useManagedAgentObserverBridge(
  * - The event sender (`pubkey`) must match the `agent` tag value.
  * - Event must decrypt successfully via `decryptObserverEvent`.
  *
- * Routes through `appendAgentEvent` so dedup on `(seq, timestamp)` and
- * sort are reused — archived events that are already present (live-delivered)
- * are silently skipped. Failed decryptions are silently dropped (same as
- * live path error handling).
+ * Routing depends on whether the decoded event carries a `channelId`:
+ *
+ * - With one, it joins the channel-scoped archive window via
+ *   `appendArchivedChannelEvents`, batched so each channel's slice of the page
+ *   is merged in a single call. Dedup there is archive-local — an event that
+ *   also arrived live is still stored, and the two windows are reconciled at
+ *   read time by `mergeObserverEventWindows`.
+ * - Without one, it falls through to `appendAgentEvent` so it stays visible in
+ *   the agent's general transcript.
+ *
+ * Failed decryptions are silently dropped (same as live path error handling).
  *
  * Note: events for agents not currently registered in `knownAgentPubkeys`
  * (e.g. an agent that is stopped but has archived history) are dropped.
@@ -849,6 +880,12 @@ export async function ingestArchivedObserverEvents(
   _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
 ): Promise<void> {
   let archiveChanged = false;
+  // Collected per (agent, channel) so each channel's slice of the page is
+  // merged in one call rather than once per event.
+  const pendingByChannel = new Map<
+    string,
+    { agentPubkey: string; channelId: string; events: ObserverEvent[] }
+  >();
   for (const event of rawEvents) {
     const agentPubkey = observerTag(event, "agent");
     const frame = observerTag(event, "frame");
@@ -869,12 +906,17 @@ export async function ingestArchivedObserverEvents(
         // Events without a channelId fall through to the live store so they
         // remain visible in the agent's general transcript.
         if (inner.channelId) {
-          const added = appendArchivedChannelEvent(
-            agentPubkey,
-            inner.channelId,
-            inner,
-          );
-          if (added) archiveChanged = true;
+          const channelKey = archiveChannelKey(agentPubkey, inner.channelId);
+          const pending = pendingByChannel.get(channelKey);
+          if (pending) {
+            pending.events.push(inner);
+          } else {
+            pendingByChannel.set(channelKey, {
+              agentPubkey,
+              channelId: inner.channelId,
+              events: [inner],
+            });
+          }
         } else {
           // Live path already calls notifyListeners() inside appendAgentEvent.
           appendAgentEvent(agentPubkey, inner);
@@ -882,6 +924,11 @@ export async function ingestArchivedObserverEvents(
       }
     } catch {
       // Silently drop decrypt failures — same as live path error handling.
+    }
+  }
+  for (const { agentPubkey, channelId, events } of pendingByChannel.values()) {
+    if (appendArchivedChannelEvents(agentPubkey, channelId, events)) {
+      archiveChanged = true;
     }
   }
   // Batch-notify once for the whole page of archive events. appendAgentEvent
