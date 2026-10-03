@@ -2,9 +2,8 @@
 name: buzz-cli
 description: >
   Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
-  channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
-  uploads, and agent memory.
-version: 1
+  channels, DMs, users, workflows and slash-command macros, feed, reactions,
+  canvas, social, repos, uploads, and agent memory.
 ---
 
 # Buzz CLI Skill
@@ -108,6 +107,62 @@ buzz messages send --channel <UUID> \
 ## Workflow Inputs
 
 `workflows trigger --workflow <UUID> --inputs '<json>'` passes input variables as the trigger event's content. Omit `--inputs` for parameterless workflows.
+
+## Workflow Macros
+
+When a user asks to create, change, or remove a named macro or chat shortcut,
+model it as a channel-scoped workflow with a `slash_command` trigger. The user
+supplies the behavior in ordinary language; translate it into workflow steps
+and use the current Buzz `[Context]` channel UUID. Ask one concise question only
+when the requested command name or outcome is genuinely missing.
+
+Command names omit the leading slash and must contain 1–64 lowercase ASCII
+letters or digits with optional internal hyphens. A bare `/name ...` message
+invokes the workflow. `@Agent /name ...` remains an agent-runtime command and
+does not invoke the workflow. The text after the command is available as
+`{{trigger.args}}`:
+
+```yaml
+name: New task
+trigger:
+  on: slash_command
+  command: new-task
+steps:
+  - id: plan
+    action: send_message
+    text: "@Planner /plan {{trigger.args}}"
+    reply_in_thread: true
+  - id: review
+    action: send_message
+    text: "@Reviewer /review {{trigger.args}}"
+    reply_in_thread: true
+```
+
+For agent fan-out, use the exact channel-member display name as plain
+`@Name` text at the start of each message; do not wrap mentions in Markdown.
+Put each agent's own command immediately after its mention. Prefer threaded
+replies so the original macro invocation and dispatched work stay together.
+
+Before writing, run `buzz workflows list --channel <UUID>` and inspect existing
+definitions for the same `slash_command` name:
+
+- No match: `buzz workflows create --channel <UUID> --yaml '<definition>'`.
+- One match: update that workflow instead of creating a duplicate; run
+  `buzz workflows update --help` for the current flags.
+- Multiple matches: stop and report the conflicting workflow IDs. Do not choose
+  one or trigger all of them silently.
+
+For a removal request, delete the single matching workflow with
+`buzz workflows delete --workflow <UUID>`. If none exists, report that without
+writing; if several exist, use the same conflict stop above.
+
+Both create and update accept `--yaml -` to read the definition from stdin.
+Prefer that path when the YAML contains quotes or shell metacharacters rather
+than trying to embed a complex definition in one shell argument.
+
+Creating or updating the macro does not authorize running it. Report the saved
+command and its actions, but do not invoke it unless the user separately asks.
+Never put credentials or other secrets in workflow YAML or command arguments.
 
 ## Feed Filtering
 
