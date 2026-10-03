@@ -86,3 +86,4 @@ nix = { version = "0.31", default-features = false, features = ["signal", "user"
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+tempfile = "3"
