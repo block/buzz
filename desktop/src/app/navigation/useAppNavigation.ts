@@ -277,6 +277,8 @@ export function useAppNavigation() {
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
         messageId?: string;
+        /** Focus the message in the main timeline without opening its replies. */
+        messageView?: "timeline";
         /** Preserve an active search highlight; ordinary navigation clears it. */
         preserveSearchHighlight?: boolean;
         searchHighlight?: SearchHighlightNavigation;
@@ -296,6 +298,7 @@ export function useAppNavigation() {
             ...(options?.messageId
               ? {
                   messageId: options.messageId,
+                  messageView: options.messageView,
                   threadRootId: options.threadRootId ?? undefined,
                 }
               : {}),

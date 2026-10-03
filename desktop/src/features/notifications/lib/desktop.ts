@@ -6,14 +6,22 @@ import {
   onAction,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
+import {
+  isLinuxPlatform,
+  isMacPlatform,
+  isWindowsPlatform,
+} from "@/shared/lib/platform";
 
 // Backend event emitted when a native Linux notification is clicked or a
 // queued macOS activation becomes available. See src-tauri notification code.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
+const TAKE_PENDING_WINDOWS_NOTIFICATION_ACTIVATIONS =
+  "take_pending_windows_activations";
 const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
 const REQUEST_MACOS_NOTIFICATION_ACCESS = "request_notification_access";
+const WINDOWS_NOTIFICATION_PERMISSION_STATE =
+  "windows_notification_permission_state";
 
 export type DesktopNotificationPermissionState =
   | NotificationPermission
@@ -32,10 +40,11 @@ export type DesktopNotificationTarget = {
   eventId: string | null;
   kind: number | null;
   pubkey?: string;
+  openInThread?: boolean;
   threadRootId?: string | null;
 };
 
-type DesktopNotificationPayload = {
+export type DesktopNotificationPayload = {
   body?: string;
   target?: DesktopNotificationTarget;
   title: string;
@@ -91,6 +100,12 @@ function parseNotificationTarget(
     typeof candidate.pubkey === "string" ? candidate.pubkey : undefined;
   const threadRootId =
     typeof candidate.threadRootId === "string" ? candidate.threadRootId : null;
+  // Notifications can outlive an app upgrade. Legacy payloads did not carry
+  // openInThread, so only those infer branch navigation from their root id.
+  const openInThread =
+    typeof candidate.openInThread === "boolean"
+      ? candidate.openInThread
+      : threadRootId !== null;
 
   if (!channelId && !eventId) {
     return null;
@@ -104,6 +119,7 @@ function parseNotificationTarget(
     eventId,
     kind,
     pubkey,
+    openInThread,
     threadRootId,
   };
 }
@@ -146,6 +162,15 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
     }
   }
 
+  // Windows has enabled/disabled toast settings, not a browser-style prompt
+  // lifecycle. Query the AppUserModelID's native ToastNotifier setting so a
+  // system block remains terminal until the user changes Windows Settings.
+  if (isTauri() && isWindowsPlatform()) {
+    return invoke<NotificationPermission>(
+      WINDOWS_NOTIFICATION_PERMISSION_STATE,
+    );
+  }
+
   if (window.Notification.permission !== "default") {
     return window.Notification.permission;
   }
@@ -174,21 +199,42 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
   }
 
   const request =
-    isTauri() && isMacPlatform()
-      ? invoke<NotificationPermission>(REQUEST_MACOS_NOTIFICATION_ACCESS).catch(
-          (error) => {
+    isTauri() && isWindowsPlatform()
+      ? getDesktopNotificationPermissionState()
+      : isTauri() && isMacPlatform()
+        ? invoke<NotificationPermission>(
+            REQUEST_MACOS_NOTIFICATION_ACCESS,
+          ).catch((error) => {
             if (shouldUseMacDevelopmentFallback(error)) {
               return requestPermission();
             }
             throw error;
-          },
-        )
-      : requestPermission();
+          })
+        : requestPermission();
   pendingPermissionRequest = request.finally(() => {
     pendingPermissionRequest = null;
   });
 
   return pendingPermissionRequest;
+}
+
+export async function ensureDesktopNotificationPermissionGranted(
+  getPermissionState = getDesktopNotificationPermissionState,
+  requestAccess = requestDesktopNotificationAccess,
+): Promise<boolean> {
+  try {
+    const currentPermission = await getPermissionState();
+    if (currentPermission === "granted") {
+      return true;
+    }
+    if (currentPermission !== "default") {
+      return false;
+    }
+    return (await requestAccess()) === "granted";
+  } catch (error) {
+    console.warn("Failed to determine desktop notification permission", error);
+    return false;
+  }
 }
 
 export async function listenForDesktopNotificationActions(
@@ -214,8 +260,13 @@ export async function listenForDesktopNotificationActions(
 
   if (isTauri()) {
     const usesMacActivationQueue = isMacPlatform();
+    const usesWindowsActivationQueue = isWindowsPlatform();
+    const usesActivationQueue =
+      usesMacActivationQueue || usesWindowsActivationQueue;
 
-    if (!isLinuxPlatform() && !usesMacActivationQueue) {
+    // Keep the plugin action path for other Tauri targets, such as Android;
+    // Linux, macOS, and Windows use the native event/activation paths above.
+    if (!isLinuxPlatform() && !usesActivationQueue) {
       try {
         pluginListener = await onAction((notification) => {
           const target = parseNotificationTarget(
@@ -232,12 +283,14 @@ export async function listenForDesktopNotificationActions(
       }
     }
 
-    // Linux forwards the target as the event payload. macOS queues targets in
-    // Rust first so cold-start clicks survive until this listener is mounted.
+    // Linux forwards the target as the event payload. macOS and Windows queue
+    // targets in Rust before emitting so clicks survive a missing listener.
     const dispatchNativeActivations = async (payload?: unknown) => {
-      if (usesMacActivationQueue) {
+      if (usesActivationQueue) {
         const targets = await invoke<unknown[]>(
-          TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
+          usesMacActivationQueue
+            ? TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS
+            : TAKE_PENDING_WINDOWS_NOTIFICATION_ACTIVATIONS,
         );
         for (const pendingTarget of targets) {
           const target = parseNotificationTarget(pendingTarget);
@@ -270,18 +323,18 @@ export async function listenForDesktopNotificationActions(
       nativeUnlisten = null;
     }
 
-    if (nativeUnlisten && usesMacActivationQueue) {
+    if (usesActivationQueue) {
       try {
         await dispatchNativeActivations();
       } catch (error) {
         console.error(
-          "Failed to drain pending macOS notification activations",
+          "Failed to drain pending notification activations",
           error,
         );
       }
     }
 
-    if (usesMacActivationQueue) {
+    if (usesActivationQueue) {
       // Belt and suspenders for block/buzz#3509: the Rust delegate queues the
       // target before emitting, so a lost emit strands the activation with
       // nothing re-draining it. macOS always foregrounds the app on a
@@ -291,7 +344,7 @@ export async function listenForDesktopNotificationActions(
       const redrain = () => {
         void dispatchNativeActivations().catch((error) => {
           console.error(
-            "Failed to drain macOS notification activations on focus",
+            "Failed to drain pending notification activations on focus",
             error,
           );
         });
@@ -417,15 +470,31 @@ export async function revealDesktopAppWindow(): Promise<void> {
 
 export async function sendDesktopNotification(
   payload: DesktopNotificationPayload,
+  canDeliver: () => boolean = () => true,
 ): Promise<boolean> {
-  if ((await getDesktopNotificationPermissionState()) !== "granted") {
+  let permission: DesktopNotificationPermissionState;
+  try {
+    permission = await getDesktopNotificationPermissionState();
+  } catch (error) {
+    console.warn("Failed to determine desktop notification permission", error);
+    return false;
+  }
+
+  if (permission !== "granted" || !canDeliver()) {
     return false;
   }
 
   // Linux needs a retained D-Bus connection. macOS needs a native notification
   // center delegate because the Tauri plugin does not deliver desktop clicks.
+  // Windows needs WinRT toast notifications so the app registers with
+  // Settings > System > Notifications and click actions work.
+  // Do NOT use the Tauri notification plugin's sendNotification() on Windows —
+  // the native WinRT path handles delivery and click actions exclusively.
   // See src-tauri/src/commands/notifications.rs.
-  if (isTauri() && (isLinuxPlatform() || isMacPlatform())) {
+  if (
+    isTauri() &&
+    (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())
+  ) {
     try {
       await invoke("show_native_notification", {
         title: payload.title,

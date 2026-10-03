@@ -218,7 +218,9 @@ for an authoritative replacement.
 ### 6. Going deeper
 
 For full coverage of every CLI command (54 subcommands across 12 groups),
-follow [`crates/buzz-cli/TESTING.md`](crates/buzz-cli/TESTING.md).
+follow [`crates/buzz-cli/TESTING.md`](crates/buzz-cli/TESTING.md). For desktop
+behavior that only a real OS session can show, such as Windows notifications,
+follow [`desktop/TESTING.md`](desktop/TESTING.md).
 
 The relay's HTTP bridge accepts three endpoints — useful if you're testing
 a client other than `buzz-cli`:

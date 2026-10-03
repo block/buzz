@@ -14,12 +14,20 @@ export function projectChannelWindowMessages(
   queryClient: QueryClient,
   channelId: string,
 ) {
+  const queryKey = channelMessagesKey(channelId);
+  const query = queryClient.getQueryCache().find({
+    queryKey,
+    exact: true,
+  });
+  if (!query || query.state.data === undefined) {
+    return;
+  }
+
   const window =
     queryClient.getQueryData<ChannelWindowStore>(channelWindowKey(channelId)) ??
     emptyChannelWindowStore();
-  queryClient.setQueryData<RelayEvent[]>(
-    channelMessagesKey(channelId),
-    (messages = []) => reconcileChannelWindowMessages(window, messages),
+  queryClient.setQueryData<RelayEvent[]>(queryKey, (messages = []) =>
+    reconcileChannelWindowMessages(window, messages),
   );
 }
 
