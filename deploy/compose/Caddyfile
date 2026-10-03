@@ -1,5 +1,11 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
+  # Device-pairing sidecar (buzz-pair-relay). Must be before the catch-all so
+  # NIP-AB QR sessions do not hit the main relay and 404 (#3842).
+  handle_path /pair* {
+    reverse_proxy pairing-relay:5000
+  }
+
   reverse_proxy relay:3000
 }
