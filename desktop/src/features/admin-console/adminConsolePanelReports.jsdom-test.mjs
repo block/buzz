@@ -42,7 +42,7 @@ async function openFirstDetailRow(container) {
   const allButtons = container.querySelectorAll("button");
   for (const btn of allButtons) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (testid.match(/^(admin-tab|community-badge)/)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 30));
@@ -336,7 +336,10 @@ test("processing-report-navigable-suppresses-resolve-form: a processing report o
 
   // The processing row must be a navigable (non-disabled) button.
   const rowButtons = Array.from(container.querySelectorAll("button")).filter(
-    (btn) => !(btn.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+    (btn) =>
+      !(btn.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ),
   );
   const processingRow = rowButtons.find((btn) =>
     btn.textContent?.includes("spam"),
@@ -429,7 +432,9 @@ test("reports-grouped-by-community: multi-community reports render per-community
   );
 
   const hosts = Array.from(
-    container.querySelectorAll("[data-testid='community-group-host']"),
+    container.querySelectorAll(
+      "[data-testid='community-group-host'] [data-testid='community-badge-host']",
+    ),
   ).map((el) => el.textContent);
   assert.deepEqual(
     hosts,
@@ -450,7 +455,7 @@ async function openFirstReportDetail(container) {
   const allButtons = container.querySelectorAll("button");
   for (const btn of allButtons) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (testid.match(/^(admin-tab|community-badge)/)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 30));
@@ -1500,7 +1505,10 @@ test("attachment-budget-seam: only 5 of 7 image attachments trigger native fetch
 
   // Click the feedback list item to open detail — the first non-tab button.
   const listButtons = Array.from(container.querySelectorAll("button")).filter(
-    (b) => !(b.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+    (b) =>
+      !(b.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ),
   );
   assert.ok(
     listButtons.length > 0,

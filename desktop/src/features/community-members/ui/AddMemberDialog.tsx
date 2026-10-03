@@ -9,11 +9,13 @@ import {
 } from "@/features/community-members/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  MemberSearchResult,
+  memberSearchLabel,
+} from "@/features/profile/ui/MemberSearchResult";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import type { RelayMemberRole, UserSearchResult } from "@/shared/api/types";
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
-import { truncateNpub } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -45,14 +47,6 @@ const ROLE_OPTIONS: Array<{
     label: "Admin",
   },
 ];
-
-function formatSearchUserName(user: UserSearchResult) {
-  return (
-    user.displayName?.trim() ||
-    user.nip05Handle?.trim() ||
-    truncateNpub(user.pubkey)
-  );
-}
 
 export function DirectAddMemberForm({
   isOwner,
@@ -234,7 +228,7 @@ export function DirectAddMemberForm({
                         <SelectedRecipientChip
                           disabled={addMutation.isPending}
                           inspectable={false}
-                          label={formatSearchUserName(user)}
+                          label={memberSearchLabel(user)}
                           onRemove={() => removeUser(user.pubkey)}
                           poofOnRemove={false}
                           testIds={{
@@ -353,15 +347,17 @@ export function DirectAddMemberForm({
                 ) : searchResults.length > 0 || directResult ? (
                   <>
                     {directResult ? (
-                      <SearchResult
+                      <MemberSearchResult
                         onSelect={() => selectUser(directResult)}
+                        testId={`member-search-result-${directResult.pubkey}`}
                         user={directResult}
                       />
                     ) : null}
                     {searchResults.map((user) => (
-                      <SearchResult
+                      <MemberSearchResult
                         key={user.pubkey}
                         onSelect={() => selectUser(user)}
+                        testId={`member-search-result-${user.pubkey}`}
                         user={user}
                       />
                     ))}
@@ -415,43 +411,6 @@ export function DirectAddMemberForm({
         </p>
       ) : null}
     </form>
-  );
-}
-
-function SearchResult({
-  onSelect,
-  user,
-}: {
-  onSelect: () => void;
-  user: UserSearchResult;
-}) {
-  const name = formatSearchUserName(user);
-  const isDirectPubkey = user.displayName === null && user.nip05Handle === null;
-
-  return (
-    <button
-      className="flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-hidden"
-      data-testid={`member-search-result-${user.pubkey}`}
-      onClick={onSelect}
-      role="option"
-      type="button"
-    >
-      <ProfileAvatar
-        avatarUrl={user.avatarUrl}
-        className="h-8 w-8 text-xs shadow-none"
-        iconClassName="h-4 w-4"
-        label={name}
-        shape={user.isAgent ? "squircle" : "circle"}
-      />
-      <span className="min-w-0 flex-1 truncate text-sm font-medium">
-        {name}
-      </span>
-      {isDirectPubkey ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          public key
-        </span>
-      ) : null}
-    </button>
   );
 }
 

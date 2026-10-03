@@ -288,6 +288,24 @@ server-backed: in `nip98` mode it `PATCH`es the relay and adopts the returned
 status, so every operator sees the same state; in `disabled` mode it renders as
 a read-only badge because the server rejects mutations.
 
+`just admin-seed` also seeds `beta.localhost:3000`, `gamma.localhost:3000` and
+50 `filler-NN.localhost:3000` communities, named members, one ban and one
+timeout per named community, and one pre-signed message per named community for
+the delete preview. It prints the member npubs and message `note`/`nevent` ids
+to paste. Rerunning it restores the seeded state, including deleted messages,
+restrictions, kicked message authors and feedback status. It refuses, writing
+nothing, while a seeded report or admin action is still in progress; finish or
+cancel it first. To use it from the desktop admin console with `just dev`, add
+these to `.env` and restart `just dev`:
+
+```bash
+BUZZ_ADMIN_HOST=admin.localhost:3000
+BUZZ_ADMIN_AUTH=nip98
+RELAY_OPERATOR_PUBKEYS=<your dev app pubkey, hex>
+```
+
+Then set the admin origin in Settings → Admin to `http://admin.localhost:3000`.
+
 ## Routes
 
 ### Read routes (Operator and Moderator)

@@ -378,6 +378,7 @@ async fn read_admin_mutation_response(
         return Err(AdminMutationError::authoritative(
             status,
             format!("admin API error: {body}"),
+            bytes.is_empty(),
         ));
     }
 

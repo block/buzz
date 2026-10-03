@@ -30,10 +30,14 @@ let replica;
 let routes;
 // Commands whose reply is held until the test releases it.
 const held = new Map();
+let hostLookupFails = false;
 window.__TAURI_INTERNALS__ = {
   invoke: async (command, args) => {
     await held.get(command)?.promise;
-    if (command === "get_relay_ws_url") return "wss://alpha.example.com";
+    if (command === "admin_connected_community_host") {
+      if (hostLookupFails) throw new Error("no active relay");
+      return "alpha.example.com";
+    }
     if (command === "get_channel_window") return [];
     if (command === "get_channel_members") {
       const strong = args.readYourWrites === true;
@@ -149,7 +153,7 @@ test("a live admin_kick system message refreshes the roster from the writer", as
 });
 
 for (const { host, recorded } of [
-  { host: "Alpha.example.com:443", recorded: true },
+  { host: "alpha.example.com", recorded: true },
   { host: "beta.example.com", recorded: false },
 ]) {
   test(`a confirmed report kick in ${host} ${recorded ? "refreshes" : "leaves"} the active community's roster`, async () => {
@@ -171,6 +175,21 @@ const kick = () =>
     { id: "report", channelId: id, communityHost: "alpha.example.com" },
     { action: "kick", requestId: "request" },
   );
+test("a confirmed report kick whose host lookup fails records nothing and still returns the resolution", async () => {
+  hostLookupFails = true;
+  try {
+    let resolution;
+    const shown = await rosterAfter(async () => {
+      resolution = await kick();
+    });
+    assert.equal(resolution.status, "resolved");
+    assert.deepEqual(routes, ["replica"]);
+    assert.deepEqual(shown, [OWNER, BOT]);
+  } finally {
+    hostLookupFails = false;
+  }
+});
+
 const addMember = () =>
   addChannelMembers({ channelId: id, pubkeys: [BOT], role: "member" });
 
@@ -178,7 +197,11 @@ const addMember = () =>
 // new community, whichever reply is still in flight when the switch happens.
 for (const { name, write, pending } of [
   { name: "a report kick", write: kick, pending: "admin_resolve_report" },
-  { name: "a report kick", write: kick, pending: "get_relay_ws_url" },
+  {
+    name: "a report kick",
+    write: kick,
+    pending: "admin_connected_community_host",
+  },
   { name: "an added member", write: addMember, pending: "add_channel_members" },
 ]) {
   test(`${name} whose ${pending} reply lands after a community reset records nothing`, async () => {

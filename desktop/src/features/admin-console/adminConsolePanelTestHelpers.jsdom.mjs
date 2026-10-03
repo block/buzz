@@ -105,8 +105,9 @@ export function mutationReject(
   message,
   relayStatus,
   bodyComplete = relayStatus !== null,
+  bodyEmpty = false,
 ) {
-  return Promise.reject({ message, relayStatus, bodyComplete });
+  return Promise.reject({ message, relayStatus, bodyComplete, bodyEmpty });
 }
 
 // ── Deferred promise helper ──────────────────────────────────────────────────
@@ -179,6 +180,7 @@ export function mountPanel({
   canMutate = true,
   role = undefined,
   initialTab = undefined,
+  initialCommunity = undefined,
   onSelfMutation = undefined,
 }) {
   const qc = makeQueryClient(pubkey);
@@ -212,6 +214,7 @@ export function mountPanel({
               pubkey: p,
               ...(role !== undefined ? { role } : {}),
               ...(initialTab !== undefined ? { initialTab } : {}),
+              ...(initialCommunity !== undefined ? { initialCommunity } : {}),
               ...(onSelfMutation !== undefined ? { onSelfMutation } : {}),
             }),
           ),
@@ -280,9 +283,55 @@ export function mountStaffingPanel(
     pubkey,
     canMutate: true,
     role: "operator",
-    initialTab: "staffing",
+    initialTab: "operators",
     ...(onSelfMutation !== undefined ? { onSelfMutation } : {}),
   });
+}
+
+export const TEST_COMMUNITY = {
+  id: "11111111-1111-4111-8111-111111111111",
+  host: "alpha.example.com",
+  icon: null,
+};
+
+/**
+ * Mount the panel on a community page and open `section` there. `doRender`
+ * re-renders and re-opens the section, so callers use it like `mountPanel`.
+ */
+export function mountCommunityPanel(
+  origin,
+  pubkey,
+  section,
+  { community = TEST_COMMUNITY, canMutate = true } = {},
+) {
+  if (!ipcHandlers.get("admin_list_reports")) {
+    setIpcHandler("admin_list_reports", () => Promise.resolve([]));
+  }
+  if (!ipcHandlers.get("admin_connected_community_host")) {
+    setIpcHandler("admin_connected_community_host", () =>
+      Promise.resolve(community.host),
+    );
+  }
+  const m = mountPanel({
+    origin,
+    pubkey,
+    canMutate,
+    role: "operator",
+    initialTab: "communities",
+    initialCommunity: community,
+  });
+  const doRender = async (opts) => {
+    await m.doRender(opts);
+    const btn = m.container.querySelector(
+      `[data-testid='community-section-${section}']`,
+    );
+    if (btn) {
+      await act(async () => {
+        fireEvent.click(btn);
+      });
+    }
+  };
+  return { ...m, doRender };
 }
 
 export async function settle(ms = 20) {
