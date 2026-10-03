@@ -221,22 +221,32 @@ pub async fn hydrate_for_write(
             // First push: empty bare repo. No packs to fetch, no refs to
             // install. `receive-pack` will accept whatever the client
             // sends; `cas_publish` will use `If-None-Match: *`.
-            let tempdir = TempDir::new_in(options.scratch_dir).map_err(|e| {
-                HydrateError::Hydrate(format!("tempdir in {:?}: {e}", options.scratch_dir))
-            })?;
-            let path = tempdir.path().to_path_buf();
-            init_bare_repo(&path).await?;
-            Ok((
-                HydratedRepo {
-                    _tempdir: tempdir,
-                    path,
-                    hydrated_bytes: 0,
-                    hydrated_packs: 0,
-                },
-                ParentState::fresh(),
-            ))
+            Ok((empty_bare_repo(&options).await?, ParentState::fresh()))
         }
     }
+}
+
+/// Ephemeral empty bare repo with `HEAD` -> `refs/heads/main`, no refs, no
+/// objects.
+///
+/// Two call sites, both "this repo has no published content yet": the
+/// first-push branch of [`hydrate_for_write`], and the `git-receive-pack`
+/// ref advertisement in `transport::info_refs_subprocess` — which must
+/// advertise an empty ref list rather than 404, or git aborts before it
+/// ever POSTs the pack that would create the repo.
+pub(super) async fn empty_bare_repo(
+    options: &HydrationOptions<'_>,
+) -> Result<HydratedRepo, HydrateError> {
+    let tempdir = TempDir::new_in(options.scratch_dir)
+        .map_err(|e| HydrateError::Hydrate(format!("tempdir in {:?}: {e}", options.scratch_dir)))?;
+    let path = tempdir.path().to_path_buf();
+    init_bare_repo(&path).await?;
+    Ok(HydratedRepo {
+        _tempdir: tempdir,
+        path,
+        hydrated_bytes: 0,
+        hydrated_packs: 0,
+    })
 }
 
 /// Resolve the pointer to its `(ETag, digest, verified Manifest)` triple.
@@ -517,6 +527,45 @@ mod tests {
                 .expect("read HEAD")
                 .trim(),
             "ref: refs/heads/main"
+        );
+    }
+
+    /// The first-push fix: `info_refs` answers a `git-receive-pack`
+    /// advertisement for a repo with no published content by running
+    /// `receive-pack --advertise-refs` against an empty bare repo (see
+    /// [`empty_bare_repo`]). Git only POSTs the pack — the request that
+    /// reaches `hydrate_for_write` and actually creates the repo — if that
+    /// advertisement is well-formed. A 404 here strands every new repo.
+    #[tokio::test]
+    async fn empty_bare_repo_advertises_receive_pack_capabilities() {
+        let scratch = TempDir::new().expect("scratch");
+        init_bare_repo(scratch.path())
+            .await
+            .expect("initialize bare repo");
+
+        let out = tokio::process::Command::new("git")
+            .arg("receive-pack")
+            .arg("--stateless-rpc")
+            .arg("--advertise-refs")
+            .arg(scratch.path())
+            .output()
+            .await
+            .expect("spawn git receive-pack");
+
+        assert!(
+            out.status.success(),
+            "git receive-pack --advertise-refs failed"
+        );
+        let advert = String::from_utf8_lossy(&out.stdout);
+        // Empty-repo advertisement: the zero oid plus the `capabilities^{}`
+        // pseudo-ref. This is what tells git "no refs yet, send your pack".
+        assert!(
+            advert.contains(&"0".repeat(40)) && advert.contains("capabilities^{}"),
+            "unexpected advertisement: {advert:?}"
+        );
+        assert!(
+            advert.contains("report-status"),
+            "advertisement missing receive-pack capabilities: {advert:?}"
         );
     }
 
