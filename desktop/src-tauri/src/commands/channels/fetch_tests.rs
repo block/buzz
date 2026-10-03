@@ -376,3 +376,50 @@ async fn discovery_and_activity_failures_still_abort_the_refresh() {
     relay.data.lock().unwrap().fail_messages = true;
     assert!(fetch(&state, DirectoryScope::MemberOnly).await.is_err());
 }
+
+/// Publication admission reads the roster with `roster_only`. Nothing may
+/// follow that snapshot inside the command: a removal during a later await
+/// would reach the caller as a stale "still a member" answer.
+#[tokio::test]
+async fn roster_only_member_read_returns_the_snapshot_with_no_later_query() {
+    let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
+    let keys = Keys::generate();
+    let me = keys.public_key().to_hex();
+    let agent = Keys::generate().public_key().to_hex();
+    let members = event(
+        &keys,
+        39002,
+        vec![
+            vec!["d", "room"],
+            vec!["p", &me, "", "member"],
+            vec!["p", &agent, "", "bot"],
+        ],
+    );
+    let relay = Relay::new(vec![members]).await;
+    let state = relay.state(&keys);
+    for roster_only in [true, false] {
+        relay.data.lock().unwrap().requests.clear();
+        let response = super::super::read_channel_members(&state, "room", true, roster_only)
+            .await
+            .unwrap();
+        let pubkeys: Vec<_> = response.members.iter().map(|m| m.pubkey.clone()).collect();
+        assert_eq!(pubkeys, vec![me.clone(), agent.clone()]);
+        assert!(response.members[1].is_agent, "bot role marks an agent");
+        let requests = relay.data.lock().unwrap().requests.clone();
+        let kinds: Vec<_> = requests
+            .iter()
+            .flatten()
+            .map(|f| f["kinds"].clone())
+            .collect();
+        if roster_only {
+            assert_eq!(
+                kinds,
+                vec![json!([39002])],
+                "the roster read is the last query"
+            );
+            assert_eq!(requests[0][0]["consistency"], json!("strong"));
+        } else {
+            assert_eq!(kinds, vec![json!([39002]), json!([0])]);
+        }
+    }
+}

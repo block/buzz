@@ -11,6 +11,7 @@ type PendingInvite = {
   pubkeys: string[];
   nonMemberPubkeys: string[];
   intendedAgentPubkeys: string[];
+  agentPubkeys: ReadonlySet<string>;
   resolve: (invited: boolean) => void;
 };
 
@@ -72,15 +73,16 @@ export function useForumMentionPreparation(
           .map((ref) => ref.pubkey),
       ];
       const agentPubkeys = new Set(intendedAgentPubkeys.map(normalizePubkey));
-      // Local managed-agent lifecycle and channel-less/notes surfaces are not
-      // part of this adapter. Relay-only agents use the same bot add as chat.
+      // Publication signs only current members, so a mentioned nonmember must
+      // be invited first. People join as members and relay-only agents use
+      // the same bot add as chat. Local managed-agent lifecycle and
+      // channel-less/notes surfaces are not part of this adapter.
       const nonMemberPubkeys =
         capturedChannelId &&
         channelType === "forum" &&
         mentions.hasResolvedMembers
           ? [...new Set(pubkeys.map(normalizePubkey))].filter(
               (pubkey) =>
-                agentPubkeys.has(pubkey) &&
                 !mentions.isManagedAgentPubkey(pubkey) &&
                 !mentions.memberPubkeys.has(pubkey),
             )
@@ -92,6 +94,7 @@ export function useForumMentionPreparation(
             pubkeys,
             nonMemberPubkeys,
             intendedAgentPubkeys,
+            agentPubkeys,
             resolve,
           };
           pendingRef.current = draft;
@@ -140,15 +143,21 @@ export function useForumMentionPreparation(
         intendedAgentPubkeys: draft.intendedAgentPubkeys,
       });
       if (!isCurrent()) return;
-      const result = await addMembers.mutateAsync({
-        channelId: draft.channelId,
-        pubkeys: draft.nonMemberPubkeys,
-        role: "bot",
-      });
-      if (!isCurrent()) return;
-      if (result.errors.length > 0) {
-        setError(result.errors.map((failure) => failure.error).join("; "));
-        return;
+      for (const role of ["member", "bot"] as const) {
+        const pubkeys = draft.nonMemberPubkeys.filter(
+          (pubkey) => draft.agentPubkeys.has(pubkey) === (role === "bot"),
+        );
+        if (pubkeys.length === 0) continue;
+        const result = await addMembers.mutateAsync({
+          channelId: draft.channelId,
+          pubkeys,
+          role,
+        });
+        if (!isCurrent()) return;
+        if (result.errors.length > 0) {
+          setError(result.errors.map((failure) => failure.error).join("; "));
+          return;
+        }
       }
       pendingRef.current = null;
       setPending(null);

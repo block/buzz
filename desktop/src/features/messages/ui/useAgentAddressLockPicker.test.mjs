@@ -35,6 +35,8 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
   let cancelCount = 0;
   const text = "@";
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
     cancelMentionAutocomplete: () => {
       cancelCount += 1;
     },
@@ -113,6 +115,9 @@ test("always addressing a new agent delegates the first add for immediate confir
       },
       audienceScope: "channel-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "Agent Ada",
         isInlineMentionSelection: () => false,
@@ -145,6 +150,8 @@ test("unpinning an addressed agent keeps its current mention and autocomplete op
   let cancelCount = 0;
   const text = "Ask @Agent Ada later @";
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
     cancelMentionAutocomplete: () => {
       cancelCount += 1;
     },
@@ -210,6 +217,8 @@ test("selecting an already addressed agent from the explicit picker pulses its b
   const addedPubkeys = [];
   const pulsedPubkeys = [];
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
@@ -269,6 +278,8 @@ test("selecting an agent from a typed query immediately auto-addresses it", asyn
   const addedPubkeys = [];
   const pulsedPubkeys = [];
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
@@ -338,6 +349,9 @@ test("selecting a human mention never changes automatic addressing", async () =>
       audience: { pubkeys: [], addPubkey: () => {} },
       audienceScope: "channel-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getMentionDisplayName: () => "Alice",
         insertMention: () => ({
           replaceFromOffset: 0,
@@ -389,6 +403,9 @@ test("restoring a multi-word automatic mention into an empty composer focuses af
       },
       audienceScope: "thread-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "claude code",
         registerMentionPubkey: (...args) => {
@@ -438,6 +455,9 @@ test("restoring before authored text preserves its selection", async () => {
       },
       audienceScope: "thread-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: () => [],
         getMentionDisplayName: () => "Morgarita",
         registerMentionPubkey: () => {},
@@ -483,6 +503,9 @@ test("restoring an existing automatic mention re-registers its agent chip", asyn
       },
       audienceScope: "thread-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: () =>
           registeredMentions.length
             ? [
@@ -551,6 +574,9 @@ test("deleting the last automatic agent mention explicitly excludes its address"
       },
       audienceScope: "channel-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: (text) => mentionRefsByText[text] ?? [],
         getMentionDisplayName: () => "Agent Ada",
       },
@@ -590,6 +616,9 @@ test("deleting human mentions is ignored while deleting a restored automatic age
       },
       audienceScope: "channel-scope",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: (text) => {
           if (text === "@Alice @Existing Agent") {
             return [
@@ -632,6 +661,8 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
   const addedPubkeys = [];
   const pulsedPubkeys = [];
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
@@ -696,6 +727,8 @@ test("repeatedly selecting an explicitly unpinned agent keeps its mentions manua
   const removedPubkeys = [];
   const pulsedPubkeys = [];
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [
       { displayName: "Agent Ada", pubkey: "agent-pubkey", isAgent: true },
@@ -811,6 +844,9 @@ test("restoring after an agent rename keeps the existing automatic mention", asy
         audience: { pubkeys: ["agent-pubkey"], addPubkey: () => {} },
         audienceScope: "channel-scope",
         mentions: {
+          retireMentionSelection: () => {},
+          admitMentionSelection: (_suggestion, _read, commit) => commit(),
+          cancelMentionAutocomplete: () => {},
           getDraftMentionRefs: () => [
             { displayName: oldName, pubkey: "agent-pubkey", isAgent: true },
           ],
@@ -848,6 +884,9 @@ test("an addressed agent keeps its resolved name while mention state clears duri
   );
   let displayName = "Agent Ada";
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
+    cancelMentionAutocomplete: () => {},
     getMentionDisplayName: () => displayName,
   };
   const audience = {
@@ -892,6 +931,9 @@ test("automatic mention insertion and restoration use the registered collision-s
   let text = "@carl existing";
   const prefixes = [];
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
+    cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: (value) =>
       snapshotDraftMentionRefs(value, bindings, [...bindings.keys()]),
     getMentionDisplayName: (pubkey) =>
@@ -991,6 +1033,9 @@ test("inverse deletion and toggle preserve B and exclude A from the composed sen
   const excluded = [],
     edits = [];
   const mentions = {
+    retireMentionSelection: () => {},
+    admitMentionSelection: (_suggestion, _read, commit) => commit(),
+    cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: (value) =>
       snapshotDraftMentionRefs(value, bindings, [...bindings.keys()]),
     getMentionDisplayName: (key) =>
@@ -1074,6 +1119,9 @@ test("implicit prefix removal uses the present exact label rather than a stale a
       audience: { pubkeys: [key], excludePubkey: () => {} },
       audienceScope: "channel",
       mentions: {
+        retireMentionSelection: () => {},
+        admitMentionSelection: (_suggestion, _read, commit) => commit(),
+        cancelMentionAutocomplete: () => {},
         getDraftMentionRefs: () => [
           { displayName: "Historical Scout", pubkey: key, isAgent: true },
         ],
@@ -1093,4 +1141,474 @@ test("implicit prefix removal uses the present exact label rather than a stale a
   );
   act(() => result.current.removeAddressedAgent(key));
   assert.equal(text, "hello");
+});
+
+// Integrated selection owner: real admission and authorization, deferred at the
+// directory boundary, not a fake boolean permission supplied by the picker.
+test("displayed identity survives reranking; fresh revocation and retired callbacks cannot select or pin", async () => {
+  const React = await import("react");
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const { useMentionAdmission, useStableMentionSuggestions } = await import(
+    "../lib/useMentionAdmission.ts"
+  );
+  const { revalidateAgentMentionPubkeys } = await import(
+    "../lib/agentMentionRevalidation.ts"
+  );
+  const agent = "b".repeat(64),
+    other = "c".repeat(64),
+    self = "a".repeat(64);
+  const first = {
+    kind: "identity",
+    pubkey: agent,
+    displayName: "Displayed",
+    isAgent: true,
+  };
+  const second = {
+    kind: "identity",
+    pubkey: other,
+    displayName: "Other",
+    isAgent: true,
+  };
+  let incoming = [first, second];
+  let allowed = true;
+  let release;
+  let deferred = false;
+  let position = { text: "@", cursor: 1 };
+  const inserted = [],
+    pinned = [],
+    requested = [];
+  let generation;
+  const { result, rerender } = renderHook(() => {
+    generation = React.useRef(0);
+    const rows = useStableMentionSuggestions(
+      String(generation.current),
+      incoming,
+    );
+    const admit = useMentionAdmission({
+      generation,
+      isPending: () => false,
+      channelId: "general",
+      channelType: "channel",
+      currentPubkey: self,
+      agentPubkeys: new Set([agent, other]),
+      personaIds: new Set(),
+      revalidate: (keys) =>
+        revalidateAgentMentionPubkeys({
+          pubkeys: keys,
+          agentPubkeys: new Set([agent, other]),
+          currentPubkey: self,
+          eligibilityScope: { type: "channel", channelId: "general" },
+          phase: "prepare",
+          sharedChannelIds: new Set(),
+          refetchManagedAgents: async () => ({ data: [], error: null }),
+          fetchRelayAgents: async (keys) => {
+            requested.push(keys);
+            if (deferred)
+              await new Promise((resolve) => {
+                release = resolve;
+              });
+            return allowed
+              ? keys.map((pubkey) => ({
+                  pubkey,
+                  respondTo: "anyone",
+                  channelIds: ["general"],
+                }))
+              : [];
+          },
+        }),
+    });
+    const picker = useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => inserted.push(edit),
+      audience: { pubkeys: [], addPubkey: (key) => pinned.push(key) },
+      audienceScope: "general",
+      mentions: {
+        retireMentionSelection: () => {
+          generation.current++;
+        },
+        admitMentionSelection: admit,
+        cancelMentionAutocomplete: () => {
+          generation.current++;
+        },
+        getMentionDisplayName: () => null,
+        getDraftMentionRefs: () => [],
+        insertMention: (row) => ({
+          insertText: row.displayName,
+          pubkey: row.pubkey,
+        }),
+        registerMentionPubkey: (label) => label,
+        isInlineMentionSelection: () => false,
+        isMentionOpen: false,
+      },
+      richText: { getPlainTextAndCursor: () => position },
+      onPulseAddressLock: () => {},
+    });
+    return { rows, ...picker };
+  });
+  incoming = [second, { ...first, displayName: "Renamed" }];
+  rerender();
+  assert.deepEqual(
+    result.current.rows.map((row) => row.pubkey),
+    [agent, other],
+  );
+  assert.equal(result.current.rows[0].displayName, "Displayed");
+  await act(async () => {
+    await result.current.selectMentionSuggestion(result.current.rows[0]);
+  });
+  assert.deepEqual(requested.pop(), [agent]);
+  assert.equal(inserted[0].pubkey, agent);
+  assert.deepEqual(pinned, [agent]);
+  inserted.length = 0;
+  pinned.length = 0;
+  allowed = false;
+  await act(async () => {
+    await result.current.selectMentionSuggestion(result.current.rows[0]);
+    await result.current.toggleAlwaysAddressAgent(result.current.rows[0]);
+  });
+  assert.deepEqual(inserted, []);
+  assert.deepEqual(pinned, []);
+  allowed = true;
+  deferred = true;
+  let pending;
+  const { QueryClient } = await import("@tanstack/react-query");
+  const {
+    refreshDirectoryAfterMembershipChange,
+    resetMembershipDirectorySync,
+  } = await import("../../channels/membershipDirectorySync.ts");
+  const client = new QueryClient();
+  for (const retire of [
+    () => refreshDirectoryAfterMembershipChange(client, "accepted-removal"),
+    resetMembershipDirectorySync,
+  ]) {
+    act(() => {
+      pending = result.current.selectMentionSuggestion(result.current.rows[0]);
+    });
+    retire(); // the still-positive direct RPC was started before this write/reset
+    release();
+    await act(async () => {
+      await pending;
+    });
+    assert.deepEqual(inserted, []);
+    assert.deepEqual(pinned, []);
+  }
+  client.clear();
+  act(() => {
+    pending = result.current.selectMentionSuggestion(result.current.rows[0]);
+  });
+  generation.current++; // editor cancellation / A -> B -> A still retires
+  release();
+  await act(async () => {
+    await pending;
+  });
+  assert.deepEqual(inserted, []);
+  assert.deepEqual(pinned, []);
+  const stale = result.current.selectMentionSuggestion;
+  rerender();
+  const before = requested.length;
+  await act(async () => {
+    await stale(first);
+  });
+  assert.equal(requested.length, before);
+  act(() => {
+    pending = result.current.toggleAlwaysAddressAgent(result.current.rows[0]);
+  });
+  position = { text: "@changed", cursor: 8 };
+  document.dispatchEvent(new dom.window.Event("input"));
+  position = { text: "@", cursor: 1 };
+  release();
+  await act(async () => {
+    await pending;
+  });
+  assert.deepEqual(inserted, []);
+  assert.deepEqual(pinned, []);
+});
+
+test("selection reads fresh human roster/visibility with private-member, open, unknown and DM rules", async () => {
+  const React = await import("react");
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useMentionAdmission } = await import("../lib/useMentionAdmission.ts");
+  const human = "c".repeat(64),
+    self = "a".repeat(64);
+  let visibility = "private",
+    members = [],
+    channelType = "channel";
+  let writes = 0,
+    reads = 0;
+  dom.window.__TAURI_INTERNALS__ = {
+    invoke: async (name) => {
+      reads++;
+      if (name === "get_channel_members") return { members };
+      if (name === "get_channels")
+        return {
+          hash: "fresh",
+          channels: [{ id: "general", channel_type: "channel", visibility }],
+          last_messages: {},
+        };
+      throw new Error(`Unexpected ${name}`);
+    },
+  };
+  const { result, rerender } = renderHook(() =>
+    useMentionAdmission({
+      generation: React.useRef(0),
+      isPending: () => false,
+      channelId: "general",
+      channelType,
+      currentPubkey: self,
+      agentPubkeys: new Set(),
+      personaIds: new Set(),
+      revalidate: async (keys) => keys,
+    }),
+  );
+  const select = async () => {
+    let accepted;
+    await act(async () => {
+      accepted = await result.current(
+        { pubkey: human, displayName: "Human" },
+        () => ({ text: "@hu", cursor: 3 }),
+        () => writes++,
+      );
+    });
+    return accepted;
+  };
+  assert.equal(
+    await select(),
+    false,
+    "revoked private membership denies nonmember admission",
+  );
+  members = [{ pubkey: self, role: "member" }];
+  assert.equal(await select(), true, "ordinary private member can add");
+  members = [];
+  visibility = "open";
+  assert.equal(await select(), true, "open permits a nonmember");
+  visibility = undefined;
+  assert.equal(await select(), false, "unknown visibility fails closed");
+  members = [{ pubkey: human, role: "member" }];
+  assert.equal(await select(), true, "existing member needs no add permission");
+  channelType = "dm";
+  rerender();
+  const before = reads;
+  assert.equal(
+    await select(),
+    true,
+    "DM mention does not mutate immutable membership",
+  );
+  assert.equal(reads, before);
+  assert.equal(writes, 4);
+  delete dom.window.__TAURI_INTERNALS__;
+});
+
+test("production editor lifecycle retires caret departures, silent restores and external blur, not options focus", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useMentionAdmissionEditor } = await import(
+    "../lib/useMentionAdmissionEditor.ts"
+  );
+  const handlers = new Map();
+  const editor = {
+    on: (name, handler) => handlers.set(name, handler),
+    off: (name) => handlers.delete(name),
+  };
+  const form = document.createElement("form");
+  const option = document.createElement("button");
+  form.append(option);
+  let cancellations = 0;
+  const cancel = () => cancellations++;
+  const container = { current: form };
+  // The native type is only used by the real blur owner.
+  globalThis.Node = dom.window.Node;
+  const { unmount } = renderHook(() =>
+    useMentionAdmissionEditor(editor, container, cancel),
+  );
+  handlers.get("selectionUpdate")({ transaction: { docChanged: false } });
+  handlers.get("selectionUpdate")({ transaction: { docChanged: false } });
+  assert.equal(
+    cancellations,
+    2,
+    "departure and return are distinct retirements",
+  );
+  handlers.get("selectionUpdate")({ transaction: { docChanged: true } });
+  assert.equal(
+    cancellations,
+    2,
+    "authored text belongs to the existing query update owner",
+  );
+  handlers.get("transaction")({ transaction: { getMeta: () => true } });
+  assert.equal(cancellations, 3);
+  handlers.get("blur")({ event: { relatedTarget: option } });
+  assert.equal(cancellations, 3);
+  handlers.get("blur")({ event: { relatedTarget: null } });
+  assert.equal(cancellations, 4);
+  unmount();
+  assert.equal(cancellations, 5);
+  assert.equal(handlers.size, 0);
+});
+
+test("default-agent hotkey owns fresh intent after typing or caret retirement, not displayed search", async () => {
+  const React = await import("react");
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useMentionAdmission } = await import("../lib/useMentionAdmission.ts");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const { useAlwaysAddressShortcut } = await import(
+    "./useAlwaysAddressShortcut.ts"
+  );
+  const agent = "b".repeat(64);
+  const suggestion = { pubkey: agent, displayName: "Agent", isAgent: true };
+  let generation, release;
+  let pendingSearch = true,
+    displayed = false,
+    defer = false,
+    denied = false;
+  const writes = [],
+    requests = [];
+  const { result, rerender } = renderHook(() => {
+    generation = React.useRef(0);
+    const admit = useMentionAdmission({
+      generation,
+      isPending: () => pendingSearch,
+      channelId: "general",
+      channelType: "channel",
+      currentPubkey: "a".repeat(64),
+      agentPubkeys: new Set([agent]),
+      personaIds: new Set(),
+      revalidate: async (keys, channel, options) => {
+        requests.push({ keys, channel, options });
+        if (defer)
+          await new Promise((resolve) => {
+            release = resolve;
+          });
+        if (denied) throw new Error("revoked");
+        return keys;
+      },
+    });
+    const mentions = {
+      admitMentionSelection: admit,
+      retireMentionSelection: () => generation.current++,
+      getDefaultAgentSuggestion: () => suggestion,
+      getMentionDisplayName: () => null,
+      getDraftMentionRefs: () => [],
+      registerMentionPubkey: (label) => label,
+      isMentionOpen: displayed,
+      suggestions: [suggestion],
+      mentionSelectedIndex: 0,
+      isInlineMentionSelection: () => false,
+      openMentionPicker: () => {},
+    };
+    const picker = useAgentAddressLockPicker({
+      mentions,
+      audience: { pubkeys: [], addPubkey: () => writes.push("pin") },
+      audienceScope: "general",
+      applyAutocompleteEdit: () => writes.push("insert"),
+      richText: { getPlainTextAndCursor: () => ({ text: "draft", cursor: 3 }) },
+      onPulseAddressLock: () => {},
+    });
+    return {
+      picker,
+      shortcut: useAlwaysAddressShortcut({
+        enabled: true,
+        mentions,
+        onOpenPicker: () => {},
+        onToggle: picker.toggleAlwaysAddressAgent,
+      }),
+    };
+  });
+  const { isMacPlatform } = await import("../../../shared/lib/platform.ts");
+  const press = async () =>
+    act(async () => {
+      result.current.shortcut({
+        code: "KeyM",
+        ctrlKey: !isMacPlatform(),
+        metaKey: isMacPlatform(),
+        shiftKey: true,
+        preventDefault() {},
+      });
+    });
+  await press();
+  assert.deepEqual(writes, ["insert", "pin"]);
+  assert.deepEqual(requests[0], {
+    keys: [agent],
+    channel: "general",
+    options: { phase: "prepare", intendedAgentPubkeys: [agent] },
+  });
+  writes.length = 0;
+  generation.current++; // deliberate caret departure without a render
+  await press();
+  assert.deepEqual(writes, ["insert", "pin"]);
+  writes.length = 0;
+  displayed = true;
+  rerender();
+  const before = requests.length;
+  await press();
+  assert.equal(
+    requests.length,
+    before,
+    "unsettled displayed row cannot be consumed",
+  );
+  pendingSearch = false;
+  generation.current++;
+  await press();
+  assert.equal(
+    requests.length,
+    before,
+    "retired displayed callback remains rejected",
+  );
+  displayed = false;
+  rerender();
+  denied = true;
+  await press();
+  assert.deepEqual(writes, [], "default identity still needs fresh authority");
+  denied = false;
+  defer = true;
+  for (const retire of [
+    () => generation.current++,
+    () => document.dispatchEvent(new dom.window.Event("input")),
+    () => document.dispatchEvent(new dom.window.Event("focusout")),
+    () => window.dispatchEvent(new dom.window.Event("blur")),
+  ]) {
+    await press();
+    retire();
+    await act(async () => release());
+    assert.deepEqual(
+      writes,
+      [],
+      "genuine pending departure cancels default pin",
+    );
+  }
+});
+
+test("editor selection refreshes explicit rows without treating owned focus as departure", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useMentionAdmissionEditor } = await import(
+    "../lib/useMentionAdmissionEditor.ts"
+  );
+  const handlers = new Map();
+  const editor = {
+    on: (name, handler) => handlers.set(name, handler),
+    off: (name) => handlers.delete(name),
+  };
+  const form = document.createElement("form");
+  const option = document.createElement("button");
+  form.append(option);
+  globalThis.Node = dom.window.Node;
+  let departures = 0;
+  let selections = 0;
+  const cancel = () => departures++;
+  const refresh = () => selections++;
+  const container = { current: form };
+  const { unmount } = renderHook(() =>
+    useMentionAdmissionEditor(editor, container, cancel, refresh),
+  );
+  handlers.get("selectionUpdate")({ transaction: { docChanged: false } });
+  assert.equal(selections, 1, "selection has its own row retirement owner");
+  assert.equal(departures, 0, "selection is not an external departure");
+  handlers.get("blur")({ event: { relatedTarget: option } });
+  assert.equal(departures, 0, "owned options retain the tray");
+  handlers.get("blur")({ event: { relatedTarget: document.body } });
+  assert.equal(departures, 1, "external focus still closes the tray");
+  handlers.get("transaction")({ transaction: { getMeta: () => true } });
+  assert.equal(departures, 2, "silent restore still closes the tray");
+  unmount();
+  assert.equal(departures, 3);
 });

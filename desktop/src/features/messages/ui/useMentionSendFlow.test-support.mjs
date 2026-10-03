@@ -7,6 +7,7 @@ import * as React from "react";
 import ts from "typescript";
 import * as helpers from "./useMentionSendFlow.helpers.ts";
 import * as draftStore from "../lib/useDrafts.ts";
+import * as revalidation from "../lib/agentMentionRevalidation.ts";
 
 // Execute the product hooks with real React effects/renders; only external
 // query/mutation/media dependencies are mocked. Deferred promises isolate the
@@ -169,9 +170,7 @@ export async function setup({ lifecycle = false } = {}) {
     "@/features/messages/lib/agentAddressMention.mjs": {
       buildAgentAddressMentionTags: () => [],
     },
-    "@/features/messages/lib/agentMentionRevalidation": {
-      AgentMentionAuthorizationError: class extends Error {},
-    },
+    "@/features/messages/lib/agentMentionRevalidation": revalidation,
   };
   stubs["./useDetachedAgentStart"] = load("useDetachedAgentStart", stubs);
   stubs["./useEnsureAgentMentionsReady"] = load(
