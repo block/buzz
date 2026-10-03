@@ -88,6 +88,8 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
+# Generate ephemeral P-256 signing fixtures; already in the runtime dependency graph.
+ring = "0.17"
 # The mesh-llm smoke harnesses moved to `crates/buzz-mesh-smoke`. A
 # dev-dependency feeds every target of its package, so keeping the mesh-llm
 # SDK here forced the entire mesh-llm/skippy/rmcp tree to compile before any

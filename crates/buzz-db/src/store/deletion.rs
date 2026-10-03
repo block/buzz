@@ -92,6 +92,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
+    "personal_read_accounts",
+    "personal_read_frontiers",
     "pubkey_allowlist",
     "push_leases",
     "push_match_queue",
@@ -110,6 +112,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "personal_read_frontiers",
+    "personal_read_accounts",
     "workflow_approvals",
     "scheduled_workflow_fires",
     "workflow_runs",
