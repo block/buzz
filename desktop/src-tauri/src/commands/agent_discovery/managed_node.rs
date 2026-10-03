@@ -5,7 +5,7 @@ use std::{io::Read, io::Write};
 
 use crate::managed_agents::{is_npm_global_install, InstallStepResult};
 
-const MANAGED_NODE_VERSION: &str = "v24.18.0";
+const MANAGED_NODE_VERSION: &str = "v24.21.0";
 const MANAGED_NODE_MAX_BYTES: u64 = 90 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -18,43 +18,43 @@ struct ManagedNodeArtifact {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "darwin-arm64",
-    filename: "node-v24.18.0-darwin-arm64.tar.gz",
-    sha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    filename: "node-v24.21.0-darwin-arm64.tar.gz",
+    sha256: "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "darwin-x64",
-    filename: "node-v24.18.0-darwin-x64.tar.gz",
-    sha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+    filename: "node-v24.21.0-darwin-x64.tar.gz",
+    sha256: "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "linux-x64",
-    filename: "node-v24.18.0-linux-x64.tar.gz",
-    sha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
+    filename: "node-v24.21.0-linux-x64.tar.gz",
+    sha256: "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "linux-arm64",
-    filename: "node-v24.18.0-linux-arm64.tar.gz",
-    sha256: "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508",
+    filename: "node-v24.21.0-linux-arm64.tar.gz",
+    sha256: "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5",
 });
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "win-x64",
-    filename: "node-v24.18.0-win-x64.zip",
-    sha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
+    filename: "node-v24.21.0-win-x64.zip",
+    sha256: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
 });
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "win-arm64",
-    filename: "node-v24.18.0-win-arm64.zip",
-    sha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
+    filename: "node-v24.21.0-win-arm64.zip",
+    sha256: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
 });
 
 #[cfg(not(any(
