@@ -74,8 +74,15 @@ with a TypeScript lookup table or an id comparison in a component.
    Additionally, a successful discovery response that yields no usable options
    (`supportsSwitching:false` or empty model list) synthesizes a warning status
    via `synthesizeEmptyDiscoveryStatus()` and is intentionally **not cached**
-   so that closing → reopening the dialog re-runs discovery after the user
+   so that Retry or closing → reopening re-runs discovery after the user
    installs or signs into the CLI (`isCacheableDiscoveryResponse()`).
+   `ModelDiscoveryStatusLine` owns the shared status and Retry UI. The control
+   shows a short loading label immediately; after 10 seconds a polite status
+   explains that first launch can take longer. Timers and request generations
+   reset on retry, provider/credential changes, close, and unmount. Databricks
+   sign-in outcomes retain their explicit auth guidance, not a generic probe retry.
+   An optional picker remains omitted during discovery; its slow status may
+   render independently. Required-model fields retain the control throughout.
 7. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
@@ -366,8 +373,10 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   failed discovery.
 - `ui/usePersonaModelDiscovery.test.mjs` — `synthesizeEmptyDiscoveryStatus`,
   `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`,
-  `isSuccessfulEmptyDiscovery`. If the "reopen to retry" copy becomes inert
-  again, these tests will catch it.
+  `isSuccessfulEmptyDiscovery`.
+- `ui/modelDiscoveryRetry.jsdom-test.mjs` — mounted discovery and real Retry
+  behavior, 10-second status timing, provider/close/unmount cleanup, stale IPC
+  results, empty-result retry, and Databricks auth precedence.
 - `ui/respondToFieldContract.test.mjs` — plain-language mode labels, the
   persistent warning contract for shared agent access, and its two render
   positions (after the people picker for `allowlist`).

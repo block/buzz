@@ -510,6 +510,8 @@ export function AgentDefinitionDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    modelDiscoveryLoadingMessage,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -886,6 +888,9 @@ export function AgentDefinitionDialog({
                 isExplicitModelRequired={isExplicitModelRequired}
                 model={model}
                 modelDiscoveryStatus={modelDiscoveryStatus}
+                modelDiscoveryLoading={modelDiscoveryLoading}
+                modelDiscoveryLoadingMessage={modelDiscoveryLoadingMessage}
+                onRetryModelDiscovery={retryModelDiscovery}
                 modelDropdownOptions={modelDropdownOptions}
                 modelSelectValue={modelSelectValue}
                 onCustomModelChange={setModel}

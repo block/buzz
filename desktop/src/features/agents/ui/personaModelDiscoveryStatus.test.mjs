@@ -156,5 +156,32 @@ test("non-auth -32000 errors do NOT get the sign-in copy", () => {
 
   assert.equal(status?.tone, "warning");
   assert.doesNotMatch(status?.message ?? "", /sign-in/i);
-  assert.match(status?.message ?? "", /Using built-in model options/);
+  assert.match(status?.message ?? "", /Model discovery timed out/);
 });
+
+for (const message of [
+  "agent timed out (45s)",
+  "program not found: codex",
+  "spawn ENOENT",
+]) {
+  test(`retry offered for ${message}`, () => {
+    assert.equal(
+      formatModelDiscoveryErrorStatus(new Error(message), "")?.retryable,
+      true,
+    );
+  });
+}
+for (const message of [
+  "Runtime not available: missing",
+  "ANTHROPIC_API_KEY required",
+  "Authentication required",
+  "Databricks sign-in timed out",
+  "Databricks sign-in failed: canceled",
+]) {
+  test(`no blind retry for ${message}`, () => {
+    assert.notEqual(
+      formatModelDiscoveryErrorStatus(new Error(message), "")?.retryable,
+      true,
+    );
+  });
+}

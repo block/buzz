@@ -1,3 +1,7 @@
+import { resolveModelFieldStatusMessage } from "./agentConfigControls";
+import type { PersonaModelOption } from "./agentConfigOptions";
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
+import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 
@@ -45,7 +49,10 @@ export function EditAgentProviderModelFields({
   showCustomModelInput,
   model,
   onModelChange,
-  modelStatusMessage,
+  discoveredModelOptions,
+  modelDiscoveryStatus,
+  modelDiscoveryLoadingMessage,
+  onRetryModelDiscovery,
 }: {
   disabled: boolean;
   llmProviderFieldVisible: boolean;
@@ -71,8 +78,16 @@ export function EditAgentProviderModelFields({
   showCustomModelInput: boolean;
   model: string;
   onModelChange: (value: string) => void;
-  modelStatusMessage: string | null;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
+  modelDiscoveryLoadingMessage: string | null;
+  onRetryModelDiscovery: () => void;
 }) {
+  const modelStatusMessage = resolveModelFieldStatusMessage({
+    discoveredModelOptions,
+    loading: modelDiscoveryLoading,
+    status: modelDiscoveryStatus,
+  });
   return (
     <>
       {/* LLM provider */}
@@ -182,7 +197,16 @@ export function EditAgentProviderModelFields({
             />
           </div>
         ) : null}
-        {modelStatusMessage ? (
+        {modelDiscoveryLoading || modelDiscoveryStatus ? (
+          <ModelDiscoveryStatusLine
+            disabled={disabled}
+            loading={modelDiscoveryLoading}
+            loadingMessage={modelDiscoveryLoadingMessage}
+            onRetry={onRetryModelDiscovery}
+            status={modelDiscoveryStatus}
+            testId="edit-agent-model-discovery-status"
+          />
+        ) : modelStatusMessage ? (
           <p className="text-xs text-muted-foreground">{modelStatusMessage}</p>
         ) : null}
       </div>

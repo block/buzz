@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
@@ -731,7 +732,8 @@ test("defaults keeps model control when optional harness discovery fails", async
   // Failed discovery must not look like successful empty: keep the control
   // and surface #2246 failure UI (status line bypasses onboarding-essential).
   await expect(page.getByTestId("global-agent-model")).toBeVisible();
-  await expect(page.getByText(/Could not load live models/i)).toBeVisible();
+  await expect(page.getByText(/Model discovery timed out/i)).toBeVisible();
+  await expect(page.getByTestId("model-discovery-retry")).toBeVisible();
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
 });
 
@@ -1211,4 +1213,89 @@ test("baked build config keeps Finish enabled without manual provider setup", as
   // baked config as complete and never block Finish.
   await expect(page.getByTestId("global-agent-default-harness")).toHaveCount(0);
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
+});
+
+test("defaults retries discovery without losing optional-model omission or the slow note", async ({
+  page,
+}, testInfo) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+      discoverAgentModelsError: "CLI discovery timed out",
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await chooseHarnessAndContinue(page);
+  await expect(page.getByTestId("model-discovery-retry")).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: testInfo.outputPath("model-discovery-retry.png"),
+  });
+  // Hold the actual discovery IPC across the user-triggered retry. Everything
+  // above/below that native seam (hook, omission rules and renderer) is real.
+  await page.evaluate(() => {
+    const fixture = window as Window & {
+      __TAURI_INTERNALS__: {
+        invoke: (command: string, args: unknown) => Promise<unknown>;
+      };
+      __finishModelRetry?: () => void;
+      __modelRetryCalls?: number;
+    };
+    const invoke = fixture.__TAURI_INTERNALS__.invoke;
+    fixture.__modelRetryCalls = 0;
+    fixture.__TAURI_INTERNALS__.invoke = (command, args) => {
+      if (command !== "discover_agent_models") return invoke(command, args);
+      fixture.__modelRetryCalls = (fixture.__modelRetryCalls ?? 0) + 1;
+      return new Promise((resolve) => {
+        fixture.__finishModelRetry = () =>
+          resolve({
+            agentName: "Claude Code",
+            agentVersion: "1",
+            supportsSwitching: true,
+            models: [
+              {
+                id: "claude-fixture",
+                name: "Fixture model",
+                description: null,
+              },
+            ],
+            selectedModel: null,
+            agentDefaultModel: null,
+          });
+      });
+    };
+  });
+  await page.clock.install();
+  await page.getByTestId("model-discovery-retry").click();
+  await expect(page.getByTestId("global-agent-model")).toHaveCount(0);
+  await expect(page.getByText(/Still loading models/)).toHaveCount(0);
+  await page.clock.runFor(10_001);
+  await expect(page.getByText(/Still loading models/)).toBeVisible();
+  await expect(page.getByTestId("model-discovery-retry")).toHaveCount(0);
+  await page.evaluate(() =>
+    (
+      window as Window & { __finishModelRetry?: () => void }
+    ).__finishModelRetry?.(),
+  );
+  await expect(page.getByText(/Still loading models/)).toHaveCount(0);
+  await expect(page.getByTestId("global-agent-model")).toBeVisible();
+  await page.getByTestId("global-agent-model").click();
+  await expect(page.getByText("Fixture model", { exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { __modelRetryCalls?: number }).__modelRetryCalls,
+    ),
+  ).toBe(1);
 });
