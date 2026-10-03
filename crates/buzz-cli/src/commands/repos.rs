@@ -111,7 +111,7 @@ fn build_updated_repo_announcement(
             (Some(pattern), false, None)
         }
         RepoChange::BindChannel(channel) => {
-            crate::validate::validate_uuid(&channel)?;
+            let channel = crate::validate::canonicalize_uuid(&channel)?;
             let tag = Tag::parse(["buzz-channel", channel.as_str()]).map_err(tag_error)?;
             (None, true, Some(tag))
         }
@@ -234,8 +234,8 @@ pub(crate) fn build_create_announcement(
     .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?;
 
     if let Some(channel) = channel {
-        crate::validate::validate_uuid(channel)?;
-        builder = builder.tag(Tag::parse(["buzz-channel", channel]).map_err(tag_error)?);
+        let channel = crate::validate::canonicalize_uuid(channel)?;
+        builder = builder.tag(Tag::parse(["buzz-channel", channel.as_str()]).map_err(tag_error)?);
     }
     Ok(builder)
 }

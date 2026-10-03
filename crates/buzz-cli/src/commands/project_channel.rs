@@ -14,7 +14,7 @@ use crate::commands::projects::{
     PROJECT_QUERY_EVENT_BOUND,
 };
 use crate::error::CliError;
-use crate::validate::{validate_repo_id, validate_uuid};
+use crate::validate::{canonicalize_uuid, validate_repo_id};
 
 pub struct ChannelProjectRepo {
     pub repo_owner: String,
@@ -26,10 +26,10 @@ pub async fn resolve_or_ensure_repo_for_channel(
     client: &BuzzClient,
     channel: &str,
 ) -> Result<ChannelProjectRepo, CliError> {
-    validate_uuid(channel)?;
-    let projects = fetch_projects_for_channel(client, channel).await?;
-    let repos = fetch_channel_repos(client, channel).await?;
-    let project = pick_authoritative_project(&projects, &repos, channel)?;
+    let channel = canonicalize_uuid(channel)?;
+    let projects = fetch_projects_for_channel(client, &channel).await?;
+    let repos = fetch_channel_repos(client, &channel).await?;
+    let project = pick_authoritative_project(&projects, &repos, &channel)?;
     if let Some((_, repo)) = project {
         return Ok(repo);
     }
@@ -40,10 +40,10 @@ pub async fn resolve_or_ensure_repo_for_channel(
             .pubkey
             .to_hex()
             .eq_ignore_ascii_case(&caller)
-            .then(|| repo_from_announcement(event, channel))
+            .then(|| repo_from_announcement(event, &channel))
             .flatten()
     }) {
-        let _ = try_add_own_repo_to_channel_project(client, channel, &repo.repo_id).await;
+        let _ = try_add_own_repo_to_channel_project(client, &channel, &repo.repo_id).await;
         return Ok(repo);
     }
 
@@ -54,7 +54,7 @@ pub async fn resolve_or_ensure_repo_for_channel(
             "this channel is not a project home; pass --repo-owner and --repo-id".into(),
         ));
     };
-    ensure_default_repo(client, channel, event).await
+    ensure_default_repo(client, &channel, event).await
 }
 
 fn project_is_unlisted(event: &Event) -> bool {
@@ -99,7 +99,8 @@ fn repo_authorizes_project(repo: &Event, project: &Event) -> bool {
 fn repo_from_announcement(event: &Event, channel: &str) -> Option<ChannelProjectRepo> {
     if event.kind.as_u16() != KIND_GIT_REPO_ANNOUNCEMENT as u16
         || repo_is_unlisted(event)
-        || first_tag_value(event, "buzz-channel") != Some(channel)
+        || !first_tag_value(event, "buzz-channel")
+            .is_some_and(|bound| channel_ids_equal(bound, channel))
     {
         return None;
     }
@@ -161,9 +162,10 @@ fn repo_is_unlisted(event: &Event) -> bool {
 }
 
 async fn fetch_channel_repos(client: &BuzzClient, channel: &str) -> Result<Vec<Event>, CliError> {
+    let channel = canonicalize_uuid(channel)?;
     let filter = serde_json::json!({
         "kinds": [KIND_GIT_REPO_ANNOUNCEMENT],
-        "#buzz-channel": [channel],
+        "#buzz-channel": [&channel],
     });
     client
         .query_all_bounded(filter, PROJECT_QUERY_EVENT_BOUND)
@@ -177,9 +179,16 @@ async fn fetch_channel_repos(client: &BuzzClient, channel: &str) -> Result<Vec<E
         .collect()
 }
 
+fn channel_ids_equal(a: &str, b: &str) -> bool {
+    match (uuid::Uuid::parse_str(a), uuid::Uuid::parse_str(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => a == b,
+    }
+}
+
 pub(crate) fn require_repo_channel_binding(event: &Event, channel: &str) -> Result<(), CliError> {
     match first_tag_value(event, "buzz-channel") {
-        Some(bound) if bound == channel => Ok(()),
+        Some(bound) if channel_ids_equal(bound, channel) => Ok(()),
         Some(bound) => Err(CliError::Conflict(format!(
             "repository {:?} is already bound to channel {bound}; pass --repo-owner and --repo-id",
             first_tag_value(event, "d").unwrap_or("<unknown>")
