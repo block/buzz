@@ -40,10 +40,11 @@ pub async fn cmd_get_users(
     }
 
     let my_pk = client.keys().public_key().to_hex();
-    let authors: Vec<&str> = if pubkeys.is_empty() {
+    let lowered: Vec<String> = pubkeys.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let authors: Vec<&str> = if lowered.is_empty() {
         vec![my_pk.as_str()]
     } else {
-        pubkeys.iter().map(|s| s.as_str()).collect()
+        lowered.iter().map(|s| s.as_str()).collect()
     };
 
     let filter = serde_json::json!({
@@ -462,6 +463,7 @@ pub async fn cmd_get_presence(client: &BuzzClient, pubkeys_csv: &str) -> Result<
     for pk in &pubkeys {
         validate_hex64(pk)?;
     }
+    let pubkeys: Vec<String> = pubkeys.iter().map(|s| s.to_ascii_lowercase()).collect();
 
     let filter = serde_json::json!({
         "kinds": [40902],
