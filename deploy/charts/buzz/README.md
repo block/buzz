@@ -371,6 +371,14 @@ Pool sizing and the aggregate connection budget across all four roles remain
 deployment configuration concerns. The relay does not enforce a combined
 connection ceiling.
 
+If the S3/MinIO backend is still starting when the relay probes it, the probe
+transparently retries on transport errors (connection refused, DNS not
+resolved yet, etc.) with exponential backoff — up to `BUZZ_GIT_PROBE_STARTUP_RETRIES`
+attempts (default 5), starting at `BUZZ_GIT_PROBE_STARTUP_BACKOFF_MS` (default
+500ms, doubling each attempt, capped at 8s). This only covers "backend isn't
+reachable yet"; a backend that responds but fails the A3 conformance checks
+still fails startup immediately — retrying a semantic failure wouldn't help.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay
