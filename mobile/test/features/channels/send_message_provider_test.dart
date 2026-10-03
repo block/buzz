@@ -216,6 +216,90 @@ void main() {
     await result;
   });
 
+  test(
+    'retries membership fetch when both membership and metadata are empty',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final recipient = 'b' * 64;
+      var fetchCount = 0;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async {
+          fetchCount++;
+          // Simulate a relay reconnect resolving after a couple of attempts.
+          if (fetchCount < 3) return const [];
+          return [_member(sender), _member(recipient)];
+        },
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'hello after a flaky membership fetch',
+        // Metadata fallback is empty too, so the first attempt alone can't
+        // resolve a recipient — only the retry can.
+        channel: _dmChannel(const []),
+        mentionPubkeys: const [],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', recipient],
+      ]);
+      expect(fetchCount, greaterThanOrEqualTo(3));
+
+      session.accept();
+      await result;
+    },
+    timeout: const Timeout(Duration(seconds: 5)),
+  );
+
+  test(
+    'gives up after bounded retries and sends without recipients rather than hanging',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      var fetchCount = 0;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async {
+          fetchCount++;
+          return const [];
+        },
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'hello into the void',
+        channel: _dmChannel(const []),
+        mentionPubkeys: const [],
+      );
+      await session.published;
+
+      expect(
+        session.event.tags.where((tag) => tag.first == 'p').toList(),
+        isEmpty,
+      );
+      // Initial attempt + 3 retries, not unbounded.
+      expect(fetchCount, 4);
+
+      session.accept();
+      await result;
+    },
+    timeout: const Timeout(Duration(seconds: 5)),
+  );
+
   test('cancels delivery after the active community changes', () async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
@@ -249,7 +333,7 @@ Channel _dmChannel(List<String> participantPubkeys) => Channel(
   channelType: 'dm',
   visibility: 'private',
   description: '',
-  createdBy: participantPubkeys.first,
+  createdBy: participantPubkeys.firstOrNull ?? 'unknown',
   createdAt: DateTime(2025),
   memberCount: participantPubkeys.length,
   participantPubkeys: participantPubkeys,
