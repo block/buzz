@@ -16,6 +16,12 @@ import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
 export type TypingIndicatorEntry = {
   pubkey: string;
   threadHeadId: string | null;
+  /**
+   * Short activity label carried by the typing event's `content` (bounded at
+   * parsing), when the publisher provided one; null for the classic
+   * content-less typing ping.
+   */
+  label: string | null;
 };
 
 type TypingEntry = {
@@ -23,12 +29,30 @@ type TypingEntry = {
   firstSeenAt: number;
   pubkey: string;
   threadHeadId: string | null;
+  label: string | null;
 };
 type TypingState = Record<string, TypingEntry>;
 
 const TYPING_INDICATOR_TTL_MS = 8_000;
 const TYPING_PRUNE_INTERVAL_MS = 1_000;
 const TYPING_POST_MESSAGE_SUPPRESS_MS = 2_000;
+/**
+ * Upper bound for the activity label a typing event may carry in its
+ * `content` (publishers SHOULD stay under it): a defensive cap so a
+ * pathological event cannot bloat typing state.
+ */
+const TYPING_LABEL_MAX_CHARS = 80;
+
+/** The activity label a typing event carries, trimmed and bounded; null when absent. */
+function getTypingActivityLabel(event: RelayEvent) {
+  const raw = event.content.trim();
+  if (!raw) {
+    return null;
+  }
+  return raw.length > TYPING_LABEL_MAX_CHARS
+    ? `${raw.slice(0, TYPING_LABEL_MAX_CHARS - 1)}…`
+    : raw;
+}
 
 function pruneTypingState(state: TypingState, now = Date.now()) {
   let changed = false;
@@ -95,6 +119,7 @@ export function useChannelTyping(
 
     const typingPubkey = event.pubkey.toLowerCase();
     const threadHeadId = getTypingScopeId(event);
+    const label = getTypingActivityLabel(event);
     const typingKey = getTypingStateKey(typingPubkey, threadHeadId);
     if (normalizedCurrentPubkey && typingPubkey === normalizedCurrentPubkey) {
       return;
@@ -125,6 +150,7 @@ export function useChannelTyping(
           firstSeenAt: existing?.firstSeenAt ?? now,
           pubkey: typingPubkey,
           threadHeadId,
+          label,
         },
       };
     });
@@ -234,7 +260,11 @@ export function useChannelTyping(
     () =>
       Object.values(typingByPubkey)
         .sort((left, right) => left.firstSeenAt - right.firstSeenAt)
-        .map(({ pubkey, threadHeadId }) => ({ pubkey, threadHeadId })),
+        .map(({ pubkey, threadHeadId, label }) => ({
+          pubkey,
+          threadHeadId,
+          label,
+        })),
     [typingByPubkey],
   );
 }

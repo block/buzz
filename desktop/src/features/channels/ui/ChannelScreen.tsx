@@ -354,8 +354,8 @@ export function ChannelScreen({
   const {
     agentSessionCandidates,
     botTypingEntries,
-    humanTypingPubkeys,
-    threadTypingPubkeys,
+    humanTypingEntries,
+    threadTypingEntries,
   } = useChannelActivityTyping({
     activeChannel,
     activeChannelId,
@@ -963,7 +963,7 @@ export function ChannelScreen({
                     void threadRepliesQuery.refetch();
                   }}
                   threadPanelWidthPx={threadPanelWidthPx}
-                  threadTypingPubkeys={threadTypingPubkeys}
+                  threadTypingEntries={threadTypingEntries}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}
                   threadUnreadCounts={threadUnreadCounts}
@@ -971,7 +971,7 @@ export function ChannelScreen({
                   threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
-                    typingPubkeys={humanTypingPubkeys}
+                    typingEntries={humanTypingEntries}
                   />,
                   searchTarget,
                 )}
