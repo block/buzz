@@ -27,6 +27,8 @@ import {
 } from "./use-feed-desktop-notifications";
 import {
   buildHomeBadgeFeedItems,
+  homeMentionAttentionIds,
+  hasUnseenHomeMention,
   isHomeBadgeFeedItemUnread,
   shouldCountTowardHomeBadgeSubtotal,
 } from "./lib/homeBadge";
@@ -36,6 +38,8 @@ export type { DesktopNotificationPermissionState } from "./lib/desktop";
 // v2: settings model reworked around per-event rows (flutter default sound,
 // slotAlertsEnabled, no singleSound/soundEnabled) — v1 values are abandoned.
 const NOTIFICATION_SETTINGS_STORAGE_KEY = "buzz-notification-settings.v2";
+const HOME_MENTION_ATTENTION_STORAGE_KEY =
+  "buzz-home-mention-attention-seen.v1";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 const EMPTY_FEED_ID_SET: ReadonlySet<string> = new Set();
 
@@ -177,6 +181,45 @@ function mergeSeenFeedIds(current: string[], nextIds: readonly string[]) {
   return values.length <= HOME_FEED_SEEN_MAX_ITEMS
     ? values
     : values.slice(values.length - HOME_FEED_SEEN_MAX_ITEMS);
+}
+
+function homeMentionAttentionStorageKey(pubkey: string) {
+  return `${HOME_MENTION_ATTENTION_STORAGE_KEY}:${pubkey}`;
+}
+
+function readStoredSeenMentionIds(pubkey: string): string[] | null {
+  if (typeof window === "undefined" || pubkey.length === 0) {
+    return null;
+  }
+
+  const rawValue = window.localStorage.getItem(
+    homeMentionAttentionStorageKey(pubkey),
+  );
+  if (rawValue === null) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    return Array.isArray(parsed)
+      ? parsed
+          .filter((value): value is string => typeof value === "string")
+          .slice(-HOME_FEED_SEEN_MAX_ITEMS)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSeenMentionIds(pubkey: string, ids: string[]) {
+  if (typeof window === "undefined" || pubkey.length === 0) {
+    return;
+  }
+
+  window.localStorage.setItem(
+    homeMentionAttentionStorageKey(pubkey),
+    JSON.stringify(ids.slice(-HOME_FEED_SEEN_MAX_ITEMS)),
+  );
 }
 
 export function useNotificationSettings(pubkey?: string) {
@@ -387,6 +430,7 @@ export function useHomeFeedNotificationState(
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
   desktopNotificationsEnabled: boolean,
   isHomeActive: boolean,
+  isInboxObserved: boolean,
   // NIP-RS read marker lookup, shared with the sidebar via AppShell. When
   // provided, channel-backed feed items are treated as read iff their
   // createdAt is at-or-below the channel's read marker; the local
@@ -428,6 +472,9 @@ export function useHomeFeedNotificationState(
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>
     readStoredSeenFeedIds(normalizedPubkey),
   );
+  const [seenMentionIds, setSeenMentionIds] = React.useState<string[] | null>(
+    () => readStoredSeenMentionIds(normalizedPubkey),
+  );
   const currentFeedItems = React.useMemo(() => {
     return buildHomeBadgeFeedItems(feed, extraInboxItems, localUnreadFeedIds);
   }, [extraInboxItems, feed, localUnreadFeedIds]);
@@ -438,11 +485,31 @@ export function useHomeFeedNotificationState(
 
   React.useEffect(() => {
     setSeenFeedIds(readStoredSeenFeedIds(normalizedPubkey));
+    setSeenMentionIds(readStoredSeenMentionIds(normalizedPubkey));
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
     writeStoredSeenFeedIds(normalizedPubkey, seenFeedIds);
   }, [normalizedPubkey, seenFeedIds]);
+
+  React.useEffect(() => {
+    if (seenMentionIds === null) {
+      return;
+    }
+    writeStoredSeenMentionIds(normalizedPubkey, seenMentionIds);
+  }, [normalizedPubkey, seenMentionIds]);
+
+  const currentMentionIds = React.useMemo(
+    () => homeMentionAttentionIds(feed),
+    [feed],
+  );
+
+  React.useEffect(() => {
+    if (!feed || seenMentionIds !== null) {
+      return;
+    }
+    setSeenMentionIds(currentMentionIds);
+  }, [currentMentionIds, feed, seenMentionIds]);
 
   const markCurrentFeedSeen = React.useEffectEvent(() => {
     setSeenFeedIds((current) => mergeSeenFeedIds(current, currentFeedIds));
@@ -457,9 +524,30 @@ export function useHomeFeedNotificationState(
     markCurrentFeedSeen();
   }, [currentFeedIds, isHomeActive, normalizedPubkey]);
 
+  const markCurrentMentionsSeen = React.useEffectEvent(() => {
+    setSeenMentionIds((current) => {
+      if (current === null) {
+        return current;
+      }
+      return mergeSeenFeedIds(current, currentMentionIds);
+    });
+  });
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: feed and account changes must mark the corresponding mention ids seen
+  React.useEffect(() => {
+    if (!isInboxObserved) {
+      return;
+    }
+    markCurrentMentionsSeen();
+  }, [currentMentionIds, isInboxObserved, normalizedPubkey]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getChannelReadAt
   return React.useMemo(() => {
-    const zero = { homeBadgeCount: 0, homeBadgeCountExcludingHighPriority: 0 };
+    const zero = {
+      hasHomeMentionAttention: false,
+      homeBadgeCount: 0,
+      homeBadgeCountExcludingHighPriority: 0,
+    };
     if (!settings.homeBadgeEnabled) {
       return zero;
     }
@@ -503,20 +591,27 @@ export function useHomeFeedNotificationState(
       }
     }
     return {
+      hasHomeMentionAttention:
+        !isInboxObserved &&
+        seenMentionIds !== null &&
+        hasUnseenHomeMention(feed, new Set(seenMentionIds)),
       homeBadgeCount: total,
       homeBadgeCountExcludingHighPriority: excludingHighPriority,
     };
   }, [
     currentFeedItems,
+    feed,
     getChannelReadAt,
     getMessageReadAt,
     getThreadReadAt,
     highPriorityChannelIds,
     isHomeActive,
+    isInboxObserved,
     localUnreadFeedIds,
     mutedChannelIds,
     readStateVersion,
     seenFeedIds,
+    seenMentionIds,
     settings.homeBadgeEnabled,
   ]);
 }

@@ -4,6 +4,7 @@ import { waitForAnimations } from "../helpers/animations";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const SHOTS = "test-results/channel-row-decoration-pr";
 
 async function waitForMockLiveSubscription(
@@ -707,6 +708,82 @@ test("interested thread reply shows the channel preview dot without incrementing
   await expect
     .poll(() => getSidebarHomeBadgeText(page))
     .toBe(baselineHomeBadge);
+  await waitForBadgeState(page, baselineBadge);
+});
+
+test("mention in the open thread keeps an attention dot on the app icon", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+  const baselineBadge = await getSettledBadgeState(page);
+  expect(baselineBadge).toEqual({ state: "none", count: 0 });
+  const baselineHomeBadge = await getSidebarHomeBadgeText(page);
+
+  const rootEventId = await page.evaluate((pubkey) => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "Thread that is currently open",
+      kind: 40002,
+      pubkey,
+    });
+    if (!root) throw new Error("Mock message emitter is unavailable");
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "Initial thread reply",
+      kind: 40002,
+      parentEventId: root.id,
+      pubkey,
+    });
+    return root.id;
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  await page.getByTestId("message-thread-summary").first().click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+  await page.evaluate(
+    ({ channelId, mentionPubkey, parentEventId, pubkey }) => {
+      const mention = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "Direct ping for @tyler in the open thread",
+        kind: 40002,
+        mentionPubkeys: [mentionPubkey],
+        parentEventId,
+        pubkey,
+      });
+      if (!mention) throw new Error("Mock message emitter is unavailable");
+      window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?.({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        content: mention.content,
+        created_at: mention.created_at,
+        id: mention.id,
+        kind: mention.kind,
+        pubkey: mention.pubkey,
+        tags: mention.tags,
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      mentionPubkey: DEFAULT_MOCK_PUBKEY,
+      parentEventId: rootEventId,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await waitForBadgeState(page, { state: "dot", count: 0 });
+  await expect
+    .poll(() => getSidebarHomeBadgeText(page))
+    .toBe(baselineHomeBadge);
+
+  await page.getByRole("button", { name: "Inbox" }).click();
+  await waitForBadgeState(page, baselineBadge);
+  await page.getByTestId("channel-general").click();
+  await page.reload();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForBadgeState(page, baselineBadge);
 });
 
