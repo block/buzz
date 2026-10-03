@@ -63,7 +63,9 @@ export function useComposerVoiceNote({
       recordingContext.draftKey === currentContext.draftKey &&
       recordingContext.editTargetId === currentContext.editTargetId
     ) {
-      await media.uploadFile(recording.file);
+      await media.uploadFile(recording.file, {
+        waveform: recording.waveform.map((sample) => Math.round(sample * 100)),
+      });
     }
     return recording;
   }, [recorder.stop, media.uploadFile]);

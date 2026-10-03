@@ -10,11 +10,11 @@ use buzz_media::validation::mime_to_ext;
 pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result<(), String> {
     const ALLOWED_IMETA_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "alt", "thumb", "fallback", "duration",
-        "bitrate", "image", "filename",
+        "bitrate", "image", "filename", "waveform",
     ];
     const SINGLETON_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "thumb", "alt", "duration", "bitrate", "image",
-        "filename",
+        "filename", "waveform",
     ];
     // Previewable media MIME types — these get the strict url-extension
     // consistency check below (their ext is derived from the MIME). Generic
@@ -43,6 +43,8 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         let mut x_value = String::new();
         let mut m_value = String::new();
         let mut thumb_value = String::new();
+        let mut filename_value = String::new();
+        let mut has_waveform = false;
 
         for part in tag.iter().skip(1) {
             let mut parts = part.splitn(2, ' ');
@@ -153,6 +155,24 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                                 .into(),
                         );
                     }
+                    filename_value = value.to_string();
+                }
+                "waveform" => {
+                    let samples: Vec<&str> = value.split_whitespace().collect();
+                    if samples.is_empty()
+                        || samples.len() > 100
+                        || samples.iter().any(|sample| {
+                            sample
+                                .parse::<u8>()
+                                .map_or(true, |amplitude| amplitude > 100)
+                        })
+                    {
+                        return Err(
+                            "imeta waveform must contain 1–100 integer amplitudes from 0 to 100"
+                                .into(),
+                        );
+                    }
+                    has_waveform = true;
                 }
                 _ => {}
             }
@@ -160,6 +180,20 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
 
         if !has_url || !has_m || !has_x || !has_size {
             return Err("imeta tag must include url, m, x, and size".into());
+        }
+
+        if has_waveform {
+            let is_audio = m_value.starts_with("audio/");
+            let is_packaged_voice_note = m_value == "video/mp4"
+                && filename_value
+                    .to_ascii_lowercase()
+                    .starts_with("voice-note-")
+                && filename_value.to_ascii_lowercase().ends_with(".mp4");
+            if !is_audio && !is_packaged_voice_note {
+                return Err(
+                    "imeta waveform is only valid for audio or packaged voice notes".into(),
+                );
+            }
         }
 
         // Video-only NIP-71 fields must not appear on image blobs.
@@ -556,6 +590,46 @@ mod tests {
             "size 100".into(),
         ];
         assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_packaged_voice_note_waveform_passes() {
+        let tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.mp4"),
+            "m video/mp4".into(),
+            format!("x {HASH}"),
+            "size 100".into(),
+            "filename voice-note-123.mp4".into(),
+            "waveform 0 7 35 100 49".into(),
+        ];
+        assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_waveform_rejects_invalid_or_non_audio_values() {
+        let invalid_amplitude = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.mp4"),
+            "m video/mp4".into(),
+            format!("x {HASH}"),
+            "size 100".into(),
+            "filename voice-note-123.mp4".into(),
+            "waveform 0 101".into(),
+        ];
+        let err = validate_imeta_tags(&[invalid_amplitude], BASE).unwrap_err();
+        assert!(err.contains("waveform"), "{err}");
+
+        let image_waveform = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.jpg"),
+            "m image/jpeg".into(),
+            format!("x {HASH}"),
+            "size 100".into(),
+            "waveform 0 25 100".into(),
+        ];
+        let err = validate_imeta_tags(&[image_waveform], BASE).unwrap_err();
+        assert!(err.contains("only valid for audio"), "{err}");
     }
 
     #[test]

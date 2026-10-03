@@ -55,6 +55,20 @@ export function parseImetaTags(
         case "filename":
           entry.filename = val;
           break;
+        case "waveform": {
+          const samples = val
+            .trim()
+            .split(/\s+/)
+            .map(Number)
+            .filter(
+              (sample) =>
+                Number.isInteger(sample) && sample >= 0 && sample <= 100,
+            )
+            .slice(0, 100)
+            .map((sample) => sample / 100);
+          if (samples.length > 0) entry.waveform = samples;
+          break;
+        }
       }
     }
     if (entry.url) map.set(entry.url, entry as ParsedImetaEntry);

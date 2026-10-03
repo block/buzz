@@ -14,6 +14,8 @@ export type ImetaEntry = {
   size?: number;
   filename?: string;
   duration?: number;
+  /** NIP-A0/NIP-71 voice-note amplitudes, normalized to 0–1. */
+  waveform?: number[];
   /** SHA-256 hex of the attachment bytes (from imeta `x` field). */
   x?: string;
 };

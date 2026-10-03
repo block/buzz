@@ -3,6 +3,7 @@ export type AudioAttachmentImetaEntry = {
   filename?: string;
   m?: string;
   size?: number;
+  waveform?: number[];
 };
 
 export type ResolvedAudioAttachment = {
@@ -10,6 +11,7 @@ export type ResolvedAudioAttachment = {
   filename: string;
   href: string;
   size?: number;
+  waveform?: number[];
 };
 
 export const VOICE_NOTE_MAX_DURATION_SECONDS = 5 * 60;
@@ -56,7 +58,27 @@ export function resolveAudioAttachment(
       "voice-note",
     href,
     size: entry.size,
+    ...(entry.waveform ? { waveform: entry.waveform } : {}),
   };
+}
+
+export function applyVoiceNotePlaybackRate(
+  media: Pick<
+    HTMLMediaElement,
+    "currentTime" | "defaultPlaybackRate" | "playbackRate"
+  >,
+  rate: number,
+): void {
+  const preservedTime = media.currentTime;
+  media.defaultPlaybackRate = rate;
+  media.playbackRate = rate;
+  if (
+    Number.isFinite(preservedTime) &&
+    preservedTime > 0 &&
+    Math.abs(media.currentTime - preservedTime) > 0.05
+  ) {
+    media.currentTime = preservedTime;
+  }
 }
 
 export function formatVoiceNoteDuration(seconds: number): string {
