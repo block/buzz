@@ -15,6 +15,7 @@ pub(crate) mod admission_test_support;
 mod backend;
 pub(crate) mod bestie_assignment;
 pub(crate) mod claude_config;
+mod codex_home;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
 mod definition_validation;
