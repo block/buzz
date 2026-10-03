@@ -9,10 +9,37 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
-  func testNativeConversationExpiryDisclosure() throws {
+  func testNativeMembersActivityAppearsAndClears() throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let idle: [String: Any] = ["id": "0", "label": "View members", "symbol": "person.2", "enabled": true]
+    let bar = factory.create(withFrame: CGRect(x: 0, y: 0, width: 390, height: 120),
+                             viewIdentifier: 999994, arguments: ["title": "Group", "actions": [idle]])
+    parent.view.addSubview(bar.view())
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    func item() throws -> UIBarButtonItem { try XCTUnwrap(navigation.topViewController?.navigationItem.rightBarButtonItems?.first) }
+    let idleImage = try XCTUnwrap(item().image?.pngData())
+    var working = idle
+    working["activityColor"] = 0xFF00FF00
+    working["activityLabel"] = "Agent working"
+    messenger.configure(["title": "Group", "actions": [working]])
+    XCTAssertEqual(try item().accessibilityValue, "Agent working")
+    XCTAssertNotEqual(try item().image?.pngData(), idleImage)
+    messenger.configure(["title": "Group", "actions": [idle]])
+    XCTAssertNil(try item().accessibilityValue)
+    XCTAssertEqual(try item().image?.pngData(), idleImage)
+  }
+
+  @MainActor
+  func testNativeConversationExpiryDisclosure() async throws {
     for dm in [false, true] {
       let messenger = NavigationTestMessenger()
       let parent = UIViewController()
+      let window = UIWindow(frame: UIScreen.main.bounds)
+      window.rootViewController = parent
+      window.makeKeyAndVisible()
+      defer { window.isHidden = true }
       let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
       let expiry = "Ephemeral channel. Cleans up after 1 hour of inactivity."
       var args: [String: Any] = ["title": dm ? "Alice" : "general",
@@ -29,8 +56,8 @@ class RunnerTests: XCTestCase {
         title.semanticContentAttribute = direction
         title.setNeedsLayout()
         title.layoutIfNeeded()
-        let clock = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "navigation-ephemeral-status" } as? UIImageView)
-        XCTAssertNotNil(clock.image)
+        let clock = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "navigation-ephemeral-status" } as? UIButton)
+        XCTAssertNotNil(clock.image(for: .normal))
         XCTAssertFalse(clock.isHidden)
         XCTAssertTrue(title.bounds.contains(clock.frame))
         for label in title.subviews.compactMap({ $0 as? UILabel }) {
@@ -38,6 +65,15 @@ class RunnerTests: XCTestCase {
         }
         XCTAssertTrue(title.accessibilityLabel?.contains(expiry) == true)
       }
+      let clock = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "navigation-ephemeral-status" } as? UIButton)
+      XCTAssertTrue(title.isUserInteractionEnabled)
+      clock.sendActions(for: .touchUpInside)
+      try await Task.sleep(nanoseconds: 400_000_000)
+      let disclosure = try XCTUnwrap(navigation.topViewController?.presentedViewController as? UIAlertController)
+      XCTAssertEqual(disclosure.message, expiry)
+      XCTAssertTrue(messenger.actions.isEmpty, "The clock must not open channel settings")
+      disclosure.dismiss(animated: false)
+      try await Task.sleep(nanoseconds: 100_000_000)
       args.removeValue(forKey: "ephemeralLabel")
       messenger.configure(args)
       let permanent = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)

@@ -63,7 +63,12 @@ Future<Uint8List?> nativeAvatarImage({
         }
         rendered = true;
       case _NetworkAvatarSource(:final url):
-        final stream = networkImage(url).resolve(ImageConfiguration.empty);
+        final stream = ResizeImage(
+          networkImage(url),
+          width: dimension.toInt(),
+          height: dimension.toInt(),
+          policy: ResizeImagePolicy.fit,
+        ).resolve(ImageConfiguration.empty);
         final completer = Completer<ImageInfo>();
         final listener = ImageStreamListener(
           (image, _) {

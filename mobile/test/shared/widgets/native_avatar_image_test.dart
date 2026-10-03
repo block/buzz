@@ -6,6 +6,34 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('bounds remote avatar decoding before painting the native PNG', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawColor(Colors.blue, BlendMode.src);
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(1440, 720);
+      final bytes = (await image.toByteData(
+        format: ui.ImageByteFormat.png,
+      ))!.buffer.asUint8List();
+      image.dispose();
+      picture.dispose();
+      final provider = _RecordingImage(bytes);
+      final png = await nativeAvatarImage(
+        url: 'https://example.com/avatar.png',
+        initial: 'A',
+        background: Colors.white,
+        foreground: Colors.black,
+        networkImage: (_) => provider,
+      );
+      expect(png, isNotNull);
+      expect(provider.decodedWidth, lessThanOrEqualTo(72));
+      expect(provider.decodedHeight, lessThanOrEqualTo(72));
+      expect(provider.decodedWidth, greaterThan(0));
+    });
+  });
+
   for (final emoji in ['🥳', '🦝', '👩🏽‍💻']) {
     testWidgets('centers painted bounds of $emoji in the native avatar', (
       tester,
@@ -48,5 +76,29 @@ void main() {
         expect((minY + maxY + 1) / 2, closeTo(36, 0.5));
       });
     });
+  }
+}
+
+class _RecordingImage extends MemoryImage {
+  _RecordingImage(super.bytes);
+  final decodedSizes = <Size>[];
+  double get decodedWidth => decodedSizes.single.width;
+  double get decodedHeight => decodedSizes.single.height;
+
+  @override
+  ImageStreamCompleter loadImage(
+    MemoryImage key,
+    ImageDecoderCallback decode,
+  ) => MultiFrameImageStreamCompleter(codec: _decode(decode), scale: 1);
+
+  Future<ui.Codec> _decode(ImageDecoderCallback decode) async {
+    final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    final codec = await decode(buffer);
+    final frame = await codec.getNextFrame();
+    decodedSizes.add(
+      Size(frame.image.width.toDouble(), frame.image.height.toDouble()),
+    );
+    frame.image.dispose();
+    return codec;
   }
 }

@@ -22,13 +22,14 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
-private final class NavigationTitleView: UIView {
+private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
   var onActivate: (() -> Void)?
+  var onExpiryPressed: ((String) -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
   private var avatarView: UIImageView?
   private var presenceView: UIView?
-  private var expiryView: UIImageView?
+  private var expiryView: UIButton?
 
   init(title: String?, subtitle: String, color: UIColor) {
     super.init(frame: .zero)
@@ -46,7 +47,9 @@ private final class NavigationTitleView: UIView {
     }
     isAccessibilityElement = true
     accessibilityTraits = .button
-    addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(activate)))
+    let tap = UITapGestureRecognizer(target: self, action: #selector(activate))
+    tap.delegate = self
+    addGestureRecognizer(tap)
   }
 
   func setAvatar(_ image: UIImage?, presence: UIColor?) {
@@ -69,9 +72,10 @@ private final class NavigationTitleView: UIView {
   }
 
   func setEphemeralStatus(_ label: String) {
-    let clock = UIImageView(image: UIImage(systemName: "clock"))
+    let clock = UIButton(type: .custom)
+    clock.setImage(UIImage(systemName: "clock"), for: .normal)
     clock.tintColor = .secondaryLabel
-    clock.contentMode = .scaleAspectFit
+    clock.addAction(UIAction { [weak self] _ in self?.onExpiryPressed?(label) }, for: .touchUpInside)
     clock.accessibilityIdentifier = "navigation-ephemeral-status"
     // The title is one accessibility element; include the full retention
     // explanation there so the clock is never announced without its meaning.
@@ -79,6 +83,15 @@ private final class NavigationTitleView: UIView {
     addSubview(clock)
     expiryView = clock
     accessibilityLabel = [accessibilityLabel, label].compactMap { $0 }.joined(separator: ", ")
+  }
+
+  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    var touched = touch.view
+    while let view = touched {
+      if view is UIControl { return false }
+      touched = view.superview
+    }
+    return true
   }
 
   required init?(coder: NSCoder) { return nil }
@@ -92,7 +105,7 @@ private final class NavigationTitleView: UIView {
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16 + (avatarView == nil ? 0 : 40) + (expiryView == nil ? 0 : 20),
+    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16 + (avatarView == nil ? 0 : 40) + (expiryView == nil ? 0 : 44),
            height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
   }
 
@@ -103,11 +116,11 @@ private final class NavigationTitleView: UIView {
     let top = (bounds.height - titleHeight - subtitleHeight) / 2
     let hasAvatar = avatarView != nil
     let rtl = effectiveUserInterfaceLayoutDirection == .rightToLeft
-    let statusWidth: CGFloat = expiryView == nil ? 0 : 20
+    let statusWidth: CGFloat = expiryView == nil ? 0 : 44
     let textX: CGFloat = (hasAvatar && !rtl ? 48 : 8) + (rtl ? statusWidth : 0)
     let textWidth = max(0, bounds.width - 16 - (hasAvatar ? 40 : 0) - statusWidth)
-    expiryView?.frame = CGRect(x: rtl ? 8 : bounds.width - 24,
-                              y: top + (titleHeight - 16) / 2, width: 16, height: 16)
+    expiryView?.frame = CGRect(x: rtl ? 8 : bounds.width - 52,
+                              y: 0, width: 44, height: bounds.height)
     titleLabel.frame = CGRect(x: textX, y: top, width: textWidth, height: titleHeight)
     subtitleLabel.frame = CGRect(x: textX, y: top + titleHeight, width: textWidth, height: subtitleHeight)
     let avatarX: CGFloat = rtl ? bounds.width - 40 : 8
@@ -238,16 +251,22 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
       let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color)
-      button.onActivate = { [weak self] in
-        self?.channel.invokeMethod("action", arguments: "title")
-      }
       button.accessibilityIdentifier = "channel-navigation-title"
       let enabled = args["titleEnabled"] as? Bool == true
       button.accessibilityLabel = enabled
         ? "Open settings for \(item.title ?? ""), \(subtitle)"
         : "\(item.title ?? ""), \(subtitle)"
       button.accessibilityTraits = enabled ? .button : .header
-      button.isUserInteractionEnabled = enabled
+      button.isUserInteractionEnabled = enabled || args["ephemeralLabel"] is String
+      if enabled {
+        button.onActivate = { [weak self] in self?.channel.invokeMethod("action", arguments: "title") }
+      }
+      button.onExpiryPressed = { [weak self] label in
+        guard let self, self.content.presentedViewController == nil else { return }
+        let disclosure = UIAlertController(title: "Temporary conversation", message: label, preferredStyle: .alert)
+        disclosure.addAction(UIAlertAction(title: "OK", style: .default))
+        self.content.present(disclosure, animated: true)
+      }
       if let avatar = args["titleAvatar"] as? [String: Any] {
         button.setAvatar(makeItem(avatar).image,
                          presence: args["titlePresenceColor"] is NSNumber ? Self.color(args["titlePresenceColor"]) : nil)
@@ -383,6 +402,17 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }.withRenderingMode(.alwaysOriginal).withAlignmentRectInsets(
         UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
       )
+    }
+    if data["activityColor"] is NSNumber, let symbol = item.image {
+      let size = CGSize(width: 28, height: 26)
+      item.image = UIGraphicsImageRenderer(size: size).image { _ in
+        symbol.withTintColor(navigation.navigationBar.tintColor).draw(in: CGRect(x: 0, y: 4, width: 22, height: 22))
+        UIColor.systemBackground.setFill()
+        UIBezierPath(ovalIn: CGRect(x: 18, y: 0, width: 10, height: 10)).fill()
+        Self.color(data["activityColor"]).setFill()
+        UIBezierPath(ovalIn: CGRect(x: 19.5, y: 1.5, width: 7, height: 7)).fill()
+      }.withRenderingMode(.alwaysOriginal)
+      item.accessibilityValue = data["activityLabel"] as? String
     }
     return item
   }

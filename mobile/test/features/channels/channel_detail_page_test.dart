@@ -10269,6 +10269,80 @@ void main() {
       });
     }
 
+    testWidgets('native group DM members follows working-agent activity', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final typing = _FakeTypingNotifier([]);
+      final dm = Channel(
+        id: _channelId,
+        name: 'Group',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 3,
+        participantPubkeys: const ['self', 'alice', 'bot'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dm,
+          typingNotifier: typing,
+          members: [
+            ChannelMember(pubkey: 'bot', role: 'bot', joinedAt: DateTime(2025)),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      final view = tester.widget<UiKitView>(
+        find.byWidgetPredicate(
+          (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
+        ),
+      );
+      Map payload = view.creationParams! as Map;
+      Map membersAction() => (payload['actions'] as List)
+          .cast<Map>()
+          .singleWhere((a) => a['label'] == 'View members');
+      expect(membersAction()['activityColor'], isNull);
+      const bridge = MethodChannel('buzz/ios_navigation_bar/397');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+        call,
+      ) async {
+        if (call.method == 'configure') payload = call.arguments as Map;
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          bridge,
+          null,
+        ),
+      );
+      view.onPlatformViewCreated!(397);
+      await tester.pump();
+      typing.setEntries([
+        TypingEntry(
+          pubkey: 'bot',
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 60000,
+        ),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(membersAction()['activityColor'], isNotNull);
+      expect(membersAction()['activityLabel'], 'Agent working');
+      typing.setEntries([]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(membersAction()['activityColor'], isNull);
+      expect(membersAction()['activityLabel'], isNull);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('native channel header preserves members settings and Huddle', (
       tester,
     ) async {

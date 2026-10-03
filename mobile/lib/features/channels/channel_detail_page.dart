@@ -577,6 +577,11 @@ class ChannelDetailPage extends HookConsumerWidget {
         resolvedChannel.isDm && defaultTargetPlatform == TargetPlatform.iOS
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
         : null;
+    final nativeMembersWorking =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        resolvedChannel.isDm &&
+        _showsMembersAction(resolvedChannel) &&
+        ref.watch(workingBotPubkeysProvider(resolvedChannel.id)).isNotEmpty;
     final nativeMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
     final nativeMemberCount =
         nativeMembers.value?.length ?? resolvedChannel.memberCount;
@@ -646,6 +651,10 @@ class ChannelDetailPage extends HookConsumerWidget {
             IosNavigationAction(
               label: 'View members',
               symbol: 'person.2',
+              activityColor: nativeMembersWorking
+                  ? context.appColors.success
+                  : null,
+              activityLabel: nativeMembersWorking ? 'Agent working' : null,
               onPressed: () => showBuzzModalBottomSheet<void>(
                 context: context,
                 title: 'Members',

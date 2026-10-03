@@ -21,6 +21,8 @@ class IosNavigationAction {
     this.avatarInitial,
     this.avatarIdentity,
     this.avatarIsAgent = false,
+    this.activityColor,
+    this.activityLabel,
     this.onPressed,
     this.children = const [],
     this.selected = false,
@@ -32,6 +34,8 @@ class IosNavigationAction {
   final String? avatarInitial;
   final String? avatarIdentity;
   final bool avatarIsAgent;
+  final Color? activityColor;
+  final String? activityLabel;
   final VoidCallback? onPressed;
   final List<IosNavigationAction> children;
   final bool selected;
@@ -42,6 +46,8 @@ class IosNavigationAction {
     'symbol': avatarInitial == null ? symbol : null,
     'avatarInitial': avatarInitial,
     'avatarIsAgent': avatarIsAgent,
+    'activityColor': activityColor?.toARGB32(),
+    'activityLabel': activityLabel,
     'imageUrl': imageUrl,
     'enabled': onPressed != null || children.isNotEmpty,
     'selected': selected,
