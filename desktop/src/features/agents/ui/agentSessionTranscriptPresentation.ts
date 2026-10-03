@@ -1,5 +1,9 @@
 import type { TranscriptItem } from "./agentSessionTypes";
 import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import {
+  countCharacters,
+  truncateByCharacters,
+} from "@/shared/lib/truncateByCharacters";
 
 /**
  * Whether a polished activity row should render the opt-in timestamp footer.
@@ -39,8 +43,8 @@ export function getActivityHeadline(item: TranscriptItem): string | null {
       if (trimmed.length > 0) {
         const firstLine = trimmed.split("\n")[0]?.trim() ?? "";
         if (firstLine.length > 0) {
-          return firstLine.length > 72
-            ? `${firstLine.slice(0, 69)}…`
+          return countCharacters(firstLine) > 72
+            ? `${truncateByCharacters(firstLine, 69)}…`
             : firstLine;
         }
       }
