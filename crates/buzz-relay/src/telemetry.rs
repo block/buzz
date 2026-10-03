@@ -481,6 +481,15 @@ mod tests {
                 .with_filter(tracing_subscriber::filter::LevelFilter::OFF),
         );
 
+        // `tracing` caches callsite *interest* globally per static callsite, not
+        // per-subscriber (see issue #3929): if a parallel test poisoned this
+        // callsite's cached interest while a different subscriber was active,
+        // `enabled!` consults that stale cache and a thread-local `with_default`
+        // filter is bypassed. Use a target literal unique to this test statement
+        // (suffixed by source line) so no other test's callsite can have poisoned
+        // this assertion's cached interest — removing the shared state instead of
+        // serializing around it. `enabled!` requires a compile-time literal, so
+        // this is an inline `concat!`, not a runtime `format!`.
         tracing::subscriber::with_default(subscriber, || {
             assert!(context_lookup
                 .dispatch
@@ -488,7 +497,7 @@ mod tests {
                 .and_then(tracing::dispatcher::WeakDispatch::upgrade)
                 .is_some());
             assert!(!tracing::enabled!(
-                target: "trace_context_lookup_filter_test",
+                target: concat!("trace_context_lookup_filter_test_L", line!()),
                 tracing::Level::ERROR
             ));
         });
