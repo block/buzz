@@ -158,8 +158,12 @@ it is safe to re-run.
 
 `just setup` then starts Docker services (Postgres on `:5432`, Redis on `:6379`,
 Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
-`:9000` for media storage, and Prometheus on `:9090` for metrics) and runs all
-pending database migrations.
+`:9000`/`:9001` for media storage and its console, and Prometheus on `:9090` for
+metrics) and runs all pending database migrations. These are host-port defaults;
+override `PGPORT`, `REDIS_PORT`, `ADMINER_PORT`, `KEYCLOAK_PORT`,
+`MINIO_API_PORT`, `MINIO_CONSOLE_PORT`, or `PROMETHEUS_PORT` in `.env` when a
+port is already occupied. Keep `DATABASE_URL`, `REDIS_URL`, and
+`BUZZ_S3_ENDPOINT` aligned with their corresponding host-port overrides.
 
 ### Running the Relay and Desktop App
 
