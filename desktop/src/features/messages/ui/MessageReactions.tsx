@@ -255,6 +255,10 @@ export function MessageReactions({
     <div
       className={cn(
         "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5",
+        // Issue #4077: reaction pills and the inline picker are chrome, not
+        // message content — they must not become part of the surrounding
+        // text selection when the user drag-selects across a message.
+        "select-none",
         className,
       )}
       data-testid="message-reactions"
