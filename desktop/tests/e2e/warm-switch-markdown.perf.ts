@@ -36,8 +36,8 @@ import { installMockBridge } from "../helpers/bridge";
  * absolute ms are not portable across machines, but before/after deltas on
  * the same machine are.
  *
- * Run it (from desktop/):
- *   pnpm build
+ * Run it (from desktop/) — build:e2e, not build; a plain build strips the mock bridge:
+ *   pnpm build:e2e
  *   npx playwright test --config=playwright.perf.config.ts warm-switch-markdown.perf.ts
  *
  * NOTE: the perf web server reuses an existing server on :4173 — if one is
