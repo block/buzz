@@ -225,6 +225,19 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli_install_hint: None,
         underlying_cli_install_instructions_url: None,
     },
+    PresetHarness {
+        id: "zcode-acp",
+        label: "ZCode",
+        command: "zcode-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/jpalmae/zcode-acp",
+        install_hint: "Buzz talks to ZCode through the zcode-acp ACP adapter, \
+            which drives the ZCode CLI (`zcode.cjs`) over its stdio app-server. \
+            Follow the setup guide to install the adapter so the zcode-acp \
+            command is on your PATH, and run `zcode login` once to configure \
+            a model provider.",
+        underlying_cli: Some("zcode"),
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
