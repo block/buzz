@@ -7,7 +7,12 @@ use serde::Deserialize;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::{parse_event_id, validate_hex64};
+use crate::validate::{parse_event_id, read_stdin_sentinel, validate_hex64};
+
+/// Bound on stdin reads for `social publish --content -`. Matches the
+/// `notes set` guardrail: NIP-01 doesn't cap event size, so this exists to stop
+/// a runaway producer OOMing the CLI.
+pub const PUBLISH_STDIN_MAX_BYTES: usize = 1024 * 1024;
 
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
@@ -23,14 +28,22 @@ pub async fn cmd_publish_note(
     client: &BuzzClient,
     content: &str,
     reply_to: Option<&str>,
+    allow_empty: bool,
 ) -> Result<(), CliError> {
     if let Some(r) = reply_to {
         validate_hex64(r)?;
     }
 
+    // `--content -` reads the note body from stdin, the same sentinel
+    // `messages send` and `notes set` accept. Without this the CLI published a
+    // literal one-character `-` note and reported success, discarding the piped
+    // body — and kind:1 notes are awkward to walk back.
+    // See https://github.com/block/buzz/issues/4905.
+    let body = read_stdin_sentinel(content, PUBLISH_STDIN_MAX_BYTES, allow_empty)?;
+
     let reply_id = reply_to.map(parse_event_id).transpose()?;
 
-    let builder = buzz_sdk::build_note(content, reply_id)
+    let builder = buzz_sdk::build_note(&body, reply_id)
         .map_err(|e| CliError::Other(format!("build error: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -211,9 +224,11 @@ pub async fn cmd_get_list(
 pub async fn dispatch(cmd: crate::SocialCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::SocialCmd;
     match cmd {
-        SocialCmd::PublishNote { content, reply_to } => {
-            cmd_publish_note(client, &content, reply_to.as_deref()).await
-        }
+        SocialCmd::PublishNote {
+            content,
+            reply_to,
+            allow_empty,
+        } => cmd_publish_note(client, &content, reply_to.as_deref(), allow_empty).await,
         SocialCmd::SetContactList { contacts } => cmd_set_contact_list(client, &contacts).await,
         SocialCmd::GetEvent { event } => cmd_get_event(client, &event).await,
         SocialCmd::GetUserNotes {
