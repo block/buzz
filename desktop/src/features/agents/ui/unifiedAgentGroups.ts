@@ -1,6 +1,8 @@
+import type {
+  AgentLibraryCards,
+  PersonaGroup,
+} from "@/features/agents/lib/agentLibraryFilter";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
-
-type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
 
 /**
  * Group managed agents under their personas for the Agents library.
@@ -17,7 +19,7 @@ export function buildUnifiedGroups(
   personas: AgentPersona[],
   agents: ManagedAgent[],
   isArchived: (pubkey: string) => boolean,
-) {
+): AgentLibraryCards {
   const byPersonaId = new Map<string, ManagedAgent[]>();
   const ungrouped: ManagedAgent[] = [];
 
