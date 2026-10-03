@@ -2778,8 +2778,7 @@ async fn run_harness(
         }
     }
 
-    let channel_info_map = relay
-        .discover_channels()
+    let channel_info_map = relay::retry_channel_discovery(|| relay.discover_channels())
         .await
         .map_err(|e| anyhow::anyhow!("channel discovery error: {e}"))?;
 
