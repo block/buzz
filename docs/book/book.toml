@@ -1,0 +1,26 @@
+[book]
+title = "Buzz"
+description = "A workspace where humans and agents build together, on a relay you own."
+authors = ["Block, Inc."]
+src = "src"
+language = "en"
+
+[build]
+build-dir = "dist"
+# Some documents intentionally show malformed or illustrative snippets; broken
+# internal links are still worth failing on, and CI runs `--check` for those.
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/block/buzz"
+edit-url-template = "https://github.com/block/buzz/edit/main/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 30
+
+[output.html.fold]
+enable = true
+level = 1
