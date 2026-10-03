@@ -12,6 +12,16 @@ export function isMacPlatform(): boolean {
   return /mac|iphone|ipad|ipod/i.test(navigator.platform);
 }
 
+/** Returns true on Windows. */
+export function isWindowsPlatform(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+
+  // Anchored so "Darwin" (which contains "win") never matches.
+  return /^win/i.test(navigator.platform);
+}
+
 /** Returns true on Linux desktops (excludes Android). */
 export function isLinuxPlatform(): boolean {
   if (typeof navigator === "undefined") {
