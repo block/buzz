@@ -1,6 +1,7 @@
-import type { ManagedAgent, RuntimeConfigSurface } from "@/shared/api/types";
+import type { ManagedAgentBackend } from "@/shared/api/types";
 import { PERSONA_LABEL_OPTIONAL_CLASS } from "./agentConfigOptions";
 import {
+  type EffortOptions,
   effortPickerState,
   effortSelectionToPersistedValue,
 } from "./effortPicker";
@@ -11,9 +12,8 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
  *
  * Local-only by construction: the Rust backend rejects effort writes for
  * non-local backends (remote effort is set at deploy time via `policy_env`). So the
- * control renders only for a local backend AND once the adapter has advertised
- * a `thought_level` configId (discovered from the running session — absent
- * pre-first-session and for runtimes/models without effort support). The
+ * control renders only for a local backend AND when `effortChoices` knows the
+ * levels for the model that will run (session list, else Claude manifest). The
  * read-only configured-vs-running two-facts display lives in `AgentConfigPanel`;
  * this is the write control.
  *
@@ -24,25 +24,30 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
  * and can never race or survive a Cancel/failed Save.
  */
 export function EffortPickerField({
-  agent,
-  config,
+  backend,
+  choices,
   disabled,
   value,
+  storedEffort,
   onChange,
 }: {
-  agent: ManagedAgent;
-  config: RuntimeConfigSurface | undefined;
+  backend: ManagedAgentBackend;
+  /** Levels from `effortChoices`; `undefined` hides the control. */
+  choices: EffortOptions;
   disabled: boolean;
   /** The pending persisted effort form (`null` = adapter default). */
   value: string | null;
+  /** The saved effort, kept selectable when the model doesn't list it. */
+  storedEffort?: string | null;
   onChange: (level: string | null) => void;
 }) {
-  const { visible, options, selectValue } = effortPickerState({
-    backend: agent.backend,
-    effortConfigId: config?.effortConfigId,
-    effortOptions: config?.effortOptions,
-    currentEffort: value,
-  });
+  const { visible, options, selectValue, unlisted, unknownModel } =
+    effortPickerState({
+      backend,
+      effortOptions: choices,
+      currentEffort: value,
+      storedEffort,
+    });
 
   if (!visible) {
     return null;
@@ -68,7 +73,11 @@ export function EffortPickerField({
         value={selectValue}
       />
       <p className="text-xs text-muted-foreground">
-        Applied at the next session start.
+        {unknownModel
+          ? `Support for ${selectValue} isn't known yet. Applied at the next session start.`
+          : unlisted
+            ? `This model may not support ${selectValue}. Applied at the next session start.`
+            : "Applied at the next session start."}
       </p>
     </div>
   );

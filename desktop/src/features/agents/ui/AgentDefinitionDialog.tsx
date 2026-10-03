@@ -66,6 +66,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
+import type { EffortModels } from "./effortPicker";
 import {
   useAcpCommandsQuery,
   useBakedBuildEnvKeysQuery,
@@ -114,7 +115,11 @@ type AgentDefinitionDialogProps = {
   ) => Promise<unknown>;
   /** Publishes saved changes when the edited agent is shared in the catalog. */
   publishCatalogUpdatesOnSave?: boolean;
-  createRunSection?: React.ReactNode;
+  /** Receives the effort model chain (`effortChoices` inputs) to render. */
+  createRunSection?: (
+    runtimeId: string,
+    models: EffortModels,
+  ) => React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
 };
@@ -510,6 +515,7 @@ export function AgentDefinitionDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    agentDefaultModel,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -612,6 +618,15 @@ export function AgentDefinitionDialog({
       {runtimeWarningText} Visit Settings &gt; Agents to set it up.
     </p>
   ) : null;
+  // Built every render, not only while Advanced is open: the callback also
+  // tracks which effort levels the submitted model allows.
+  const createRunSectionNode =
+    isCreateMode &&
+    createRunSection?.(runtime, [
+      model,
+      globalConfig.model, // build/provider fallbacks never reach Claude
+      agentDefaultModel,
+    ]);
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
@@ -963,7 +978,7 @@ export function AgentDefinitionDialog({
                 transition={advancedFieldsTransition}
               >
                 <PersonaAdvancedFields
-                  afterRespondTo={isCreateMode ? createRunSection : undefined}
+                  afterRespondTo={createRunSectionNode}
                   behaviorDraft={behaviorDraft}
                   disabled={isPending}
                   envVars={envVars}

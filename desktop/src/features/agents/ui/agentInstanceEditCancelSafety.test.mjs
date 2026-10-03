@@ -273,7 +273,7 @@ function installEffortIpc({ deferUpdate = false, failUpdate = false } = {}) {
   };
 }
 
-function renderDialog(onOpenChange) {
+function renderDialog(onOpenChange, agentOverrides = {}) {
   const client = new QueryClient({
     defaultOptions: {
       mutations: { gcTime: 0 },
@@ -289,7 +289,7 @@ function renderDialog(onOpenChange) {
         QueryClientProvider,
         { client },
         createElement(AgentInstanceEditDialog, {
-          agent: { ...toCamelAgent(rawAgent()) },
+          agent: { ...toCamelAgent(rawAgent(agentOverrides)) },
           open: true,
           onOpenChange,
           onUpdated: () => {},
@@ -498,8 +498,8 @@ test("inherit toggle then Save dispatches the agentCommand:'' inherit sentinel",
 // Opens the effort dropdown (Radix DropdownMenu trigger) and selects the option
 // whose visible label matches `label`. Mirrors a real user pick — the seam the
 // pure resolveEffortSubmission unit tests never touch.
-async function selectEffort(label) {
-  const trigger = dom.window.document.getElementById("edit-agent-effort");
+async function selectEffort(label, id = "edit-agent-effort") {
+  const trigger = dom.window.document.getElementById(id);
   assert.ok(
     trigger,
     "effort picker trigger must render for a local + effort-capable agent",
@@ -1075,4 +1075,63 @@ test("auto-restart and inherit checkboxes are disabled while the locked update w
     resolveUpdate();
     await new Promise((resolve) => setTimeout(resolve, 5));
   });
+});
+
+const CLAUDE_CATALOG = {
+  agentName: "claude",
+  models: [
+    { id: "opus[1m]", name: "Opus" },
+    { id: "haiku", name: "Haiku" },
+  ],
+  agentDefaultModel: "opus[1m]",
+  supportsSwitching: true,
+};
+const CLAUDE_INSTANCE = {
+  runtime: "claude",
+  agent_command: "claude",
+  agent_command_override: null,
+  model: "haiku",
+};
+
+test("linked agent: effort follows the definition model, not the unsaved field", async () => {
+  installIpc();
+  ipcHandlers.set("list_personas", () =>
+    Promise.resolve([rawPersona({ model: "haiku" })]),
+  );
+  ipcHandlers.set("discover_agent_models", () =>
+    Promise.resolve(CLAUDE_CATALOG),
+  );
+  await act(async () => {
+    renderDialog(() => {}, CLAUDE_INSTANCE);
+  });
+  await selectEffort("Opus", "edit-agent-model");
+  assert.equal(
+    dom.window.document.getElementById("edit-agent-effort"),
+    null,
+    "Save never sends model for a linked agent, so Haiku still runs",
+  );
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  });
+  const update = ipcCalls.find((call) => call.cmd === "update_managed_agent");
+  assert.equal(update.args.input.model, undefined);
+  assert.equal(update.args.input.effortLevel, undefined);
+});
+
+test("untouched Claude form ignores stored session levels it cannot attribute", async () => {
+  installIpc();
+  ipcHandlers.set("get_agent_config_surface", () =>
+    Promise.resolve({ ...effortConfigSurface(), runtimeId: "claude" }),
+  );
+  ipcHandlers.set("discover_agent_models", () =>
+    Promise.resolve(CLAUDE_CATALOG),
+  );
+  await act(async () => {
+    renderDialog(() => {}, { ...CLAUDE_INSTANCE, persona_id: null });
+  });
+  assert.equal(
+    dom.window.document.getElementById("edit-agent-effort"),
+    null,
+    "configured Haiku must not inherit levels from a session of unknown model",
+  );
 });
