@@ -45,7 +45,9 @@
 //! is correct behaviour, not a gap.
 
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use portable_pty::Child;
 
@@ -62,6 +64,7 @@ pub const TERM_GRACE: Duration = Duration::from_millis(250);
 /// Polling rather than blocking in `wait()`: a blocking wait cannot be given a
 /// deadline without a second thread, and the whole point of the grace period
 /// is that it expires.
+#[cfg(unix)]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// How a session ended.
@@ -264,4 +267,54 @@ pub fn shutdown_draining(
     reader.stop();
     reader.join();
     outcome
+}
+
+/// Ends a session on a platform whose PTY is a ConPTY pseudo console, closing
+/// the console as part of the teardown rather than leaving it to `Drop`.
+///
+/// ConPTY inverts the EOF contract the Unix path is written against. There, the
+/// slave closing when the child dies is what EOFs the master, so the reader
+/// ends on its own and [`DrainingReader::stop`] is only a safety net. Here the
+/// output pipe does **not** EOF when the child dies — it EOFs when
+/// `ClosePseudoConsole` runs, which `portable-pty` performs in the master's
+/// `Drop` (`win/psuedocon.rs:73-75`). A reader parked in `read()` therefore
+/// never observes the stop flag, and joining it while the master is still alive
+/// blocks forever. For a synchronous Tauri command that block lands on the
+/// app's main thread: the whole window stops responding with no panic and no
+/// stack, which is the `AppHangB1` reported as #4930.
+///
+/// So the master is taken **by value** and dropped here, before the join. The
+/// ordering is also what ConPTY itself requires: `ClosePseudoConsole` blocks
+/// until pending output has been consumed, so the reader must still be draining
+/// when it runs, and only then does the reader see EOF and finish.
+///
+/// The child is killed rather than signalled politely because Windows has no
+/// process-group equivalent of the Unix escalation: `portable-pty`'s `kill` is
+/// `TerminateProcess` and its `wait` is `WaitForSingleObject`, both prompt and
+/// both pid-scoped. [`Shutdown::Terminated`] is therefore never returned from
+/// this path — a session either was already gone or was killed.
+#[cfg(not(unix))]
+pub fn shutdown_closing_console(
+    child: &mut Box<dyn Child + Send + Sync>,
+    reader: Box<dyn DrainingReader>,
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+) -> io::Result<Shutdown> {
+    reader.begin_closing();
+
+    let already_exited = child.try_wait()?.is_some();
+    if !already_exited {
+        let _ = child.kill();
+    }
+    child.wait()?;
+
+    // ClosePseudoConsole: the only thing that can EOF the reader.
+    drop(master);
+    reader.stop();
+    reader.join();
+
+    Ok(if already_exited {
+        Shutdown::AlreadyExited
+    } else {
+        Shutdown::Killed
+    })
 }

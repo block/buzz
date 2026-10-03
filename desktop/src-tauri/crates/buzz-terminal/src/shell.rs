@@ -21,6 +21,10 @@
 //! on many systems. A directory or a non-executable file falls through to the
 //! next candidate instead of becoming an unspawnable child.
 
+// Every user of `Path` in this module is part of the Unix executability check;
+// the Windows resolver below works on the string form, because what it has to
+// reject (a relative `ComSpec`) is a question about the text, not the file.
+#[cfg(unix)]
 use std::path::Path;
 
 /// Last-resort shell. POSIX guarantees `/bin/sh`; if this is not executable
@@ -131,8 +135,76 @@ pub fn login_argv0(shell: &str) -> String {
     format!("-{basename}")
 }
 
-/// Resolve the command shell on Windows from `ComSpec`, falling back to cmd.
+/// Resolve the command shell on Windows from `ComSpec`, falling back to the
+/// absolute `%SystemRoot%\System32\cmd.exe`.
+///
+/// The result ends up as `CreateProcessW`'s `lpApplicationName` (via the
+/// builder-env `ComSpec` that [`crate::env_fence::fence_env`] sets), and
+/// `lpApplicationName` performs **no path search**: a bare `cmd.exe` fails
+/// with os error 2 no matter what `PATH` says. So the same discipline as the
+/// Unix resolver applies — validate each candidate, and make the last resort
+/// an absolute path.
 #[cfg(windows)]
 pub fn resolve_shell(shell_env: Option<&str>) -> String {
-    shell_env.unwrap_or("cmd.exe").to_owned()
+    pick_windows_shell(
+        shell_env,
+        std::env::var("SystemRoot").ok().as_deref(),
+        |candidate| {
+            std::fs::metadata(candidate)
+                .map(|meta| meta.is_file())
+                .unwrap_or(false)
+        },
+    )
+}
+
+/// The pure candidate-selection half of the Windows [`resolve_shell`],
+/// compiled on every platform so its behaviour is testable from the Unix CI
+/// this repo actually runs. `is_file` is injected for the same reason
+/// `shell_env` is: no process-global state in the decision.
+///
+/// A candidate must be rooted ([`has_windows_root`]) *and* an existing file.
+/// The rootedness check is not redundant with the file check: a relative
+/// `ComSpec=cmd.exe` could name a real file in whatever directory Buzz
+/// happens to run from, and `lpApplicationName` would execute exactly that
+/// file — planting `cmd.exe` next to a program is a classic hijack.
+pub fn pick_windows_shell(
+    shell_env: Option<&str>,
+    system_root: Option<&str>,
+    is_file: impl Fn(&str) -> bool,
+) -> String {
+    if let Some(candidate) = shell_env {
+        if has_windows_root(candidate) && is_file(candidate) {
+            return candidate.to_owned();
+        }
+    }
+    // Last-resort shell, absolute by construction. The process environment is
+    // mutable, so merely having a `SystemRoot` value does not make it rooted:
+    // a relative value would recreate the current-directory hijack rejected
+    // above for `ComSpec`. Fall back to the stock root in that case as well as
+    // when the variable is absent.
+    let root = validated_windows_system_root(system_root);
+    format!(r"{root}\System32\cmd.exe")
+}
+
+/// Returns a rooted Windows system directory, rejecting environment values
+/// that `CreateProcessW` or `PATH` lookup would resolve against the current
+/// drive or directory.
+pub(crate) fn validated_windows_system_root(system_root: Option<&str>) -> &str {
+    system_root
+        .filter(|candidate| has_windows_root(candidate))
+        .unwrap_or(r"C:\Windows")
+}
+
+/// True if `candidate` is anchored to a drive (`C:\...`, `C:/...`) or a UNC
+/// share (`\\server\...`) — i.e. not resolved relative to the current
+/// directory. A byte-level check rather than `Path::is_absolute` because this
+/// function also compiles on Unix (for tests), where `Path` applies Unix
+/// path semantics to Windows strings.
+fn has_windows_root(candidate: &str) -> bool {
+    let bytes = candidate.as_bytes();
+    let drive_rooted = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    drive_rooted || candidate.starts_with(r"\\")
 }
