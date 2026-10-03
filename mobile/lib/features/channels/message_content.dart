@@ -539,7 +539,7 @@ class MessageContent extends HookConsumerWidget {
           await ref.read(openDownloadedFileProvider)(
             url,
             auth.headersFor(url),
-            text,
+            imeta?.filename ?? text,
           );
         } catch (_) {
           if (!context.mounted) return;
