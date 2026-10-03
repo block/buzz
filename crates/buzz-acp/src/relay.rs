@@ -3526,19 +3526,73 @@ fn jittered_duration(base: Duration) -> Duration {
     base.mul_f64(factor)
 }
 
+/// Classify a Windows Sockets error code as a `getaddrinfo` resolution failure.
+///
+/// Windows surfaces resolver failures as raw `WSA*` codes on the underlying
+/// `io::Error`, and `FormatMessage` renders their text in the machine's display
+/// language. Matching the code rather than the message keeps the classification
+/// working on non-English installs.
+///
+/// - `11001` `WSAHOST_NOT_FOUND` — the name does not resolve.
+/// - `11002` `WSATRY_AGAIN` — an authoritative server did not answer. Explicitly
+///   temporary, so it is the case the flat retry exists for.
+/// - `11004` `WSANO_DATA` — the name is valid but carries no record of the
+///   requested type, which is what a partially propagated or split-horizon zone
+///   returns during a brownout.
+///
+/// `11003` `WSANO_RECOVERY` is deliberately excluded. It reports a
+/// non-recoverable resolver failure, so retrying it flat and forever in
+/// `wait_for_reconnect` would be the wrong response.
+///
+/// Kept free of `cfg(windows)` so it compiles and is asserted on every platform.
+pub(crate) fn is_windows_dns_errno(code: i32) -> bool {
+    matches!(code, 11001 | 11002 | 11004)
+}
+
 /// Classify a `RelayError` as a DNS resolution failure.
 ///
-/// Matches the OS-level "name not found" strings surfaced by the platform's
-/// resolver, covering macOS (`nodename nor servname`), Linux (`Name or service not
-/// known`), and common BSD/Windows variants (`No such host`,
-/// `failed to lookup address`). These are transient on brownouts and must NOT
-/// consume a backoff ladder rung — they retry on a flat `DNS_RETRY_INTERVAL`.
+/// Two independent signals, either one is sufficient.
+///
+/// 1. The raw OS error code, when the error wraps an `io::Error`. This is the
+///    reliable signal on Windows and it does not depend on the display language.
+/// 2. The OS-level "name not found" strings surfaced by the platform's resolver,
+///    covering macOS (`nodename nor servname`), Linux (`Name or service not
+///    known`) and the English Windows and BSD variants. This is the only signal
+///    available once an error has been flattened into `RelayError::Http`.
+///
+/// These are transient on brownouts and must NOT consume a backoff ladder rung —
+/// they retry on a flat `DNS_RETRY_INTERVAL`.
 pub(crate) fn is_dns_error(err: &RelayError) -> bool {
+    if let Some(code) = relay_error_raw_os_error(err) {
+        if is_windows_dns_errno(code) {
+            return true;
+        }
+    }
+
     let msg = err.to_string();
     msg.contains("nodename nor servname")
         || msg.contains("Name or service not known")
         || msg.contains("No such host")
         || msg.contains("failed to lookup address")
+        // Windows, English. The code check above is the primary signal; these
+        // cover a resolver error that reached us as an already-formatted string.
+        || msg.contains("no data of the requested type")
+        || msg.contains("temporary error during hostname resolution")
+}
+
+/// Extract the raw OS error code from a `RelayError`, if it wraps one.
+///
+/// `connect_async` surfaces a failed resolution as
+/// `RelayError::WebSocket(tungstenite::Error::Io(_))`, which is the shape that
+/// carries a usable `raw_os_error()`.
+fn relay_error_raw_os_error(err: &RelayError) -> Option<i32> {
+    match err {
+        RelayError::WebSocket(ws) => match ws.as_ref() {
+            tokio_tungstenite::tungstenite::Error::Io(io_err) => io_err.raw_os_error(),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Shutdown-aware fixed-duration sleep for REQ pacing in `resubscribe_after_reconnect`.
@@ -6770,6 +6824,70 @@ mod tests {
         assert!(!is_dns_error(&RelayError::ConnectionClosed));
         assert!(!is_dns_error(&RelayError::Http(
             "connection refused".into()
+        )));
+    }
+
+    /// The Windows resolver codes are classified from the code, not the message.
+    ///
+    /// Asserted on every platform. `is_windows_dns_errno` is a pure function of
+    /// the code precisely so this coverage does not depend on the host OS.
+    #[test]
+    fn windows_dns_errnos_are_classified() {
+        // WSAHOST_NOT_FOUND, WSATRY_AGAIN, WSANO_DATA.
+        assert!(is_windows_dns_errno(11001));
+        assert!(is_windows_dns_errno(11002));
+        assert!(is_windows_dns_errno(11004));
+
+        // WSANO_RECOVERY is a non-recoverable resolver failure. It must take the
+        // backoff ladder rather than retry flat and forever.
+        assert!(!is_windows_dns_errno(11003));
+
+        // WSAECONNREFUSED is a connection error, not a resolution failure.
+        assert!(!is_windows_dns_errno(10061));
+        assert!(!is_windows_dns_errno(0));
+    }
+
+    /// Production shape: `connect_async` fails resolution and the code survives
+    /// as `raw_os_error` on a WebSocket-wrapped `io::Error`.
+    ///
+    /// `from_raw_os_error` preserves the code on every platform, so this drives
+    /// the real classification path on Linux CI as well as on Windows.
+    #[test]
+    fn windows_dns_errno_classified_through_websocket_io_error() {
+        use tokio_tungstenite::tungstenite;
+
+        for code in [11001, 11002, 11004] {
+            let err = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+                std::io::Error::from_raw_os_error(code),
+            )));
+            assert!(
+                is_dns_error(&err),
+                "WSA code {code} must be classified as DNS"
+            );
+        }
+
+        // WSAECONNREFUSED through the same shape must NOT be a DNS error, or the
+        // flat retry would swallow a genuinely refused connection.
+        let refused = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+            std::io::Error::from_raw_os_error(10061),
+        )));
+        assert!(
+            !is_dns_error(&refused),
+            "WSAECONNREFUSED must not be classified as DNS"
+        );
+    }
+
+    /// The English Windows resolver messages are also matched, for the case
+    /// where the error reached us already flattened into a string.
+    #[test]
+    fn windows_dns_message_fallback_is_classified() {
+        // WSANO_DATA, 11004.
+        assert!(is_dns_error(&RelayError::Http(
+            "The requested name is valid, but no data of the requested type was found. (os error 11004)".into()
+        )));
+        // WSATRY_AGAIN, 11002.
+        assert!(is_dns_error(&RelayError::Http(
+            "This is usually a temporary error during hostname resolution and means that the local server did not receive a response from an authoritative server. (os error 11002)".into()
         )));
     }
 
