@@ -523,3 +523,34 @@ test("extractSupportedLinkPreviews finds generic links and preserves exclusions"
     ],
   );
 });
+
+test("parseSupportedLinkPreview preserves bare-domain URLs without trailing slash", () => {
+  // Bare-domain URLs like https://api.airtable.com must NOT get a trailing
+  // slash added. The relay's ingest validates that the canonical URL appears
+  // verbatim in the message body — a mismatched trailing slash causes
+  // "invalid link-preview canonical URL".
+  assert.equal(
+    parseSupportedLinkPreview("https://api.airtable.com")?.href,
+    "https://api.airtable.com",
+  );
+  assert.equal(
+    parseSupportedLinkPreview("https://example.com")?.href,
+    "https://example.com",
+  );
+});
+
+test("parseSupportedLinkPreview still strips fragments from bare-domain URLs", () => {
+  assert.equal(
+    parseSupportedLinkPreview("https://example.com#section")?.href,
+    "https://example.com",
+  );
+});
+
+test("extractSupportedLinkPreviews preserves bare-domain URL form for relay verbatim check", () => {
+  const previews = extractSupportedLinkPreviews(
+    "Request failed for https://api.airtable.com returned code 403",
+  );
+  assert.equal(previews.length, 1);
+  assert.equal(previews[0].href, "https://api.airtable.com");
+  assert.equal(previews[0].kind, "generic-link");
+});
