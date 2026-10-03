@@ -30,6 +30,10 @@ keypair.
 - Default `BUZZ_IMAGE` tracks `ghcr.io/block/buzz:main` for early testing. Pin it to `ghcr.io/block/buzz:sha-<7>` or a semver release tag for production once available.
 - Keep `BUZZ_RELAY_PRIVATE_KEY`, `BUZZ_GIT_HOOK_HMAC_SECRET`, database/Redis,
   and S3 secrets stable across restarts.
+- `BUZZ_CORS_ORIGINS` must include Desktop webview origins (`tauri://localhost`,
+  `http://tauri.localhost`, `https://tauri.localhost`) in addition to the public
+  site origin. A rejected CORS preflight now logs `CORS rejected origin` on the
+  relay; recreate containers after changing this env var.
 - `RELAY_OWNER_PUBKEY` is intentionally not prefixed with `BUZZ_`; it must be a
   64-character hex Nostr pubkey when closed relay mode is enabled.
 - `BUZZ_AUTO_MIGRATE` is opt-in. Set `BUZZ_AUTO_MIGRATE=true` or run
