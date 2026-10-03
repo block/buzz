@@ -17,7 +17,12 @@ export function ChannelGlyph({
   const iconClass = cn("size-4 shrink-0", className);
 
   if (projectHome) {
-    return <ProjectChannelIcon className={iconClass} />;
+    return (
+      <ProjectChannelIcon
+        className={iconClass}
+        private={channel.visibility === "private"}
+      />
+    );
   }
   if (channel.visibility === "private") {
     return <Lock className={iconClass} />;
