@@ -6,7 +6,7 @@ use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
-    validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
+    validate_content_size, validate_hex64, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
@@ -168,6 +168,13 @@ async fn resolve_content_mentions(
         return Ok((vec![], vec![]));
     }
 
+    // `cmd_send_message` hands us the raw `--channel` argument. The send path
+    // itself is safe (the SDK builders take a parsed `Uuid` and write the
+    // canonical form), but this preflight filters on the string, so a
+    // non-canonical spelling loads no roster and the send fails with
+    // "could not load channel membership" rather than with the parse error the
+    // input deserves.
+    let channel_id = parse_uuid(channel_id)?.hyphenated().to_string();
     let members_filter = serde_json::json!({
         "kinds": [39002],
         "#d": [channel_id],
@@ -362,7 +369,14 @@ pub async fn cmd_get_messages(
     kinds: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    // Canonicalize before filtering. `validate_uuid` only checks that the input
+    // parses and throws the result away, but `Uuid::parse_str` accepts
+    // uppercase, the unhyphenated 32-character form, braces, and a `urn:uuid:`
+    // prefix. Every `h` tag in the tree is written in the canonical lowercase
+    // hyphenated form and a NIP-01 generic tag filter compares tag values byte
+    // for byte, so any other spelling matches nothing and the command prints an
+    // empty list instead of an error.
+    let channel_id = parse_uuid(channel_id)?.hyphenated().to_string();
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
@@ -427,6 +441,9 @@ pub async fn cmd_get_thread(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let expected_channel_id = parse_uuid(channel_id)?;
+    // The parsed value already exists here; the filters below were still built
+    // from the raw argument. See `cmd_get_messages` for why that matters.
+    let channel_id = expected_channel_id.hyphenated().to_string();
     validate_hex64(event_id)?;
     let selected_event = fetch_event(client, event_id).await?;
     let root_event_id = resolve_thread_target(
