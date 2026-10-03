@@ -7,6 +7,9 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/relay/media_image.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -27,6 +30,11 @@ class SettingsProfileHeader extends HookConsumerWidget {
     final profile = ref.watch(profileProvider).asData?.value;
     final status = ref.watch(userStatusProvider).asData?.value;
     final hasStatus = status != null && !status.isEmpty;
+    final palette = ref.watch(customEmojiListProvider);
+    final shortcode = normalizeShortcode(status?.emoji ?? '');
+    final customEmoji = palette
+        .where((entry) => entry.shortcode == shortcode)
+        .firstOrNull;
     final presence = ref.watch(presenceProvider).value ?? 'offline';
     final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
     final animatedPosterUrl = animatedAvatar?.posterUrl;
@@ -143,7 +151,7 @@ class SettingsProfileHeader extends HookConsumerWidget {
             style: context.textTheme.titleMedium,
             textAlign: TextAlign.center,
           ),
-          // Keep text-only and emoji-only statuses visible below the name.
+          // Preserve the complete status below the name, including custom emoji.
           if (hasStatus)
             GestureDetector(
               onTap: openStatusSheet,
@@ -154,8 +162,24 @@ class SettingsProfileHeader extends HookConsumerWidget {
                   right: Grid.gutter,
                   bottom: Grid.half,
                 ),
-                child: Text(
-                  status.text.isNotEmpty ? status.text : status.emoji,
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      if (customEmoji != null)
+                        WidgetSpan(
+                          alignment: PlaceholderAlignment.middle,
+                          child: CustomEmojiImage(
+                            shortcode: customEmoji.shortcode,
+                            url: customEmoji.url,
+                          ),
+                        )
+                      else if (status.emoji.isNotEmpty)
+                        TextSpan(text: status.emoji),
+                      if (status.emoji.isNotEmpty && status.text.isNotEmpty)
+                        const TextSpan(text: ' '),
+                      if (status.text.isNotEmpty) TextSpan(text: status.text),
+                    ],
+                  ),
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.onSurfaceVariant,
                   ),
