@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
+
 import {
   ForumView,
   UserProfilePanel,
@@ -42,6 +44,7 @@ type ForumChannelContentProps = {
   profilePanelView: ProfilePanelView;
   selectedPostId: string | null;
   targetReplyId: string | null;
+  typingEntries?: TypingIndicatorEntry[];
   targetSearchMessageId?: string;
   targetSearchQuery?: string;
 };
@@ -73,6 +76,7 @@ export function ForumChannelContent({
   profilePanelView,
   selectedPostId,
   targetReplyId,
+  typingEntries,
   targetSearchMessageId,
   targetSearchQuery,
 }: ForumChannelContentProps) {
@@ -92,6 +96,7 @@ export function ForumChannelContent({
               onSelectPost={onSelectPost}
               selectedPostId={selectedPostId}
               targetReplyId={targetReplyId}
+              typingEntries={typingEntries}
               targetSearchMessageId={targetSearchMessageId}
               targetSearchQuery={targetSearchQuery}
             />
