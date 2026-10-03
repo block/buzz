@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
+    infer_language, parse_event_id, parse_hex64, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
@@ -427,30 +427,21 @@ pub async fn cmd_get_thread(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let expected_channel_id = parse_uuid(channel_id)?;
-    validate_hex64(event_id)?;
+    let event_id = &parse_hex64(event_id)?;
+    let expected_root_id = match expected_root_id {
+        Some(id) => Some(parse_hex64(id)?),
+        None => None,
+    };
     let selected_event = fetch_event(client, event_id).await?;
     let root_event_id = resolve_thread_target(
         expected_channel_id,
         event_id,
-        expected_root_id,
+        expected_root_id.as_deref(),
         &selected_event,
     )?;
     let limit = limit.unwrap_or(100).min(500);
 
-    let mut reply_filter = serde_json::json!({
-        "kinds": [9, 40002, 40003, 40008, 45003],
-        "#h": [channel_id],
-        "#e": [root_event_id.as_str()],
-        "limit": limit
-    });
-    if let Some(d) = depth_limit {
-        reply_filter["depth_limit"] = serde_json::json!(d);
-    }
-    let root_filter = serde_json::json!({
-        "ids": [root_event_id.as_str()],
-        "#h": [channel_id],
-        "limit": 1
-    });
+    let [reply_filter, root_filter] = thread_filters(channel_id, &root_event_id, limit, depth_limit);
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|event| {
@@ -462,6 +453,36 @@ pub async fn cmd_get_thread(
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
+}
+
+/// The two filters `buzz messages thread` ORs in a single call: replies that
+/// carry this event in an `e` tag, and the root event itself by id.
+///
+/// `event_id` must already be lowercased (`parse_hex64`). `ids` is parsed into
+/// a typed `EventId` on the relay and so tolerates either case, but `#e` is a
+/// generic tag filter compared as a raw string against a lowercase tag — an
+/// uppercase id there returns the root and none of its replies.
+fn thread_filters(
+    channel_id: &str,
+    event_id: &str,
+    limit: u32,
+    depth_limit: Option<u32>,
+) -> [serde_json::Value; 2] {
+    let mut reply_filter = serde_json::json!({
+        "kinds": [9, 40002, 40003, 40008, 45003],
+        "#h": [channel_id],
+        "#e": [event_id],
+        "limit": limit
+    });
+    if let Some(d) = depth_limit {
+        reply_filter["depth_limit"] = serde_json::json!(d);
+    }
+    let root_filter = serde_json::json!({
+        "ids": [event_id],
+        "#h": [channel_id],
+        "limit": 1
+    });
+    [reply_filter, root_filter]
 }
 
 pub async fn cmd_search(
@@ -1887,5 +1908,41 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod thread_filter_tests {
+    use super::thread_filters;
+    use crate::validate::parse_hex64;
+
+    const CHANNEL: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn the_e_tag_filter_carries_the_normalized_id() {
+        // `#e` is compared as a raw string against a lowercase tag, so an
+        // uppercase id here would return the root and none of its replies.
+        let upper = "ABCDEF0123456789".repeat(4);
+        let id = parse_hex64(&upper).unwrap();
+        let [reply, root] = thread_filters(CHANNEL, &id, 100, None);
+        assert_eq!(reply["#e"][0], upper.to_lowercase().as_str());
+        assert_eq!(root["ids"][0], upper.to_lowercase().as_str());
+    }
+
+    #[test]
+    fn the_channel_and_limit_ride_along_unchanged() {
+        let id = "a".repeat(64);
+        let [reply, root] = thread_filters(CHANNEL, &id, 25, None);
+        assert_eq!(reply["#h"][0], CHANNEL);
+        assert_eq!(reply["limit"], 25);
+        assert_eq!(root["limit"], 1);
+        assert!(reply.get("depth_limit").is_none());
+    }
+
+    #[test]
+    fn a_depth_limit_is_added_only_when_given() {
+        let id = "a".repeat(64);
+        let [reply, _] = thread_filters(CHANNEL, &id, 100, Some(3));
+        assert_eq!(reply["depth_limit"], 3);
     }
 }
