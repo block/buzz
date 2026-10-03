@@ -608,6 +608,35 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+/// Format one uploaded attachment as a leading-newline markdown line.
+///
+/// Images and video embed inline. Everything else is a generic file and must use
+/// a plain `[label](url)` link, which Buzz Desktop recognises as a non-media blob
+/// and upgrades to a download card. Announcing a document as `![image](url)`
+/// instead renders a permanently broken image in the recipient's client, while
+/// the sender still sees `accepted: true` — the relay accepted the upload, only
+/// the embed was wrong.
+fn format_media_markdown(mime_type: &str, url: &str, filename: Option<&str>) -> String {
+    if mime_type.starts_with("video/") {
+        return format!("\n![video]({url})");
+    }
+    if mime_type.starts_with("image/") {
+        return format!("\n![image]({url})");
+    }
+    // Escape the markdown link-label metacharacters so a name containing `[`,
+    // `]`, or `\` still renders as a card with the correct label rather than
+    // breaking the link.
+    let label = filename
+        .map(|n| {
+            n.replace('\\', "\\\\")
+                .replace('[', "\\[")
+                .replace(']', "\\]")
+        })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "file".to_string());
+    format!("\n[{label}]({url})")
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -655,14 +684,11 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        let filename = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str());
+        media_tags.push(crate::client::build_imeta_tag(&desc, filename));
+        media_content.push_str(&format_media_markdown(&desc.mime_type, &desc.url, filename));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1085,8 +1111,8 @@ pub async fn dispatch(
 mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
-        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        find_root_from_tags, format_events, format_media_markdown, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
         thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
@@ -1887,5 +1913,49 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+
+    #[test]
+    fn documents_embed_as_file_links_not_images() {
+        // Regression for the `![image](…)` catch-all: a document announced as an
+        // image renders as a permanently broken image in Buzz Desktop.
+        let line = format_media_markdown(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "https://relay.example/blob/abc",
+            Some("quote.xlsx"),
+        );
+        assert_eq!(line, "\n[quote.xlsx](https://relay.example/blob/abc)");
+        assert!(
+            !line.contains("!["),
+            "generic files must not use an inline embed: {line}"
+        );
+    }
+
+    #[test]
+    fn images_and_video_still_embed_inline() {
+        assert_eq!(
+            format_media_markdown("image/png", "https://relay.example/i", Some("a.png")),
+            "\n![image](https://relay.example/i)"
+        );
+        assert_eq!(
+            format_media_markdown("video/mp4", "https://relay.example/v", Some("a.mp4")),
+            "\n![video](https://relay.example/v)"
+        );
+    }
+
+    #[test]
+    fn file_label_escapes_markdown_metacharacters() {
+        // `a].pdf` would otherwise close the link label early and render as text.
+        let line =
+            format_media_markdown("application/pdf", "https://relay.example/p", Some("a].pdf"));
+        assert_eq!(line, "\n[a\\].pdf](https://relay.example/p)");
+    }
+
+    #[test]
+    fn file_label_falls_back_when_filename_is_unusable() {
+        for name in [None, Some("")] {
+            let line = format_media_markdown("application/zip", "https://relay.example/z", name);
+            assert_eq!(line, "\n[file](https://relay.example/z)", "name={name:?}");
+        }
     }
 }
