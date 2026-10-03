@@ -38,6 +38,20 @@ image:
   digest: sha256:<64-lowercase-hex-characters>
 ```
 
+Bundled object storage uses [Silo](https://silo.pgsty.com/download/), a maintained
+MinIO fork, with matching `pgsty/silo` and `pgsty/mc` release images pinned by
+multi-platform digest. Both images allow anonymous pulls and support Linux
+amd64 and arm64; the upstream Quay MinIO images no longer allow anonymous pulls.
+The existing `minio` names and `MINIO_*` settings remain compatible. Keep the
+Helm and Compose pins aligned when upgrading, and run Buzz's
+[object-store conformance probe](../../../docs/git-on-object-storage.md#conformance-admitting-a-backend-for-a3)
+against the new release before deploying it.
+
+For an existing MinIO data volume, follow Silo's
+[migration guide](https://silo.pgsty.com/compatibility/migration/) and take a
+backup before upgrading. Replacing the container image upgrades the storage
+server as well as changing its registry.
+
 ## Production (GitOps)
 
 The chart is designed for ArgoCD and Flux. Both render charts with `helm template`, in which mode Helm's `lookup` function returns empty — any chart-side `randAlphaNum` call would regenerate secrets on every sync. The chart-managed Secret path is **only** safe for `helm install` / `helm upgrade`.

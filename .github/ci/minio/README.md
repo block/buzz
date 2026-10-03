@@ -13,9 +13,10 @@ Once consumers adopt the override, ordinary CI only pulls it; there is no build
 fallback or dependency on the publisher. `latest` deliberately floats, and
 Compose always pulls it. Docker's pull output records the resolved digest.
 
-The Dockerfile uses the same upstream releases as the development services,
-with checksummed official GitHub release binaries and a digest-pinned Alpine
-base. MinIO and `mc` are AGPL-3.0; their corresponding source is available at
+The Dockerfile pins upstream MinIO releases independently of the Silo images
+used by the development and deployment examples. It uses checksummed official
+GitHub release binaries and a digest-pinned Alpine base. MinIO and `mc` are
+AGPL-3.0; their corresponding source is available at
 the [MinIO release](https://github.com/minio/minio/tree/RELEASE.2025-09-07T16-13-09Z)
 and [mc release](https://github.com/minio/mc/tree/RELEASE.2025-08-13T08-35-41Z).
 
