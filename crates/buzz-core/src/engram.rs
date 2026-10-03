@@ -27,6 +27,23 @@ pub const D_TAG_DOMAIN: &[u8] = b"agent-memory/v1/d-tag";
 /// MUST NOT be encrypted (spec: *Encryption*).
 pub const NIP44_PLAINTEXT_MAX: usize = 65_535;
 
+/// NIP-44 v2 ciphertext-length limit (bytes), on the *serialized body* —
+/// not the raw value. The nostr crate's NIP-44 v2 `pad` accepts at most
+/// `65_536 - 128` plaintext bytes (`MAX_SUPPORTED_PLAINTEXT_SIZE`, two-byte
+/// length prefix), and `Body::to_json_bytes()` is what gets padded. That
+/// serialized form is the raw value PLUS:
+///   * the JSON envelope: `slug` + 22 bytes for `mem/…` slugs (33 for the
+///     11-char `mem/example`), 28 for `core` (`profile` member),
+///   * one extra byte per JSON-escaped character (every newline, tab,
+///     quote, and backslash doubles in the serialized form).
+///
+/// Writes with a serialized body in `(NIP44_CIPHERTEXT_MAX,
+/// NIP44_PLAINTEXT_MAX]` pass every earlier size check and only fail deep
+/// in `nip44::encrypt` with a generic `message too long` — a dead zone
+/// seats hit repeatedly (empirically: a 65,080-byte raw value with 400
+/// newlines serializes to 65,518 bytes and bounces; 65,370 passes).
+pub const NIP44_CIPHERTEXT_MAX: usize = 65_536 - 128;
+
 /// Maximum slug length in bytes (spec: *Slugs*).
 pub const SLUG_MAX_LEN: usize = 255;
 
@@ -51,9 +68,30 @@ pub enum EngramError {
     /// Encryption failed.
     #[error("encrypt failed: {0}")]
     Encrypt(String),
-    /// Body exceeds the NIP-44 plaintext cap.
-    #[error("body exceeds {NIP44_PLAINTEXT_MAX}-byte plaintext limit ({0} bytes)")]
-    BodyTooLarge(usize),
+    /// Serialized body exceeds the NIP-44 v2 ciphertext-length cap.
+    ///
+    /// `serialized` — the byte length of `Body::to_json_bytes()` (raw value
+    ///   plus JSON envelope plus one byte per escaped character).
+    /// `raw` — the byte length of the raw value the caller supplied.
+    /// `trim` — the minimum number of bytes to remove from the raw value
+    ///   for the serialized body to fit under the cap.
+    #[error(
+        "serialized body exceeds {NIP44_CIPHERTEXT_MAX}-byte NIP-44 v2 limit ({} bytes; \
+         raw value {} bytes + JSON envelope and escape overhead). Trim the raw value by \
+         at least {} bytes and retry",
+        serialized,
+        raw,
+        trim
+    )]
+    BodyCipherTextTooLarge {
+        /// Byte length of the serialized body (what NIP-44 pads).
+        serialized: usize,
+        /// Byte length of the raw value before serialization.
+        raw: usize,
+        /// Minimum bytes to trim from the raw value to fit the cap.
+        trim: usize,
+    },
+
     /// Signing error.
     #[error("sign failed: {0}")]
     Sign(String),
@@ -439,9 +477,25 @@ pub fn build_event(
     created_at: u64,
 ) -> Result<Event, EngramError> {
     let plaintext = body.to_json_bytes();
-    if plaintext.len() > NIP44_PLAINTEXT_MAX {
-        return Err(EngramError::BodyTooLarge(plaintext.len()));
+    if plaintext.len() > NIP44_CIPHERTEXT_MAX {
+        // The crypto-layer cap is on the *serialized body* (raw value + JSON
+        // envelope + one byte per escaped newline/tab/quote/backslash), and it
+        // sits below NIP44_PLAINTEXT_MAX — enforce it here with a message
+        // that names the arithmetic instead of letting `nip44::encrypt` fail
+        // with a generic "message too long" far from the cause.
+        let raw = match body {
+            Body::Memory { value: Some(v), .. } => v.len(),
+            Body::Memory { value: None, .. } => 0,
+            Body::Core { profile } => profile.len(),
+        };
+        let trim = plaintext.len() - NIP44_CIPHERTEXT_MAX + 1;
+        return Err(EngramError::BodyCipherTextTooLarge {
+            serialized: plaintext.len(),
+            raw,
+            trim,
+        });
     }
+
     // `to_json_bytes` only emits ASCII control chars or `&str` bytes, so
     // this is always Ok. We still verify rather than `.expect()` so a future
     // change to the serializer can't silently introduce a panic on the hot
@@ -884,7 +938,90 @@ mod tests {
             value: Some(huge),
         };
         let err = build_event(&agent, &owner.public_key(), &body, 1).unwrap_err();
-        assert!(matches!(err, EngramError::BodyTooLarge(_)));
+        assert!(matches!(err, EngramError::BodyCipherTextTooLarge { .. }));
+    }
+
+    /// The enforced cap is the NIP-44 v2 *ciphertext-length* limit on the
+    /// serialized body, which sits 127 bytes below NIP44_PLAINTEXT_MAX.
+    /// `mem/example` has a 33-byte envelope (`{"slug":"mem/example","value":""}`),
+    /// so a raw value of NIP44_CIPHERTEXT_MAX - 33 'a's serializes to exactly
+    /// the cap and must be accepted, while one more byte must bounce with the
+    /// detailed arithmetic error.
+    #[test]
+    fn build_event_enforces_ciphertext_cap_on_serialized_body() {
+        let agent = keys_from_hex(SECKEY_A);
+        let owner = keys_from_hex(SECKEY_O);
+
+        let envelope = "{\"slug\":\"mem/example\",\"value\":\"\"}".len(); // 33
+        assert_eq!(envelope, 33);
+
+        // At the cap: accepted.
+        let at_cap = Body::Memory {
+            slug: "mem/example".into(),
+            value: Some("a".repeat(NIP44_CIPHERTEXT_MAX - envelope)),
+        };
+        assert!(build_event(&agent, &owner.public_key(), &at_cap, 1).is_ok());
+
+        // One byte over the cap: rejected, with raw length and trim advice
+        // that the caller can act on without re-counting escapes.
+        let over = Body::Memory {
+            slug: "mem/example".into(),
+            value: Some("a".repeat(NIP44_CIPHERTEXT_MAX - envelope + 1)),
+        };
+        let err = build_event(&agent, &owner.public_key(), &over, 1).unwrap_err();
+        match err {
+            EngramError::BodyCipherTextTooLarge {
+                serialized,
+                raw,
+                trim,
+            } => {
+                assert_eq!(serialized, NIP44_CIPHERTEXT_MAX + 1);
+                assert_eq!(raw, NIP44_CIPHERTEXT_MAX - envelope + 1);
+                assert_eq!(trim, 2);
+            }
+            other => panic!("expected BodyCipherTextTooLarge, got {other:?}"),
+        }
+    }
+
+    /// Escaped characters count double in the serialized body: every newline
+    /// in the raw value becomes `\n` (2 bytes). A raw value well below
+    /// NIP44_PLAINTEXT_MAX can therefore still exceed the ciphertext cap —
+    /// the exact trap that bounced a 65,080-byte raw value with 400 newlines
+    /// (65,518 serialized). Pins the escape arithmetic so the error's
+    /// `serialized` field can be trusted for trim calculations.
+    #[test]
+    fn serialized_body_counts_escape_overhead() {
+        let envelope = "{\"slug\":\"mem/example\",\"value\":\"\"}".len(); // 33
+        let newlines = 400;
+        // 65,080 raw with 400 newlines = 65,480 printable + 400 newlines.
+        let printable = 65_080 - newlines;
+        let body = Body::Memory {
+            slug: "mem/example".into(),
+            value: Some(format!(
+                "{}{}",
+                "a".repeat(printable),
+                "\n".repeat(newlines)
+            )),
+        };
+        let serialized_len = body.to_json_bytes().len();
+        // Raw + envelope + one extra byte per escaped newline.
+        assert_eq!(
+            serialized_len,
+            65_080 + envelope + newlines,
+            "serialized length must equal raw + envelope + escapes"
+        );
+        assert!(serialized_len > NIP44_CIPHERTEXT_MAX);
+        assert!(serialized_len <= NIP44_PLAINTEXT_MAX); // passes the old check — dead zone
+        assert!(matches!(
+            build_event(
+                &keys_from_hex(SECKEY_A),
+                &keys_from_hex(SECKEY_O).public_key(),
+                &body,
+                1
+            )
+            .unwrap_err(),
+            EngramError::BodyCipherTextTooLarge { .. }
+        ));
     }
 
     #[test]
