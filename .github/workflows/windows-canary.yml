@@ -144,6 +144,16 @@ jobs:
           cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           ./scripts/bundle-sidecars.sh "$TARGET"
 
+      # The `!desktop/src-tauri/target/**/release/bundle` entry in the cache
+      # path list does not exclude the bundle directory: in actions/cache,
+      # negating a subpath of an already-included directory is a no-op, so
+      # installers do enter the tar and a cache hit restores the previous run's
+      # installer. Left in place, `find … | head -1` below can pick that stale
+      # file and upload it as this run's canary.
+      - name: Remove stale bundle output
+        shell: bash
+        run: rm -rf "desktop/src-tauri/target/${TARGET}/release/bundle"
+
       - name: Build Windows NSIS installer (unsigned)
         shell: bash
         run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --config src-tauri/tauri.canary.conf.json
@@ -176,8 +186,10 @@ jobs:
         shell: bash
         run: du -sh ~/.cargo/registry ~/.cargo/git target desktop/src-tauri/target 2>/dev/null || true
 
-      # Only this trusted, main-bound canary writes the cache. Excluding bundle
-      # output prevents installers from entering it.
+      # Only this trusted, main-bound canary writes the cache. The
+      # `!…/release/bundle` entry below does not keep installers out of it — see
+      # the "Remove stale bundle output" step, which clears them before the build
+      # instead.
       - name: Save exact release Cargo cache
         if: steps.rust_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
