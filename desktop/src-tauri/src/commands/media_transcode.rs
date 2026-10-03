@@ -116,6 +116,223 @@ pub(super) fn has_heic_extension(path: &std::path::Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("heic") || ext.eq_ignore_ascii_case("heif"))
 }
 
+/// First ffmpeg release whose CLI assembles HEIF tile grids on its own
+/// (`Stream #0:N -> xstack`) when no explicit `-map` is given. Older builds
+/// expose the tiles as independent video streams and pick one of them.
+const HEIF_TILE_GRID_MIN_FFMPEG: (u32, u32) = (8, 1);
+
+/// Upper bound on the `meta` box we are willing to read when probing a HEIF
+/// for a tile grid. iPhone files carry a few KiB; anything larger is treated
+/// as "no grid found" rather than buffered.
+const HEIF_META_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Split an ISO-BMFF byte range into `(box_type, payload)` pairs.
+///
+/// Handles 64-bit `largesize` and the "extends to end" `size == 0` form;
+/// stops at the first truncated or malformed header.
+fn iso_bmff_boxes(mut buf: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
+    std::iter::from_fn(move || {
+        let header: &[u8; 8] = buf.get(..8)?.try_into().ok()?;
+        let box_type: &[u8; 4] = header[4..8].try_into().ok()?;
+        let (size, header_len) =
+            match u32::from_be_bytes([header[0], header[1], header[2], header[3]]) {
+                0 => (buf.len(), 8),
+                1 => {
+                    let large: &[u8; 8] = buf.get(8..16)?.try_into().ok()?;
+                    (usize::try_from(u64::from_be_bytes(*large)).ok()?, 16)
+                }
+                size => (usize::try_from(size).ok()?, 8),
+            };
+        if size < header_len {
+            return None;
+        }
+        let payload = buf.get(header_len..size)?;
+        buf = &buf[size..];
+        Some((box_type, payload))
+    })
+}
+
+/// Read a big-endian HEIF item ID at `offset`: u16, or u32 when `wide`.
+fn heif_item_id(buf: &[u8], offset: usize, wide: bool) -> Option<u32> {
+    if wide {
+        let id = buf.get(offset..offset + 4)?;
+        Some(u32::from_be_bytes([id[0], id[1], id[2], id[3]]))
+    } else {
+        let id = buf.get(offset..offset + 2)?;
+        Some(u32::from(u16::from_be_bytes([id[0], id[1]])))
+    }
+}
+
+/// True if a HEIF `meta` box payload declares its primary image as a `grid`
+/// derived item — the layout iPhones use for every photo.
+///
+/// Walks `meta` → `pitm` for the primary item ID, then `meta` → `iinf` →
+/// `infe` for that item's `item_type`. Only `infe` version 2+ carries an
+/// item type, which is also the minimum version HEIF requires for `grid`
+/// items. A grid that is *not* the primary item is ignored: ffmpeg's stream
+/// selection follows `pitm`, so such files decode the same on every release.
+/// Without a `pitm` box any `grid` item counts.
+fn heif_meta_primary_item_is_grid(meta_payload: &[u8]) -> bool {
+    // `meta` is a FullBox: skip 4 bytes of version/flags.
+    let Some(children) = meta_payload.get(4..) else {
+        return false;
+    };
+    let mut primary_item: Option<u32> = None;
+    let mut iinf: Option<&[u8]> = None;
+    for (box_type, payload) in iso_bmff_boxes(children) {
+        match box_type {
+            // FullBox version 0 stores a u16 item_ID, version 1 a u32.
+            b"pitm" => {
+                primary_item = payload
+                    .first()
+                    .and_then(|version| heif_item_id(payload, 4, *version != 0));
+            }
+            b"iinf" => iinf = Some(payload),
+            _ => {}
+        }
+    }
+    let Some(iinf) = iinf else {
+        return false;
+    };
+    // `iinf` FullBox: version 0 uses a u16 entry count, later versions u32.
+    let entries_offset = match iinf.first() {
+        Some(0) => 6,
+        Some(_) => 8,
+        None => return false,
+    };
+    let Some(entries) = iinf.get(entries_offset..) else {
+        return false;
+    };
+    iso_bmff_boxes(entries).any(|(t, infe)| {
+        if t != b"infe" {
+            return false;
+        }
+        // FullBox version, then item_ID (u16 for v2, u32 for v3),
+        // item_protection_index (u16), item_type (4cc).
+        let (item_id, item_type_offset) = match infe.first() {
+            Some(2) => (heif_item_id(infe, 4, false), 8),
+            Some(3) => (heif_item_id(infe, 4, true), 10),
+            _ => return false,
+        };
+        primary_item.is_none_or(|primary| item_id == Some(primary))
+            && infe.get(item_type_offset..item_type_offset + 4) == Some(b"grid")
+    })
+}
+
+/// True if the HEIF at `path` stores its primary image as a tile grid.
+///
+/// Reads only top-level box headers plus the `meta` box payload (bounded by
+/// `HEIF_META_MAX_BYTES`), so this stays cheap even for multi-MB photos.
+/// Returns `Ok(false)` for files without a readable `meta` box — the
+/// transcode itself surfaces decode errors with a better message.
+fn heif_has_tile_grid(path: &std::path::Path) -> Result<bool, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("failed to open HEIC: {e}"))?;
+    let mut header = [0u8; 8];
+    loop {
+        if file.read_exact(&mut header).is_err() {
+            return Ok(false);
+        }
+        let mut header_len = 8u64;
+        let size = match u32::from_be_bytes([header[0], header[1], header[2], header[3]]) {
+            0 => return Ok(false), // box extends to EOF; only valid for a trailing `mdat`
+            1 => {
+                let mut large = [0u8; 8];
+                if file.read_exact(&mut large).is_err() {
+                    return Ok(false);
+                }
+                header_len = 16;
+                u64::from_be_bytes(large)
+            }
+            size => u64::from(size),
+        };
+        if size < header_len {
+            return Ok(false);
+        }
+        let payload_len = size - header_len;
+        if &header[4..8] == b"meta" {
+            if payload_len > HEIF_META_MAX_BYTES {
+                return Ok(false);
+            }
+            let mut payload = Vec::new();
+            if (&mut file)
+                .take(payload_len)
+                .read_to_end(&mut payload)
+                .is_err()
+            {
+                return Ok(false);
+            }
+            return Ok(heif_meta_primary_item_is_grid(&payload));
+        }
+        let Ok(skip) = i64::try_from(payload_len) else {
+            return Ok(false);
+        };
+        if file.seek(SeekFrom::Current(skip)).is_err() {
+            return Ok(false);
+        }
+    }
+}
+
+/// Parse `(major, minor)` from the first line of `ffmpeg -version`.
+///
+/// Accepts release tags (`ffmpeg version 8.1.3-static`, `n7.1.5-12-g…`,
+/// `7.1.1-1ubuntu1`) and returns `None` for git snapshots (`N-121557-g…`,
+/// `2026-01-15-git-…`) whose feature set cannot be inferred from the string.
+fn parse_ffmpeg_version(version_output: &str) -> Option<(u32, u32)> {
+    let first_line = version_output.lines().next()?;
+    let token = first_line
+        .strip_prefix("ffmpeg version ")?
+        .split_whitespace()
+        .next()?;
+    let token = token.strip_prefix('n').unwrap_or(token);
+    // Require `<digits>.<digits>` up front so date-stamped snapshots such as
+    // `2026-01-15-git-…` are not read as release 2026.1.
+    let (major, rest) = token.split_once('.')?;
+    let major = major.parse().ok()?;
+    let minor_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let minor = rest[..minor_len].parse().ok()?;
+    Some((major, minor))
+}
+
+/// Query the ffmpeg binary's `(major, minor)` release version.
+fn ffmpeg_version(ffmpeg: &std::path::Path) -> Option<(u32, u32)> {
+    let output = ffmpeg_command(ffmpeg)
+        .arg("-version")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_ffmpeg_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Output options for the HEIC → JPEG transcode. Must not contain `-map`:
+/// see `transcode_heic_to_jpeg`.
+const HEIC_OUTPUT_ARGS: &[&str] = &["-map_metadata", "-1", "-frames:v", "1", "-q:v", "2"];
+
+/// Refuse to transcode a tile-grid HEIF with an ffmpeg that would silently
+/// emit a single tile.
+///
+/// `version` is `None` when the release could not be determined; that is
+/// treated as unsupported so a mis-detected build never produces a cropped
+/// upload without telling the user why.
+fn check_heif_tile_grid_support(version: Option<(u32, u32)>) -> Result<(), String> {
+    let (min_major, min_minor) = HEIF_TILE_GRID_MIN_FFMPEG;
+    let found = match version {
+        Some(v) if v >= HEIF_TILE_GRID_MIN_FFMPEG => return Ok(()),
+        Some((major, minor)) => format!("found {major}.{minor}"),
+        None => "could not determine the installed version".to_string(),
+    };
+    Err(format!(
+        "This HEIC is stored as a tile grid (typical for iPhone photos), which needs \
+         ffmpeg {min_major}.{min_minor} or newer to convert without cropping it to a \
+         single tile ({found}).\n\n\
+         Upgrade it:\n  \
+         macOS:   brew upgrade ffmpeg\n  \
+         Linux:   https://ffmpeg.org/download.html\n  \
+         Windows: winget upgrade ffmpeg"
+    ))
+}
+
 /// Maximum wall-clock time for an ffmpeg transcode before we kill it.
 /// 10 minutes is generous for any reasonable video; pathological inputs
 /// (crafted to cause exponential decode time) get killed instead of
@@ -362,14 +579,23 @@ pub(super) fn transcode_voice_note_to_mp4_with_cancellation(
 /// as-is render blank in the composer and are unviewable for everyone. This
 /// normalizes them to JPEG (the same fix mobile applies before upload).
 ///
-/// Uses `-frames:v 1` so multi-image HEIF containers (Live Photos, bursts)
-/// yield a single still, and `-q:v 2` for high JPEG quality. Returns the path
-/// to a temp file. Caller must clean up.
+/// Deliberately passes no `-map`: iPhone HEICs store the photo as a grid of
+/// 512×512 HEVC tiles, each exposed by ffmpeg as its own video stream, and
+/// `-map 0:v:0` would select only the first tile. Left to its own stream
+/// selection ffmpeg (≥ 8.1) picks the tile-grid group and assembles the full
+/// image; older builds are refused up front for tiled inputs rather than
+/// uploading one tile. Uses `-frames:v 1` so multi-image HEIF containers
+/// (Live Photos, bursts) yield a single still, and `-q:v 2` for high JPEG
+/// quality. Returns the path to a temp file. Caller must clean up.
 fn transcode_heic_to_jpeg(
     source: &std::path::Path,
     ffmpeg: &std::path::Path,
     cancellation: Option<&CancellationToken>,
 ) -> Result<std::path::PathBuf, String> {
+    if heif_has_tile_grid(source)? {
+        check_heif_tile_grid_support(ffmpeg_version(ffmpeg))?;
+    }
+
     // UUID-based temp path — unique across concurrent uploads.
     let output = std::env::temp_dir().join(format!("buzz-heic-{}.jpg", uuid::Uuid::new_v4()));
 
@@ -388,16 +614,7 @@ fn transcode_heic_to_jpeg(
             ]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
-            .args([
-                "-map",
-                "0:v:0",
-                "-map_metadata",
-                "-1",
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-            ])
+            .args(HEIC_OUTPUT_ARGS)
             .arg(&output)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()),
@@ -844,5 +1061,313 @@ mod tests {
         let _ = std::fs::remove_file(&heic_path);
         assert!(jpeg.len() > 2, "empty jpeg output");
         assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "output is not a JPEG");
+    }
+
+    /// Serialize an ISO-BMFF box with a 32-bit size header.
+    fn bmff_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(payload.len() + 8).expect("box fits u32");
+        let mut buf = size.to_be_bytes().to_vec();
+        buf.extend_from_slice(box_type);
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// Serialize an ISO-BMFF box with a 64-bit `largesize` header.
+    fn bmff_large_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut buf = 1u32.to_be_bytes().to_vec();
+        buf.extend_from_slice(box_type);
+        buf.extend_from_slice(&(payload.len() as u64 + 16).to_be_bytes());
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// `infe` version 2 entry: item_ID, protection index, item_type, empty name.
+    fn infe_v2(item_id: u16, item_type: &[u8; 4]) -> Vec<u8> {
+        let mut payload = vec![2, 0, 0, 0];
+        payload.extend_from_slice(&item_id.to_be_bytes());
+        payload.extend_from_slice(&0u16.to_be_bytes());
+        payload.extend_from_slice(item_type);
+        payload.push(0);
+        bmff_box(b"infe", &payload)
+    }
+
+    /// `meta` box (version 0) with `pitm` naming the 1-based `primary` entry
+    /// of `item_types` (IDs are assigned 1, 2, 3, …) and an `iinf` listing them.
+    fn meta_box(primary: Option<u16>, item_types: &[&[u8; 4]]) -> Vec<u8> {
+        let mut iinf = vec![0, 0, 0, 0];
+        iinf.extend_from_slice(&(item_types.len() as u16).to_be_bytes());
+        for (i, item_type) in item_types.iter().enumerate() {
+            iinf.extend(infe_v2(i as u16 + 1, item_type));
+        }
+        let mut meta = vec![0, 0, 0, 0];
+        meta.extend(bmff_box(b"hdlr", &[0; 20]));
+        if let Some(primary) = primary {
+            let mut pitm = vec![0, 0, 0, 0];
+            pitm.extend_from_slice(&primary.to_be_bytes());
+            meta.extend(bmff_box(b"pitm", &pitm));
+        }
+        meta.extend(bmff_box(b"iinf", &iinf));
+        bmff_box(b"meta", &meta)
+    }
+
+    /// iPhone-style item layout: 48 HEVC tiles behind one `grid` primary item.
+    fn iphone_grid_items() -> Vec<&'static [u8; 4]> {
+        let mut items: Vec<&'static [u8; 4]> = vec![b"grid"];
+        items.extend(std::iter::repeat_n(b"hvc1", 48));
+        items.push(b"Exif");
+        items
+    }
+
+    /// Synthetic iPhone-style HEIC: `ftyp`, `meta` with a primary `grid`, `mdat`.
+    fn iphone_grid_heic() -> Vec<u8> {
+        let mut heic = ftyp_box(b"heic", &[b"mif1"]);
+        heic[3] = 20;
+        heic.extend(meta_box(Some(1), &iphone_grid_items()));
+        heic.extend(bmff_box(b"mdat", &[0xAB; 100]));
+        heic
+    }
+
+    /// Synthetic single-image HEIC with no derived items.
+    fn single_image_heic() -> Vec<u8> {
+        let mut heic = ftyp_box(b"heic", &[b"mif1"]);
+        heic[3] = 20;
+        heic.extend(meta_box(Some(1), &[b"hvc1", b"Exif"]));
+        heic.extend(bmff_box(b"mdat", &[0xAB; 100]));
+        heic
+    }
+
+    #[test]
+    fn test_heif_meta_primary_item_is_grid() {
+        let grid = meta_box(Some(1), &iphone_grid_items());
+        assert!(heif_meta_primary_item_is_grid(&grid[8..]));
+
+        let single = meta_box(Some(1), &[b"hvc1", b"Exif"]);
+        assert!(!heif_meta_primary_item_is_grid(&single[8..]));
+
+        // A grid that is only an alternate (primary is a plain image) decodes
+        // identically on every ffmpeg, so it must not trip the gate.
+        let alternate = meta_box(Some(2), &[b"grid", b"hvc1", b"hvc1"]);
+        assert!(!heif_meta_primary_item_is_grid(&alternate[8..]));
+
+        // No `pitm`: fall back to "any grid item".
+        let no_pitm = meta_box(None, &[b"hvc1", b"grid"]);
+        assert!(heif_meta_primary_item_is_grid(&no_pitm[8..]));
+
+        assert!(!heif_meta_primary_item_is_grid(&[]));
+        assert!(!heif_meta_primary_item_is_grid(&grid[8..grid.len() / 2]));
+    }
+
+    #[test]
+    fn test_heif_meta_primary_item_is_grid_wide_ids() {
+        // `pitm` version 1 (u32 item_ID), `iinf` version 1 (u32 count),
+        // `infe` version 3 (u32 item_ID).
+        let mut infe = vec![3, 0, 0, 0];
+        infe.extend_from_slice(&70_000u32.to_be_bytes());
+        infe.extend_from_slice(&0u16.to_be_bytes());
+        infe.extend_from_slice(b"grid");
+        infe.push(0);
+        let mut iinf = vec![1, 0, 0, 0];
+        iinf.extend_from_slice(&1u32.to_be_bytes());
+        iinf.extend(bmff_box(b"infe", &infe));
+        let mut pitm = vec![1, 0, 0, 0];
+        pitm.extend_from_slice(&70_000u32.to_be_bytes());
+        let mut meta = vec![0, 0, 0, 0];
+        meta.extend(bmff_box(b"pitm", &pitm));
+        meta.extend(bmff_box(b"iinf", &iinf));
+        assert!(heif_meta_primary_item_is_grid(&meta));
+
+        let mut other_primary = vec![1, 0, 0, 0];
+        other_primary.extend_from_slice(&70_001u32.to_be_bytes());
+        let mut meta = vec![0, 0, 0, 0];
+        meta.extend(bmff_box(b"pitm", &other_primary));
+        meta.extend(bmff_box(b"iinf", &iinf));
+        assert!(!heif_meta_primary_item_is_grid(&meta));
+    }
+
+    #[test]
+    fn test_heif_has_tile_grid_walks_top_level_boxes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("buzz-test-{}.heic", uuid::Uuid::new_v4()));
+
+        // ftyp, then a largesize mdat *before* meta (exercises the seek path),
+        // then meta with a grid, then a size-0 (to EOF) mdat.
+        let mut file = ftyp_box(b"heic", &[b"mif1"]);
+        file[3] = 20;
+        file.extend(bmff_large_box(b"mdat", &[0xAB; 100]));
+        file.extend(meta_box(Some(1), &iphone_grid_items()));
+        file.extend([0, 0, 0, 0]);
+        file.extend_from_slice(b"mdat");
+        file.extend([0xCD; 50]);
+        std::fs::write(&path, &file).expect("write grid fixture");
+        assert!(is_heic_file(&file));
+        assert_eq!(heif_has_tile_grid(&path), Ok(true));
+
+        let grid = iphone_grid_heic();
+        std::fs::write(&path, &grid).expect("write grid fixture");
+        assert!(is_heic_file(&grid));
+        assert_eq!(heif_has_tile_grid(&path), Ok(true));
+
+        std::fs::write(&path, single_image_heic()).expect("write single fixture");
+        assert_eq!(heif_has_tile_grid(&path), Ok(false));
+
+        std::fs::write(&path, b"\xFF\xD8\xFF\xE0").expect("write junk");
+        assert_eq!(heif_has_tile_grid(&path), Ok(false));
+        let _ = std::fs::remove_file(&path);
+
+        assert!(heif_has_tile_grid(&dir.join("buzz-test-missing.heic")).is_err());
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_version() {
+        let cases = [
+            (
+                "ffmpeg version 8.1.3-static https://johnvansickle.com/ffmpeg/",
+                Some((8, 1)),
+            ),
+            (
+                "ffmpeg version n7.1.5-12-g1fdbca85aa-20260731 Copyright",
+                Some((7, 1)),
+            ),
+            (
+                "ffmpeg version 7.1.1-1ubuntu1 Copyright (c) 2000-2025",
+                Some((7, 1)),
+            ),
+            (
+                "ffmpeg version 8.0 Copyright (c) 2000-2025 the FFmpeg developers",
+                Some((8, 0)),
+            ),
+            (
+                "ffmpeg version 8.1-full_build-www.gyan.dev Copyright",
+                Some((8, 1)),
+            ),
+            ("ffmpeg version 10.0.1 Copyright", Some((10, 0))),
+            (
+                "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright",
+                Some((4, 4)),
+            ),
+            (
+                "ffmpeg version N-121557-gc0f65ff9c3-20260115 Copyright",
+                None,
+            ),
+            ("ffmpeg version 2026-01-15-git-abcdef1234-full_build", None),
+            ("", None),
+            ("ffprobe version 8.1.3", None),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(parse_ffmpeg_version(line), expected, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn test_check_heif_tile_grid_support() {
+        assert_eq!(check_heif_tile_grid_support(Some((8, 1))), Ok(()));
+        assert_eq!(check_heif_tile_grid_support(Some((9, 0))), Ok(()));
+        assert_eq!(check_heif_tile_grid_support(Some((10, 0))), Ok(()));
+        for version in [Some((8, 0)), Some((7, 1)), Some((4, 4)), None] {
+            let err =
+                check_heif_tile_grid_support(version).expect_err("tile grids need ffmpeg 8.1+");
+            assert!(err.contains("ffmpeg 8.1"), "{err}");
+            assert!(err.contains("tile grid"), "{err}");
+        }
+        assert!(check_heif_tile_grid_support(Some((7, 1)))
+            .expect_err("7.1 is too old")
+            .contains("found 7.1"));
+    }
+
+    #[test]
+    fn test_heic_output_args_do_not_pin_first_tile_stream() {
+        // `-map 0:v:0` selects the first 512×512 tile of an iPhone HEIC instead
+        // of the assembled grid; stream selection must be left to ffmpeg.
+        assert!(!HEIC_OUTPUT_ARGS.contains(&"-map"), "{HEIC_OUTPUT_ARGS:?}");
+        assert!(
+            HEIC_OUTPUT_ARGS.contains(&"-frames:v"),
+            "{HEIC_OUTPUT_ARGS:?}"
+        );
+    }
+
+    /// Drive `transcode_heic_to_jpeg` against a stub ffmpeg that reports a
+    /// configurable version and records the arguments of any transcode call.
+    #[cfg(unix)]
+    fn run_heic_transcode_with_stub_ffmpeg(
+        version_line: &str,
+        heic: &[u8],
+    ) -> (Result<std::path::PathBuf, String>, Option<String>) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir();
+        let stub = dir.join(format!("buzz-test-ffmpeg-{id}.sh"));
+        let args_log = dir.join(format!("buzz-test-ffmpeg-{id}.args"));
+        let heic_path = dir.join(format!("buzz-test-{id}.heic"));
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = -version ]; then echo '{version_line}'; exit 0; fi\n\
+                 printf '%s\\n' \"$@\" > '{}'\nexit 1\n",
+                args_log.display()
+            ),
+        )
+        .expect("write stub ffmpeg");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub ffmpeg");
+        std::fs::write(&heic_path, heic).expect("write heic fixture");
+
+        let result = transcode_heic_to_jpeg(&heic_path, &stub, None);
+        let recorded = std::fs::read_to_string(&args_log).ok();
+
+        let _ = std::fs::remove_file(&stub);
+        let _ = std::fs::remove_file(&args_log);
+        let _ = std::fs::remove_file(&heic_path);
+        (result, recorded)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_transcode_heic_refuses_tile_grid_on_old_ffmpeg() {
+        let grid = iphone_grid_heic();
+
+        let (result, recorded) =
+            run_heic_transcode_with_stub_ffmpeg("ffmpeg version 7.1.1-1ubuntu1", &grid);
+        let err = result.expect_err("tiled HEIC on ffmpeg 7.1 must not transcode");
+        assert!(err.contains("ffmpeg 8.1"), "{err}");
+        assert!(
+            recorded.is_none(),
+            "ffmpeg was invoked despite the version gate: {recorded:?}"
+        );
+
+        let (result, recorded) =
+            run_heic_transcode_with_stub_ffmpeg("ffmpeg version N-121557-gc0f65ff9c3", &grid);
+        assert!(
+            result.is_err() && recorded.is_none(),
+            "unknown version must be refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_transcode_heic_lets_ffmpeg_select_tile_grid_stream() {
+        let grid = iphone_grid_heic();
+
+        let (result, recorded) =
+            run_heic_transcode_with_stub_ffmpeg("ffmpeg version 8.1.3-static", &grid);
+        // The stub exits non-zero, so the transcode reports failure — what
+        // matters is that it ran, and with which arguments.
+        assert!(result.is_err());
+        let recorded = recorded.expect("ffmpeg 8.1 should be invoked for a tiled HEIC");
+        let args: Vec<&str> = recorded.lines().collect();
+        assert!(
+            !args.contains(&"-map"),
+            "explicit -map pins one tile: {args:?}"
+        );
+        assert!(args.contains(&"-frames:v"), "{args:?}");
+        assert!(args.contains(&"-map_metadata"), "{args:?}");
+
+        // Non-tiled HEICs skip the version gate entirely.
+        let (_, recorded) =
+            run_heic_transcode_with_stub_ffmpeg("ffmpeg version 7.1.1", &single_image_heic());
+        assert!(
+            recorded.is_some(),
+            "single-image HEIC must still transcode on ffmpeg 7.1"
+        );
     }
 }
