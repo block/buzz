@@ -37,6 +37,34 @@ export const THREAD_PREFIX = "thread:";
 
 const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
 
+// How far ahead of this machine's clock a read marker may plausibly land.
+// This is the desktop read-state policy, not the relay's message acceptance
+// bound. A future marker can hide later messages until this clock catches up.
+// The tolerance permits small clock differences between devices; reconciling
+// it with relay-accepted timestamps and slow local clocks remains separate.
+export const MAX_READ_MARKER_SKEW_SECONDS = 120;
+
+export function nowUnixSeconds(): number {
+  return Math.floor(Date.now() / 1_000);
+}
+
+/**
+ * Whether a read marker at `unixSeconds` could have been written by a clock
+ * this one agrees with.
+ *
+ * The single skew policy for read state. Every route a marker can enter by
+ * consults it, because read markers are monotonic and persisted: a marker
+ * accepted once from a live event, from local storage, or from an NIP-RS
+ * event synced by another (possibly unpatched) desktop stays effective, and
+ * a year-ahead one is unrecoverable from the UI.
+ */
+export function isPlausibleReadMarker(
+  unixSeconds: number,
+  now: number = nowUnixSeconds(),
+): boolean {
+  return unixSeconds <= now + MAX_READ_MARKER_SKEW_SECONDS;
+}
+
 export function maxReadAt(...markers: Array<number | null>): number | null {
   return markers.reduce<number | null>((latest, marker) => {
     if (marker === null) return latest;
@@ -94,14 +122,26 @@ export function isValidBlob(obj: unknown): obj is ReadStateBlob {
   return true;
 }
 
+/**
+ * Validate a decrypted blob's context map.
+ *
+ * Implausible markers are dropped rather than clamped. Markers are monotonic
+ * and this blob may have been written by another desktop that predates the
+ * skew policy, so a year-ahead entry admitted here would silently mark every
+ * later message read and never expire. Dropping it restores the channel to
+ * unread, which the user can see and act on; clamping it to the present would
+ * assert a read position nobody ever reached.
+ */
 export function sanitizeContexts(
   contexts: Record<string, unknown>,
+  now: number = nowUnixSeconds(),
 ): Record<string, number> {
   const result: Record<string, number> = {};
   for (const [key, value] of Object.entries(contexts)) {
     if (new TextEncoder().encode(key).length > 256) continue;
     if (typeof value !== "number" || !Number.isInteger(value)) continue;
     if (value < 0 || value > 4294967295) continue;
+    if (!isPlausibleReadMarker(value, now)) continue;
     result[key] = value;
   }
   return result;
