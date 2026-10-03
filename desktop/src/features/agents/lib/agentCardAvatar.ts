@@ -8,8 +8,13 @@
 export function resolveAgentCardAvatarUrl(
   profileAvatarUrl: string | null | undefined,
   personaAvatarUrl: string | null | undefined,
+  managedAgentAvatarUrl?: string | null | undefined,
 ): string | null {
-  for (const candidate of [profileAvatarUrl, personaAvatarUrl]) {
+  for (const candidate of [
+    profileAvatarUrl,
+    managedAgentAvatarUrl,
+    personaAvatarUrl,
+  ]) {
     const trimmed = candidate?.trim();
     if (trimmed) return trimmed;
   }
