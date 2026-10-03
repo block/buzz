@@ -92,28 +92,30 @@ fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<Th
     thread_ref_from_parent_tags(parent_eid, event_id, &tags)
 }
 
-/// Resolve the channel UUID for an event by querying for it via POST /query.
-/// Extracts the `h` tag value from the returned event's tags.
+/// The channel an event says it belongs to: the first `h` tag whose value
+/// parses as a UUID.
+///
+/// Mirrors `buzz_sdk::extract_channel_id`, which is what the rest of the
+/// codebase reads an event's channel with — an `h` tag that is not a UUID is
+/// skipped rather than ending the search, so a garbage tag ahead of the real
+/// one does not hide it. (This path holds `serde_json::Value`, not
+/// `nostr::Event`, so the walk cannot be shared outright.)
+fn event_channel_id(event: &serde_json::Value) -> Option<Uuid> {
+    event.get("tags")?.as_array()?.iter().find_map(|tag| {
+        let tag = tag.as_array()?;
+        (tag.first()?.as_str()? == "h")
+            .then(|| Uuid::parse_str(tag.get(1)?.as_str()?).ok())
+            .flatten()
+    })
+}
+
+/// Resolve the channel UUID for an event from its tags.
 fn channel_id_from_event(event_id: &str, event: &serde_json::Value) -> Result<Uuid, CliError> {
-    let tags = event
-        .get("tags")
-        .and_then(|tags| tags.as_array())
-        .ok_or_else(|| CliError::Other("event missing 'tags' field".into()))?;
-    tags.iter()
-        .filter_map(|tag| tag.as_array())
-        .find(|tag| tag.first().and_then(|value| value.as_str()) == Some("h"))
-        .and_then(|tag| tag.get(1))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            CliError::Other(format!(
-                "event {event_id} has no h-tag — cannot determine channel"
-            ))
-        })
-        .and_then(|channel_id| {
-            Uuid::parse_str(channel_id).map_err(|_| {
-                CliError::Other(format!("event h-tag is not a valid UUID: {channel_id}"))
-            })
-        })
+    event_channel_id(event).ok_or_else(|| {
+        CliError::Other(format!(
+            "event {event_id} has no readable channel (h) tag — cannot determine channel"
+        ))
+    })
 }
 
 async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
@@ -400,10 +402,14 @@ pub fn resolve_thread_target(
     expected_root_id: Option<&str>,
     selected_event: &serde_json::Value,
 ) -> Result<String, CliError> {
-    let actual_channel_id = channel_id_from_event(event_id, selected_event)?;
+    let actual_channel_id = event_channel_id(selected_event).ok_or_else(|| {
+        CliError::Usage(format!(
+            "event {event_id} carries no readable channel (h) tag, so it cannot be shown as a thread in {expected_channel_id}"
+        ))
+    })?;
     if actual_channel_id != expected_channel_id {
         return Err(CliError::Usage(format!(
-            "event {event_id} does not belong to channel {expected_channel_id}"
+            "event belongs to a different channel: --channel is {expected_channel_id}, event {event_id} is in {actual_channel_id}"
         )));
     }
     let root_event_id = thread_ref_from_event(event_id, selected_event)?
@@ -426,7 +432,14 @@ pub async fn cmd_get_thread(
     depth_limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    // Canonicalize once. `Uuid::parse_str` accepts uppercase, braced and
+    // unhyphenated spellings, but `h` tags on the wire are lowercase
+    // hyphenated (NIP-PL `h_grammar: uuid-v4-lowercase`) — so the raw argument
+    // is the wrong thing to put in the filter as well as the wrong thing to
+    // compare with. Sending a non-canonical spelling matches no replies, which
+    // is the same "nobody answered" silence this command is fixing.
     let expected_channel_id = parse_uuid(channel_id)?;
+    let channel_id = expected_channel_id.hyphenated().to_string();
     validate_hex64(event_id)?;
     let selected_event = fetch_event(client, event_id).await?;
     let root_event_id = resolve_thread_target(
@@ -1887,5 +1900,101 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod thread_channel_tests {
+    use super::{event_channel_id, resolve_thread_target};
+    use uuid::Uuid;
+
+    const ROOT: &str = "0a9882747d0029df3fc9742b0755068a4ae24426b7e1f18cf44800409fdb437f";
+    const CHANNEL_A: &str = "2cf6cfd0-b917-4ea0-b2d8-a29dea949b77";
+    const CHANNEL_B: &str = "17c553b9-363f-461a-8f46-ae11f765ea3b";
+
+    fn uuid(s: &str) -> Uuid {
+        Uuid::parse_str(s).expect("test constant must be a UUID")
+    }
+
+    fn root_event(channel: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": ROOT,
+            "tags": [["h", channel], ["p", "abc"]],
+        })
+    }
+
+    #[test]
+    fn accepts_a_root_in_the_requested_channel() {
+        assert_eq!(
+            resolve_thread_target(uuid(CHANNEL_A), ROOT, None, &root_event(CHANNEL_A)).unwrap(),
+            ROOT
+        );
+    }
+
+    #[test]
+    fn rejects_a_root_from_another_channel() {
+        let err =
+            resolve_thread_target(uuid(CHANNEL_B), ROOT, None, &root_event(CHANNEL_A)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(CHANNEL_A),
+            "error must name the real channel: {msg}"
+        );
+        assert!(
+            msg.contains(CHANNEL_B),
+            "error must name the requested channel: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_channel_argument_that_differs_only_in_spelling() {
+        // `Uuid::parse_str` accepts these; the `h` tag is always lowercase
+        // hyphenated. Comparing the text would reject all three.
+        for spelling in [
+            CHANNEL_A.to_uppercase(),
+            CHANNEL_A.replace('-', ""),
+            format!("{{{CHANNEL_A}}}"),
+        ] {
+            assert!(
+                resolve_thread_target(uuid(&spelling), ROOT, None, &root_event(CHANNEL_A)).is_ok(),
+                "spelling {spelling} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_root_with_no_h_tag() {
+        let event = serde_json::json!({"id": ROOT, "tags": [["p", "abc"]]});
+        let err = resolve_thread_target(uuid(CHANNEL_A), ROOT, None, &event).unwrap_err();
+        assert!(
+            err.to_string().contains("no readable channel"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_root_whose_h_tag_is_not_a_uuid() {
+        let event = serde_json::json!({"id": ROOT, "tags": [["h", "not-a-uuid"]]});
+        assert!(resolve_thread_target(uuid(CHANNEL_A), ROOT, None, &event).is_err());
+    }
+
+    #[test]
+    fn skips_an_unparseable_h_tag_ahead_of_the_real_one() {
+        // `buzz_sdk::extract_channel_id` takes the first *parseable* `h`, not
+        // the first `h`; a junk tag ahead of the real one must not win.
+        let event = serde_json::json!({
+            "id": ROOT,
+            "tags": [["h", "not-a-uuid"], ["h", CHANNEL_A]],
+        });
+        assert_eq!(event_channel_id(&event), Some(uuid(CHANNEL_A)));
+        assert!(resolve_thread_target(uuid(CHANNEL_A), ROOT, None, &event).is_ok());
+    }
+
+    #[test]
+    fn reads_an_uppercase_h_tag_by_value() {
+        // Nothing on the wire should produce this, but an `h` tag written by a
+        // client that skipped canonicalization must not read as a mismatch.
+        let event = root_event(&CHANNEL_A.to_uppercase());
+        assert!(resolve_thread_target(uuid(CHANNEL_A), ROOT, None, &event).is_ok());
     }
 }
