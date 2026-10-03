@@ -744,6 +744,9 @@ fn test_upsert_observer_channel_index_non_null_is_idempotent() {
     let pk = "owner";
     let relay = "wss://r";
 
+    // The insert is gated on the canonical event existing (stale-backfill
+    // orphan race fix), so seed it first.
+    upsert_archived_event(&conn, pk, relay, "ev1", 24200, "agent", 1000, "{}", 0).unwrap();
     upsert_observer_channel_index(&conn, pk, relay, "ev1", Some("ch-abc"), 1000).unwrap();
     // Second call with same PK → INSERT OR IGNORE, no error, row unchanged.
     upsert_observer_channel_index(&conn, pk, relay, "ev1", Some("ch-abc"), 2000).unwrap();
@@ -775,6 +778,8 @@ fn test_upsert_observer_channel_index_null_channel_id_is_idempotent() {
     let relay = "wss://r";
 
     // Write a NULL channel_id status row (unscoped / decrypt-failed frame).
+    // Gated on the canonical event existing, so seed it first.
+    upsert_archived_event(&conn, pk, relay, "ev-null", 24200, "agent", 500, "{}", 0).unwrap();
     upsert_observer_channel_index(&conn, pk, relay, "ev-null", None, 500).unwrap();
     // Re-run → no-op.
     upsert_observer_channel_index(&conn, pk, relay, "ev-null", None, 600).unwrap();
