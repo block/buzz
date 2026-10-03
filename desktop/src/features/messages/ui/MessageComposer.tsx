@@ -1,16 +1,10 @@
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
-import {
-  useChannelLinks,
-  type ChannelSuggestion,
-} from "@/features/messages/lib/useChannelLinks";
+import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
-import {
-  useEmojiAutocomplete,
-  type EmojiSuggestion,
-} from "@/features/messages/lib/useEmojiAutocomplete";
+import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import {
   findSpoileredImetaMediaUrls,
@@ -66,6 +60,7 @@ import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPrevi
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { useAddressedAgentMentionRestore } from "./useAddressedAgentMentionRestore";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
+import { useComposerInsertionActions } from "@/features/messages/lib/useComposerInsertionActions";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
   audienceContext = null,
@@ -484,28 +479,21 @@ function MessageComposerImpl({
     restoreAddressedAgentMentions();
   }, [audienceScope, editTarget, restoreAddressedAgentMentions]);
   syncAddressedAgentsFromTextRef.current = syncAddressedAgentsFromText;
-  const applyChannelInsert = React.useCallback(
-    (suggestion: ChannelSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(channelLinks.insertChannel(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      channelLinks.insertChannel,
-      richText.getPlainTextAndCursor,
-    ],
-  );
-  const applyEmojiInsert = React.useCallback(
-    (suggestion: EmojiSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(emojiAutocomplete.insertEmoji(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      emojiAutocomplete.insertEmoji,
-      richText.getPlainTextAndCursor,
-    ],
-  );
+  const {
+    applyChannelInsert,
+    applyEmojiInsert,
+    insertSkill,
+    skillAgentDisplayName,
+    skills,
+  } = useComposerInsertionActions({
+    addressedAgents: lockedAgents,
+    applyAutocompleteEdit,
+    channelId,
+    enabled: editTarget == null,
+    getPlainTextAndCursor: richText.getPlainTextAndCursor,
+    insertChannel: channelLinks.insertChannel,
+    insertEmoji: emojiAutocomplete.insertEmoji,
+  });
   // ── Emoji insertion ─────────────────────────────────────────────────
   const insertEmoji = React.useCallback(
     (emoji: string) => {
@@ -984,9 +972,13 @@ function MessageComposerImpl({
               onFinishVoiceNote={() => void voiceNote.finish()}
               onVoiceNote={voiceNote.toggle}
               onRemoveAddressedAgent={removeAddressedAgent}
+              onSkillPickerClose={richText.focusPreserve}
+              onSkillSelect={insertSkill}
               pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
               sendDisabled={sendDisabled}
               shakeVersionByPubkey={addressPulse.shakeVersionByPubkey}
+              skillAgentDisplayName={skillAgentDisplayName}
+              skills={skills}
             />
           </form>
         </div>
