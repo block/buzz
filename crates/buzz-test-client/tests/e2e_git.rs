@@ -2,10 +2,10 @@
 //!
 //! Drives the real `git` binary (clone / push / fetch / force-push / tag,
 //! plus a best-effort concurrent push race) against a running relay backed by
-//! S3/MinIO, exercising the full manifest-pointer CAS commit path described in
+//! S3/RustFS, exercising the full manifest-pointer CAS commit path described in
 //! `docs/git-on-object-storage.md`.
 //!
-//! Requires: relay at localhost:3000 with git + S3/MinIO configured, `git` on
+//! Requires: relay at localhost:3000 with git + S3/RustFS configured, `git` on
 //! PATH, and the `git-credential-nostr` helper built. All tests are `#[ignore]`
 //! so they don't run in CI by default.
 //!
@@ -161,7 +161,7 @@ impl GitS3Probe {
     fn from_env() -> Self {
         // These E2E assertions inspect the relay's backing bucket directly, so
         // they must receive the same provider connection and URL style as the
-        // relay. Unit/live MinIO probes in buzz-relay keep explicit local
+        // relay. Unit/live RustFS probes in buzz-relay keep explicit local
         // fixtures and do not need provider overrides.
         let endpoint = std::env::var("BUZZ_S3_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9000".to_string());
@@ -266,7 +266,7 @@ fn git_s3_probe_builds_both_addressing_styles() {
 }
 
 #[tokio::test]
-#[ignore = "requires live relay + MinIO + git"]
+#[ignore = "requires live relay + RustFS + git"]
 async fn git_clone_push_fetch_force_roundtrip() {
     use nostr::ToBech32;
 
@@ -409,7 +409,7 @@ async fn git_clone_push_fetch_force_roundtrip() {
 }
 
 #[tokio::test]
-#[ignore = "requires live relay + MinIO + git"]
+#[ignore = "requires live relay + RustFS + git"]
 async fn git_concurrent_push_one_wins_and_repo_recovers() {
     use nostr::ToBech32;
 

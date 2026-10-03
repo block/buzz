@@ -36,17 +36,24 @@ keypair.
   `buzz-admin migrate` before starting the relay when bootstrapping a fresh
   database. Auto-migration requires an image that includes embedded SQLx
   migrations.
-- The stack uses Postgres, Redis, MinIO, and a git data volume because
+- The stack uses Postgres, Redis, RustFS, and a git data volume because
   those are real Buzz dependencies today. Minimal mode can simplify this later.
 - Mobile push remains off by default. To use the public gateway, keep the
   template's explicit `BUZZ_PUSH_GATEWAY_DELIVERY_URL` and set
   `BUZZ_PUSH_ENABLED=true`. To use another gateway, replace the exact HTTPS
   `/v1/deliveries/apns` URL before enabling push.
-- The bundled Compose stack fixes the relay endpoint to `http://minio:9000` and
-  `BUZZ_S3_ADDRESSING_STYLE=path`: Docker DNS resolves `minio`, not
-  `<bucket>.minio`. It is not configurable for an external S3 provider through
+- The bundled Compose stack fixes the relay endpoint to `http://rustfs:9000` and
+  `BUZZ_S3_ADDRESSING_STYLE=path`: Docker DNS resolves `rustfs`, not
+  `<bucket>.rustfs`. It is not configurable for an external S3 provider through
   `.env`; use the Helm chart or a custom Compose configuration for providers
   such as new Railway Storage Buckets that require `virtual` addressing.
+- The bundled Compose stack uses RustFS. The Helm quickstart remains the
+  separate MinIO option, and external S3 providers require the Helm chart or a
+  custom Compose configuration. The pinned RustFS build is not validated here
+  for direct reuse of a MinIO data directory: existing MinIO deployments must
+  migrate objects through the S3 API and verify a backup before switching;
+  `./run.sh start`, `restart`, and `upgrade` refuse to create the new RustFS
+  volume automatically while only the legacy MinIO volume exists.
 
 Run `./run.sh backup-hint` for the backup checklist.
 

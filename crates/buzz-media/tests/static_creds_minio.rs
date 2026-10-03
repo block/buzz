@@ -6,17 +6,17 @@
 //! exists to prove that adding the IRSA/credential-chain fallback did **not**
 //! regress hardcoded credentials.
 //!
-//! Run it against the docker-compose MinIO (creds `buzz_dev`/`buzz_dev_secret`,
+//! Run it against the docker-compose RustFS (creds `buzz_dev`/`buzz_dev_secret`,
 //! bucket `buzz-media`, endpoint `http://localhost:9000`):
 //!
 //! ```bash
-//! docker compose up -d minio minio-init
+//! docker compose up -d rustfs rustfs-init
 //! cargo test -p buzz-media --test static_creds_minio -- --ignored
 //! ```
 //!
 //! Overridable via `BUZZ_S3_ENDPOINT` / `BUZZ_S3_ACCESS_KEY` /
 //! `BUZZ_S3_SECRET_KEY` / `BUZZ_S3_BUCKET` / `BUZZ_S3_REGION` /
-//! `BUZZ_S3_ADDRESSING_STYLE`. The default remains `path` for MinIO.
+//! `BUZZ_S3_ADDRESSING_STYLE`. The default remains `path` for RustFS.
 
 use buzz_media::config::MediaConfig;
 use buzz_media::storage::MediaStorage;
@@ -47,7 +47,7 @@ fn minio_config() -> MediaConfig {
 }
 
 #[tokio::test]
-#[ignore = "requires a live MinIO (docker compose up -d minio minio-init)"]
+#[ignore = "requires a live RustFS (docker compose up -d rustfs rustfs-init)"]
 async fn static_creds_round_trip_against_minio() {
     let storage =
         MediaStorage::new(&minio_config()).expect("static creds should build a storage client");

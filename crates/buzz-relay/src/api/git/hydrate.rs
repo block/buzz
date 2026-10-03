@@ -577,7 +577,7 @@ mod tests {
         assert!(hydrated.path().starts_with(scratch.path()));
     }
 
-    // -------- Live MinIO + real git roundtrip ----------------------------------
+    // -------- Live RustFS + real git roundtrip ---------------------------------
     //
     // Run manually:
     //   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
@@ -596,7 +596,7 @@ mod tests {
             "us-east-1",
             buzz_media::config::S3AddressingStyle::Path,
         )
-        .expect("connect local MinIO")
+        .expect("connect local RustFS")
     }
 
     /// Build a tiny on-disk repo, return (pack bytes, head_oid).

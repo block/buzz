@@ -12,7 +12,7 @@
 #     compose project : buzz-harness
 #     postgres        : localhost:5471  (db=buzz, user=buzz, pass=buzz_dev)
 #     redis           : localhost:6471
-#     minio           : localhost:9471 (console 9472)
+#     RustFS          : localhost:9471 (console 9472)
 #     relay main      : localhost:3030   ← BUZZ_E2E_RELAY_URL=http://localhost:3030
 #     relay health    : localhost:8088
 #     relay metrics   : localhost:9202
@@ -57,7 +57,7 @@ COMPOSE_FILE="docker-compose.harness.yml"
 # evaperf :5470/:6470/:9470/:3170 stack).
 PG_PORT=5471
 REDIS_PORT=6471
-MINIO_PORT=9471
+RUSTFS_PORT=9471
 RELAY_MAIN=3030
 RELAY_HEALTH=8088
 RELAY_METRICS=9202
@@ -83,6 +83,29 @@ wait_pg() {
   err "Postgres did not become ready"; return 1
 }
 wait_pg
+
+wait_rustfs_init() {
+  local container status exit_code
+  for _ in $(seq 1 60); do
+    container="$(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" ps -a -q rustfs-init 2>/dev/null || true)"
+    status="$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || true)"
+    if [[ "${status}" == "exited" ]]; then
+      exit_code="$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || true)"
+      if [[ "${exit_code}" == "0" ]]; then
+        ok "RustFS bucket initialization completed"
+        return 0
+      fi
+      err "RustFS bucket initialization failed with exit code ${exit_code}"
+      docker logs "${container}" || true
+      return 1
+    fi
+    sleep 2
+  done
+  err "RustFS bucket initialization did not complete"
+  docker logs "${container}" || true
+  return 1
+}
+wait_rustfs_init
 
 # ── Schema + partitions ──────────────────────────────────────────────────────
 export PGPASSWORD=buzz_dev
@@ -148,7 +171,7 @@ tmux new-session -d -s "${TMUX_SESSION}" "cd '${REPO_ROOT}' && env \
   BUZZ_BIND_ADDR=0.0.0.0:${RELAY_MAIN} \
   BUZZ_HEALTH_PORT=${RELAY_HEALTH} \
   BUZZ_METRICS_PORT=${RELAY_METRICS} \
-  BUZZ_S3_ENDPOINT=http://localhost:${MINIO_PORT} \
+  BUZZ_S3_ENDPOINT=http://localhost:${RUSTFS_PORT} \
   BUZZ_S3_ACCESS_KEY=buzz_dev \
   BUZZ_S3_SECRET_KEY=buzz_dev_secret \
   BUZZ_S3_BUCKET=buzz-media \

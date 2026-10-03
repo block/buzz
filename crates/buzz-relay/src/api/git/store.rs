@@ -172,15 +172,15 @@ pub struct GitStore {
 }
 
 impl GitStore {
-    /// Build a client against an S3-compatible endpoint (e.g. MinIO).
+    /// Build a client against an S3-compatible endpoint (e.g. RustFS).
     ///
     /// `addressing_style` is shared with media storage so both paths sign and
-    /// route requests consistently. Path style supports the bundled MinIO DNS;
+    /// route requests consistently. Path style supports the bundled RustFS DNS;
     /// virtual-hosted style supports standard S3 and providers such as Railway.
     ///
     /// Credential selection mirrors [`buzz_media::MediaStorage::new`]:
     /// - both `access_key` and `secret_key` non-empty → static credentials
-    ///   (MinIO/local/dev, or any static-key deployment);
+    ///   (local/dev, or any static-key deployment);
     /// - both empty → the AWS default credential chain via
     ///   [`Credentials::default`] (env, profile, web-identity/IRSA, container,
     ///   instance metadata), so the relay can use its pod IAM role;
@@ -1024,7 +1024,7 @@ mod probe {
     //!   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
     //!     api::git::store::probe -- --nocapture --test-threads=1
     //!
-    //! Pre-req: `docker compose up minio` and the `buzz-git` bucket exists.
+    //! Pre-req: `docker compose up rustfs` and the `buzz-git` bucket exists.
 
     use super::*;
 
@@ -1035,7 +1035,7 @@ mod probe {
     fn store() -> GitStore {
         // This is the dedicated backend conformance path, so all connection and
         // signing inputs are overridable for a real provider such as Railway.
-        // The hydrate/CAS live tests use explicit local MinIO fixtures instead.
+        // The hydrate/CAS live tests use explicit local RustFS fixtures instead.
         let endpoint =
             std::env::var("BUZZ_S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into());
         let access_key = std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_else(|_| "buzz_dev".into());
@@ -1067,7 +1067,7 @@ mod probe {
     #[tokio::test]
     async fn probe_412_surfacing() {
         if !probe_enabled() {
-            eprintln!("skipping: set BUZZ_GIT_S3_PROBE=1 to run against live MinIO");
+            eprintln!("skipping: set BUZZ_GIT_S3_PROBE=1 to run against live RustFS");
             return;
         }
         let st = store();
@@ -1142,9 +1142,9 @@ mod probe {
         assert_eq!(r, CasOutcome::LostRace, "second INM* must lose");
 
         // Chain CAS directly on the PUT-returned ETag (no HEAD round-trip).
-        // MinIO returns the ETag in the PUT response; this proves callers can
+        // RustFS returns the ETag in the PUT response; this proves callers can
         // chain `Won → IfMatch → Won` without re-reading the pointer.
-        assert!(!e1.0.is_empty(), "MinIO should populate PUT response ETag");
+        assert!(!e1.0.is_empty(), "RustFS should populate PUT response ETag");
         let p2 = br#"{"manifest":"d2"}"#;
         let r = st
             .put_pointer(&pkey, p2, Precond::IfMatch(e1.clone()))
@@ -1171,7 +1171,7 @@ mod probe {
         let _ = st.bucket.delete_object(&key).await;
     }
 
-    /// End-to-end conformance probe against MinIO. This is the same code path
+    /// End-to-end conformance probe against RustFS. This is the same code path
     /// that will run at relay startup as a deployment gate.
     #[tokio::test]
     async fn probe_conformance() {

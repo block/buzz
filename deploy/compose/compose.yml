@@ -11,8 +11,8 @@ services:
       BUZZ_METRICS_PORT: "9102"
       DATABASE_URL: postgres://${POSTGRES_USER:-buzz}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-buzz}
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
-      BUZZ_S3_ENDPOINT: http://minio:9000
-      # Docker DNS resolves `minio`, not arbitrary `<bucket>.minio` hosts.
+      BUZZ_S3_ENDPOINT: http://rustfs:9000
+      # Docker DNS resolves `rustfs`, not arbitrary `<bucket>.rustfs` hosts.
       BUZZ_S3_ADDRESSING_STYLE: path
       BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
       BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
@@ -29,9 +29,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
+      rustfs:
         condition: service_healthy
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
     # Probe /_readiness over /dev/tcp because the runtime image has bash but no curl/wget/socat.
     healthcheck:
@@ -84,16 +84,18 @@ services:
     networks:
       - buzz-net
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    command: server /data --console-address ":9001"
+  rustfs:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff # 1.0.0
     environment:
-      MINIO_ROOT_USER: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
     volumes:
-      - buzz-minio-data:/data
+      - buzz-rustfs-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -102,21 +104,23 @@ services:
     networks:
       - buzz-net
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+  rustfs-init:
+    image: rustfs/rc@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699 # v0.1.36
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
     environment:
       BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
       BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
       BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
-    entrypoint: >
-      /bin/sh -euc '
-        mc alias set local http://minio:9000 "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}"
-        mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET}"
-        mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
-      '
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - >-
+        rc alias set local http://rustfs:9000
+        "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}" &&
+        rc bucket create "local/$${BUZZ_S3_BUCKET}" --ignore-existing --quiet &&
+        rc bucket anonymous set private "local/$${BUZZ_S3_BUCKET}"
     restart: "no"
     networks:
       - buzz-net
@@ -128,9 +132,9 @@ volumes:
   buzz-redis-data:
     labels:
       com.buzz.volume: redis
-  buzz-minio-data:
+  buzz-rustfs-data:
     labels:
-      com.buzz.volume: minio
+      com.buzz.volume: rustfs
   buzz-git-data:
     labels:
       com.buzz.volume: git

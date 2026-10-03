@@ -35,6 +35,21 @@ MSG
   fi
 }
 
+guard_legacy_minio_volume() {
+  local legacy_volume="buzz-prod_buzz-minio-data"
+  local rustfs_volume="buzz-prod_buzz-rustfs-data"
+  if docker volume inspect "${legacy_volume}" >/dev/null 2>&1 &&
+    ! docker volume inspect "${rustfs_volume}" >/dev/null 2>&1; then
+    cat >&2 <<'MSG'
+The previous MinIO data volume exists, but the RustFS data volume does not.
+The pinned RustFS build has not been validated for direct MinIO data-directory
+reuse. Buzz will not create a new empty RustFS store and hide existing objects.
+Migrate the objects through the S3 API, verify the backup, then retry.
+MSG
+    return 1
+  fi
+}
+
 backup_hint() {
   cat <<'MSG'
 Back up these before upgrades and on a regular schedule:
@@ -42,7 +57,7 @@ Back up these before upgrades and on a regular schedule:
 - deploy/compose/.env, especially BUZZ_RELAY_PRIVATE_KEY, DB/Redis/S3 secrets, and BUZZ_GIT_HOOK_HMAC_SECRET
 - The owner private key if bootstrap generated one for RELAY_OWNER_PUBKEY
 - Postgres data (prefer pg_dump or a quiesced volume snapshot)
-- MinIO/S3 bucket contents for media and git objects
+- RustFS/S3 bucket contents for media and git objects
 - buzz-git-data volume (BUZZ_GIT_REPO_PATH=/data/git)
 - Caddy data/config volumes if using compose.caddy.yml
 
@@ -53,6 +68,7 @@ MSG
 case "${1:-help}" in
   start|up)
     require_env
+    guard_legacy_minio_volume
     compose up -d --wait
     ;;
   stop|down)
@@ -60,6 +76,7 @@ case "${1:-help}" in
     ;;
   restart)
     require_env
+    guard_legacy_minio_volume
     compose up -d --wait --force-recreate relay
     ;;
   pull)
@@ -68,6 +85,7 @@ case "${1:-help}" in
     ;;
   upgrade)
     require_env
+    guard_legacy_minio_volume
     compose pull
     compose up -d --wait
     backup_hint

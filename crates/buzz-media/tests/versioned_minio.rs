@@ -1,20 +1,21 @@
-//! Live destructive versioned-bucket deletion coverage against docker-compose MinIO.
+//! Live destructive versioned-bucket deletion coverage against docker-compose RustFS.
 //!
 //! This exercises the S3-compatible path that community deletion relies on when
 //! a bucket has versioning enabled: list object versions/delete markers with
 //! dual markers, delete exact `(Key, VersionId)` identifiers, retry an already
 //! deleted version, and prove final `ListObjectVersions` emptiness.
 //!
-//! Run it against the docker-compose MinIO (creds `buzz_dev`/`buzz_dev_secret`):
+//! Run it against the docker-compose RustFS (creds `buzz_dev`/`buzz_dev_secret`):
 //!
 //! ```bash
-//! docker compose up -d minio minio-init
+//! docker compose up -d rustfs rustfs-init
 //! cargo test -p buzz-media --test versioned_minio -- --ignored --nocapture
 //! ```
 //!
-//! The test creates and removes its own bucket. The MinIO container name is
-//! overridable with `BUZZ_MINIO_CONTAINER`; credentials/endpoint/region/addressing
-//! use the same `BUZZ_S3_*` env vars as `static_creds_minio`.
+//! The test creates and removes its own bucket. The RustFS CLI image is run on
+//! the Compose network; override that network with `BUZZ_S3_DOCKER_NETWORK`.
+//! Credentials/endpoint/region/addressing use the same `BUZZ_S3_*` env vars as
+//! `static_creds_minio`.
 
 use std::process::Command;
 
@@ -25,7 +26,7 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn minio_config(bucket: String) -> MediaConfig {
+fn s3_config(bucket: String) -> MediaConfig {
     MediaConfig {
         s3_endpoint: env_or("BUZZ_S3_ENDPOINT", "http://localhost:9000"),
         s3_access_key: env_or("BUZZ_S3_ACCESS_KEY", "buzz_dev"),
@@ -46,20 +47,38 @@ fn minio_config(bucket: String) -> MediaConfig {
     }
 }
 
-fn run_mc(args: &[String]) -> Result<(), String> {
-    let container = env_or("BUZZ_MINIO_CONTAINER", "buzz-minio");
+fn run_rc(args: &[String]) -> Result<(), String> {
+    const RUSTFS_RC_IMAGE: &str =
+        "rustfs/rc@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699";
+    let network = env_or("BUZZ_S3_DOCKER_NETWORK", "buzz-net");
     let output = Command::new("docker")
-        .arg("exec")
-        .arg(container)
-        .arg("mc")
+        .args(["run", "--rm", "-i", "--network", &network])
+        .args([
+            "-e",
+            &format!(
+                "BUZZ_S3_ACCESS_KEY={}",
+                env_or("BUZZ_S3_ACCESS_KEY", "buzz_dev")
+            ),
+            "-e",
+            &format!(
+                "BUZZ_S3_SECRET_KEY={}",
+                env_or("BUZZ_S3_SECRET_KEY", "buzz_dev_secret")
+            ),
+            "--entrypoint",
+            "/bin/sh",
+            RUSTFS_RC_IMAGE,
+            "-c",
+            "set -eu; rc alias set local http://rustfs:9000 \"$BUZZ_S3_ACCESS_KEY\" \"$BUZZ_S3_SECRET_KEY\" >/dev/null; exec rc \"$@\"",
+            "--",
+        ])
         .args(args)
         .output()
-        .map_err(|err| format!("failed to execute docker/mc: {err}"))?;
+        .map_err(|err| format!("failed to execute docker/rustfs-rc: {err}"))?;
     if output.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "mc {:?} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "rustfs-rc {:?} failed with status {}\nstdout:\n{}\nstderr:\n{}",
             args,
             output.status,
             String::from_utf8_lossy(&output.stdout),
@@ -68,12 +87,12 @@ fn run_mc(args: &[String]) -> Result<(), String> {
     }
 }
 
-fn mc_alias(access_key: &str, secret_key: &str) -> Result<(), String> {
-    run_mc(&[
+fn rc_alias(access_key: &str, secret_key: &str) -> Result<(), String> {
+    run_rc(&[
         "alias".to_string(),
         "set".to_string(),
         "local".to_string(),
-        "http://localhost:9000".to_string(),
+        "http://rustfs:9000".to_string(),
         access_key.to_string(),
         secret_key.to_string(),
     ])
@@ -128,20 +147,20 @@ fn refs_from(entries: &[buzz_media::storage::ObjectVersionEntry]) -> Vec<ObjectV
 }
 
 #[tokio::test]
-#[ignore = "requires live docker-compose MinIO; permanently deletes exact test object versions"]
+#[ignore = "requires live docker-compose RustFS; permanently deletes exact test object versions"]
 async fn never_versioned_bucket_lists_null_versions_and_exact_delete_empties_listing() {
     let bucket = format!("buzz-media-never-versioned-{}", std::process::id());
     let bucket_path = format!("local/{bucket}");
-    let config = minio_config(bucket.clone());
-    mc_alias(&config.s3_access_key, &config.s3_secret_key).expect("configure mc alias");
-    run_mc(&[
+    let config = s3_config(bucket.clone());
+    rc_alias(&config.s3_access_key, &config.s3_secret_key).expect("configure RustFS alias");
+    run_rc(&[
         "mb".to_string(),
         "--ignore-existing".to_string(),
         bucket_path.clone(),
     ])
     .expect("create isolated never-versioned test bucket");
 
-    let storage = MediaStorage::new(&config).expect("static MinIO storage client");
+    let storage = MediaStorage::new(&config).expect("static S3 storage client");
     let prefix = format!("_test/never-versioned-{}/", uuid::Uuid::new_v4());
     let key = format!("{prefix}plain.bin");
     storage
@@ -177,31 +196,31 @@ async fn never_versioned_bucket_lists_null_versions_and_exact_delete_empties_lis
         "final ListObjectVersions must be empty after deleting the exact null version"
     );
 
-    run_mc(&["rb".to_string(), "--force".to_string(), bucket_path.clone()])
+    run_rc(&["rb".to_string(), "--force".to_string(), bucket_path.clone()])
         .expect("remove isolated never-versioned test bucket");
 }
 
 #[tokio::test]
-#[ignore = "requires live docker-compose MinIO; permanently deletes exact test object versions"]
+#[ignore = "requires live docker-compose RustFS; permanently deletes exact test object versions"]
 async fn versioned_bucket_exact_version_delete_reaches_final_list_versions_emptiness() {
     let bucket = format!("buzz-media-versioned-{}", std::process::id());
     let bucket_path = format!("local/{bucket}");
-    let config = minio_config(bucket.clone());
-    mc_alias(&config.s3_access_key, &config.s3_secret_key).expect("configure mc alias");
-    run_mc(&[
+    let config = s3_config(bucket.clone());
+    rc_alias(&config.s3_access_key, &config.s3_secret_key).expect("configure RustFS alias");
+    run_rc(&[
         "mb".to_string(),
         "--ignore-existing".to_string(),
         bucket_path.clone(),
     ])
     .expect("create isolated versioned test bucket");
-    run_mc(&[
+    run_rc(&[
         "version".to_string(),
         "enable".to_string(),
         bucket_path.clone(),
     ])
     .expect("enable bucket versioning");
 
-    let storage = MediaStorage::new(&config).expect("static MinIO storage client");
+    let storage = MediaStorage::new(&config).expect("static S3 storage client");
     let prefix = format!("_test/versioned-{}/", uuid::Uuid::new_v4());
     let historical_key = format!("{prefix}historical.bin");
     let marker_only_key = format!("{prefix}marker-only.bin");
@@ -321,7 +340,7 @@ async fn versioned_bucket_exact_version_delete_reaches_final_list_versions_empti
         "final ListObjectVersions must be empty after exact-version deletion: {remaining:?}"
     );
 
-    if run_mc(&[
+    if run_rc(&[
         "version".to_string(),
         "suspend".to_string(),
         bucket_path.clone(),
@@ -355,9 +374,9 @@ async fn versioned_bucket_exact_version_delete_reaches_final_list_versions_empti
         );
         assert!(list_all_versions(&storage, &prefix, 2).await.is_empty());
     } else {
-        eprintln!("MinIO mc did not support version suspend; enabled-versioning coverage passed");
+        eprintln!("RustFS rc did not support version suspend; enabled-versioning coverage passed");
     }
 
-    run_mc(&["rb".to_string(), "--force".to_string(), bucket_path.clone()])
+    run_rc(&["rb".to_string(), "--force".to_string(), bucket_path.clone()])
         .expect("remove isolated versioned test bucket");
 }

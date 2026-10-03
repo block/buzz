@@ -1,6 +1,6 @@
 //! End-to-end video upload tests (Blossom protocol, MP4/H.264).
 //!
-//! Requires: relay running at localhost:3000, MinIO running at localhost:9000.
+//! Requires: relay running at localhost:3000, RustFS running at localhost:9000.
 //! All tests are `#[ignore]` so they don't run in CI by default.
 //!
 //! # Running

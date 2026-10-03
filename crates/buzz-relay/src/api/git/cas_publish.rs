@@ -1600,7 +1600,7 @@ mod tests {
             "us-east-1",
             buzz_media::config::S3AddressingStyle::Path,
         )
-        .expect("connect local MinIO")
+        .expect("connect local RustFS")
     }
 
     fn tenant() -> TenantContext {
