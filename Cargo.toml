@@ -15,6 +15,7 @@ members = [
     "crates/sprig",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",
+    "crates/buzz-terminal-host",
     "crates/buzz-admin",
     "crates/buzz-deletion",
     "crates/buzz-feature-flags",
