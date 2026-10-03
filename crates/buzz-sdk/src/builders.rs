@@ -409,11 +409,29 @@ pub fn build_edit(
     target_event_id: nostr::EventId,
     new_content: &str,
 ) -> Result<EventBuilder, SdkError> {
+    build_edit_with_editor(channel_id, target_event_id, new_content, None)
+}
+
+/// Build an edit event with the signing editor's provenance.
+///
+/// The `edited_by` tag is part of the signed event, so relay-authorized
+/// channel-admin edits can be attributed without changing the original
+/// message author. Pass the public key that will sign the returned builder.
+pub fn build_edit_with_editor(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+    new_content: &str,
+    editor_pubkey: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
     check_content(new_content, 64 * 1024)?;
-    let tags = vec![
+    let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&["e", &target_event_id.to_hex()])?,
     ];
+    if let Some(editor_pubkey) = editor_pubkey {
+        let editor_pubkey = check_pubkey_hex(editor_pubkey, "edited_by")?;
+        tags.push(tag(&["edited_by", &editor_pubkey])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
@@ -3005,6 +3023,21 @@ mod tests {
         let ev = sign(build_edit(cid, eid, "new content").unwrap());
         assert_eq!(ev.kind.as_u16(), 40003);
         assert!(has_tag(&ev, "e", &eid.to_hex()));
+    }
+
+    #[test]
+    fn edit_with_editor_records_signed_provenance() {
+        let cid = uuid();
+        let eid = event_id();
+        let keys = nostr::Keys::generate();
+        let ev = keys
+            .sign_event(
+                build_edit_with_editor(cid, eid, "new content", Some(&keys.public_key().to_hex()))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert!(has_tag(&ev, "edited_by", &keys.public_key().to_hex()));
     }
 
     #[test]

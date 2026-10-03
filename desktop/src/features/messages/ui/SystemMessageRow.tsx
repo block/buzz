@@ -641,6 +641,11 @@ function describeSystemEvent(
         action: "removed a message",
       };
     }
+    case "message_edited_by_admin":
+      return {
+        title: actorName,
+        action: "edited a message",
+      };
     default:
       return null;
   }
