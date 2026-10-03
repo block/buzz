@@ -62,6 +62,7 @@ export function useActiveCommunityIcon(relayUrl: string | undefined) {
       if (relayUrl) saveCachedCommunityIcon(relayUrl, icon);
       return icon;
     },
+    placeholderData: loadCachedCommunityIcon(relayUrl ?? ""),
     enabled: relayUrl !== undefined,
     staleTime: ICON_STALE_MS,
   });
