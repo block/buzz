@@ -406,4 +406,24 @@ mod tests {
         assert_eq!(r.users.len(), 1);
         assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
     }
+
+    #[test]
+    fn rank_exact_human_beats_many_aviz_prefix_agents() {
+        // Live INT-1263: prefix FTS page held only Aviz-* agents; the human
+        // "aviz" arrived via the merged whole-word supplement and must outrank
+        // longer prefix matches after local re-ranking.
+        let human = ev(0, r#"{"display_name":"aviz"}"#, vec![]);
+        let agents: Vec<Event> = (0..8)
+            .map(|i| {
+                oa_profile_event(&format!(
+                    r#"{{"display_name":"Aviz-Agent-{i}"}}"#
+                ))
+            })
+            .collect();
+        let mut crowded_prefix_page = agents;
+        crowded_prefix_page.push(human.clone());
+        let r = rank_user_search_results(&crowded_prefix_page, "aviz", 8);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("aviz"));
+        assert!(!r.users[0].is_agent);
+    }
 }
