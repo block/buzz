@@ -3,10 +3,10 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
+import 'onion_ws.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
 ///
@@ -70,7 +70,11 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = IOWebSocketChannel.connect(
+      // Onion-aware transport: a `wss://<onion>` connection is authenticated
+      // by Tor (the .onion address is the relay's ed25519 key), so its TLS
+      // cert need not chain to a CA. Clearnet hosts keep full web-PKI trust.
+      // Also normalizes a missing ws/wss port so it never resolves to :0.
+      _channel = onionAwareChannel(
         Uri.parse(_wsUrl),
         pingInterval: debugPingInterval,
       );
