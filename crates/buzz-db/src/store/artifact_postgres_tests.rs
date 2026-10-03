@@ -24,7 +24,15 @@ impl Fixture {
             crate::migration::run_migrations(&pool).await.unwrap();
         }
         let db = Db::from_pool(pool);
-        db.ensure_future_partitions(1, true).await.unwrap();
+        db.maintain_partitions(
+            1,
+            crate::partition::PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: false,
+            },
+        )
+        .await
+        .unwrap();
         let community = CommunityId::from_uuid(Uuid::new_v4());
         sqlx::query("INSERT INTO communities(id,host) VALUES($1,$2)")
             .bind(community.as_uuid())

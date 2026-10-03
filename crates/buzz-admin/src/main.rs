@@ -94,7 +94,7 @@ enum Command {
     /// Run the partition catalog audit using a read-only database session.
     PartitionAudit {
         /// Future months to include in the coverage check.
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = buzz_db::partition::PARTITION_MANAGER_MONTHS_AHEAD)]
         months_ahead: u32,
     },
     /// Inspect deployment-wide Buzz product feedback.

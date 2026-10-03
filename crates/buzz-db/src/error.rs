@@ -45,6 +45,11 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// A partition the catalog audit had already listed was dropped before the
+    /// audit finished. A fresh snapshot sees a consistent catalog.
+    #[error("partition catalog changed mid-audit: {0}")]
+    PartitionDroppedMidAudit(String),
+
     /// A serving write admitted before the lifecycle transition is still live.
     /// This is an ordinary retryable drain condition, not a safety violation.
     #[error(

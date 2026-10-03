@@ -198,8 +198,13 @@ pub struct Config {
     pub metrics_port: u16,
     /// Interval between read-only partition catalog audits.
     pub partition_audit_interval: Duration,
-    /// Whether the partition manager may create uncovered monthly partitions.
+    /// Whether the partition manager may issue any partition DDL. Off also
+    /// disables catch-all advancement.
     pub partition_manager_create_enabled: bool,
+    /// Whether the partition manager may replace an empty right-edge catch-all
+    /// with dedicated monthlies. Also enables periodic (not only startup) DDL.
+    /// Requires `partition_manager_create_enabled`.
+    pub partition_manager_advance_enabled: bool,
 
     /// When true, NIP-42 pubkey-only authentication (no API token) is
     /// restricted to pubkeys in the `pubkey_allowlist` table. Users with valid
@@ -920,6 +925,9 @@ impl Config {
         );
         let partition_manager_create_enabled =
             parse_bool("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", true)?;
+        // Off by default: each environment opts in after its canary.
+        let partition_manager_advance_enabled =
+            parse_bool("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED", false)?;
 
         let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
             Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
@@ -1358,6 +1366,7 @@ impl Config {
             metrics_port,
             partition_audit_interval,
             partition_manager_create_enabled,
+            partition_manager_advance_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,
@@ -1531,6 +1540,7 @@ mod tests {
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
         assert_eq!(config.partition_audit_interval, Duration::from_secs(900));
         assert!(config.partition_manager_create_enabled);
+        assert!(!config.partition_manager_advance_enabled);
         assert!(config.slow_client_grace_limit > 0);
         assert!(
             !config.pubkey_allowlist_enabled,
@@ -2003,6 +2013,33 @@ mod tests {
             invalid,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_PARTITION_MANAGER_CREATE_ENABLED")
+        ));
+    }
+
+    #[test]
+    fn partition_manager_advance_is_opt_in_and_parses_strictly() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED");
+
+        std::env::remove_var("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED");
+        let default = Config::from_env().expect("default config");
+        std::env::set_var("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED", " TRUE ");
+        let enabled = Config::from_env().expect("enabled config");
+        std::env::set_var("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED", "enable-maybe");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED");
+        }
+
+        assert!(!default.partition_manager_advance_enabled);
+        assert!(enabled.partition_manager_advance_enabled);
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED")
         ));
     }
 

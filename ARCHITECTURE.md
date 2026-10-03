@@ -462,7 +462,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `channel.rs` | Channel CRUD, membership management, role enforcement (transactional) |
 | `feed.rs` | `query_mentions` (INNER JOIN event_mentions), `query_needs_action`, `query_activity` |
 | `workflow.rs` | Full workflow/run/approval CRUD; SHA-256 hashed approval tokens |
-| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables |
+| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
 | `dm.rs` | DM channel management |
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
