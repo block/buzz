@@ -9,6 +9,42 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testCompactConversationLabelsFitAccessibilityXXXL() async throws {
+    guard #available(iOS 17.0, *) else { return }
+    for subtitle in ["36 members", "Online"] {
+      let parent = UIViewController()
+      parent.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+      let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+      window.rootViewController = parent
+      window.makeKeyAndVisible()
+      defer { window.isHidden = true }
+      let factory = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent)
+      let bar = factory.create(
+        withFrame: CGRect(x: 0, y: 0, width: 393, height: 120), viewIdentifier: 989898,
+        arguments: ["title": "general", "subtitle": subtitle, "titleEnabled": true, "back": true])
+      parent.view.addSubview(bar.view())
+      parent.view.layoutIfNeeded()
+      try await Task.sleep(nanoseconds: 200_000_000)
+      let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+      let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)
+      // UIKit may cap inherited toolbar traits; also exercise an explicit AX
+      // override while preserving the real navigation bar's allocated bounds.
+      title.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+      title.setNeedsLayout()
+      title.layoutIfNeeded()
+      XCTAssertEqual(title.traitCollection.preferredContentSizeCategory, .accessibilityExtraExtraExtraLarge)
+      XCTAssertTrue(title.accessibilityLabel?.contains(subtitle) == true)
+      for label in title.subviews.compactMap({ $0 as? UILabel }) where !label.isHidden {
+        XCTAssertTrue(title.bounds.contains(label.frame))
+        XCTAssertGreaterThanOrEqual(label.bounds.height, label.intrinsicContentSize.height)
+        let frame = label.convert(label.bounds, to: navigation.navigationBar)
+        XCTAssertGreaterThanOrEqual(frame.minY, 0)
+        XCTAssertLessThanOrEqual(frame.maxY, navigation.navigationBar.bounds.height)
+      }
+    }
+  }
+
+  @MainActor
   func testNativeMembersActivityAppearsAndClears() throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()

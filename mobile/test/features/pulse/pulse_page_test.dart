@@ -83,6 +83,20 @@ void main() {
     await tester.pump();
     final expandedHeight = tester.getSize(find.byType(UiKitView)).height;
     final expandedTabsTop = tester.getTopLeft(find.text('Everyone')).dy;
+    final row = find.text('Timeline note 1');
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView).last),
+    );
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    for (var i = 0; i < 5; i++) {
+      final before = tester.getTopLeft(row).dy;
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump();
+      expect(before - tester.getTopLeft(row).dy, closeTo(20, 1));
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
     await tester.drag(find.byType(ListView).last, const Offset(0, -400));
     await tester.pumpAndSettle();
     expect(calls.where((c) => c.method == 'scroll').last.arguments, 52);

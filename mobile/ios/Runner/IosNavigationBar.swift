@@ -42,7 +42,7 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
     for label in [titleLabel, subtitleLabel] {
       label.textAlignment = .center
       label.lineBreakMode = .byTruncatingTail
-      label.adjustsFontForContentSizeCategory = true
+      label.adjustsFontForContentSizeCategory = false
       addSubview(label)
     }
     isAccessibilityElement = true
@@ -111,6 +111,14 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
 
   override func layoutSubviews() {
     super.layoutSubviews()
+    // Compact navigation remains a 44pt toolbar. Scale within that budget;
+    // the complete title/subtitle remains available as one VoiceOver label.
+    titleLabel.font = UIFontMetrics(forTextStyle: .headline).scaledFont(
+      for: .systemFont(ofSize: 17, weight: .semibold), maximumPointSize: 20,
+      compatibleWith: traitCollection)
+    subtitleLabel.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
+      for: .systemFont(ofSize: 12), maximumPointSize: 14,
+      compatibleWith: traitCollection)
     let titleHeight = titleLabel.intrinsicContentSize.height
     let subtitleHeight = subtitleLabel.intrinsicContentSize.height
     let top = (bounds.height - titleHeight - subtitleHeight) / 2

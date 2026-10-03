@@ -13,12 +13,51 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('iOS recent rows move once through title collapse', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(
+              List.generate(30, (i) => 'Recent query $i'),
+            ),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.text('Recent query 1');
+    final list = find.byKey(const Key('recent-searches-list'));
+    final gesture = await tester.startGesture(tester.getCenter(list));
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    for (var i = 0; i < 5; i++) {
+      final before = tester.getTopLeft(row).dy;
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump();
+      expect(before - tester.getTopLeft(row).dy, closeTo(20, 1));
+    }
+    await gesture.up();
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('reselecting Search uses the field activation path', (
     tester,
   ) async {
