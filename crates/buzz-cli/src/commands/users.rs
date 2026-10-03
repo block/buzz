@@ -4,8 +4,33 @@ use nostr::PublicKey;
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
+use nostr::ToBech32;
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with buzz-sdk builder
+
+/// Build identity JSON for `buzz users me` (unit-testable without a live client).
+pub(crate) fn me_identity_json(pubkey_hex: &str, npub_bech32: &str) -> serde_json::Value {
+    serde_json::json!({
+        "pubkey": pubkey_hex,
+        "npub": npub_bech32,
+    })
+}
+
+/// Print the active CLI identity (hex pubkey + npub) from the loaded private key.
+///
+/// No relay I/O — agents can resolve "who am I?" before connecting. Refs #2663.
+pub async fn cmd_me(
+    client: &BuzzClient,
+    _format: &crate::OutputFormat,
+) -> Result<(), CliError> {
+    let pk = client.keys().public_key();
+    let hex = pk.to_hex();
+    let npub = pk
+        .to_bech32()
+        .map_err(|e| CliError::Other(format!("npub encode failed: {e}")))?;
+    println!("{}", me_identity_json(&hex, &npub));
+    Ok(())
+}
 
 /// Get user profiles (kind:0 metadata events).
 ///
@@ -536,6 +561,7 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::UsersCmd;
     match cmd {
+        UsersCmd::Me => cmd_me(client, format).await,
         UsersCmd::Get {
             pubkeys,
             name,
@@ -761,5 +787,27 @@ mod tests {
     fn presence_subject_falls_back_to_author_for_malformed_p_tag() {
         let event = json!({"pubkey": "user", "tags": [["p"]]});
         assert_eq!(presence_subject(&event), "user");
+    }
+
+    #[test]
+    fn me_identity_json_includes_pubkey_and_npub() {
+        let hex = "a".repeat(64);
+        let v = super::me_identity_json(
+            &hex,
+            "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5s0xov",
+        );
+        assert_eq!(v["pubkey"], hex);
+        assert!(v["npub"].as_str().unwrap().starts_with("npub1"));
+    }
+
+    #[test]
+    fn me_identity_from_generated_keys_roundtrips_bech32() {
+        use nostr::{Keys, ToBech32};
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = keys.public_key().to_bech32().expect("npub");
+        let v = super::me_identity_json(&hex, &npub);
+        assert_eq!(v["pubkey"].as_str().unwrap().len(), 64);
+        assert_eq!(v["npub"].as_str().unwrap(), npub);
     }
 }
