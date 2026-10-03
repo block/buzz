@@ -1,0 +1,57 @@
+suite: relay Deployment update strategy
+# secret-chart.yaml is in scope only so deployment.yaml's checksum/secret include
+# resolves at render time (same reason as render_test.yaml).
+templates:
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+set:
+  relayUrl: wss://buzz.example.com
+  ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+  externalPostgresql.url: postgres://u:p@h:5432/d
+  externalRedis.url: redis://h:6379
+  s3.endpoint: http://minio:9000
+  s3.accessKey: a
+  s3.secretKey: s
+tests:
+  - it: defaults to a zero-downtime rolling update
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.strategy
+          value:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 0
+
+  - it: honors custom rollingUpdate bounds
+    set:
+      strategy.rollingUpdate.maxSurge: 0
+      strategy.rollingUpdate.maxUnavailable: 25%
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.strategy.rollingUpdate
+          value:
+            maxSurge: 0
+            maxUnavailable: 25%
+
+  # Helm deep-merges maps, so setting only `type` leaves the default
+  # rollingUpdate block in .Values. The API server rejects rollingUpdate
+  # alongside Recreate, so the template must drop it.
+  - it: drops rollingUpdate when only type is switched to Recreate
+    set:
+      strategy.type: Recreate
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.strategy
+          value:
+            type: Recreate
+
+  - it: rejects an unknown strategy type
+    set:
+      strategy.type: BlueGreen
+    template: templates/deployment.yaml
+    asserts:
+      - failedTemplate: {}
