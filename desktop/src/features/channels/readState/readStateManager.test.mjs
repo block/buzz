@@ -5,9 +5,11 @@ import {
   ReadStateManager,
   applyRemoteContextTimestamp,
   resolveEffectiveTimestamp,
+} from "./readStateManager.ts";
+import {
   splitContextsIntoBudgetedSlots,
   trimContextsToBudget,
-} from "./readStateManager.ts";
+} from "./readStateBudget.ts";
 
 // ── ReadStateManager integration helpers ─────────────────────────────────────
 // Provide browser globals required by ReadStateManager (localStorage,
@@ -268,6 +270,66 @@ test("publish flushes pending local state first", async () => {
   }
 });
 
+test("publishing does not refresh read recency", async () => {
+  globalThis.window.localStorage = makeLocalStorage();
+  const { restore } = withFakeTimers();
+  const pubkey = "7".repeat(64);
+  const manager = new ReadStateManager(pubkey, makeFakeRelay());
+  const msgKey = `msg:${"c".repeat(64)}`;
+  const markerValue = 1_000_000; // timestamp of the message that was read
+  const readHappenedAt = 1_500_000; // when that read entered the client
+
+  // @tauri-apps/api/core reads `window.__TAURI_INTERNALS__.invoke`.
+  const originalInternals = globalThis.window.__TAURI_INTERNALS__;
+  const invoked = [];
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: (cmd, args) => {
+      invoked.push(cmd);
+      if (cmd === "nip44_encrypt_to_self") return Promise.resolve("ciphertext");
+      if (cmd === "sign_event") {
+        return Promise.resolve(
+          JSON.stringify({
+            id: "e".repeat(64),
+            pubkey,
+            created_at: args.createdAt,
+            kind: args.kind,
+            tags: args.tags,
+            content: args.content,
+            sig: "f".repeat(128),
+          }),
+        );
+      }
+      return Promise.resolve(null);
+    },
+  };
+
+  try {
+    manager.markContextRead(msgKey, markerValue);
+    manager.contextSourceCreatedAt.set(msgKey, readHappenedAt);
+    // Fresh launch on an account whose blob is trimmed: the relay copy that
+    // seeds lastPublishedContexts does not carry this key, so it reads as
+    // changed on the next publish.
+    manager.lastPublishedContexts = {};
+    manager.fetchOwnBlobBeforePublish = async () => {};
+
+    await manager.publish();
+
+    assert.ok(
+      invoked.includes("sign_event"),
+      "precondition: the blob must actually publish",
+    );
+    assert.equal(
+      manager.contextSourceCreatedAt.get(msgKey),
+      readHappenedAt,
+      "a publish is not a read: recency must stay at the time of the read",
+    );
+  } finally {
+    globalThis.window.__TAURI_INTERNALS__ = originalInternals;
+    manager.destroy();
+    restore();
+  }
+});
+
 test("destroyed manager cannot persist after an in-flight fetch resolves", async () => {
   const storage = makeLocalStorage();
   globalThis.window.localStorage = storage;
@@ -414,7 +476,28 @@ test("applyRemoteContextTimestamp ignores older remote read markers from newer s
 
   assert.equal(result, "unchanged");
   assert.equal(effectiveState.get("channel-1"), 200);
-  assert.equal(contextSourceCreatedAt.get("channel-1"), 11);
+  // Recency tracks the last read ADVANCE, not the last blob that mentioned the
+  // context — a routine republish carrying nothing new must not refresh it.
+  assert.equal(contextSourceCreatedAt.get("channel-1"), 10);
+});
+
+test("applyRemoteContextTimestamp keeps recency stable across repeated republishes", () => {
+  const effectiveState = new Map([["channel-1", 200]]);
+  const contextSourceCreatedAt = new Map([["channel-1", 10]]);
+
+  for (const eventCreatedAt of [50, 60, 70]) {
+    applyRemoteContextTimestamp({
+      effectiveState,
+      contextSourceCreatedAt,
+      contextId: "channel-1",
+      timestamp: 200,
+      eventCreatedAt,
+    });
+  }
+
+  // Without this, every context in every republished blob would look freshly
+  // read and recency-ranked eviction would degenerate to publish order.
+  assert.equal(contextSourceCreatedAt.get("channel-1"), 10);
 });
 
 test("applyRemoteContextTimestamp advances to newer remote read markers", () => {
@@ -503,6 +586,44 @@ test("trimContextsToBudget_overBudget_evictsMsgEntriesOldestFirst", () => {
   assert.ok(
     resultSize <= budget,
     `result ${resultSize} exceeds budget ${budget}`,
+  );
+});
+
+test("trimContextsToBudget_evictsLeastRecentlyRead_notOldestMessage", () => {
+  // msg A points at the OLDEST message but was read just now; msg B and C point
+  // at newer messages read long ago. Ranking by marker value would evict A —
+  // the read the user just performed.
+  const justReadOldMessage = `msg:${MSG_ID}`;
+  const contexts = {
+    [justReadOldMessage]: 1,
+    [`msg:${"c".repeat(64)}`]: 3,
+    [`msg:${"d".repeat(64)}`]: 2,
+  };
+  const readRecency = new Map([
+    [justReadOldMessage, 9_000],
+    [`msg:${"c".repeat(64)}`, 10],
+    [`msg:${"d".repeat(64)}`, 20],
+  ]);
+  const encoder = new TextEncoder();
+  const budget =
+    encoder.encode(JSON.stringify({ v: 1, client_id: CLIENT_ID, contexts }))
+      .length - 10;
+
+  const { fitsAfterTrim } = trimContextsToBudget(
+    contexts,
+    CLIENT_ID,
+    budget,
+    readRecency,
+  );
+
+  assert.equal(fitsAfterTrim, true);
+  assert.ok(
+    justReadOldMessage in contexts,
+    "the marker read most recently must survive",
+  );
+  assert.ok(
+    !(`msg:${"c".repeat(64)}` in contexts),
+    "the least recently read marker should be evicted",
   );
 });
 
