@@ -17,6 +17,37 @@ if [[ -f ".env" ]]; then
   set +o allexport
 fi
 
+# Prefer DATABASE_URL when set so PGHOST/PGPORT/… can't drift from the URL
+# migrations already use (#2479). Explicit PG* still win only when DATABASE_URL
+# is unset.
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  eval "$(python3 - <<'PY'
+import os
+from urllib.parse import unquote, urlparse
+
+url = os.environ["DATABASE_URL"]
+parsed = urlparse(url)
+if parsed.scheme not in {"postgres", "postgresql"}:
+    raise SystemExit(f"DATABASE_URL must be postgres://…, got {parsed.scheme!r}")
+
+def sh_export(name: str, value: str) -> None:
+    print(f"export {name}={value!r}")
+
+if parsed.hostname:
+    sh_export("PGHOST", parsed.hostname)
+if parsed.port is not None:
+    sh_export("PGPORT", str(parsed.port))
+if parsed.username:
+    sh_export("PGUSER", unquote(parsed.username))
+if parsed.password is not None:
+    sh_export("PGPASSWORD", unquote(parsed.password))
+db = (parsed.path or "").lstrip("/")
+if db:
+    sh_export("PGDATABASE", unquote(db))
+PY
+)"
+fi
+
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"
 export PGUSER="${PGUSER:-buzz}"
