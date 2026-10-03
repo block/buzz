@@ -349,6 +349,7 @@ pub async fn cmd_set(
         raw_value.to_string()
     };
     let owner = resolve_owner(client, owner_flag)?;
+    let value_len = value.len();
     let body = if slug == engram::CORE_SLUG {
         Body::Core { profile: value }
     } else {
@@ -367,7 +368,7 @@ pub async fn cmd_set(
         .map_err(|e| CliError::Other(format!("build event failed: {e}")))?;
     let id = event.id.to_hex();
     submit_engram(client, event).await?;
-    eprintln!("wrote {slug} (event {id}, created_at {created_at})");
+    eprintln!("wrote {slug} ({value_len} bytes, event {id}, created_at {created_at})");
     Ok(())
 }
 
@@ -378,6 +379,35 @@ fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     hex::encode(h.finalize())
+}
+
+/// Near-no-op refusal reason for `mem patch`, or `None` when the change is
+/// substantial enough to land unattended.
+///
+/// A patch whose result is byte-identical to the current value, or differs
+/// from it by at most one byte, is refused unless `--allow-empty` is passed.
+/// Such deltas are almost never the intended edit — they are the signature of
+/// a mis-targeted slug (a patch built for one memory applied to another whose
+/// value happens to satisfy the hunk's context, e.g. a shared front-matter
+/// first line) or of stray trailing-newline drift. The refusal forces the
+/// operator to look; `--allow-empty` remains the explicit escape hatch for
+/// genuine one-byte edits.
+fn near_noop_refusal(old: &str, new: &str) -> Option<String> {
+    if old == new {
+        return Some(format!(
+            "patch result is byte-identical to the current value ({} bytes) — nothing to write",
+            old.len()
+        ));
+    }
+    let delta = new.len() as isize - old.len() as isize;
+    if delta.unsigned_abs() <= 1 {
+        return Some(format!(
+            "patch result differs from the current value by a single byte ({} → {} bytes)",
+            old.len(),
+            new.len()
+        ));
+    }
+    None
 }
 
 /// Verify that each hunk's preimage lines (Context + Delete) match the
@@ -419,16 +449,26 @@ fn verify_hunks_at_declared_position(
 
         // Pure insertion at start of empty file: `@@ -0,0 +1,M @@`.
         //
-        // Known limitation: a pure-insertion hunk into a non-empty value
-        // (`@@ -N,0 +N,M @@` with `N > 0`) is currently rejected. With no
-        // preimage lines there's nothing to position-check against, and the
-        // safe-default for a strict mode is "refuse" rather than "land at an
-        // unverified position." `diff -u` includes context lines by default,
-        // so users hit this only if they hand-author a no-context insertion.
-        // Failure mode is rejection, not corruption — see PR #627 review.
+        // With no preimage lines there is nothing to content-check, so the
+        // only positional fact we can verify is emptiness itself. Diffy
+        // inserts at index 0 without consulting the existing content, so a
+        // `-0,0` hunk applied to a *non-empty* value silently prepends the
+        // lines — the 2026-09-19 incident landed exactly this way: a patch
+        // built for one slug was applied to another and echoed a
+        // success-shaped receipt while changing the stored value by one byte.
+        // Legitimate only against an empty value.
         if preimage.is_empty() {
             if hunk.old_range().start() == 0 {
-                continue;
+                if current.is_empty() {
+                    continue;
+                }
+                return Err(format!(
+                    "hunk #{} declares an insertion into an empty value (`-0,0`) but the \
+                     value is non-empty ({} bytes); regenerate the patch with `diff -u` \
+                     against the current value",
+                    i + 1,
+                    current.len()
+                ));
             }
             return Err(format!(
                 "hunk #{} has empty preimage at line {}; \
@@ -531,9 +571,16 @@ pub async fn cmd_hash(
 ///   This makes concurrent edits safe: if the slug has changed since the
 ///   patch was generated, the write is refused.
 /// - The result is rejected if it would be empty, unless `--allow-empty`.
+/// - The result is rejected as a **near-no-op** if it is byte-identical to
+///   or within one byte of the current value, unless `--allow-empty` — the
+///   signature of a mis-targeted slug or stray newline drift.
+/// - Hunks with an empty preimage (`@@ -0,0 …`) are only accepted against an
+///   actually-empty value; diffy would otherwise insert at index 0 of a
+///   non-empty value without any content check.
 /// - `--dry-run` prints the post-application diff and exits without writing.
-/// - On a successful write, the new sha256 is printed to stderr so callers
-///   can chain edits.
+/// - On a successful write, the receipt echoes the target slug, the byte
+///   delta, and the new sha256 so mis-targeted writes are visible at a
+///   glance and callers can chain edits.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_patch(
     client: &BuzzClient,
@@ -664,14 +711,34 @@ pub async fn cmd_patch(
         ));
     }
 
+    // Near-no-op guard — see `near_noop_refusal`. Checked after the empty-
+    // result guard so the more specific tombstone guidance keeps priority,
+    // and before `--dry-run` so a preview can't green-light a write the
+    // real run would refuse.
+    if !allow_empty {
+        if let Some(reason) = near_noop_refusal(&current, &new_value) {
+            return Err(CliError::Usage(format!(
+                "{reason}. This is usually a mis-targeted slug or stray \
+                 newline drift — verify the target with `buzz mem get {slug}` \
+                 before forcing; pass --allow-empty to force the write."
+            )));
+        }
+    }
+
     // Echo the *input* patch verbatim (not a regenerated form) plus the
     // resulting sha256, so the operator can review exactly what was applied
     // and chain follow-up edits with the new hash.
     let new_hash = sha256_hex(&new_value);
+    let old_len = current.len();
+    let new_len = new_value.len();
+    let delta = new_len as isize - old_len as isize;
     eprintln!("{}", diff_text.trim_end_matches('\n'));
     eprintln!();
     if dry_run {
-        eprintln!("(dry run — slug `{slug}` not modified; would write sha256 {new_hash})");
+        eprintln!(
+            "(dry run — slug `{slug}` not modified; would write {old_len}→{new_len} bytes \
+             (Δ{delta:+}), sha256 {new_hash})"
+        );
         return Ok(());
     }
 
@@ -693,7 +760,10 @@ pub async fn cmd_patch(
         .map_err(|e| CliError::Other(format!("build event failed: {e}")))?;
     let id = event.id.to_hex();
     submit_engram(client, event).await?;
-    eprintln!("wrote {slug} (event {id}, created_at {created_at}, sha256 {new_hash})");
+    eprintln!(
+        "wrote {slug} (event {id}, created_at {created_at}, {old_len}→{new_len} bytes \
+         (Δ{delta:+}), sha256 {new_hash})"
+    );
     Ok(())
 }
 
@@ -974,6 +1044,46 @@ mod tests {
 ";
         let patch = diffy::Patch::from_str(patch_text).unwrap();
         verify_hunks_at_declared_position(current, &patch).unwrap();
+    }
+
+    // The 2026-09-19 incident vector: a `@@ -0,0 @@` insertion hunk applied
+    // to a NON-empty value. Diffy inserts at index 0 without consulting the
+    // existing content, so without this check a patch built for one slug
+    // lands on another as a near-no-op with a success-shaped receipt.
+    #[test]
+    fn strict_position_rejects_dash00_insertion_into_nonempty() {
+        let current = "---\ntitle: role\n---\nbody\n"; // non-empty, any content
+        let patch_text = "\
+--- a/core
++++ b/core
+@@ -0,0 +1 @@
++
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let err = verify_hunks_at_declared_position(current, &patch).unwrap_err();
+        assert!(err.contains("`-0,0`"), "got: {err}");
+        assert!(err.contains("non-empty"), "got: {err}");
+    }
+
+    // Near-no-op guard: byte-identical and ±1-byte results are refused;
+    // anything larger passes.
+    #[test]
+    fn near_noop_refusal_cases() {
+        // Byte-identical — a true no-op.
+        let reason = near_noop_refusal("alpha\nbeta\n", "alpha\nbeta\n").unwrap();
+        assert!(reason.contains("byte-identical"), "got: {reason}");
+
+        // Single-byte growth / shrink (incl. trailing-newline drift).
+        let reason = near_noop_refusal("abc", "abcd").unwrap();
+        assert!(reason.contains("single byte"), "got: {reason}");
+        let reason = near_noop_refusal("abcd", "abc").unwrap();
+        assert!(reason.contains("single byte"), "got: {reason}");
+        assert!(near_noop_refusal("abc\n", "abc").is_some());
+
+        // Substantial changes pass.
+        assert!(near_noop_refusal("abc", "abcdef").is_none());
+        assert!(near_noop_refusal("", "ab").is_none());
+        assert!(near_noop_refusal("abcdef", "").is_none());
     }
 
     // Multi-hunk patches: each hunk's `@@ -N @@` references line numbers in
