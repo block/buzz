@@ -132,6 +132,56 @@ test("treats an already-absent inactive membership as successful cleanup and dis
   assert.equal(disconnected, true);
 });
 
+/** The latched session refuses to reconnect, so it never reaches the relay. */
+function terminalSession() {
+  return async () => {
+    throw new Error("Relay session is terminal; cannot reconnect.");
+  };
+}
+
+test("retries a terminal active session on a fresh connection", async () => {
+  // Membership already ended, so the relay refuses the latched session and the
+  // community can never be removed while we wait for it to accept (#7049).
+  let disconnected = false;
+  const result = await leaveCommunity(
+    "wss://active.example",
+    "wss://active.example",
+    dependencies({
+      publishActive: terminalSession(),
+      createRelayClient: () => ({
+        publishEvent: async () => {
+          throw new Error("restricted: not a relay member");
+        },
+        disconnect: () => {
+          disconnected = true;
+        },
+      }),
+    }),
+  );
+
+  assert.deepEqual(result, { status: "already-absent" });
+  assert.equal(disconnected, true);
+});
+
+test("still fails when a fresh connection has a membership to end", async () => {
+  await assert.rejects(
+    leaveCommunity(
+      "wss://active.example",
+      "wss://active.example",
+      dependencies({
+        publishActive: terminalSession(),
+        createRelayClient: () => ({
+          publishEvent: async () => {
+            throw new Error("auth-required: verification failed");
+          },
+          disconnect() {},
+        }),
+      }),
+    ),
+    /verification failed/,
+  );
+});
+
 test("preserves other relay rejections and disconnects without falling through", async () => {
   const rejection = new Error("invalid: relay owner cannot leave");
   let disconnected = false;
