@@ -75,8 +75,5 @@ export type TriggerWorkflowResponse = {
 };
 
 export type ApprovalActionResponse = {
-  token: string;
-  status: string;
-  runId: string;
-  workflowId: string;
+  eventId: string;
 };

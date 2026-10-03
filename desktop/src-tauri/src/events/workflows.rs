@@ -39,12 +39,58 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
 
 /// Kind 46030 — grant an approval token (with optional note).
 pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
+    build_approval_action(46030, token, note)
 }
 
 /// Kind 46031 — deny an approval token (with optional note).
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
+    build_approval_action(46031, token, note)
+}
+
+fn build_approval_action(
+    kind: u16,
+    approval_ref: &str,
+    note: Option<&str>,
+) -> Result<EventBuilder, String> {
+    // The relay resolves approval actions from an `e` (or legacy `d`) tag.
+    // Approval references are SHA-256 hashes, so validating them as event IDs
+    // both enforces the 32-byte wire shape and gives us a standard Nostr tag.
+    EventId::from_hex(approval_ref).map_err(|_| "invalid approval reference".to_string())?;
+    let tags = vec![tag(vec!["e", approval_ref])?];
+    Ok(EventBuilder::new(Kind::Custom(kind), note.unwrap_or("")).tags(tags))
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::Keys;
+
+    use super::*;
+
+    const APPROVAL_REF: &str = "abababababababababababababababababababababababababababababababab";
+
+    #[test]
+    fn approval_actions_use_the_reference_tag_consumed_by_the_relay() {
+        for builder in [
+            build_approval_grant(APPROVAL_REF, Some("approved")).expect("grant builder"),
+            build_approval_deny(APPROVAL_REF, Some("denied")).expect("deny builder"),
+        ] {
+            let event = builder
+                .sign_with_keys(&Keys::generate())
+                .expect("sign approval action");
+            let reference = event.tags.iter().find_map(|tag| {
+                (tag.kind().to_string() == "e")
+                    .then(|| tag.content().map(str::to_string))
+                    .flatten()
+            });
+
+            assert_eq!(reference.as_deref(), Some(APPROVAL_REF));
+            assert!(!event.tags.iter().any(|tag| tag.kind().to_string() == "t"));
+        }
+    }
+
+    #[test]
+    fn approval_actions_reject_malformed_references() {
+        assert!(build_approval_grant("not-a-hash", None).is_err());
+        assert!(build_approval_deny(&"ab".repeat(31), None).is_err());
+    }
 }
