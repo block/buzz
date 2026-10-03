@@ -1,0 +1,23 @@
+name: PR Image URLs
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check PR image URLs
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # pull_request_target has a privileged context. Check out only the trusted
+      # base commit and never execute code from the pull request branch.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Check pull request body
+        run: scripts/check-pr-image-urls-event.sh
