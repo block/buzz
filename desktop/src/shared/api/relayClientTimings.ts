@@ -11,6 +11,20 @@ export const HISTORY_TIMEOUT_MS = 25_000;
 export const PUBLISH_TIMEOUT_MS = 25_000;
 
 /**
+ * Hard timeout for the `plugin:websocket|connect` invoke itself.
+ *
+ * tauri-plugin-websocket holds a global connection-manager mutex while awaiting
+ * `send()`; a stuck `send()` from a previous dead connection can therefore starve
+ * any subsequent `connect()` registration indefinitely (see issue #3975). Unlike
+ * `AUTH_TIMEOUT_MS` (which guards the post-handshake auth round-trip) this guards
+ * the plugin's own registration path, which has no other timeout. On fire the
+ * retry wrapper treats it like a normal connection failure and backs off, so a
+ * manual Reconnect click always re-enters a fresh attempt instead of joining a
+ * stuck future.
+ */
+export const RECONNECT_INVOKE_TIMEOUT_MS = 30_000;
+
+/**
  * A stability-gated reset prevents reconnect flapping from erasing backoff.
  */
 export const BACKOFF_RESET_STABLE_MS = 60_000;
