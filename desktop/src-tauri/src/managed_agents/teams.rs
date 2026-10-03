@@ -216,7 +216,10 @@ pub fn save_teams<R: tauri::Runtime>(
 /// legacy `persona_team_dir` link (directory-backed teams only) or the
 /// `team_id` field (every team kind, all agents created after the team_id
 /// seam landed). Used to block team deletion while agents still depend on it.
-fn agents_referencing_team<'a>(
+///
+/// Visible to the crate so a test of the update command can apply the real
+/// delete guard to the agent store that the update saved.
+pub(crate) fn agents_referencing_team<'a>(
     agents: &'a [ManagedAgentRecord],
     team: &TeamRecord,
 ) -> Vec<&'a str> {

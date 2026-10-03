@@ -92,3 +92,20 @@ test("getUsableTeams keeps only fully-resolved teams with at least one persona",
     ["team-ready"],
   );
 });
+
+// An emptied team is now possible in the editor. You remove all the members to
+// make it possible to delete the team. But the team must still be unusable. A
+// snapshot of it has no members, and the import of that snapshot fails with the
+// message "Team snapshot must have at least one member". A deployment of it
+// would also add no agents.
+test("resolveTeamPersonas marks a deliberately emptied team complete but unusable", () => {
+  const resolution = resolveTeamPersonas(createTeam("team-empty", []), [
+    createPersona("persona-1", "Solo"),
+  ]);
+
+  assert.equal(resolution.hasMissingPersonas, false);
+  assert.equal(resolution.isComplete, true);
+  assert.equal(resolution.isUsable, false);
+  assert.equal(resolution.missingPersonaCount, 0);
+  assert.deepEqual(resolution.resolvedPersonaIds, []);
+});

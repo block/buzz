@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canSubmitTeamDialog,
   copySelectedPersonaIds,
   countMissingPersonaIds,
   filterAvailablePersonaIds,
@@ -89,4 +90,22 @@ test("orderPersonasByInitiallySelected keeps initially selected personas at top"
       "persona:raphael",
     ],
   );
+});
+
+// ── canSubmitTeamDialog ───────────────────────────────────────────────────
+//
+// A team with no members must be savable. If it is not, you cannot delete a
+// team, because you must first remove each member.
+
+test("canSubmitTeamDialog allows saving a team with an empty roster", () => {
+  assert.equal(canSubmitTeamDialog({ name: "Hive", isPending: false }), true);
+});
+
+test("canSubmitTeamDialog still requires a non-blank name", () => {
+  assert.equal(canSubmitTeamDialog({ name: "", isPending: false }), false);
+  assert.equal(canSubmitTeamDialog({ name: "   ", isPending: false }), false);
+});
+
+test("canSubmitTeamDialog blocks while a save is in flight", () => {
+  assert.equal(canSubmitTeamDialog({ name: "Hive", isPending: true }), false);
 });

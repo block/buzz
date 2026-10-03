@@ -33,6 +33,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use tauri::Manager;
+
 use crate::managed_agents::{team_persona_key, ManagedAgentRecord, TeamRecord};
 
 /// Repair stale team `persona_ids`/instance `team_id`, then detach
@@ -53,6 +55,17 @@ pub(super) fn repair_then_detach_teams(app: &tauri::AppHandle) {
         || repair_team_membership_in_dir(&base_dir),
         || super::detach::detach_directory_backed_teams_in_dir(&base_dir),
     );
+}
+
+pub(super) fn replay_pending_team_membership_update(app: &tauri::AppHandle) {
+    let state = app.state::<crate::app_state::AppState>();
+    let Ok(_store_guard) = state.managed_agents_store_lock.lock() else {
+        eprintln!("buzz-desktop: pending-team-membership: cannot lock agent store");
+        return;
+    };
+    if let Err(error) = crate::commands::replay_pending_team_membership(app) {
+        eprintln!("buzz-desktop: pending-team-membership: {error}");
+    }
 }
 
 /// Gate `detach` on a successful `repair`: run detach only when repair returned

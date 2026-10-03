@@ -374,11 +374,13 @@ mod membership_wiring {
             &mut teams,
             team("team-a", &["duncan"]),
             |_| Ok(()),
+            |_| Ok(()),
             || Ok(existing.clone()),
             |records| {
                 spy.borrow_mut().saved = Some(records.to_vec());
                 Ok(())
             },
+            || Ok(()),
         )
         .expect("create succeeds");
 
@@ -391,36 +393,29 @@ mod membership_wiring {
         );
     }
 
-    /// A failing secondary agent write after successful `save_teams` is
-    /// swallowed: both commits still return the persisted team. Otherwise a UI
-    /// retry of a create whose team already landed would mint a duplicate.
+    /// A failed create reports the undurable binding after it saves the team.
+    /// The caller can replay the staged membership delta before another write.
     #[test]
-    fn commit_returns_ok_when_agent_save_fails() {
+    fn commit_create_reports_agent_save_failure() {
         let mut teams: Vec<TeamRecord> = Vec::new();
-        let created = commit_team_create(
+        let error = commit_team_create(
             &mut teams,
             team("team-a", &["duncan"]),
             |_| Ok(()),
+            |_| Ok(()),
             || Ok(vec![instance('a', "duncan", None)]),
             |_| Err("disk full".to_string()),
+            || Ok(()),
         )
-        .expect("create swallows secondary-store failure");
-        assert_eq!(created.id, "team-a");
+        .expect_err("create reports a lost membership binding");
 
-        let mut teams = vec![team("team-a", &["duncan"])];
-        let updated = commit_team_update(
-            &mut teams,
-            "team-a",
-            "team-a".to_string(),
-            None,
-            None,
-            ids(&[]),
-            "2026-02-02T00:00:00Z".to_string(),
-            |_| Ok(()),
-            || Err("agent store unreadable".to_string()),
-            |_| Ok(()),
-        )
-        .expect("update swallows secondary-store failure");
-        assert_eq!(updated.persona_ids, Vec::<String>::new());
+        assert!(error.contains("could not update the new team's agents"));
+        assert_eq!(
+            teams.len(),
+            1,
+            "the team write occurs before the agent write"
+        );
     }
 }
+
+mod membership_recovery;
