@@ -88,6 +88,7 @@ class IosNavigationBar extends HookConsumerWidget {
     super.key,
     required this.title,
     this.subtitle,
+    this.ephemeralLabel,
     this.titleAvatar,
     this.titlePresenceColor,
     this.onTitlePressed,
@@ -102,6 +103,7 @@ class IosNavigationBar extends HookConsumerWidget {
 
   final String title;
   final String? subtitle;
+  final String? ephemeralLabel;
   final IosNavigationAction? titleAvatar;
   final Color? titlePresenceColor;
   final VoidCallback? onTitlePressed;
@@ -181,6 +183,7 @@ class IosNavigationBar extends HookConsumerWidget {
     final payload = <String, Object?>{
       'title': title,
       'subtitle': subtitle,
+      'ephemeralLabel': ephemeralLabel,
       'titleAvatar': titleAvatar == null
           ? null
           : encodeAction(titleAvatar!, 'titleAvatar'),

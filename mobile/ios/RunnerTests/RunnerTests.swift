@@ -9,6 +9,44 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testNativeConversationExpiryDisclosure() throws {
+    for dm in [false, true] {
+      let messenger = NavigationTestMessenger()
+      let parent = UIViewController()
+      let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+      let expiry = "Ephemeral channel. Cleans up after 1 hour of inactivity."
+      var args: [String: Any] = ["title": dm ? "Alice" : "general",
+                                "subtitle": dm ? "Online" : "2 members",
+                                "titleEnabled": !dm, "ephemeralLabel": expiry]
+      if dm { args["titleAvatar"] = ["avatarInitial": "A"] }
+      let bar = factory.create(withFrame: CGRect(x: 0, y: 0, width: 390, height: 120),
+                               viewIdentifier: 999995, arguments: args)
+      parent.view.addSubview(bar.view())
+      let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+      let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)
+      title.frame.size = title.intrinsicContentSize
+      for direction in [UISemanticContentAttribute.forceLeftToRight, .forceRightToLeft] {
+        title.semanticContentAttribute = direction
+        title.setNeedsLayout()
+        title.layoutIfNeeded()
+        let clock = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "navigation-ephemeral-status" } as? UIImageView)
+        XCTAssertNotNil(clock.image)
+        XCTAssertFalse(clock.isHidden)
+        XCTAssertTrue(title.bounds.contains(clock.frame))
+        for label in title.subviews.compactMap({ $0 as? UILabel }) {
+          XCTAssertFalse(label.frame.intersects(clock.frame))
+        }
+        XCTAssertTrue(title.accessibilityLabel?.contains(expiry) == true)
+      }
+      args.removeValue(forKey: "ephemeralLabel")
+      messenger.configure(args)
+      let permanent = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)
+      XCTAssertFalse(permanent.subviews.contains { $0.accessibilityIdentifier == "navigation-ephemeral-status" })
+      XCTAssertFalse(permanent.accessibilityLabel?.contains("Ephemeral") == true)
+    }
+  }
+
+  @MainActor
   func testNativeDmTitlePreservesAvatarPresenceAndAccessibility() throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
@@ -1492,6 +1530,13 @@ private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
 
   func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) {
     handler = nil
+  }
+
+  func configure(_ arguments: [String: Any]) {
+    let message = FlutterStandardMethodCodec.sharedInstance().encode(
+      FlutterMethodCall(methodName: "configure", arguments: arguments)
+    )
+    handler?(message) { _ in }
   }
 
   func scroll(to offset: Double) {

@@ -162,6 +162,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Optional second line and action for a native channel title.
   final String? nativeSubtitle;
 
+  /// Existing retention disclosure displayed by the native conversation title.
+  final String? nativeEphemeralLabel;
+
   /// Reactive counterpart avatar and presence badge for a native DM title.
   final IosNavigationAction? nativeTitleAvatar;
   final Color? nativeTitlePresenceColor;
@@ -183,6 +186,7 @@ class FrostedAppBar extends StatelessWidget {
     super.key,
     this.nativeTitle,
     this.nativeSubtitle,
+    this.nativeEphemeralLabel,
     this.nativeTitleAvatar,
     this.nativeTitlePresenceColor,
     this.onNativeTitlePressed,
@@ -252,6 +256,7 @@ class FrostedAppBar extends StatelessWidget {
                       nativeTitle ??
                       (title is Text ? (title as Text).data ?? '' : ''),
                   subtitle: nativeSubtitle,
+                  ephemeralLabel: nativeEphemeralLabel,
                   titleAvatar: nativeTitleAvatar,
                   titlePresenceColor: nativeTitlePresenceColor,
                   onTitlePressed: onNativeTitlePressed,

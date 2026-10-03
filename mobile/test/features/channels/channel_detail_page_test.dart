@@ -228,6 +228,7 @@ Widget _buildTestable({
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
   Channel? channel,
+  ChannelDetails Function()? channelDetails,
   List<Channel>? channels,
   _FakeChannelsNotifier? channelsNotifier,
   List<NavigatorObserver> navigatorObservers = const [],
@@ -292,7 +293,9 @@ Widget _buildTestable({
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
       channelDetailsProvider(_channelId).overrideWith(
-        (ref) async => ChannelDetails.fromChannel(resolvedChannel),
+        (ref) async =>
+            channelDetails?.call() ??
+            ChannelDetails.fromChannel(resolvedChannel),
       ),
       channelCanvasProvider(_channelId).overrideWith(
         (ref) async => ChannelCanvas(
@@ -10188,6 +10191,83 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
     });
+
+    for (final dm in [false, true]) {
+      testWidgets('native ephemeral header retains expiry disclosure dm=$dm', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        Channel conversation({int? ttlSeconds, DateTime? deadline}) => Channel(
+          id: _channelId,
+          name: dm ? 'DM' : 'general',
+          channelType: dm ? 'dm' : 'channel',
+          visibility: 'private',
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          participants: const ['Self', 'Alice'],
+          participantPubkeys: const ['self', 'alice'],
+          isMember: true,
+          ttlSeconds: ttlSeconds,
+          ttlDeadline: deadline,
+        );
+        final initial = conversation(ttlSeconds: 3600);
+        var current = initial;
+        final channels = _FakeChannelsNotifier([initial]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: initial,
+            channelsNotifier: channels,
+            channelDetails: () => ChannelDetails.fromChannel(current),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final view = tester.widget<UiKitView>(
+          find.byWidgetPredicate(
+            (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
+          ),
+        );
+        Map payload = view.creationParams! as Map;
+        expect(
+          payload['ephemeralLabel'],
+          'Ephemeral channel. Cleans up after 1 hour of inactivity.',
+        );
+        const bridge = MethodChannel('buzz/ios_navigation_bar/297');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+          call,
+        ) async {
+          if (call.method == 'configure') payload = call.arguments as Map;
+          return null;
+        });
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            bridge,
+            null,
+          ),
+        );
+        view.onPlatformViewCreated!(297);
+        await tester.pump();
+        current = conversation(deadline: DateTime(2020));
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ChannelDetailPage)),
+        );
+        container.invalidate(channelDetailsProvider(_channelId));
+        await tester.pumpAndSettle();
+        expect(
+          payload['ephemeralLabel'],
+          'Ephemeral channel. Cleanup is due now.',
+        );
+        current = conversation();
+        container.invalidate(channelDetailsProvider(_channelId));
+        await tester.pumpAndSettle();
+        expect(payload['ephemeralLabel'], isNull);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
 
     testWidgets('native channel header preserves members settings and Huddle', (
       tester,

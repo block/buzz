@@ -607,6 +607,9 @@ class ChannelDetailPage extends HookConsumerWidget {
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         nativeViewSuppressed: messageActionBackdropActive,
+        nativeEphemeralLabel: ephemeralChannelDisplay(
+          resolvedChannel,
+        )?.tooltipLabel,
         nativeTitle:
             nativeDm?.label ??
             resolveDmChannelDisplayLabel(

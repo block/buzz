@@ -28,6 +28,7 @@ private final class NavigationTitleView: UIView {
   private let subtitleLabel = UILabel()
   private var avatarView: UIImageView?
   private var presenceView: UIView?
+  private var expiryView: UIImageView?
 
   init(title: String?, subtitle: String, color: UIColor) {
     super.init(frame: .zero)
@@ -67,6 +68,19 @@ private final class NavigationTitleView: UIView {
     }
   }
 
+  func setEphemeralStatus(_ label: String) {
+    let clock = UIImageView(image: UIImage(systemName: "clock"))
+    clock.tintColor = .secondaryLabel
+    clock.contentMode = .scaleAspectFit
+    clock.accessibilityIdentifier = "navigation-ephemeral-status"
+    // The title is one accessibility element; include the full retention
+    // explanation there so the clock is never announced without its meaning.
+    clock.isAccessibilityElement = false
+    addSubview(clock)
+    expiryView = clock
+    accessibilityLabel = [accessibilityLabel, label].compactMap { $0 }.joined(separator: ", ")
+  }
+
   required init?(coder: NSCoder) { return nil }
 
   @objc private func activate() { onActivate?() }
@@ -78,7 +92,7 @@ private final class NavigationTitleView: UIView {
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16 + (avatarView == nil ? 0 : 40),
+    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16 + (avatarView == nil ? 0 : 40) + (expiryView == nil ? 0 : 20),
            height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
   }
 
@@ -89,8 +103,11 @@ private final class NavigationTitleView: UIView {
     let top = (bounds.height - titleHeight - subtitleHeight) / 2
     let hasAvatar = avatarView != nil
     let rtl = effectiveUserInterfaceLayoutDirection == .rightToLeft
-    let textX: CGFloat = hasAvatar && !rtl ? 48 : 8
-    let textWidth = max(0, bounds.width - 16 - (hasAvatar ? 40 : 0))
+    let statusWidth: CGFloat = expiryView == nil ? 0 : 20
+    let textX: CGFloat = (hasAvatar && !rtl ? 48 : 8) + (rtl ? statusWidth : 0)
+    let textWidth = max(0, bounds.width - 16 - (hasAvatar ? 40 : 0) - statusWidth)
+    expiryView?.frame = CGRect(x: rtl ? 8 : bounds.width - 24,
+                              y: top + (titleHeight - 16) / 2, width: 16, height: 16)
     titleLabel.frame = CGRect(x: textX, y: top, width: textWidth, height: titleHeight)
     subtitleLabel.frame = CGRect(x: textX, y: top + titleHeight, width: textWidth, height: subtitleHeight)
     let avatarX: CGFloat = rtl ? bounds.width - 40 : 8
@@ -234,6 +251,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       if let avatar = args["titleAvatar"] as? [String: Any] {
         button.setAvatar(makeItem(avatar).image,
                          presence: args["titlePresenceColor"] is NSNumber ? Self.color(args["titlePresenceColor"]) : nil)
+      }
+      if let label = args["ephemeralLabel"] as? String {
+        button.setEphemeralStatus(label)
       }
       button.frame.size = button.intrinsicContentSize
       item.titleView = button
