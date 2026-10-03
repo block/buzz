@@ -171,8 +171,9 @@ contract's rule, not a relay constant: the relay enforces the token `exp` and
 its own deployment-configured `maximum_assertion_age`. The assertion itself
 follows [NIP-FI](nips/NIP-FI.md): a dedicated assertion's protected `typ` is
 `nip-fi+jwt`, and its `aud` MUST exactly match the canonical host URI of the
-community the relay resolves from the connection's `Host`. The assertion's `nostr_pubkey` MUST be the key that signs the
-NIP-42 relay login; the relay rejects any other key.
+community the relay resolves from the connection's `Host`. The assertion's
+`nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay
+rejects any other key.
 
 Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 
