@@ -157,29 +157,178 @@ export function shouldPlayNotificationSound(
   return !channelId || !silentChannelIds?.has(channelId);
 }
 
-const cache = new Map<SoundName, HTMLAudioElement>();
+/**
+ * A cancellable handle for an in-flight notification sound.
+ *
+ * `stop()` halts playback; `onEnded()` registers a callback fired once when
+ * playback finishes naturally or is stopped (used by the settings preview
+ * button to reset its play/pause state).
+ */
+export type SoundPlayback = {
+  stop: () => void;
+  onEnded: (callback: () => void) => void;
+};
 
-function getAudio(name: SoundName): HTMLAudioElement {
-  let audio = cache.get(name);
-  if (!audio) {
-    audio = new Audio(`/sounds/${name}.mp3`);
-    cache.set(name, audio);
-  }
-  return audio;
+function soundUrl(name: SoundName): string {
+  return `/sounds/${name}.mp3`;
 }
 
-export function playNotificationSound(
-  name: SoundName,
-): HTMLAudioElement | null {
+// Notification sounds play through the Web Audio API rather than an
+// <audio>/HTMLAudioElement. A playing HTMLMediaElement is automatically
+// adopted by the browser's Media Session, which binds the OS hardware
+// media keys (macOS Play/Pause) to it — so previewing a sound left the
+// Play key replaying the ping indefinitely. Web Audio buffer sources are
+// not media-session participants and are never captured by media keys.
+// (This mirrors the click-poof sound in PoofBurstProvider.tsx.)
+let audioContext: AudioContext | null = null;
+
+function getAudioContext(): AudioContext | null {
   try {
-    const audio = getAudio(name);
-    audio.currentTime = 0;
-    audio.play().catch(() => {
-      // Best-effort — user may not have interacted with the page yet.
-    });
-    return audio;
+    audioContext ??= new AudioContext({ latencyHint: "interactive" });
+    return audioContext;
   } catch {
-    // Best-effort only.
     return null;
   }
+}
+
+const bufferCache = new Map<SoundName, AudioBuffer>();
+const bufferPromises = new Map<SoundName, Promise<AudioBuffer | null>>();
+
+function loadBuffer(name: SoundName): Promise<AudioBuffer | null> {
+  const cached = bufferCache.get(name);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+  const pending = bufferPromises.get(name);
+  if (pending) {
+    return pending;
+  }
+
+  const context = getAudioContext();
+  if (!context) {
+    return Promise.resolve(null);
+  }
+
+  const promise = fetch(soundUrl(name))
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to load sound ${name}: ${response.status}`);
+      }
+      return response.arrayBuffer();
+    })
+    .then((arrayBuffer) => context.decodeAudioData(arrayBuffer))
+    .then((buffer) => {
+      bufferCache.set(name, buffer);
+      return buffer;
+    })
+    .catch(() => null)
+    .finally(() => {
+      bufferPromises.delete(name);
+    });
+
+  bufferPromises.set(name, promise);
+  return promise;
+}
+
+/** Warm the decoded-buffer cache so the first play has no fetch/decode lag. */
+export function preloadNotificationSound(name: SoundName): void {
+  void loadBuffer(name);
+}
+
+function noopPlayback(): SoundPlayback {
+  return { stop: () => {}, onEnded: (callback) => callback() };
+}
+
+// Fallback for environments without a usable AudioContext (or a buffer that
+// failed to decode). Uses a one-shot HTMLAudioElement; this path can still be
+// captured by media keys, but it only runs when Web Audio is unavailable.
+function playViaAudioElement(name: SoundName): SoundPlayback {
+  try {
+    const audio = new Audio(soundUrl(name));
+    audio.currentTime = 0;
+    audio.play().catch(() => {
+      // Best-effort — the user may not have interacted with the page yet.
+    });
+    return {
+      stop: () => {
+        audio.pause();
+      },
+      onEnded: (callback) => {
+        const handler = () => callback();
+        audio.addEventListener("ended", handler, { once: true });
+        audio.addEventListener("pause", handler, { once: true });
+      },
+    };
+  } catch {
+    return noopPlayback();
+  }
+}
+
+function playViaWebAudio(
+  context: AudioContext,
+  buffer: AudioBuffer,
+): SoundPlayback {
+  const endedCallbacks: Array<() => void> = [];
+  let ended = false;
+  const finish = () => {
+    if (ended) return;
+    ended = true;
+    for (const callback of endedCallbacks) {
+      callback();
+    }
+  };
+
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(context.destination);
+  source.addEventListener("ended", finish, { once: true });
+
+  const start = () => {
+    try {
+      source.start();
+    } catch {
+      finish();
+    }
+  };
+  if (context.state === "suspended") {
+    void context.resume().then(start, finish);
+  } else {
+    start();
+  }
+
+  return {
+    stop: () => {
+      try {
+        source.stop();
+      } catch {
+        // Already stopped/ended.
+      }
+      finish();
+    },
+    onEnded: (callback) => {
+      if (ended) {
+        callback();
+      } else {
+        endedCallbacks.push(callback);
+      }
+    },
+  };
+}
+
+export function playNotificationSound(name: SoundName): SoundPlayback {
+  const context = getAudioContext();
+  const buffer = bufferCache.get(name);
+
+  if (context && buffer) {
+    try {
+      return playViaWebAudio(context, buffer);
+    } catch {
+      return playViaAudioElement(name);
+    }
+  }
+
+  // Buffer not ready yet: warm the cache for next time and fall back to an
+  // HTMLAudioElement for this play so the sound is not silently dropped.
+  void loadBuffer(name);
+  return playViaAudioElement(name);
 }
