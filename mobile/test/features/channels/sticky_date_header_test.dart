@@ -6,11 +6,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+void expectDateHeading(WidgetTester tester, String label) {
+  expect(
+    tester
+        .getSemantics(find.bySemanticsLabel(label))
+        .getSemanticsData()
+        .headingLevel,
+    1,
+    reason: 'Flutter 3.47 maps headings from headingLevel, not header.',
+  );
+}
+
 void main() {
   testWidgets(
     'keeps the native iOS date compact and stationary during push-off',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final semantics = tester.ensureSemantics();
       final state = ValueNotifier(
         const StickyDateHeaderState(label: 'Yesterday'),
       );
@@ -29,6 +41,8 @@ void main() {
             home: Scaffold(body: StickyDateHeader(state: state)),
           ),
         );
+
+        expectDateHeading(tester, 'Yesterday');
 
         var nativeView = tester.widget<UiKitView>(find.byType(UiKitView));
         expect(nativeView.viewType, 'buzz/sticky_date_glass');
@@ -144,6 +158,7 @@ void main() {
           null,
         );
         state.dispose();
+        semantics.dispose();
         debugDefaultTargetPlatformOverride = null;
       }
     },
@@ -153,6 +168,7 @@ void main() {
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final semantics = tester.ensureSemantics();
     final state = ValueNotifier(const StickyDateHeaderState(label: 'Today'));
     try {
       await tester.pumpWidget(
@@ -165,6 +181,7 @@ void main() {
       expect(find.byType(UiKitView), findsNothing);
       expect(find.byType(BackdropFilter), findsOneWidget);
       expect(find.text('Today'), findsOneWidget);
+      expectDateHeading(tester, 'Today');
       expect(
         find.byKey(const ValueKey('sticky-date-header-clip')),
         findsNothing,
@@ -205,6 +222,7 @@ void main() {
       );
     } finally {
       state.dispose();
+      semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     }
   });

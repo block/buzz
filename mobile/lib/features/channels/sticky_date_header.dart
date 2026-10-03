@@ -107,7 +107,7 @@ class StickyDateHeader extends StatelessWidget {
                   vertical: Grid.half,
                 ),
                 child: Semantics(
-                  header: true,
+                  headingLevel: 1,
                   child: Text(
                     label,
                     maxLines: 1,
@@ -206,7 +206,7 @@ class _IosStickyDateGlass extends HookWidget {
     }, [nativeChannel.value, label, brightness]);
 
     return Semantics(
-      header: true,
+      headingLevel: 1,
       label: label,
       child: ExcludeSemantics(
         child: SizedBox(

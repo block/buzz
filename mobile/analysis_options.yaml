@@ -4,6 +4,10 @@ analyzer:
   plugins:
     - custom_lint
   errors:
+    # Legacy analyzer plugins (custom_lint) are deprecated in Dart 3.13. Moving
+    # off them means riverpod_lint 3.1.9, which needs riverpod 3.4.3 and
+    # analyzer 13+.
+    analysis_options_deprecated_plugins: ignore
     invalid_use_of_visible_for_overriding_member: ignore
   exclude:
     - build/**

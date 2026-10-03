@@ -436,7 +436,7 @@ void main() {
         );
         expect(
           tester
-              .widget<ColoredBox>(
+              .widget<Material>(
                 find.byKey(const ValueKey('buzz-sheet-surface')),
               )
               .color,

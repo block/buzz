@@ -247,7 +247,7 @@ class SearchPage extends HookConsumerWidget {
               return SizeTransition(
                 sizeFactor: curvedAnimation,
                 axis: Axis.horizontal,
-                axisAlignment: 1,
+                alignment: AlignmentDirectional.topEnd,
                 child: FadeTransition(
                   opacity: curvedAnimation,
                   child: SlideTransition(
@@ -401,7 +401,7 @@ class SearchPage extends HookConsumerWidget {
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(Radii.dialog),
               ),
-              child: ColoredBox(
+              child: Material(
                 color: context.colors.surface,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,

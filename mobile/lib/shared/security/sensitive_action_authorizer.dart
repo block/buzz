@@ -44,7 +44,7 @@ class LocalSensitiveActionAuthorizer implements SensitiveActionAuthorizer {
       final availableBiometrics = await _authentication
           .getAvailableBiometrics();
       if (availableBiometrics.isEmpty) return DeviceAuthResult.unavailable;
-      return _authorize(
+      return await _authorize(
         localizedReason: 'Enable biometrics for secure actions',
         biometricOnly: true,
       );

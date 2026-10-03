@@ -127,7 +127,7 @@ Future<bool> _preloadMembers(
     final members = await ref.read(channelMembersProvider(channelId).future);
     await notifier.preload(members.map((member) => member.pubkey).toList());
     if (refreshDmParticipants) {
-      return notifier.refresh(participantPubkeys);
+      return await notifier.refresh(participantPubkeys);
     }
     return true;
   } catch (_) {
