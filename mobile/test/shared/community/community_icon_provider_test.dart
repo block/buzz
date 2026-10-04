@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:buzz/shared/community/community_icon_cache.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
@@ -47,7 +50,7 @@ void main() {
     });
     expect(await container.read(communityIconProvider(relay).future), artwork);
     expect(container.read(communityIconCacheProvider)[key], artwork);
-    expect(prefs.getString('buzz.community-icons.v1'), contains('image/svg'));
+    expect(prefs.getString('buzz.community-icons.v2'), contains('image/svg'));
   });
 
   test(
@@ -86,7 +89,7 @@ void main() {
     () async {
       var offline = false;
       final png = base64Decode(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==',
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
       );
       final container = containerFor((request) async {
         if (offline) return http.Response('offline', 503);
@@ -104,8 +107,14 @@ void main() {
         );
       });
       final provider = communityIconProvider(relay);
+      final subscription = container.listen(provider, (_, _) {});
+      addTearDown(subscription.close);
       final saved = await container.read(provider.future);
-      expect(UriData.parse(saved!).contentAsBytes(), png);
+      expect(saved, isNotNull);
+      final dimensions = await _dimensions(
+        UriData.parse(saved!).contentAsBytes(),
+      );
+      expect(dimensions, (1, 1));
       offline = true;
       container.invalidate(provider);
       expect(await container.read(provider.future), saved);
@@ -163,7 +172,7 @@ void main() {
   });
 
   test('ignores corrupt persistence and bounds cache entries', () async {
-    await prefs.setString('buzz.community-icons.v1', '{bad json');
+    await prefs.setString('buzz.community-icons.v2', '{bad json');
     final container = containerFor((_) async => http.Response('{}', 200));
     expect(container.read(communityIconCacheProvider), isEmpty);
     final cache = container.read(communityIconCacheProvider.notifier);
@@ -262,6 +271,147 @@ void main() {
     });
   }
 
+  for (final inline in [false, true]) {
+    test('rejects compressed oversized dimensions, inline=$inline', () async {
+      final bytes = await File(
+        'test/fixtures/community_icons/compressed-16000.png',
+      ).readAsBytes();
+      expect(bytes.length, lessThan(256 * 1024));
+      // Read the encoded descriptor, never allocate this 256-million-pixel image.
+      expect(await _dimensions(bytes), (16000, 16000));
+      final source = Uri.dataFromBytes(bytes, mimeType: 'image/png').toString();
+      final container = containerFor((request) async {
+        if (request.url.path == '/') {
+          return http.Response(
+            jsonEncode({
+              'icon': inline ? source : 'https://relay.example.com/icon.png',
+            }),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          bytes,
+          200,
+          headers: {'content-type': 'image/png'},
+        );
+      });
+      expect(await container.read(communityIconProvider(relay).future), isNull);
+      expect(container.read(communityIconCacheProvider), isEmpty);
+      expect(prefs.getString('buzz.community-icons.v2'), isNull);
+      final restarted = containerFor(
+        (_) async => http.Response('offline', 503),
+      );
+      expect(restarted.read(communityIconPresentationProvider(relay)), isNull);
+    });
+  }
+
+  test(
+    'old cache cannot reintroduce oversized artwork after restart',
+    () async {
+      final bytes = await File(
+        'test/fixtures/community_icons/compressed-16000.png',
+      ).readAsBytes();
+      await prefs.setString(
+        'buzz.community-icons.v1',
+        jsonEncode({
+          key: Uri.dataFromBytes(bytes, mimeType: 'image/png').toString(),
+        }),
+      );
+      final container = containerFor(
+        (_) async => http.Response('offline', 503),
+      );
+      expect(container.read(communityIconPresentationProvider(relay)), isNull);
+      expect(container.read(communityIconCacheProvider), isEmpty);
+    },
+  );
+
+  test(
+    'cached raster is bounded before rendering and after offline restart',
+    () async {
+      final bytes = await File(
+        'test/fixtures/community_icons/landscape-1024.png',
+      ).readAsBytes();
+      expect(await _dimensions(bytes), (1024, 512));
+      final container = containerFor(
+        (_) async => http.Response(
+          jsonEncode({
+            'icon': Uri.dataFromBytes(bytes, mimeType: 'image/png').toString(),
+          }),
+          200,
+        ),
+      );
+      final subscription = container.listen(
+        communityIconProvider(relay),
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+      final saved = await container.read(communityIconProvider(relay).future);
+      expect(saved, isNotNull);
+      expect(await _dimensions(UriData.parse(saved!).contentAsBytes()), (
+        512,
+        256,
+      ));
+      final restarted = containerFor(
+        (_) async => http.Response('offline', 503),
+      );
+      final restored = restarted.read(communityIconPresentationProvider(relay));
+      expect(restored, saved);
+      expect(await _dimensions(UriData.parse(restored!).contentAsBytes()), (
+        512,
+        256,
+      ));
+    },
+  );
+
+  for (final stalledImage in [false, true]) {
+    test(
+      'invalidation and disposal abort pending headers, image=$stalledImage',
+      () async {
+        var started = 0;
+        var active = 0;
+        var aborted = 0;
+        final client = MockClient.streaming((request, _) async {
+          if (stalledImage && request.url.path == '/') {
+            return http.StreamedResponse(
+              Stream.value(
+                utf8.encode('{"icon":"https://relay.example.com/stalled.png"}'),
+              ),
+              200,
+            );
+          }
+          started++;
+          active++;
+          await (request as http.AbortableRequest).abortTrigger;
+          active--;
+          aborted++;
+          throw http.RequestAbortedException(request.url);
+        });
+        final container = ProviderContainer(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            communityIconHttpClientProvider.overrideWithValue(client),
+          ],
+        );
+        addTearDown(container.dispose);
+        addTearDown(client.close);
+        final provider = communityIconProvider(relay);
+        final subscription = container.listen(provider, (_, _) {});
+        for (var iteration = 0; iteration < 3; iteration++) {
+          await _waitFor(() => started == iteration + 1);
+          expect(active, 1);
+          container.invalidate(provider);
+          await _waitFor(() => aborted == iteration + 1);
+        }
+        await _waitFor(() => started == 4);
+        expect(active, 1);
+        subscription.close();
+        await container.pump();
+        await _waitFor(() => active == 0);
+        expect(aborted, 4);
+      },
+    );
+  }
+
   test('oversized downloads do not replace a usable saved image', () async {
     final container = containerFor(
       (request) async => request.url.path == '/'
@@ -277,4 +427,25 @@ void main() {
         .remember(key, artwork);
     expect(await container.read(communityIconProvider(relay).future), artwork);
   });
+}
+
+Future<(int, int)> _dimensions(Uint8List bytes) async {
+  final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+  try {
+    final descriptor = await ui.ImageDescriptor.encoded(buffer);
+    try {
+      return (descriptor.width, descriptor.height);
+    } finally {
+      descriptor.dispose();
+    }
+  } finally {
+    buffer.dispose();
+  }
+}
+
+Future<void> _waitFor(bool Function() ready) async {
+  for (var i = 0; i < 100 && !ready(); i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+  expect(ready(), isTrue, reason: 'Request cancellation did not settle');
 }

@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import 'community_icon_cache.dart';
+import 'community_icon_artwork.dart';
 
 const _maximumIconBytes = 256 * 1024;
 const _lookupTimeout = Duration(seconds: 5);
@@ -37,9 +38,18 @@ final communityIconProvider = FutureProvider.autoDispose
       final saved = ref.read(communityIconCacheProvider)[key];
       final client = ref.read(communityIconHttpClientProvider);
       var disposed = false;
-      ref.onDispose(() => disposed = true);
+      final cancelled = Completer<void>();
+      ref.onDispose(() {
+        disposed = true;
+        cancelled.complete();
+      });
       try {
-        final response = await _download(client, uri, metadata: true);
+        final response = await _download(
+          client,
+          uri,
+          cancelled.future,
+          metadata: true,
+        );
         if (response == null || disposed) return saved;
         final document = jsonDecode(utf8.decode(response.bytes));
         if (document is! Map<String, dynamic>) return saved;
@@ -58,7 +68,7 @@ final communityIconProvider = FutureProvider.autoDispose
           final imageUri = Uri.tryParse(icon);
           if (imageUri != null &&
               (imageUri.scheme == 'https' || imageUri.scheme == 'http')) {
-            final image = await _download(client, imageUri);
+            final image = await _download(client, imageUri, cancelled.future);
             if (image != null && image.mimeType.startsWith('image/')) {
               artwork = Uri.dataFromBytes(
                 image.bytes,
@@ -71,8 +81,10 @@ final communityIconProvider = FutureProvider.autoDispose
         // Never expose rejected remote URLs to the avatar renderer: doing so
         // would bypass the bounded download above.
         if (artwork == null) return saved;
-        await cache.remember(key, artwork);
-        return artwork;
+        final prepared = await prepareCommunityIconArtwork(artwork);
+        if (prepared == null || disposed) return saved;
+        await cache.remember(key, prepared);
+        return prepared;
       } catch (_) {
         return saved;
       }
@@ -80,10 +92,16 @@ final communityIconProvider = FutureProvider.autoDispose
 
 Future<({List<int> bytes, String mimeType})?> _download(
   http.Client client,
-  Uri uri, {
+  Uri uri,
+  Future<void> cancelled, {
   bool metadata = false,
 }) async {
   final abort = Completer<void>();
+  void cancel() {
+    if (!abort.isCompleted) abort.complete();
+  }
+
+  unawaited(cancelled.then((_) => cancel()));
   final request = http.AbortableRequest('GET', uri, abortTrigger: abort.future);
   if (metadata) request.headers['Accept'] = 'application/nostr+json';
   StreamIterator<List<int>>? iterator;
@@ -115,7 +133,7 @@ Future<({List<int> bytes, String mimeType})?> _download(
   } finally {
     // Future.timeout does not stop the underlying socket, including while
     // waiting for response headers. Abort before releasing the stream.
-    abort.complete();
+    cancel();
     await iterator?.cancel();
   }
 }
