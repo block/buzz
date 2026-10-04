@@ -52,6 +52,82 @@ void main() {
   );
 
   for (final direction in TextDirection.values) {
+    for (final cancel in [false, true]) {
+      testWidgets(
+        'scrub window stays fixed across rebuilds in $direction, cancel=$cancel',
+        (tester) async {
+          final selected = ValueNotifier(10);
+          addTearDown(selected.dispose);
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              child: Directionality(
+                textDirection: direction,
+                child: Center(
+                  child: SizedBox(
+                    width: 390,
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: selected,
+                      builder: (context, page, _) => PageIndicator(
+                        semanticLabel: 'Photo',
+                        count: 20,
+                        selected: page,
+                        animateChanges: false,
+                        onSelected: (page) => selected.value = page,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          Offset center(int page) => tester.getCenter(
+            find.byKey(ValueKey('page-indicator-dot-$page')),
+          );
+          final target = center(12);
+          final gesture = await tester.startGesture(center(10));
+          await gesture.moveTo(target);
+          await tester.pump();
+          expect(selected.value, 12);
+          for (var event = 0; event < 6; event++) {
+            // Vertical jitter emits new pointer events at an unchanged scrub x.
+            await gesture.moveTo(target + Offset(0, event.isEven ? 1 : 0));
+            await tester.pump();
+            expect(selected.value, 12, reason: 'Held pointer must not cascade');
+            expect(
+              center(12).dx,
+              target.dx,
+              reason: 'Rendered window stays under the pointer',
+            );
+          }
+          if (cancel) {
+            await gesture.cancel();
+          } else {
+            await gesture.up();
+          }
+          await tester.pump();
+          expect(selected.value, 12);
+          expect(
+            center(12).dx,
+            isNot(target.dx),
+            reason: 'Release recenters the window',
+          );
+          // The next gesture must snapshot the new window after end OR cancel.
+          final next = await tester.startGesture(center(12));
+          await next.moveTo(center(14));
+          await tester.pump();
+          expect(selected.value, 14);
+          await next.up();
+          await tester.pump();
+          await tester.tapAt(center(15));
+          await tester.pump();
+          expect(
+            selected.value,
+            15,
+            reason: 'A tap uses the current window once',
+          );
+        },
+      );
+    }
     for (final window in [
       (count: 3, selected: 1, first: 0, last: 2),
       (count: 20, selected: 0, first: 0, last: 6),

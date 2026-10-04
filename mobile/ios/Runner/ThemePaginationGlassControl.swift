@@ -36,6 +36,7 @@ private final class ThemePaginationControl: UIControl {
   private var dots: [UIView] = []
   private var totalCount = 1
   private var selectedIndex = 0
+  private var scrub = ThemePaginationScrub()
   private var activeColor = UIColor.label
   private var inactiveColor = UIColor.secondaryLabel.withAlphaComponent(0.32)
   var onSelectionChanged: ((Int) -> Void)?
@@ -117,6 +118,7 @@ private final class ThemePaginationControl: UIControl {
     if let isRTL = arguments["isRTL"] as? Bool {
       semanticContentAttribute = isRTL ? .forceRightToLeft : .forceLeftToRight
     }
+    if count != totalCount { scrub.end() }
     totalCount = count
     if count != dots.count {
       rebuildDots(count: count)
@@ -145,7 +147,29 @@ private final class ThemePaginationControl: UIControl {
   @objc private func handleGesture(_ recognizer: UIGestureRecognizer) {
     guard dotsContainer.bounds.width > 0 else { return }
     let location = recognizer.location(in: dotsContainer)
-    select(index: geometry.page(at: location.x))
+    if recognizer is UIPanGestureRecognizer {
+      switch recognizer.state {
+      case .began:
+        scrub.begin(geometry)
+      case .changed:
+        guard scrub.geometry != nil else { return }
+      case .ended:
+        let page = scrub.page(at: location.x, current: geometry)
+        scrub.end()
+        select(index: page)
+        updateDots(animated: true)
+        return
+      case .cancelled, .failed:
+        scrub.end()
+        updateDots(animated: true)
+        return
+      default:
+        return
+      }
+      select(index: scrub.page(at: location.x, current: geometry))
+    } else if recognizer.state == .ended {
+      select(index: geometry.page(at: location.x))
+    }
   }
 
   private func select(index: Int) {
@@ -178,7 +202,7 @@ private final class ThemePaginationControl: UIControl {
 
   private func updateDots(animated: Bool) {
     guard !dots.isEmpty, dotsContainer.bounds.width > 0 else { return }
-    let geometry = self.geometry
+    let geometry = scrub.geometry ?? self.geometry
     let visibleCount = geometry.visibleCount
     let hasEarlierDots = geometry.isRTL ? geometry.hasLaterDots : geometry.hasEarlierDots
     let hasLaterDots = geometry.isRTL ? geometry.hasEarlierDots : geometry.hasLaterDots

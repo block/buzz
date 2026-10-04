@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 import 'ios_glass_theme_pagination.dart';
@@ -92,7 +93,14 @@ class PageIndicator extends StatelessWidget {
   }
 }
 
-class _WindowedPagination extends StatelessWidget {
+typedef _PaginationScrubGeometry = ({
+  int windowStart,
+  int visibleCount,
+  double width,
+  bool isRtl,
+});
+
+class _WindowedPagination extends HookWidget {
   const _WindowedPagination({
     required this.containerHeight,
     required this.dotKeyPrefix,
@@ -117,28 +125,37 @@ class _WindowedPagination extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scrubGeometry = useState<_PaginationScrubGeometry?>(null);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final duration = reduceMotion || !animateChanges
         ? Duration.zero
         : const Duration(milliseconds: 150);
-    final visibleCount = count.clamp(1, _maximumVisibleDots);
-    final maximumStart = (count - visibleCount).clamp(0, count);
-    final centerSlot = visibleCount ~/ 2;
-    final windowStart = (selected - centerSlot).clamp(0, maximumStart);
-    final windowEnd = windowStart + visibleCount - 1;
-    final hasEarlierDots = windowStart > 0;
-    final hasLaterDots = windowEnd < count - 1;
-
-    final pitch = _dotSize + _spacing;
-    final trackWidth = visibleCount * _dotSize + (visibleCount - 1) * _spacing;
-    final isRtl = Directionality.of(context) == TextDirection.rtl;
-
+    final currentVisibleCount = count.clamp(1, _maximumVisibleDots);
+    final maximumStart = (count - currentVisibleCount).clamp(0, count);
+    final centerSlot = currentVisibleCount ~/ 2;
     return LayoutBuilder(
       builder: (context, constraints) {
+        final geometry =
+            scrubGeometry.value ??
+            (
+              windowStart: (selected - centerSlot).clamp(0, maximumStart),
+              visibleCount: currentVisibleCount,
+              width: constraints.maxWidth,
+              isRtl: Directionality.of(context) == TextDirection.rtl,
+            );
+        final windowStart = geometry.windowStart;
+        final visibleCount = geometry.visibleCount;
+        final isRtl = geometry.isRtl;
+        final windowEnd = windowStart + visibleCount - 1;
+        final hasEarlierDots = windowStart > 0;
+        final hasLaterDots = windowEnd < count - 1;
+        final pitch = _dotSize + _spacing;
+        final trackWidth =
+            visibleCount * _dotSize + (visibleCount - 1) * _spacing;
+
         void selectFromPosition(double dx) {
           if (count <= 1) return;
-          final firstCenter =
-              (constraints.maxWidth - trackWidth) / 2 + _dotSize / 2;
+          final firstCenter = (geometry.width - trackWidth) / 2 + _dotSize / 2;
           final slot = ((dx - firstCenter) / pitch).round().clamp(
             0,
             visibleCount - 1,
@@ -150,11 +167,17 @@ class _WindowedPagination extends StatelessWidget {
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           excludeFromSemantics: true,
-          onTapDown: (details) => selectFromPosition(details.localPosition.dx),
-          onHorizontalDragStart: (details) =>
-              selectFromPosition(details.localPosition.dx),
+          // A tap must not select on pointer-down before a drag can snapshot
+          // the window. Otherwise the first drag callback already sees a shift.
+          onTapUp: (details) => selectFromPosition(details.localPosition.dx),
+          onHorizontalDragStart: (details) {
+            scrubGeometry.value = geometry;
+            selectFromPosition(details.localPosition.dx);
+          },
           onHorizontalDragUpdate: (details) =>
               selectFromPosition(details.localPosition.dx),
+          onHorizontalDragEnd: (_) => scrubGeometry.value = null,
+          onHorizontalDragCancel: () => scrubGeometry.value = null,
           child: SizedBox(
             height: 54,
             child: Center(
@@ -167,7 +190,8 @@ class _WindowedPagination extends StatelessWidget {
                 ),
                 child: LayoutBuilder(
                   builder: (context, constraints) {
-                    final trackOrigin = (constraints.maxWidth - trackWidth) / 2;
+                    final trackOrigin =
+                        (geometry.width - Grid.twelve * 2 - trackWidth) / 2;
                     return ClipRect(
                       child: Stack(
                         children: [

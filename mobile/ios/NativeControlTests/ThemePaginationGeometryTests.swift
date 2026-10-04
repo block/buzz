@@ -31,6 +31,34 @@ struct ThemePaginationGeometryTests {
         check(geometry.page(at: 200) == firstPage + (isRTL ? 0 : centers.count - 1), "right edge")
       }
     }
+    for isRTL in [false, true] {
+      for cancel in [false, true] {
+        var selected = 10
+        func current() -> ThemePaginationGeometry {
+          ThemePaginationGeometry(count: 20, selected: selected, width: 92, isRTL: isRTL)
+        }
+        var scrub = ThemePaginationScrub()
+        let target = current().centerX(for: 12)
+        scrub.begin(current())
+        for _ in 0..<8 {
+          selected = scrub.page(at: target, current: current())
+          check(selected == 12, "held pan cascaded in RTL=\(isRTL), cancel=\(cancel)")
+          check(scrub.geometry?.centerX(for: 12) == target, "rendered window moved")
+        }
+        // The UIKit ended path consumes its last coordinate before clearing;
+        // cancelled/failed paths clear without introducing another selection.
+        if !cancel { selected = scrub.page(at: target, current: current()) }
+        scrub.end()
+        check(scrub.geometry == nil, "end/cancel retained window")
+        let nextTarget = current().centerX(for: 14)
+        scrub.begin(current())
+        selected = scrub.page(at: nextTarget, current: current())
+        check(selected == 14, "next gesture reused stale geometry")
+        scrub.end()
+        check(current().page(at: current().centerX(for: 15)) == 15, "tap after scrub")
+      }
+    }
+    print("PASS: held scrubs, final events, cancellation and fresh gestures in LTR/RTL")
     print("PASS: \(checkedCenters) rendered centers, neighboring taps and clamped edges in LTR/RTL")
   }
 }

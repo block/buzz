@@ -33,3 +33,20 @@ struct ThemePaginationGeometry {
     return windowStart + (isRTL ? visibleCount - 1 - boundedSlot : boundedSlot)
   }
 }
+
+/// Freezes the rendered window for one continuous pan, including its final event.
+struct ThemePaginationScrub {
+  private(set) var geometry: ThemePaginationGeometry?
+
+  mutating func begin(_ geometry: ThemePaginationGeometry) {
+    self.geometry = geometry
+  }
+
+  func page(at x: CGFloat, current: ThemePaginationGeometry) -> Int {
+    (geometry ?? current).page(at: x)
+  }
+
+  mutating func end() {
+    geometry = nil
+  }
+}
