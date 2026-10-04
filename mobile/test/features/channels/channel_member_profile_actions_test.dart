@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -194,20 +195,65 @@ void main() {
   testWidgets('role updates block duplicates and show rejection', (
     tester,
   ) async {
-    final actions = _Actions()
-      ..pending = Completer<void>()
-      ..fail = true;
-    await _pump(tester, actions: actions);
-    await tester.tap(find.text('Make channel admin'));
-    await tester.pump();
-    await tester.tap(find.text('Make channel admin'));
-    expect(actions.calls, ['test:alice:admin']);
-    actions.pending!.complete();
-    await tester.pumpAndSettle();
-    expect(
-      find.text('Could not change this role. Please try again.'),
-      findsOneWidget,
-    );
+    final semantics = tester.ensureSemantics();
+    try {
+      final actions = _Actions()
+        ..pending = Completer<void>()
+        ..fail = true;
+      await _pump(tester, actions: actions);
+      await tester.tap(find.text('Make channel admin'));
+      await tester.pump();
+      final pending = find.bySemanticsLabel('Updating channel member');
+      expect(pending, findsOneWidget);
+      expect(
+        tester
+            .getSemantics(pending)
+            .getSemanticsData()
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
+      expect(find.bySemanticsLabel('Updating…'), findsNothing);
+      for (final label in ['Make channel admin', 'Remove from channel']) {
+        expect(
+          tester
+              .getSemantics(find.text(label))
+              .getSemanticsData()
+              .hasAction(SemanticsAction.tap),
+          isFalse,
+        );
+      }
+      await tester.tap(find.text('Make channel admin'));
+      expect(actions.calls, ['test:alice:admin']);
+      actions.pending!.complete();
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Could not change this role. Please try again.'),
+        findsOneWidget,
+      );
+      expect(pending, findsNothing);
+      final error = find.bySemanticsLabel(
+        'Could not change this role. Please try again.',
+      );
+      expect(error, findsOneWidget);
+      expect(
+        tester
+            .getSemantics(error)
+            .getSemanticsData()
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
+      expect(
+        tester
+            .getSemantics(find.text('Make channel admin'))
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+    } finally {
+      semantics.dispose();
+    }
   });
   testWidgets('removal requires confirmation and reports rejection', (
     tester,

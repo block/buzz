@@ -165,12 +165,25 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             ),
           ],
         ),
-        if (busy.value) const Center(child: Text('Updating…')),
+        if (busy.value)
+          Semantics(
+            liveRegion: true,
+            label: 'Updating channel member',
+            child: const ExcludeSemantics(
+              child: Center(child: Text('Updating…')),
+            ),
+          ),
         if (error.value != null)
-          Text(
-            error.value!,
-            style: context.textTheme.bodyMedium?.copyWith(
-              color: context.colors.error,
+          Semantics(
+            liveRegion: true,
+            label: error.value!,
+            child: ExcludeSemantics(
+              child: Text(
+                error.value!,
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
             ),
           ),
       ],
