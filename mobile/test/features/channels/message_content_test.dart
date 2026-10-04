@@ -1836,10 +1836,7 @@ Photos
         );
         await tester.pumpAndSettle();
         final indicatorFinder = find.byType(PageIndicator);
-        final indicatorRect = tester.getRect(indicatorFinder);
-        await tester.tapAt(
-          Offset(indicatorRect.right - 8, indicatorRect.center.dy),
-        );
+        await tester.tap(find.byKey(const ValueKey('page-indicator-dot-1')));
         await tester.pump();
         expect(tester.widget<PageIndicator>(indicatorFinder).selected, 1);
         final pages = tester.widget<PageView>(
