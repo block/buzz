@@ -23,9 +23,7 @@ import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
-import '../../shared/widgets/sheet_divider.dart';
-import '../../shared/widgets/app_list.dart';
-import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
@@ -191,59 +189,68 @@ Future<void> showMessageActions({
                     ),
                     const SizedBox(height: Grid.xs),
                     // Triage: come back to this message later.
-                    _MarkReadUnreadTile(message: message, channelId: channelId),
-                    _FollowThreadTile(message: message),
-                    const SheetDivider(),
-                    // Export: take the content out of the conversation.
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(LucideIcons.copy),
-                      title: const Text('Copy text'),
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        // Copy to clipboard
-                        final data = ClipboardData(text: message.content);
-                        Clipboard.setData(data);
-                      },
-                    ),
-                  ],
-                  if (canManageMessage) ...[
-                    if (!message.isSystem) const SheetDivider(),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(LucideIcons.pencil),
-                      title: const Text('Edit message'),
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        _showEditSheet(
-                          context: context,
-                          ref: ref,
+                    SheetActionSection(
+                      children: [
+                        _MarkReadUnreadTile(
                           message: message,
                           channelId: channelId,
-                        );
-                      },
+                        ),
+                        _FollowThreadTile(message: message),
+                      ],
                     ),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        LucideIcons.trash2,
-                        color: sheetContext.colors.error,
-                      ),
-                      title: Text(
-                        'Delete message',
-                        style: TextStyle(color: sheetContext.colors.error),
-                      ),
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        _confirmDelete(
-                          context: context,
-                          ref: ref,
-                          channelId: channelId,
-                          messageId: message.id,
-                        );
-                      },
+                    SheetActionSection(
+                      children: [
+                        // Export: take the content out of the conversation.
+                        ListTile(
+                          leading: const Icon(LucideIcons.copy),
+                          title: const Text('Copy text'),
+                          onTap: () {
+                            Navigator.of(sheetContext).pop();
+                            // Copy to clipboard
+                            final data = ClipboardData(text: message.content);
+                            Clipboard.setData(data);
+                          },
+                        ),
+                      ],
                     ),
                   ],
+                  if (canManageMessage)
+                    SheetActionSection(
+                      children: [
+                        ListTile(
+                          leading: const Icon(LucideIcons.pencil),
+                          title: const Text('Edit message'),
+                          onTap: () {
+                            Navigator.of(sheetContext).pop();
+                            _showEditSheet(
+                              context: context,
+                              ref: ref,
+                              message: message,
+                              channelId: channelId,
+                            );
+                          },
+                        ),
+                        ListTile(
+                          leading: Icon(
+                            LucideIcons.trash2,
+                            color: sheetContext.colors.error,
+                          ),
+                          title: Text(
+                            'Delete message',
+                            style: TextStyle(color: sheetContext.colors.error),
+                          ),
+                          onTap: () {
+                            Navigator.of(sheetContext).pop();
+                            _confirmDelete(
+                              context: context,
+                              ref: ref,
+                              channelId: channelId,
+                              messageId: message.id,
+                            );
+                          },
+                        ),
+                      ],
+                    ),
                 ],
               ),
             ),
@@ -271,74 +278,91 @@ void showImageActions({
     title: 'Image',
     builder: (sheetContext) => SafeArea(
       child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AppListCard(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                AppListRow(
-                  icon: LucideIcons.download,
-                  title: 'Save image',
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    unawaited(_saveImage(context, ref, imageUrl));
-                  },
+                SheetActionSection(
+                  children: [
+                    ListTile(
+                      leading: const Icon(LucideIcons.download),
+                      title: const Text('Save image'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        unawaited(_saveImage(context, ref, imageUrl));
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(LucideIcons.share2),
+                      title: const Text('Share image'),
+                      onTap: () {
+                        final renderBox =
+                            context.findRenderObject() as RenderBox?;
+                        final shareOrigin = renderBox == null
+                            ? null
+                            : renderBox.localToGlobal(Offset.zero) &
+                                  renderBox.size;
+                        Navigator.of(sheetContext).pop();
+                        unawaited(
+                          _shareImage(
+                            context,
+                            ref,
+                            imageUrl,
+                            shareOrigin: shareOrigin,
+                          ),
+                        );
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(LucideIcons.link2),
+                      title: const Text('Copy image link'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        copyToClipboard(
+                          context,
+                          imageUrl,
+                          message: 'Image link copied',
+                        );
+                      },
+                    ),
+                  ],
                 ),
-                AppListRow(
-                  icon: LucideIcons.share2,
-                  title: 'Share image',
-                  onTap: () {
-                    final renderBox = context.findRenderObject() as RenderBox?;
-                    final shareOrigin = renderBox == null
-                        ? null
-                        : renderBox.localToGlobal(Offset.zero) & renderBox.size;
-                    Navigator.of(sheetContext).pop();
-                    unawaited(
-                      _shareImage(
-                        context,
-                        ref,
-                        imageUrl,
-                        shareOrigin: shareOrigin,
+                if (canManageMessage)
+                  SheetActionSection(
+                    children: [
+                      ListTile(
+                        leading: Icon(
+                          LucideIcons.trash2,
+                          color: sheetContext.colors.error,
+                        ),
+                        title: Text(
+                          'Delete message',
+                          style: TextStyle(color: sheetContext.colors.error),
+                        ),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          _confirmDelete(
+                            context: context,
+                            ref: ref,
+                            channelId: channelId,
+                            messageId: message.id,
+                            onDeleted: onDeleted,
+                          );
+                        },
                       ),
-                    );
-                  },
-                ),
-                AppListRow(
-                  icon: LucideIcons.link2,
-                  title: 'Copy image link',
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    copyToClipboard(
-                      context,
-                      imageUrl,
-                      message: 'Image link copied',
-                    );
-                  },
-                ),
+                    ],
+                  ),
               ],
             ),
-            if (canManageMessage)
-              AppListCard(
-                children: [
-                  AppListRow(
-                    icon: LucideIcons.trash2,
-                    title: 'Delete message',
-                    titleColor: sheetContext.colors.error,
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _confirmDelete(
-                        context: context,
-                        ref: ref,
-                        channelId: channelId,
-                        messageId: message.id,
-                        onDeleted: onDeleted,
-                      );
-                    },
-                  ),
-                ],
-              ),
-            const SizedBox(height: Grid.xs),
-          ],
+          ),
         ),
       ),
     ),
@@ -498,7 +522,6 @@ class _MarkReadUnreadTile extends ConsumerWidget {
     );
 
     return ListTile(
-      contentPadding: EdgeInsets.zero,
       leading: Icon(unread ? LucideIcons.mailCheck : LucideIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
@@ -540,7 +563,6 @@ class _FollowThreadTile extends ConsumerWidget {
     final following = follows.isFollowing(rootId);
 
     return ListTile(
-      contentPadding: EdgeInsets.zero,
       leading: Icon(following ? LucideIcons.bellOff : LucideIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {

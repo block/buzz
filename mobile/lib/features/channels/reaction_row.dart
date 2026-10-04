@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
@@ -360,7 +361,6 @@ Future<void> showReactionDetailSheet({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) => _ReactionDetailSheet(
       channelId: channelId,
       reactions: reactions,
@@ -464,24 +464,29 @@ class _ReactionDetailSheet extends HookConsumerWidget {
             ),
           ),
 
-          const Divider(height: 1),
-
           // Reactor list.
           Flexible(
             child: ListView.builder(
               shrinkWrap: true,
               padding: EdgeInsets.only(
-                top: Grid.half,
+                left: Grid.gutter,
+                right: Grid.gutter,
+                top: Grid.xxs,
                 bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.half,
               ),
               itemCount: currentReaction.userPubkeys.length,
               itemBuilder: (context, index) {
                 final pubkey = currentReaction.userPubkeys[index];
                 final profile = userCache[pubkey.toLowerCase()];
-                return _ReactorTile(
-                  profile: profile,
-                  pubkey: pubkey,
-                  displayName: identityNames.labelFor(pubkey),
+                return AppListCardItem(
+                  index: index,
+                  itemCount: currentReaction.userPubkeys.length,
+                  dividerIndent: Grid.xs + 40 + Grid.xs,
+                  child: _ReactorTile(
+                    profile: profile,
+                    pubkey: pubkey,
+                    displayName: identityNames.labelFor(pubkey),
+                  ),
                 );
               },
             ),

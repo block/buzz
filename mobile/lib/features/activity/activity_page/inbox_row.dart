@@ -383,8 +383,7 @@ class _InboxRow extends HookConsumerWidget {
           ),
           child: IconTheme.merge(
             data: const IconThemeData(size: 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            child: SheetActionSection(
               children: [
                 ListTile(
                   leading: Icon(
