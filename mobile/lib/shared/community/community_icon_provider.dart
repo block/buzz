@@ -68,7 +68,9 @@ final communityIconProvider = FutureProvider.autoDispose
           }
         }
         if (disposed) return saved;
-        if (artwork == null) return saved ?? icon;
+        // Never expose rejected remote URLs to the avatar renderer: doing so
+        // would bypass the bounded download above.
+        if (artwork == null) return saved;
         await cache.remember(key, artwork);
         return artwork;
       } catch (_) {

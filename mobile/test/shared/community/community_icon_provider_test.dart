@@ -179,6 +179,45 @@ void main() {
     );
   });
 
+  for (final saved in [false, true]) {
+    for (final rejection in ['oversized', 'invalid MIME', 'HTTP failure']) {
+      test('$rejection never exposes an unchecked URL, saved=$saved', () async {
+        final container = containerFor((request) async {
+          if (request.url.path == '/') {
+            return http.Response(
+              '{"icon":"https://relay.example.com/rejected.png"}',
+              200,
+            );
+          }
+          return http.Response.bytes(
+            List.filled(rejection == 'oversized' ? 256 * 1024 + 1 : 4, 0),
+            rejection == 'HTTP failure' ? 503 : 200,
+            headers: {
+              'content-type': rejection == 'invalid MIME'
+                  ? 'text/html'
+                  : 'image/png',
+            },
+          );
+        });
+        if (saved) {
+          await container
+              .read(communityIconCacheProvider.notifier)
+              .remember(key, artwork);
+        }
+        final presentation = communityIconPresentationProvider(relay);
+        final subscription = container.listen(presentation, (_, _) {});
+        addTearDown(subscription.close);
+        final expected = saved ? artwork : null;
+        expect(
+          await container.read(communityIconProvider(relay).future),
+          expected,
+        );
+        expect(container.read(presentation), expected);
+        expect(container.read(communityIconCacheProvider)[key], expected);
+      });
+    }
+  }
+
   test('oversized downloads do not replace a usable saved image', () async {
     final container = containerFor(
       (request) async => request.url.path == '/'
