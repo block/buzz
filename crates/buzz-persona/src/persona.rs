@@ -65,17 +65,36 @@ pub struct RespondTo {
 }
 
 /// A single MCP server attached to this persona.
+///
+/// Either transport may be declared: `command` (+ `args`, `env`) for a local
+/// stdio subprocess, or `url` (+ `headers`) for a streamable-HTTP server. The
+/// fields are optional here so both shapes parse; which one an entry actually
+/// declares is validated during resolution, where the offending server can be
+/// named in the error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct McpServerConfig {
     pub name: String,
-    pub command: String,
+
+    /// Transport discriminant. Only meaningful for HTTP (`"http"`); stdio
+    /// entries omit it. Carried through so resolution can reject `"sse"`.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub transport_type: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 
     #[serde(default)]
     pub args: Vec<String>,
 
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 /// Lifecycle hooks (paths are pack-relative).
@@ -356,6 +375,33 @@ mod tests {
     fn empty_body_is_valid() {
         let p = parse_persona_md(minimal()).unwrap();
         assert_eq!(p.prompt, "");
+    }
+
+    #[test]
+    fn parse_http_mcp_server_without_a_command() {
+        let src = indoc(
+            "---
+name: beta
+display_name: Beta
+description: Reaches a remote MCP server.
+mcp_servers:
+  - name: arcctl
+    type: http
+    url: http://127.0.0.1:8888/mcp
+    headers:
+      Authorization: Bearer t0ken
+---
+You are Beta.
+",
+        );
+        let p = parse_persona_md(src).expect("an http server needs no command");
+        assert_eq!(p.mcp_servers.len(), 1);
+        let server = &p.mcp_servers[0];
+        assert_eq!(server.name, "arcctl");
+        assert_eq!(server.command, None);
+        assert_eq!(server.transport_type.as_deref(), Some("http"));
+        assert_eq!(server.url.as_deref(), Some("http://127.0.0.1:8888/mcp"));
+        assert_eq!(server.headers["Authorization"], "Bearer t0ken");
     }
 
     #[test]

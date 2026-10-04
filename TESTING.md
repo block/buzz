@@ -18,9 +18,9 @@ cargo test -p buzz-test-client -- --ignored
 
 ### Review-Proven Test Standards
 
-Mined from the last 25 PRs' review threads (see Review-Proven Rules in
-[AGENTS.md](AGENTS.md)); this is the test-quality rule reviewers litigated
-most:
+The first rule below is mined from the last 25 PRs' review threads (see
+Review-Proven Rules in [AGENTS.md](AGENTS.md)) — the test-quality rule
+reviewers litigated most. The rest come from defects fixed since.
 
 **Regression tests must bind the production seam and be falsifiable.**
 A guard whose removal doesn't fail any test protects nothing — mutations
@@ -30,6 +30,20 @@ path (PR #7013). Give pure predicates a table test over the full input
 combination space (PR #6807). Scope Playwright locators — unscoped
 `getByText` in a required smoke test is a strict-mode flake (PR #6980).
 (PRs #6807, #6980, #6996, #7013)
+
+**A wall-clock timeout that gates test setup is a race budget, not a tuning
+knob.** When a fixture has to win a race against a deadline — spawning a
+helper, escaping a process group, writing a handshake file — that deadline
+bounds the *setup*, not just the behavior under test. Size it against measured
+worst-case latency on a loaded machine, never the idle case. The escaped-writer
+probe in `desktop/src-tauri/src/managed_agents/discovery/bounded_command.rs`
+budgeted 300ms for a descendant whose spawn-to-ready latency measured ~30ms
+idle but p95 233ms / max 498ms under a loaded lane, so it flaked wherever
+contention was CI-shaped. Record the measurement at the call site so the budget
+is not later trimmed back toward the latency it exists to clear. When setup does
+lose the race, fail with a message saying so — a lost setup race that surfaces
+as an opaque parse error or an assertion on missing state reads as a product
+bug and costs the debugging time twice.
 
 ---
 
