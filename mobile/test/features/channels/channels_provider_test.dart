@@ -10,6 +10,7 @@ import 'package:buzz/shared/relay/relay.dart';
 
 part 'channels_provider_live_cases.dart';
 part 'channels_provider_terminal_cases.dart';
+part 'channels_provider_startup_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -24,6 +25,7 @@ part 'channels_provider_terminal_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _channelStartupCases();
   const myPk = 'me';
 
   test(
