@@ -8,6 +8,7 @@
  */
 
 const PURE_CACHE_KEY_PREFIXES = [
+  "buzz-agent-command-catalog.v1:",
   "buzz-channel-messages.v1:",
   "buzz-channels.v1:",
   "buzz-observed-unread.v1:",
