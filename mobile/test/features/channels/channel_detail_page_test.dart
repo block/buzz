@@ -2724,11 +2724,24 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(seeAllRow);
       await tester.pumpAndSettle();
+      // Verify each group when it enters the lazy sheet viewport.
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is AppListCard && widget.label == 'People · 6',
+        ),
+        findsOneWidget,
+      );
       await tester.drag(
         find.byKey(const ValueKey('members-sheet-list')),
         const Offset(0, -500),
       );
       await tester.pumpAndSettle();
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is AppListCard && widget.label == 'Agents · 1',
+        ),
+        findsOneWidget,
+      );
       expect(find.text('Agent'), findsOneWidget);
       expect(find.text('Bot'), findsNothing);
     });

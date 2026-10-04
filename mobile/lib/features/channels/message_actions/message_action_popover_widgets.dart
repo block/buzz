@@ -81,7 +81,7 @@ class _MessageActionSurface extends StatelessWidget {
       elevation: 10,
       shadowColor: Colors.black.withValues(alpha: 0.22),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Radii.dialog),
+        borderRadius: BorderRadius.circular(Radii.popover),
         side: BorderSide(
           color: context.colors.outlineVariant.withValues(alpha: 0.55),
           width: 0.5,

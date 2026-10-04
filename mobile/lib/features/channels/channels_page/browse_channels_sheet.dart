@@ -113,9 +113,13 @@ class _BrowseChannelsSheet extends HookConsumerWidget {
             else
               SliverList.builder(
                 itemCount: channels.length,
-                itemBuilder: (context, index) => _JoinableChannelTile(
-                  channel: channels[index],
-                  closeAfterJoin: true,
+                itemBuilder: (context, index) => AppListCardItem(
+                  index: index,
+                  itemCount: channels.length,
+                  child: _JoinableChannelTile(
+                    channel: channels[index],
+                    closeAfterJoin: true,
+                  ),
                 ),
               ),
           ],
@@ -158,7 +162,6 @@ class _JoinableChannelTile extends HookConsumerWidget {
       children: [
         ListTile(
           key: Key('browse-channel-${channel.id}'),
-          contentPadding: EdgeInsets.zero,
           leading: Icon(channelIcon(channel)),
           title: Text(channel.name),
           subtitle: channel.description.trim().isEmpty
