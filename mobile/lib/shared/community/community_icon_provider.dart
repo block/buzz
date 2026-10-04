@@ -83,11 +83,13 @@ Future<({List<int> bytes, String mimeType})?> _download(
   Uri uri, {
   bool metadata = false,
 }) async {
-  final request = http.Request('GET', uri);
+  final abort = Completer<void>();
+  final request = http.AbortableRequest('GET', uri, abortTrigger: abort.future);
   if (metadata) request.headers['Accept'] = 'application/nostr+json';
-  final response = await client.send(request).timeout(_lookupTimeout);
-  final iterator = StreamIterator(response.stream);
+  StreamIterator<List<int>>? iterator;
   try {
+    final response = await client.send(request).timeout(_lookupTimeout);
+    iterator = StreamIterator(response.stream);
     final limit = metadata ? _maximumIconBytes * 2 : _maximumIconBytes;
     if (response.statusCode < 200 ||
         response.statusCode >= 300 ||
@@ -111,7 +113,10 @@ Future<({List<int> bytes, String mimeType})?> _download(
           .toLowerCase(),
     );
   } finally {
-    await iterator.cancel();
+    // Future.timeout does not stop the underlying socket, including while
+    // waiting for response headers. Abort before releasing the stream.
+    abort.complete();
+    await iterator?.cancel();
   }
 }
 

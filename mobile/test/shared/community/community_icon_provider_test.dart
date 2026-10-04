@@ -218,6 +218,50 @@ void main() {
     }
   }
 
+  for (final stalledImage in [false, true]) {
+    test('timeout aborts the request, image=$stalledImage', () async {
+      var aborted = false;
+      var pending = false;
+      final started = Completer<void>();
+      final client = MockClient.streaming((request, _) async {
+        if (stalledImage && request.url.path == '/') {
+          return http.StreamedResponse(
+            Stream.value(
+              utf8.encode('{"icon":"https://relay.example.com/stalled.png"}'),
+            ),
+            200,
+          );
+        }
+        expect(request, isA<http.AbortableRequest>());
+        pending = true;
+        started.complete();
+        await (request as http.AbortableRequest).abortTrigger;
+        pending = false;
+        aborted = true;
+        throw http.RequestAbortedException(request.url);
+      });
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          communityIconHttpClientProvider.overrideWithValue(client),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(client.close);
+      final subscription = container.listen(
+        communityIconProvider(relay),
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+      final result = container.read(communityIconProvider(relay).future);
+      await started.future;
+      expect(pending, isTrue);
+      expect(await result, isNull);
+      expect(aborted, isTrue);
+      expect(pending, isFalse);
+    });
+  }
+
   test('oversized downloads do not replace a usable saved image', () async {
     final container = containerFor(
       (request) async => request.url.path == '/'
