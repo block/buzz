@@ -69,6 +69,7 @@ void main() {
     double bottomPadding = 0,
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
+    Future<String?> Function(String)? loadCommunityIcon,
     TextScaler textScaler = TextScaler.noScaling,
     Gradient? topSectionGradient,
     ValueChanged<double>? onSettingsTransitionProgress,
@@ -84,6 +85,7 @@ void main() {
         presenceProvider.overrideWith(() => _FakePresenceNotifier()),
         communityIconProvider.overrideWith((ref, relayUrl) async {
           onCommunityIconLoad?.call(relayUrl);
+          if (loadCommunityIcon != null) return loadCommunityIcon(relayUrl);
           return communityIcons[relayUrl];
         }),
         dmDirectoryPreviewEnabledProvider.overrideWith(
@@ -1806,6 +1808,12 @@ void main() {
                     }
                   : const {},
               disableAnimations: reduceMotion,
+              // An offline cosmetic refresh must not block ready content.
+              loadCommunityIcon: nativeHeader
+                  ? null
+                  : (relayUrl) => relayUrl.contains('bravo')
+                        ? Completer<String?>().future
+                        : Future.value(null),
               onSettingsTransitionProgress: progress.add,
               overrides: [
                 userCacheProvider.overrideWith(() => profiles),

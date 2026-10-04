@@ -16,9 +16,6 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   final channels = ref.watch(channelsProvider);
   final profile = ref.watch(profileProvider);
   final community = ref.watch(activeCommunityProvider).unwrapPrevious().value;
-  final icon = community == null
-      ? null
-      : ref.watch(communityIconProvider(community.relayUrl));
   final sections = ref.watch(channelSectionsProvider).isReady;
   final stars = ref.watch(channelStarsProvider).isReady;
   final sort = ref.watch(channelSortProvider).isReady;
@@ -30,7 +27,6 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   }
   return AsyncData(
     community != null &&
-        !(icon?.isLoading ?? false) &&
         channels.hasValue &&
         !channels.isLoading &&
         !profile.isLoading &&
@@ -165,8 +161,8 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;
-        // Retire the previous list snapshot before awaiting this community.
-        // ChannelsNotifier otherwise retains its old list during reconnection.
+        // Refresh this scope before awaiting its content. ChannelsNotifier
+        // fences cached snapshots to the destination relay and identity.
         ref.invalidate(channelsProvider);
         await (() async {
           await waitForContent();

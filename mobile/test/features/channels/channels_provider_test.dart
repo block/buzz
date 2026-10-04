@@ -2246,7 +2246,7 @@ void main() {
   );
 
   test(
-    'refreshes cached channels after a disconnected community switch',
+    'waits for destination channels after a disconnected community switch',
     () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -2267,12 +2267,21 @@ void main() {
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://new-community.example');
       await Future<void>.delayed(Duration.zero);
-      expect(container.read(channelsProvider).value?.single.name, 'general');
+      expect(container.read(channelsProvider).isLoading, isTrue);
+      expect(container.read(channelsProvider.notifier).hasLoaded, isFalse);
+      var destinationReady = false;
+      final destination = container.read(channelsProvider.future).then((value) {
+        destinationReady = true;
+        return value;
+      });
+      await _settle();
+      expect(destinationReady, isFalse);
 
       session.setStatus(SessionStatus.connected);
       await Future<void>.delayed(Duration.zero);
 
-      expect(container.read(channelsProvider).value?.single.name, 'random');
+      expect((await destination).single.name, 'random');
+      expect(container.read(channelsProvider).isLoading, isFalse);
     },
   );
 
