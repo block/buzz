@@ -1,6 +1,6 @@
 part of '../channels_page.dart';
 
-class _CommunityMenuSheet extends ConsumerWidget {
+class _CommunityMenuSheet extends StatelessWidget {
   const _CommunityMenuSheet({
     required this.canInvite,
     required this.onSwitchCommunity,
@@ -14,9 +14,7 @@ class _CommunityMenuSheet extends ConsumerWidget {
   final WidgetBuilder? appearancePageBuilder;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final activeCommunity = ref.watch(activeCommunityProvider).value;
-
+  Widget build(BuildContext context) {
     void openPage(WidgetBuilder builder) {
       final navigator = Navigator.of(context, rootNavigator: true);
       Navigator.of(context).pop();
@@ -38,8 +36,7 @@ class _CommunityMenuSheet extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (activeCommunity != null ||
-                appearancePageBuilder != null ||
+            if (appearancePageBuilder != null ||
                 (canInvite && invitePageBuilder != null))
               AppListCard(
                 label: 'Community settings',
@@ -57,18 +54,6 @@ class _CommunityMenuSheet extends ConsumerWidget {
                       title: 'Appearance',
                       trailing: const Icon(LucideIcons.chevronRight, size: 18),
                       onTap: () => openPage(appearancePageBuilder!),
-                    ),
-                  if (activeCommunity != null)
-                    AppListRow(
-                      icon: LucideIcons.circleMinus,
-                      title: 'Remove community',
-                      titleColor: context.colors.error,
-                      onTap: () => _confirmRemoveCommunity(
-                        context,
-                        ref,
-                        activeCommunity,
-                        closeSheetAfterRemoval: true,
-                      ),
                     ),
                 ],
               ),

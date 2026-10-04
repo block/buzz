@@ -1189,21 +1189,7 @@ void main() {
       expect(find.text('Community settings'), findsOneWidget);
       expect(find.text('Invite'), findsOneWidget);
       expect(find.text('Appearance'), findsOneWidget);
-      expect(find.text('Remove community'), findsOneWidget);
-      expect(
-        tester.getTopLeft(find.text('Remove community')).dy,
-        greaterThan(tester.getTopLeft(find.text('Appearance')).dy),
-      );
-      expect(
-        tester.getTopLeft(find.text('Remove community')).dy,
-        lessThan(tester.getTopLeft(find.text('Switch Community')).dy),
-      );
-      await tester.tap(find.text('Remove community'));
-      await tester.pumpAndSettle();
-      expect(find.text('Remove community?'), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-      expect(find.text('Community settings'), findsOneWidget);
+      expect(find.text('Remove community'), findsNothing);
 
       expect(
         tester.getTopLeft(find.text('Appearance')).dy,
@@ -1290,10 +1276,10 @@ void main() {
     });
   }
 
-  for (final fromGrid in [false, true]) {
+  for (final removingInactive in [false, true]) {
     for (final confirmed in [false, true]) {
       testWidgets(
-        'iOS removal uses native confirmation (grid: $fromGrid, confirmed: $confirmed)',
+        'iOS switcher removal uses native confirmation (inactive: $removingInactive, confirmed: $confirmed)',
         (tester) async {
           debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
           addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -1340,19 +1326,18 @@ void main() {
               .nativeLeading!
               .onPressed!();
           await tester.pumpAndSettle();
-          if (fromGrid) {
-            await tester.tap(find.byKey(const Key('community-menu-switch')));
-            await tester.pumpAndSettle();
-            tester
-                .widget<IosNavigationBar>(find.byType(IosNavigationBar).last)
-                .actions
-                .single
-                .onPressed!();
-            await tester.pumpAndSettle();
-            await tester.tap(find.byTooltip('Remove Bravo'));
-          } else {
-            await tester.tap(find.text('Remove community'));
-          }
+          expect(find.text('Remove community'), findsNothing);
+          await tester.tap(find.byKey(const Key('community-menu-switch')));
+          await tester.pumpAndSettle();
+          tester
+              .widget<IosNavigationBar>(find.byType(IosNavigationBar).last)
+              .actions
+              .single
+              .onPressed!();
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byTooltip(removingInactive ? 'Remove Bravo' : 'Remove Alpha'),
+          );
           await tester.pumpAndSettle();
           expect(calls.single.method, 'present');
           expect(calls.single.arguments['title'], 'Remove community?');
@@ -1360,7 +1345,7 @@ void main() {
           expect(calls.single.arguments['cancelLabel'], 'Cancel');
           expect(
             calls.single.arguments['message'],
-            contains(fromGrid ? 'Bravo' : 'Alpha'),
+            contains(removingInactive ? 'Bravo' : 'Alpha'),
           );
           expect(find.byType(AlertDialog), findsNothing);
           expect(notifier.removedIds, isEmpty);
@@ -1368,17 +1353,11 @@ void main() {
           await tester.pumpAndSettle();
           expect(
             notifier.removedIds,
-            confirmed ? [fromGrid ? 'bravo' : 'alpha'] : isEmpty,
+            confirmed ? [removingInactive ? 'bravo' : 'alpha'] : isEmpty,
           );
           expect(
-            find.byKey(
-              Key(
-                fromGrid
-                    ? 'community-switcher-page'
-                    : 'community-switcher-sheet',
-              ),
-            ),
-            confirmed && !fromGrid ? findsNothing : findsOneWidget,
+            find.byKey(const Key('community-switcher-page')),
+            confirmed && !removingInactive ? findsNothing : findsOneWidget,
           );
           await tester.pumpWidget(const SizedBox());
           debugDefaultTargetPlatformOverride = null;
