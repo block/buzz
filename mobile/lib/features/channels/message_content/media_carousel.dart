@@ -123,7 +123,6 @@ class _MessageImageCarousel extends HookConsumerWidget {
       () => [for (var index = 0; index < items.length; index++) Object()],
       [itemSignature],
     );
-    final controller = usePageController(viewportFraction: 0.9);
     final currentIndex = useState(0);
     final mediaAuth = ref.watch(mediaGetAuthServiceProvider);
     final mediaClient = ref.watch(mediaHttpClientProvider);
@@ -161,8 +160,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
                 for (var index = 0; index < items.length; index++)
                   math.max(
                     1.0,
-                    carouselWidth * controller.viewportFraction -
-                        itemTrailingPaddings[index],
+                    carouselWidth * 0.9 - itemTrailingPaddings[index],
                   ),
               ];
               final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
@@ -193,16 +191,16 @@ class _MessageImageCarousel extends HookConsumerWidget {
                 key: const ValueKey('message-media-carousel'),
                 width: carouselWidth,
                 height: _messageMediaCarouselHeight,
-                child: PageView.builder(
-                  controller: controller,
-                  allowImplicitScrolling: true,
-                  // Keep the first image aligned with the message body, but
-                  // allow later pages to paint through the avatar gutter as
-                  // the row scrolls.
-                  clipBehavior: Clip.none,
-                  padEnds: false,
+                child: _MessageCarouselViewport(
+                  width: carouselWidth,
+                  currentIndex: currentIndex.value,
                   itemCount: items.length,
-                  onPageChanged: (index) => currentIndex.value = index,
+                  onPageChanged: (index) {
+                    if (index != currentIndex.value) {
+                      unawaited(HapticFeedback.selectionClick());
+                    }
+                    currentIndex.value = index;
+                  },
                   itemBuilder: (context, index) {
                     final item = items[index];
                     return Padding(
@@ -300,4 +298,81 @@ class _MessageImageCarousel extends HookConsumerWidget {
       ),
     );
   }
+}
+
+/// Extends the actual paint viewport through the message gutters. Clip.none
+/// alone cannot keep a sliver child painting once it leaves its viewport.
+class _MessageCarouselViewport extends HookWidget {
+  const _MessageCarouselViewport({
+    required this.width,
+    required this.currentIndex,
+    required this.itemCount,
+    required this.onPageChanged,
+    required this.itemBuilder,
+  });
+
+  final double width;
+  final int currentIndex;
+  final int itemCount;
+  final ValueChanged<int> onPageChanged;
+  final IndexedWidgetBuilder itemBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    // Cover any space between the message body and either screen edge.
+    // Matching sliver padding preserves the original alignment, page stride,
+    // and end-of-gallery scroll limit despite the wider paint viewport.
+    final gutter = math.max(0.0, MediaQuery.sizeOf(context).width - width);
+    final viewportWidth = width + 2 * gutter;
+    final fraction = width * 0.9 / viewportWidth;
+    final controller = usePageController(
+      initialPage: currentIndex,
+      viewportFraction: fraction,
+      keys: [fraction],
+    );
+
+    return OverflowBox(
+      minWidth: viewportWidth,
+      maxWidth: viewportWidth,
+      child: NotificationListener<ScrollUpdateNotification>(
+        onNotification: (notification) {
+          if (notification.depth == 0 && notification.metrics is PageMetrics) {
+            final index = (notification.metrics as PageMetrics).page!.round();
+            if (index != currentIndex) onPageChanged(index);
+          }
+          return false;
+        },
+        child: CustomScrollView(
+          controller: controller,
+          scrollDirection: Axis.horizontal,
+          physics: const _CarouselPagePhysics(),
+          clipBehavior: Clip.none,
+          slivers: [
+            SliverPadding(
+              padding: EdgeInsets.symmetric(horizontal: gutter),
+              sliver: SliverFillViewport(
+                viewportFraction: fraction,
+                padEnds: false,
+                delegate: SliverChildBuilderDelegate(
+                  itemBuilder,
+                  childCount: itemCount,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CarouselPagePhysics extends PageScrollPhysics {
+  const _CarouselPagePhysics({super.parent});
+
+  @override
+  bool get allowImplicitScrolling => true;
+
+  @override
+  _CarouselPagePhysics applyTo(ScrollPhysics? ancestor) =>
+      _CarouselPagePhysics(parent: buildParent(ancestor));
 }

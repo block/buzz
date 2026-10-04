@@ -584,6 +584,8 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IosGlassNavigationButton) {
     final symbol = switch (widget.icon) {
+      IosGlassNavigationIcon.more => 'ellipsis',
+      IosGlassNavigationIcon.reply => 'arrowshape.turn.up.left',
       IosGlassNavigationIcon.back => 'chevron.backward',
       IosGlassNavigationIcon.close => 'xmark',
       IosGlassNavigationIcon.camera => 'camera',

@@ -24,6 +24,8 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/widgets/sheet_divider.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
@@ -266,87 +268,77 @@ void showImageActions({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
+    title: 'Image',
     builder: (sheetContext) => SafeArea(
-      child: IconTheme.merge(
-        data: const IconThemeData(size: 22),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(LucideIcons.download),
-                title: const Text('Save image'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  unawaited(_saveImage(context, ref, imageUrl));
-                },
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(LucideIcons.share2),
-                title: const Text('Share image'),
-                onTap: () {
-                  final renderBox = context.findRenderObject() as RenderBox?;
-                  final shareOrigin = renderBox == null
-                      ? null
-                      : renderBox.localToGlobal(Offset.zero) & renderBox.size;
-                  Navigator.of(sheetContext).pop();
-                  unawaited(
-                    _shareImage(
-                      context,
-                      ref,
-                      imageUrl,
-                      shareOrigin: shareOrigin,
-                    ),
-                  );
-                },
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(LucideIcons.link2),
-                title: const Text('Copy image link'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  copyToClipboard(
-                    context,
-                    imageUrl,
-                    message: 'Image link copied',
-                  );
-                },
-              ),
-              if (canManageMessage) ...[
-                const SheetDivider(),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(
-                    LucideIcons.trash2,
-                    color: sheetContext.colors.error,
-                  ),
-                  title: Text(
-                    'Delete message',
-                    style: TextStyle(color: sheetContext.colors.error),
-                  ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AppListCard(
+              children: [
+                AppListRow(
+                  icon: LucideIcons.download,
+                  title: 'Save image',
                   onTap: () {
                     Navigator.of(sheetContext).pop();
-                    _confirmDelete(
-                      context: context,
-                      ref: ref,
-                      channelId: channelId,
-                      messageId: message.id,
-                      onDeleted: onDeleted,
+                    unawaited(_saveImage(context, ref, imageUrl));
+                  },
+                ),
+                AppListRow(
+                  icon: LucideIcons.share2,
+                  title: 'Share image',
+                  onTap: () {
+                    final renderBox = context.findRenderObject() as RenderBox?;
+                    final shareOrigin = renderBox == null
+                        ? null
+                        : renderBox.localToGlobal(Offset.zero) & renderBox.size;
+                    Navigator.of(sheetContext).pop();
+                    unawaited(
+                      _shareImage(
+                        context,
+                        ref,
+                        imageUrl,
+                        shareOrigin: shareOrigin,
+                      ),
+                    );
+                  },
+                ),
+                AppListRow(
+                  icon: LucideIcons.link2,
+                  title: 'Copy image link',
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    copyToClipboard(
+                      context,
+                      imageUrl,
+                      message: 'Image link copied',
                     );
                   },
                 ),
               ],
-            ],
-          ),
+            ),
+            if (canManageMessage)
+              AppListCard(
+                children: [
+                  AppListRow(
+                    icon: LucideIcons.trash2,
+                    title: 'Delete message',
+                    titleColor: sheetContext.colors.error,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      _confirmDelete(
+                        context: context,
+                        ref: ref,
+                        channelId: channelId,
+                        messageId: message.id,
+                        onDeleted: onDeleted,
+                      );
+                    },
+                  ),
+                ],
+              ),
+            const SizedBox(height: Grid.xs),
+          ],
         ),
       ),
     ),

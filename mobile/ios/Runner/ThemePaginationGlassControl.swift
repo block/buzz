@@ -34,6 +34,7 @@ private final class ThemePaginationControl: UIControl {
   private static let dotSpacing: CGFloat = 6
   private let glassView: UIVisualEffectView
   private let dotsContainer = UIView()
+  private var glassHeightConstraint: NSLayoutConstraint?
   private var dots: [UIView] = []
   private var totalCount = 1
   private var selectedIndex = 0
@@ -67,11 +68,13 @@ private final class ThemePaginationControl: UIControl {
     dotsContainer.isUserInteractionEnabled = false
     glassView.contentView.addSubview(dotsContainer)
 
+    let glassHeightConstraint = glassView.heightAnchor.constraint(equalToConstant: 30)
+    self.glassHeightConstraint = glassHeightConstraint
     NSLayoutConstraint.activate([
       glassView.leadingAnchor.constraint(equalTo: leadingAnchor),
       glassView.trailingAnchor.constraint(equalTo: trailingAnchor),
       glassView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      glassView.heightAnchor.constraint(equalToConstant: 30),
+      glassHeightConstraint,
       dotsContainer.leadingAnchor.constraint(equalTo: glassView.contentView.leadingAnchor, constant: 12),
       dotsContainer.trailingAnchor.constraint(equalTo: glassView.contentView.trailingAnchor, constant: -12),
       dotsContainer.topAnchor.constraint(equalTo: glassView.contentView.topAnchor),
@@ -108,6 +111,11 @@ private final class ThemePaginationControl: UIControl {
       inactiveColor = Self.color(fromARGB: value.uint32Value)
     }
 
+    accessibilityLabel = arguments["accessibilityLabel"] as? String ?? accessibilityLabel
+    if let height = arguments["containerHeight"] as? NSNumber {
+      glassHeightConstraint?.constant = max(10, CGFloat(height.doubleValue))
+      setNeedsLayout()
+    }
     totalCount = count
     if count != dots.count {
       rebuildDots(count: count)
