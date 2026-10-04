@@ -118,6 +118,90 @@ void main() {
     },
   );
 
+  for (final reverse in [false, true]) {
+    testWidgets('initial material tracks content above reverse=$reverse', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      ValueListenable<double>? offset;
+      Widget page(int count) => _testApp(
+        home: FrostedScaffold(
+          appBar: const FrostedAppBar(title: Text('Conversation')),
+          body: Builder(
+            builder: (context) {
+              offset = IosNavigationScrollScope.maybeOf(context);
+              return ListView(
+                controller: controller,
+                reverse: reverse,
+                children: [
+                  for (var i = 0; i < count; i++)
+                    SizedBox(height: 60, child: Text('Message $i')),
+                ],
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpWidget(page(40));
+      await tester.pumpAndSettle();
+      expect(offset!.value, reverse ? greaterThan(0) : 0);
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(offset!.value, reverse ? 0 : greaterThan(0));
+      await tester.pumpWidget(page(1));
+      await tester.pumpAndSettle();
+      expect(offset!.value, 0);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  testWidgets('native material follows live theme surface changes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/845');
+    final configurations = <Map<Object?, Object?>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'configure') configurations.add(call.arguments as Map);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    Widget app(Color surface) => ProviderScope(
+      child: MaterialApp(
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: surface,
+          ).copyWith(surface: surface),
+        ),
+        home: const Scaffold(
+          body: IosNavigationBar(title: 'general', subtitle: '3 members'),
+        ),
+      ),
+    );
+    await tester.pumpWidget(app(const Color(0xFFFFEEDD)));
+    final view = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(view.creationParams, containsPair('background', 0xFFFFEEDD));
+    view.onPlatformViewCreated!(845);
+    await tester.pump();
+    await tester.pumpWidget(app(const Color(0xFF223344)));
+    await tester.pumpAndSettle();
+    expect(configurations.last['background'], 0xFF223344);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('larger native metrics keep a deeply scrolled title collapsed', (
     tester,
   ) async {

@@ -577,11 +577,6 @@ class ChannelDetailPage extends HookConsumerWidget {
         resolvedChannel.isDm && defaultTargetPlatform == TargetPlatform.iOS
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
         : null;
-    final nativeMembersWorking =
-        defaultTargetPlatform == TargetPlatform.iOS &&
-        resolvedChannel.isDm &&
-        _showsMembersAction(resolvedChannel) &&
-        ref.watch(workingBotPubkeysProvider(resolvedChannel.id)).isNotEmpty;
     final nativeMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
     final nativeMemberCount =
         nativeMembers.value?.length ?? resolvedChannel.memberCount;
@@ -621,70 +616,24 @@ class ChannelDetailPage extends HookConsumerWidget {
               resolvedChannel,
               currentPubkey: currentPubkey,
             ),
-        nativeSubtitle: resolvedChannel.isDm
+        nativeSubtitle: isOneToOneDm
             ? nativeDm?.presenceLabel
             : nativeMemberLabel,
-        nativeTitleAvatar: nativeDm == null
-            ? null
-            : IosNavigationAction(
-                label: nativeDm.label,
-                avatarIdentity: nativeDm.pubkey,
-                avatarIsAgent: nativeDm.isAgent,
-                avatarInitial: nativeDm.initial,
-                imageUrl: nativeDm.avatarUrl,
-              ),
-        nativeTitlePresenceColor: nativeDm?.presence == null
-            ? null
-            : switch (nativeDm!.presence) {
-                'online' => context.appColors.success,
-                'away' => context.appColors.warning,
-                _ => context.colors.outline,
-              },
-        onNativeTitlePressed: resolvedChannel.isDm ? null : openChannelDetails,
+        nativeTitlePresenceColor: switch (isOneToOneDm
+            ? nativeDm?.presence
+            : null) {
+          'online' => context.appColors.success,
+          'away' => context.appColors.warning,
+          'offline' => context.colors.outline,
+          _ => null,
+        },
+        onNativeTitlePressed: openChannelDetails,
         nativeActions: [
           if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
             ]),
-          if (resolvedChannel.isDm && _showsMembersAction(resolvedChannel))
-            IosNavigationAction(
-              label: 'View members',
-              symbol: 'person.2',
-              activityColor: nativeMembersWorking
-                  ? context.appColors.success
-                  : null,
-              activityLabel: nativeMembersWorking ? 'Agent working' : null,
-              onPressed: () => showBuzzModalBottomSheet<void>(
-                context: context,
-                title: 'Members',
-                isScrollControlled: true,
-                showDragHandle: true,
-                builder: (_) => MembersSheet(
-                  channel: resolvedChannel,
-                  currentPubkey: currentPubkey,
-                ),
-              ),
-            ),
-          if (resolvedChannel.isDm)
-            IosNavigationAction(
-              label: 'Channel actions',
-              symbol: 'ellipsis',
-              onPressed: () async {
-                final shouldClose = await showChannelActionsSheet(
-                  context: context,
-                  channel: resolvedChannel,
-                  isUnread: false,
-                  sectionId: ref
-                      .read(channelSectionsProvider)
-                      .store
-                      .assignments[resolvedChannel.id],
-                );
-                if (shouldClose == true && context.mounted) {
-                  Navigator.of(context).pop();
-                }
-              },
-            ),
         ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,

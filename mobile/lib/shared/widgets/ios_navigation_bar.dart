@@ -28,6 +28,8 @@ class IosNavigationAction {
     this.selected = false,
     this.onAvatarBoundsChanged,
     this.avatarHidden = false,
+
+    this.plain = false,
   });
 
   final String label;
@@ -48,6 +50,9 @@ class IosNavigationAction {
   /// Hides a transition's destination avatar while retaining its layout slot.
   final bool avatarHidden;
 
+  /// Omits the shared Liquid Glass background for a text-only action.
+  final bool plain;
+
   Map<String, Object?> _encode(String id) => {
     'id': id,
     'label': label,
@@ -61,6 +66,8 @@ class IosNavigationAction {
     'selected': selected,
     'tracksAvatarBounds': onAvatarBoundsChanged != null,
     'avatarHidden': avatarHidden,
+
+    'plain': plain,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -217,6 +224,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'actions': [
         for (var i = 0; i < actions.length; i++) encodeAction(actions[i], '$i'),
       ],
+      'background': colors.surface.toARGB32(),
       'dark': Theme.of(context).brightness == Brightness.dark,
       'foreground': (foregroundColor ?? Theme.of(context).colorScheme.onSurface)
           .toARGB32(),

@@ -447,6 +447,8 @@ void main() {
     final nativeBar = tester.widget<UiKitView>(find.byType(UiKitView));
     expect(nativeBar.viewType, 'buzz/ios_navigation_bar');
     final params = nativeBar.creationParams! as Map<String, Object?>;
+    expect(params['title'], 'Settings');
+    expect(params['largeTitle'], isFalse);
     expect(params['leading'], containsPair('symbol', 'xmark'));
     expect(params['leading'], containsPair('label', 'Close settings'));
     expect(params['actions'], isEmpty);

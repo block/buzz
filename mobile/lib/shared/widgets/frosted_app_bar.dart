@@ -173,6 +173,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
 
+  /// Duration for coordinated native header and overlapping control movement.
+  final Duration nativeLayoutDuration;
+
   /// Native replacement for a custom leading widget.
   final IosNavigationAction? nativeLeading;
 
@@ -194,6 +197,7 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeTitlePresenceColor,
     this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
+    this.nativeLayoutDuration = Duration.zero,
     this.nativeLeading,
     this.nativeActions,
     this.onNativeReadyChanged,
@@ -238,6 +242,11 @@ class FrostedAppBar extends StatelessWidget {
     if (defaultTargetPlatform == TargetPlatform.iOS && !nativeSuppressed) {
       final offset = IosNavigationScrollScope.maybeOf(context);
       Widget buildNative(double scrollOffset) {
+        // Scrolling tracks the finger directly; only the search focus change
+        // uses the coordinated layout transition.
+        final layoutDuration = nativeLargeTitle && scrollOffset > 0
+            ? Duration.zero
+            : nativeLayoutDuration;
         final extra = nativeLargeTitle
             ? (IosNavigationMetrics.of(context).largeTitleHeight - scrollOffset)
                   .clamp(0.0, IosNavigationMetrics.of(context).largeTitleHeight)
@@ -246,14 +255,19 @@ class FrostedAppBar extends StatelessWidget {
             MediaQuery.paddingOf(context).top +
             IosNavigationMetrics.of(context).compactHeight +
             extra;
-        return Positioned(
+        return AnimatedPositioned(
+          duration: layoutDuration,
+          curve: Curves.easeInOutCubic,
           top: 0,
           left: 0,
           right: 0,
           height: barHeight + bottomHeight,
-          child: Column(
+          child: Stack(
             children: [
-              SizedBox(
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
                 height: barHeight,
                 child: IosNavigationBar(
                   onReadyChanged: onNativeReadyChanged,
@@ -283,10 +297,15 @@ class FrostedAppBar extends StatelessWidget {
                 ),
               ),
               if (bottom != null)
-                SizedBox(
-                  height: bottomHeight,
-                  child: bottom is SizedBox
-                      ? bottom
+                AnimatedPositioned(
+                  duration: layoutDuration,
+                  curve: Curves.easeInOutCubic,
+                  top: barHeight - bottomOverlap,
+                  left: 0,
+                  right: 0,
+                  height: bottomHeight + bottomOverlap,
+                  child: bottomOverlap > 0 || bottom is SizedBox
+                      ? bottom!
                       : ColoredBox(
                           color: context.colors.surface,
                           child: bottom!,

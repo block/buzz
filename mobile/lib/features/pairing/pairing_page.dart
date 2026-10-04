@@ -104,6 +104,10 @@ class PairingPage extends HookConsumerWidget {
                         frosted: false,
                         showBottomDivider: false,
                         iconColor: context._onboardingInk,
+
+                        title: identityRecoveryOnly
+                            ? const Text('Send to Desktop')
+                            : null,
                       ),
                     ],
                   ),
