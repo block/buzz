@@ -6,6 +6,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -317,19 +318,64 @@ void main() {
   testWidgets(
     'accessible navigation keeps controls available and reduce motion is instant',
     (tester) async {
+      final semantics = tester.ensureSemantics();
       await _pumpVideo(tester, accessible: true, reduceMotion: true);
       await tester.pump(const Duration(seconds: 10));
       expect(_opacity(tester), 1);
       await tester.tap(_surface);
       await tester.pump();
       expect(_opacity(tester), 0);
+      expect(find.bySemanticsLabel('Pause video'), findsNothing);
+      final restore = find.bySemanticsLabel('Show video controls');
+      expect(restore, findsOneWidget);
+      final restoreNode = tester.getSemantics(restore);
+      expect(
+        restoreNode.getSemanticsData().hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+      final semanticsOwner = tester
+          .renderObject(_surface)
+          .owner!
+          .semanticsOwner!;
+      final tapStops = <SemanticsData>[];
+      void countTapStops(SemanticsNode node) {
+        if (node.getSemanticsData().hasAction(SemanticsAction.tap)) {
+          tapStops.add(node.getSemanticsData());
+        }
+        node.visitChildren((child) {
+          countTapStops(child);
+          return true;
+        });
+      }
+
+      countTapStops(semanticsOwner.rootSemanticsNode!);
+      expect(
+        tapStops,
+        hasLength(1),
+        reason: 'One named restore stop, no anonymous duplicate',
+      );
       final fade = tester.widget<AnimatedOpacity>(
         find.descendant(of: _chrome, matching: find.byType(AnimatedOpacity)),
       );
       expect(fade.duration, Duration.zero);
-      await tester.tap(_surface);
+      semanticsOwner.performAction(restoreNode.id, SemanticsAction.tap);
       await tester.pump();
       expect(_opacity(tester), 1);
+      expect(find.bySemanticsLabel('Hide video controls'), findsOneWidget);
+      expect(find.bySemanticsLabel('Show video controls'), findsNothing);
+      tapStops.clear();
+      countTapStops(semanticsOwner.rootSemanticsNode!);
+      expect(
+        tapStops.map(
+          (node) => node.label.isNotEmpty ? node.label : node.tooltip,
+        ),
+        containsAll([
+          'Hide video controls',
+          'Close video viewer',
+          'Pause video',
+        ]),
+      );
+      semantics.dispose();
       await _disposeVideo(tester);
     },
   );

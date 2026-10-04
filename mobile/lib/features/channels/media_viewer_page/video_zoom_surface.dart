@@ -5,6 +5,7 @@ class _VideoZoomSurface extends HookWidget {
     super.key,
     required this.child,
     required this.onTap,
+    required this.controlsVisible,
     required this.onInteractionStart,
     required this.onInteractionEnd,
     required this.onDismissStart,
@@ -15,6 +16,7 @@ class _VideoZoomSurface extends HookWidget {
 
   final Widget child;
   final VoidCallback onTap;
+  final bool controlsVisible;
   final VoidCallback onInteractionStart;
   final VoidCallback onInteractionEnd;
   final VoidCallback onDismissStart;
@@ -85,54 +87,60 @@ class _VideoZoomSurface extends HookWidget {
       }
     }
 
-    return GestureDetector(
-      key: const ValueKey('message-media-video-viewer-gesture'),
-      behavior: HitTestBehavior.opaque,
+    return Semantics(
+      button: true,
+      label: controlsVisible ? 'Hide video controls' : 'Show video controls',
       onTap: onTap,
-      onDoubleTap: transformed.value
-          ? () {
+      child: GestureDetector(
+        excludeFromSemantics: true,
+        key: const ValueKey('message-media-video-viewer-gesture'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        onDoubleTap: transformed.value
+            ? () {
+                onInteractionEnd();
+                resetToFit(cancelMomentum: true);
+              }
+            : null,
+        child: KeyedSubtree(
+          key: ValueKey(gestureGeneration.value),
+          child: InteractiveViewer(
+            key: const ValueKey('message-media-video-viewer-zoom'),
+            transformationController: transform,
+            minScale: 1,
+            maxScale: 4,
+            panEnabled: transformed.value,
+            boundaryMargin: const EdgeInsets.all(Grid.xxl),
+            clipBehavior: Clip.none,
+            onInteractionStart: (details) {
+              resetRequest.value++;
+              reset.stop();
+              onInteractionStart();
+              dismissGesture.value =
+                  details.pointerCount == 1 && !transformed.value;
+              if (dismissGesture.value) onDismissStart();
+            },
+            onInteractionUpdate: (details) {
+              if (details.pointerCount > 1 || details.scale != 1) {
+                if (dismissGesture.value) onDismissCancel();
+                dismissGesture.value = false;
+              } else if (dismissGesture.value && !transformed.value) {
+                onDismissUpdate(details.focalPointDelta.dy);
+              }
+            },
+            onInteractionEnd: (details) {
               onInteractionEnd();
-              resetToFit(cancelMomentum: true);
-            }
-          : null,
-      child: KeyedSubtree(
-        key: ValueKey(gestureGeneration.value),
-        child: InteractiveViewer(
-          key: const ValueKey('message-media-video-viewer-zoom'),
-          transformationController: transform,
-          minScale: 1,
-          maxScale: 4,
-          panEnabled: transformed.value,
-          boundaryMargin: const EdgeInsets.all(Grid.xxl),
-          clipBehavior: Clip.none,
-          onInteractionStart: (details) {
-            resetRequest.value++;
-            reset.stop();
-            onInteractionStart();
-            dismissGesture.value =
-                details.pointerCount == 1 && !transformed.value;
-            if (dismissGesture.value) onDismissStart();
-          },
-          onInteractionUpdate: (details) {
-            if (details.pointerCount > 1 || details.scale != 1) {
-              if (dismissGesture.value) onDismissCancel();
-              dismissGesture.value = false;
-            } else if (dismissGesture.value && !transformed.value) {
-              onDismissUpdate(details.focalPointDelta.dy);
-            }
-          },
-          onInteractionEnd: (details) {
-            onInteractionEnd();
-            if (dismissGesture.value) {
-              dismissGesture.value = false;
-              onDismissEnd(details.velocity.pixelsPerSecond.dy);
-            } else if (transform.value.getMaxScaleOnAxis() <= 1.001) {
-              // Finish a pinch back to fit at the original centered position,
-              // so the next downward swipe can dismiss rather than pan.
-              resetToFit();
-            }
-          },
-          child: child,
+              if (dismissGesture.value) {
+                dismissGesture.value = false;
+                onDismissEnd(details.velocity.pixelsPerSecond.dy);
+              } else if (transform.value.getMaxScaleOnAxis() <= 1.001) {
+                // Finish a pinch back to fit at the original centered position,
+                // so the next downward swipe can dismiss rather than pan.
+                resetToFit();
+              }
+            },
+            child: child,
+          ),
         ),
       ),
     );

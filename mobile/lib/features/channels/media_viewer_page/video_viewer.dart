@@ -304,6 +304,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                 child: _VideoZoomSurface(
                   key: ValueKey(videoUrl),
                   onTap: controls.toggle,
+                  controlsVisible: controls.visible,
                   onInteractionStart: controls.beginInteraction,
                   onInteractionEnd: controls.endInteraction,
                   onDismissStart: () {

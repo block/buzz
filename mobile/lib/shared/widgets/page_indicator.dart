@@ -45,16 +45,6 @@ class PageIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    void selectFromPosition(double dx, double width) {
-      if (width <= 0 || count <= 1) return;
-      final fraction = (dx / width).clamp(0.0, 1.0);
-      final position = Directionality.of(context) == TextDirection.rtl
-          ? 1 - fraction
-          : fraction;
-      final index = (position * count).floor().clamp(0, count - 1);
-      onSelected(index);
-    }
-
     return Semantics(
       label: '$semanticLabel ${selected + 1} of $count',
       slider: true,
@@ -84,32 +74,16 @@ class PageIndicator extends StatelessWidget {
                   ),
                 ),
               )
-            : LayoutBuilder(
-                builder: (context, constraints) => GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) => selectFromPosition(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  onHorizontalDragStart: (details) => selectFromPosition(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  onHorizontalDragUpdate: (details) => selectFromPosition(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  child: Center(
-                    child: SizedBox(
-                      width: 116.0,
-                      child: _WindowedPagination(
-                        containerHeight: containerHeight,
-                        dotKeyPrefix: dotKeyPrefix,
-                        count: count,
-                        selected: selected,
-                        animateChanges: animateChanges,
-                      ),
-                    ),
+            : Center(
+                child: SizedBox(
+                  width: 116,
+                  child: _WindowedPagination(
+                    containerHeight: containerHeight,
+                    dotKeyPrefix: dotKeyPrefix,
+                    count: count,
+                    selected: selected,
+                    animateChanges: animateChanges,
+                    onSelected: onSelected,
                   ),
                 ),
               ),
@@ -125,6 +99,7 @@ class _WindowedPagination extends StatelessWidget {
     required this.count,
     required this.selected,
     required this.animateChanges,
+    required this.onSelected,
   });
 
   final String dotKeyPrefix;
@@ -138,6 +113,7 @@ class _WindowedPagination extends StatelessWidget {
   final int count;
   final int selected;
   final bool animateChanges;
+  final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -153,42 +129,76 @@ class _WindowedPagination extends StatelessWidget {
     final hasEarlierDots = windowStart > 0;
     final hasLaterDots = windowEnd < count - 1;
 
-    return Container(
-      height: containerHeight,
-      padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.full),
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final pitch = _dotSize + _spacing;
-          final trackWidth =
-              visibleCount * _dotSize + (visibleCount - 1) * _spacing;
-          final isRtl = Directionality.of(context) == TextDirection.rtl;
-          final trackOrigin = (constraints.maxWidth - trackWidth) / 2;
-          return ClipRect(
-            child: Stack(
-              children: [
-                for (var page = 0; page < count; page++)
-                  _buildDot(
-                    context: context,
-                    page: page,
-                    slot: isRtl
-                        ? visibleCount - 1 - (page - windowStart)
-                        : page - windowStart,
-                    visibleCount: visibleCount,
-                    trackOrigin: trackOrigin,
-                    pitch: pitch,
-                    hasEarlierDots: isRtl ? hasLaterDots : hasEarlierDots,
-                    hasLaterDots: isRtl ? hasEarlierDots : hasLaterDots,
-                    duration: duration,
-                  ),
-              ],
-            ),
+    final pitch = _dotSize + _spacing;
+    final trackWidth = visibleCount * _dotSize + (visibleCount - 1) * _spacing;
+    final isRtl = Directionality.of(context) == TextDirection.rtl;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        void selectFromPosition(double dx) {
+          if (count <= 1) return;
+          final firstCenter =
+              (constraints.maxWidth - trackWidth) / 2 + _dotSize / 2;
+          final slot = ((dx - firstCenter) / pitch).round().clamp(
+            0,
+            visibleCount - 1,
           );
-        },
-      ),
+          final page = windowStart + (isRtl ? visibleCount - 1 - slot : slot);
+          onSelected(page);
+        }
+
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          excludeFromSemantics: true,
+          onTapDown: (details) => selectFromPosition(details.localPosition.dx),
+          onHorizontalDragStart: (details) =>
+              selectFromPosition(details.localPosition.dx),
+          onHorizontalDragUpdate: (details) =>
+              selectFromPosition(details.localPosition.dx),
+          child: SizedBox(
+            height: 54,
+            child: Center(
+              child: Container(
+                height: containerHeight,
+                padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
+                decoration: BoxDecoration(
+                  color: context.colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(Radii.full),
+                ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final trackOrigin = (constraints.maxWidth - trackWidth) / 2;
+                    return ClipRect(
+                      child: Stack(
+                        children: [
+                          for (var page = 0; page < count; page++)
+                            _buildDot(
+                              context: context,
+                              page: page,
+                              slot: isRtl
+                                  ? visibleCount - 1 - (page - windowStart)
+                                  : page - windowStart,
+                              visibleCount: visibleCount,
+                              trackOrigin: trackOrigin,
+                              pitch: pitch,
+                              hasEarlierDots: isRtl
+                                  ? hasLaterDots
+                                  : hasEarlierDots,
+                              hasLaterDots: isRtl
+                                  ? hasEarlierDots
+                                  : hasLaterDots,
+                              duration: duration,
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
