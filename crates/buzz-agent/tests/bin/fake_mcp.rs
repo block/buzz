@@ -12,6 +12,11 @@
 //!                              (use a large value, e.g. 999, to simulate hang)
 //!   FAKE_MCP_RESULT_SIZE=N   — `tools/call` returns an N-byte text result
 //!                              (default: the literal "ok"); grows history
+//!   FAKE_MCP_RESULT_TEXT=S   — `tools/call` returns S verbatim (overrides
+//!                              RESULT_SIZE). Lets a test inject a canned
+//!                              `buzz-dev-mcp` shell body / CLI ack.
+//!   FAKE_MCP_RESULT_IS_ERROR=1
+//!                            — mark the `tools/call` result `isError: true`
 //!   FAKE_MCP_IMAGE_RESULT=1  — `tools/call` returns text plus a PNG image block
 //!   FAKE_MCP_PID_FILE=path   — write the child PID to `path` on startup
 //!                              (for tests that want to verify the child died)
@@ -165,6 +170,10 @@ fn main() {
     // Tool-call result text size in bytes (default: the literal "ok"). Lets a
     // test grow session history by a controlled amount via a tool result.
     let result_size = env_u64("FAKE_MCP_RESULT_SIZE", 0) as usize;
+    // Verbatim result text, overriding RESULT_SIZE. Lets a test inject a canned
+    // shell body / CLI ack so the reply guard can be exercised end-to-end.
+    let result_text_override = std::env::var("FAKE_MCP_RESULT_TEXT").ok();
+    let result_is_error = env_flag("FAKE_MCP_RESULT_IS_ERROR");
     let stop_hook = env_flag("FAKE_MCP_STOP_HOOK");
     let stop_text = std::env::var("FAKE_MCP_STOP_TEXT").unwrap_or_else(|_| "keep going".to_owned());
     let stop_delay_secs = env_u64("FAKE_MCP_STOP_DELAY", 0);
@@ -339,7 +348,9 @@ fn main() {
                 if tool_delay_secs > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(tool_delay_secs));
                 }
-                let result_text = if result_size > 0 {
+                let result_text = if let Some(text) = &result_text_override {
+                    text.clone()
+                } else if result_size > 0 {
                     "x".repeat(result_size)
                 } else {
                     "ok".to_owned()
@@ -356,7 +367,7 @@ fn main() {
                     id,
                     json!({
                         "content": content,
-                        "isError": false,
+                        "isError": result_is_error,
                     }),
                 );
             }
