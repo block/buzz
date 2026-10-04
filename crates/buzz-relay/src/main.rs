@@ -105,6 +105,48 @@ impl EmissionScope {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
+/// Retry missing diagnostics promptly, without tying audit recovery to readiness.
+/// Delays start after each attempt finishes, so slow audits cannot cause bursts.
+struct PartitionAuditSchedule {
+    period: std::time::Duration,
+    next_delay: std::time::Duration,
+    retry_delay: std::time::Duration,
+    has_completed_audit: bool,
+}
+
+impl PartitionAuditSchedule {
+    fn new(period: std::time::Duration, has_completed_audit: bool) -> Self {
+        Self {
+            period,
+            next_delay: if has_completed_audit {
+                period
+            } else {
+                std::time::Duration::ZERO
+            },
+            retry_delay: std::time::Duration::from_secs(5),
+            has_completed_audit,
+        }
+    }
+
+    async fn wait(&self) {
+        tokio::time::sleep(self.next_delay).await;
+    }
+
+    /// A completed audit counts even when its verdict is unsafe.
+    fn record_attempt(&mut self, completed: bool) {
+        self.has_completed_audit |= completed;
+        if self.has_completed_audit {
+            self.next_delay = self.period;
+        } else {
+            self.next_delay = self.retry_delay;
+            self.retry_delay = self
+                .retry_delay
+                .saturating_mul(2)
+                .min(std::time::Duration::from_secs(60));
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let (runtime, boot) = BootTracker::start_before_runtime(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -226,7 +268,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     );
 
     let usage_interval_secs = usage_metrics_interval_secs();
-    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
+    let metrics_refresh_interval_secs =
+        usage_interval_secs.max(config.partition_audit_interval.as_secs());
+    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(metrics_refresh_interval_secs);
     let dependency_sample_completion_republish_interval =
         buzz_relay::readiness::dependency_sample_completion_republish_interval(
             usage_idle_timeout_secs,
@@ -287,9 +331,22 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
-    if let Err(e) = db.ensure_future_partitions(3).await {
-        error!("Failed to ensure partitions: {e}");
-    }
+    let startup_partition_audit = match db
+        .ensure_future_partitions(3, config.partition_manager_create_enabled)
+        .await
+    {
+        Ok(audit) => Some(audit),
+        Err(error) => {
+            error!(%error, "Failed to ensure partitions");
+            match db.audit_partitions(3).await {
+                Ok(audit) => Some(audit),
+                Err(error) => {
+                    error!(%error, "Initial partition catalog audit failed");
+                    None
+                }
+            }
+        }
+    };
 
     db.validate_deletion_serving_catalog().await.map_err(|e| {
         error!("Community deletion serving-fence validation failed: {e}");
@@ -492,6 +549,21 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
     tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
 
+    // Spawn Redis pub/sub subscriber for NIP-FI cross-pod disconnect commands.
+    // Remote pods publish to this global channel after accepting a disconnect
+    // command; every pod merges the deny entry and closes matching sessions.
+    // Subscribe before the Redis subscriber starts so messages buffer (up to the
+    // channel capacity) instead of being dropped until the consumer below runs.
+    let mut nip_fi_disconnect_rx = pubsub.subscribe_nip_fi_disconnect();
+    let pubsub_for_nip_fi = Arc::clone(&pubsub);
+    let nip_fi_channels =
+        buzz_relay::api::nip_fi::disconnect_subscribe_channels(config.nip_fi.mode);
+    tokio::spawn(async move {
+        pubsub_for_nip_fi
+            .run_nip_fi_disconnect_subscriber(nip_fi_channels)
+            .await
+    });
+
     let auth = AuthService::new(config.auth.clone());
 
     // Postgres FTS: the searchable row IS the persisted event row (its
@@ -525,7 +597,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to initialize media storage: {e}"))?;
     info!("Media storage connected");
 
-    let (app_state, audit_shutdown) = AppState::new(
+    let (mut app_state, audit_shutdown) = AppState::new(
         config.clone(),
         db,
         redis_health_pool,
@@ -537,7 +609,57 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         relay_keypair,
         media_storage,
     );
+    // NIP-FI S4: construct deny map + command verifier from startup config,
+    // before Arc::new so we can mutate app_state directly. The installer does
+    // no JWKS I/O; the warm + refresh block below is the single key lifecycle
+    // owner for the shared source both verifiers read.
+    {
+        let nip_fi = &config.nip_fi;
+        if let Some(key_source) = app_state.nip_fi_jwks_source.clone() {
+            buzz_relay::api::nip_fi::install_nip_fi_command_components(
+                &mut app_state.nip_fi_deny_map,
+                &mut app_state.nip_fi_command_verifier,
+                nip_fi.mode,
+                &nip_fi.registry,
+                key_source,
+                &nip_fi.command_configs,
+            )
+            .map_err(|e| anyhow::anyhow!("NIP-FI startup failed: {e}"))?;
+        } else if nip_fi.mode.evaluates() {
+            return Err(anyhow::anyhow!(
+                "NIP-FI: failed to construct JWKS key source \
+                 (empty or duplicate issuer config)"
+            ));
+        }
+    }
     let state = Arc::new(app_state);
+    let has_startup_partition_audit = startup_partition_audit.is_some();
+    if let Some(audit) = startup_partition_audit {
+        state.record_partition_audit(audit);
+    }
+
+    // The periodic path is deliberately read-only. Partition creation only
+    // occurs during the bounded startup pass.
+    {
+        let partition_state = Arc::clone(&state);
+        let audit_interval = state.config.partition_audit_interval;
+        tokio::spawn(async move {
+            let mut schedule =
+                PartitionAuditSchedule::new(audit_interval, has_startup_partition_audit);
+            loop {
+                schedule.wait().await;
+                let result = partition_state.db.audit_partitions(3).await;
+                schedule.record_attempt(result.is_ok());
+                match result {
+                    Ok(audit) => partition_state.record_partition_audit(audit),
+                    Err(error) => {
+                        metrics::counter!("buzz_partition_audit_failures_total").increment(1);
+                        warn!(%error, "Periodic partition catalog audit failed")
+                    }
+                }
+            }
+        });
+    }
 
     // NIP-FI JWKS warm + background refresh.
     //
@@ -1147,12 +1269,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                             pubkey,
                             event_id,
                             reason,
+                            unowned_only,
                         } => {
-                            state_for_conn_ctrl.conn_manager.disconnect_pubkey(
+                            state_for_conn_ctrl.disconnect_pubkey_local(
                                 scoped.community_id,
                                 &pubkey,
                                 &event_id,
                                 &reason,
+                                unowned_only,
                             );
                         }
                     },
@@ -1162,6 +1286,48 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::error!("Connection-control broadcast channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Cross-pod NIP-FI disconnect consumer: receive deny entries from remote
+    // pods, merge them into the local deny map (same max(until) rule), and
+    // close any matching sessions.  Every pod subscribes; the publishing pod
+    // also receives its own message and applies it — this is idempotent because
+    // the deny entry was already inserted locally before the publish.
+    //
+    // The consumer delegates to `apply_nip_fi_disconnect` which owns all
+    // validation, merge, and session-close logic.  This keeps the loop body
+    // minimal and makes the exact production path testable end-to-end.
+    {
+        let state_for_nip_fi = Arc::clone(&state);
+        let nip_fi_mode = state.config.nip_fi.mode;
+        tokio::spawn(async move {
+            loop {
+                match nip_fi_disconnect_rx.recv().await {
+                    Ok(msg) => {
+                        let now = chrono::Utc::now();
+                        buzz_relay::api::nip_fi::apply_nip_fi_disconnect(
+                            &state_for_nip_fi,
+                            &msg,
+                            now,
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        buzz_relay::api::nip_fi::count_disconnect_event(
+                            nip_fi_mode,
+                            "buzz_nip_fi_disconnect_lag_total",
+                            "cross_pod",
+                            "lag",
+                            n,
+                        );
+                        tracing::warn!("NIP-FI disconnect consumer lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("NIP-FI disconnect broadcast channel closed");
                         break;
                     }
                 }
@@ -2415,7 +2581,7 @@ mod tests {
         jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
         refresh_legacy_active_gauge_recency, relay_keypair_from_config,
         run_jwks_refresh_supervisor, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        InMemoryMetricKey, PartitionAuditSchedule,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -2514,6 +2680,68 @@ mod tests {
         async fn audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits() {
             super::audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits().await;
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partition_audit_first_tick_matches_startup_cache_state() {
+        let period = Duration::from_secs(900);
+
+        let immediate_start = tokio::time::Instant::now();
+        let mut schedule = PartitionAuditSchedule::new(period, false);
+        schedule.wait().await;
+        assert_eq!(tokio::time::Instant::now(), immediate_start);
+
+        // Failure of the first periodic attempt must not delay recovery by 15 minutes.
+        schedule.record_attempt(false);
+        schedule.wait().await;
+        assert_eq!(
+            tokio::time::Instant::now() - immediate_start,
+            Duration::from_secs(5)
+        );
+
+        let delayed_start = tokio::time::Instant::now();
+        let schedule = PartitionAuditSchedule::new(period, true);
+        schedule.wait().await;
+        assert_eq!(tokio::time::Instant::now() - delayed_start, period);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partition_audit_recovery_backoff_is_bounded_and_completion_ends_retries() {
+        let period = Duration::from_secs(900);
+        let mut schedule = PartitionAuditSchedule::new(period, false);
+        schedule.wait().await;
+        for seconds in [5, 10, 20, 40, 60, 60, 60] {
+            schedule.record_attempt(false);
+            let start = tokio::time::Instant::now();
+            schedule.wait().await;
+            assert_eq!(
+                tokio::time::Instant::now() - start,
+                Duration::from_secs(seconds)
+            );
+        }
+
+        // Completion, not a serving-safe verdict, ends recovery. Later failures
+        // retain the cached audit and use the normal cadence.
+        for completed in [true, false, false] {
+            schedule.record_attempt(completed);
+            let start = tokio::time::Instant::now();
+            schedule.wait().await;
+            assert_eq!(tokio::time::Instant::now() - start, period);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partition_audit_retries_wait_after_slow_attempts() {
+        let mut schedule = PartitionAuditSchedule::new(Duration::from_secs(900), false);
+        schedule.wait().await;
+        tokio::time::advance(Duration::from_secs(120)).await;
+        schedule.record_attempt(false);
+        let finished = tokio::time::Instant::now();
+        schedule.wait().await;
+        assert_eq!(
+            tokio::time::Instant::now() - finished,
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
@@ -2623,9 +2851,10 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_timeout_is_at_least_three_usage_intervals() {
+    fn test_idle_timeout_is_at_least_three_metric_refresh_intervals() {
         assert_eq!(idle_timeout_secs(None, 300), 900);
         assert_eq!(idle_timeout_secs(Some(10), 1_000), 3_000);
+        assert_eq!(idle_timeout_secs(None, 86_400), 259_200);
     }
 
     // ── F1: JWKS hard-dead recovery cadence ──────────────────────────────────

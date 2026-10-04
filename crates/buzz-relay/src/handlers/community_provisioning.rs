@@ -287,10 +287,7 @@ pub async fn provision_community(
                 return Err("community already exists".to_string());
             }
             buzz_db::CreateCommunityWithOwnerResult::LimitReached => {
-                return Err(
-                    "limit_reached: owner already owns the maximum number of communities"
-                        .to_string(),
-                );
+                return Err("limit_reached: owner has reached the community limit".to_string());
             }
         };
 

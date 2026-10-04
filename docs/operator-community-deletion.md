@@ -149,7 +149,68 @@ has no human approval step or cooling-off period: operator-attested owner intent
 is prepared automatically under privileged policy and becomes immediately
 eligible for execution. Transient preparation failures use the existing retry
 schedule; permanent or exhausted failures block durably. Owner-facing
-admission has no cancellation endpoint.
+admission has no cancellation endpoint. Admission requires the asserted owner
+to be the community's sole current owner: a legacy community with more than
+one owner row is rejected as `404 community_not_found`, indistinguishable from
+a missing host. Converge ownership first: transfer rejects archived communities,
+so unarchive, transfer to the intended owner (a self-transfer demotes the other
+owner rows; the transferee's quota still applies), re-archive, then resubmit.
+
+Admission is idempotent on the request UUID. Resending the same UUID with the
+same host, owner, and acknowledgement version returns `202` with that request's
+current `status` at any stage, including after membership purge, and admits no
+new work. Clients recover an ambiguous submission by resending it. The same
+UUID used for any other request returns `409 deletion_request_conflict`: a
+different host, owner, or stored acknowledgement version, or a UUID held by an
+operator-origin request.
+The optional `community_id` UUID binds the request to the community resolved
+from `host` without changing the host-derived authority. A different UUID
+returns `409 community_id_mismatch` with no mutation: on a fresh submission
+only after sole-owner authority is proven (a non-owner still gets `404`), and
+on replay only for a stored request with the same host (a different host is
+the `409 deletion_request_conflict` above). A malformed UUID returns
+`400 invalid_request`; omitting the field preserves existing clients.
+An unsupported acknowledgement version is the exception: it is rejected before
+the UUID lookup with `400 unsupported_acknowledgement_version`, even for a
+known UUID.
+
+The acknowledgement version is a compile-time constant
+(`OWNER_DELETION_ACKNOWLEDGEMENT_VERSION`), not operator configuration.
+Admission validates it before the UUID lookup, and the executor claims and
+leases only requests carrying the current version. Raising it therefore makes
+resends of pending requests made under the old version fail with
+`400 unsupported_acknowledgement_version`, and leaves already-admitted
+old-version requests unclaimed in `submitted`. A version bump must ship code
+that keeps admitting replays of, and executing, requests at the prior version
+until none remain in a non-terminal stage.
+
+## Owner quota
+
+The relay enforces two per-owner caps on create and on transfer-in. Either
+rejects with `409` and `code: "limit_reached"` (the `error` message keeps its
+`limit_reached:` prefix for older clients):
+
+- **Active:** live ownership plus incomplete owner deletions
+  (`BUZZ_MAX_COMMUNITIES_PER_OWNER`, default 5). A deletion keeps its slot
+  until logical completion records `completed_at`.
+- **Lifetime:** live ownership plus every non-aborted owner deletion, including
+  completed ones, capped at an absolute 20 regardless of the active limit.
+  Lifetime usage includes live ownership, so no owner can hold more than 20
+  live communities; a `BUZZ_MAX_COMMUNITIES_PER_OWNER` above 20 is
+  unreachable, and owner lists would report a `quota_limit` the owner can
+  never reach.
+  Deleted communities keep their hosts as permanent tombstones, so this bounds
+  create-then-delete host squatting. Aborted deletions restore the community
+  and count only through its live membership.
+
+Owner-list responses carry `quota_used` (active), `quota_limit` (active), and
+`can_create` (both caps). `can_create: false` is the only signal a client needs:
+show a generic community-limit message and do not derive a reason from the
+counts, because an owner at the lifetime cap can have `quota_used` below
+`quota_limit`. The projection is advisory: clients may use it for
+UX, but the relay's `limit_reached` is authoritative, and quota changes have no
+deployment order. Keep owner deletion off until this relay and the drain
+executor are live; on rollback, turn deletion off before rolling back the relay.
 
 The chart has no existing PrometheusRule or provider-neutral CronJob alert
 integration. Operators must alert on failed/missed Jobs and long-running active

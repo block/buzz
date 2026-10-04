@@ -15,7 +15,7 @@ use axum::{
 use base64::Engine;
 use serde_json::Value;
 
-use buzz_auth::{LimitType, Nip98ReplayGuard, NipFiMode, DEFAULT_REPLAY_TTL_SECS};
+use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
 use buzz_core::TenantContext;
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
@@ -67,6 +67,17 @@ pub(crate) struct VerifiedBridgeAuth {
     pub(crate) pubkey: nostr::PublicKey,
     pub(crate) event_id_bytes: [u8; 32],
     pub(crate) signed_created_at: Option<u64>,
+}
+
+impl VerifiedBridgeAuth {
+    /// The admission proof; the dev-mode `X-Pubkey` zero event ID is unsigned.
+    pub(crate) fn proof<X>(&self, extra: X) -> Nip98Proof<X> {
+        if self.event_id_bytes == [0; 32] {
+            Nip98Proof::unsigned(self.pubkey, extra)
+        } else {
+            Nip98Proof::new(self.pubkey, extra)
+        }
+    }
 }
 
 type BridgeAuthResult = Result<VerifiedBridgeAuth, (StatusCode, Json<Value>)>;
@@ -213,7 +224,7 @@ pub(crate) fn make_nip98_closure_for_admission(
             require_auth_token,
             require_payload,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     }
 }
@@ -894,13 +905,9 @@ pub async fn submit_event(
     // before any tenant-scoped write, identical to the WS door in `router.rs`.
     // Unmapped host or lookup failure fails closed with a generic 404 — never a
     // default tenant, never echoing the host.
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -912,15 +919,18 @@ pub async fn submit_event(
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let nip_fi_active = state.config.nip_fi.mode.restricts();
     // POST /events carries an authorization-relevant body (the event determines
     // resource, effect, and state change), so a payload tag is required in
     // NIP-FI enforce mode. [NIP-FI.md:619-637]
-    let nip_fi_enforce = matches!(state.config.nip_fi.mode, NipFiMode::Enforce);
+    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
 
     // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
     // assertion verify → pair → deny-map in fixed order. The proven pubkey is
     // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
+    crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
+        verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
+    });
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
         verify_bridge_auth_with_options(
             &headers,
@@ -930,7 +940,7 @@ pub async fn submit_event(
             state.config.require_auth_token || nip_fi_active,
             nip_fi_enforce,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -1221,13 +1231,9 @@ pub async fn query_events(
     // An unmapped host or lookup failure fails closed with a generic 404 — never
     // a default tenant, never echoing the host (so an unauthenticated caller
     // cannot probe which communities exist on this deployment).
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -1238,13 +1244,16 @@ pub async fn query_events(
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let nip_fi_active = state.config.nip_fi.mode.restricts();
     // POST /query carries an authorization-relevant body (filter selects the
     // resources returned), so a payload tag is required in enforce mode.
     // [NIP-FI.md:619-637]
-    let nip_fi_enforce = matches!(state.config.nip_fi.mode, NipFiMode::Enforce);
+    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
+        verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
+    });
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
         verify_bridge_auth_with_options(
             &headers,
@@ -1254,7 +1263,7 @@ pub async fn query_events(
             state.config.require_auth_token || nip_fi_active,
             nip_fi_enforce,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -1852,13 +1861,9 @@ pub async fn count_events(
     // before any tenant-scoped read, identical to the WS door in `router.rs`
     // and `query_events`/`submit_event` above. Fail-closed; never a default
     // tenant, never echoing the host.
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -1869,13 +1874,16 @@ pub async fn count_events(
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let nip_fi_active = state.config.nip_fi.mode.restricts();
     // POST /count carries an authorization-relevant body (filter selects what
     // is counted), so a payload tag is required in enforce mode.
     // [NIP-FI.md:619-637]
-    let nip_fi_enforce = matches!(state.config.nip_fi.mode, NipFiMode::Enforce);
+    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
+        verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
+    });
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
         verify_bridge_auth_with_options(
             &headers,
@@ -1885,7 +1893,7 @@ pub async fn count_events(
             state.config.require_auth_token || nip_fi_active,
             nip_fi_enforce,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -2667,13 +2675,9 @@ async fn authorize_moderation_read(
     path: &str,
     raw_query: Option<&str>,
 ) -> Result<TenantContext, Response> {
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             api_error(
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
@@ -2689,9 +2693,12 @@ async fn authorize_moderation_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = !matches!(state.config.nip_fi.mode, NipFiMode::Off);
+    let nip_fi_active = state.config.nip_fi.mode.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    crate::nip_fi_shadow::observe_strict_proof(state, headers, "bridge", || {
+        verify_bridge_auth(headers, "GET", &url, None, true).map(drop)
+    });
     let admission = admit_nip_fi_http_on_state(state, headers, || {
         verify_bridge_auth(
             headers,
@@ -2700,7 +2707,7 @@ async fn authorize_moderation_read(
             None,
             state.config.require_auth_token || nip_fi_active,
         )
-        .map(|auth| Nip98Proof::new(auth.pubkey, auth.event_id_bytes))
+        .map(|auth| auth.proof(auth.event_id_bytes))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
@@ -2710,6 +2717,17 @@ async fn authorize_moderation_read(
         .await
         .map_err(|e| e.into_response())?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
+
+    // Membership and community ban, same step as the other NIP-98 routes.
+    super::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        &pubkey_bytes,
+        super::relay_members::extract_auth_tag_header(headers),
+        None,
+    )
+    .await
+    .map_err(|e| e.into_response())?;
 
     crate::handlers::moderation_authz::authorize_moderation_action(
         &tenant,
@@ -5002,6 +5020,8 @@ mod postgres_tests {
         config.require_auth_token = true;
         config.require_relay_membership = false;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
         // Pin the GIF provider absent: `Config::from_env()` imports
         // `BUZZ_KLIPY_API_KEY`, and the GIF positive control's exact 404
         // (`gifs.rs` "GIF search is not configured") depends on `klipy = None`.
@@ -6496,6 +6516,8 @@ mod postgres_tests {
             config.require_auth_token = true;
             config.require_relay_membership = false;
             config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://relay.example");
 
             let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
                 .await
@@ -6627,7 +6649,10 @@ mod postgres_tests {
             .nip_fi_verifier
             .as_deref()
             .expect("verifier injected")
-            .verify_assertion(BAD_SIG_TOKEN);
+            .verify_assertion(
+                BAD_SIG_TOKEN,
+                &crate::nip_fi_core::test_support::binding(TEST_AUDIENCE),
+            );
         assert!(
             verifier_check.is_err(),
             "pre-condition: the bad-sig token MUST be rejected by the verifier; \
@@ -6887,6 +6912,8 @@ mod postgres_tests {
             config.require_auth_token = true;
             config.require_relay_membership = false;
             config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://relay.example");
 
             let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
                 .await
@@ -7012,7 +7039,10 @@ mod postgres_tests {
                 .nip_fi_verifier
                 .as_deref()
                 .expect("verifier injected")
-                .verify_assertion(&valid_assertion)
+                .verify_assertion(
+                    &valid_assertion,
+                    &crate::nip_fi_core::test_support::binding(TEST_AUDIENCE)
+                )
                 .is_ok(),
             "pre-condition: valid assertion must be accepted by the verifier"
         );
@@ -7052,7 +7082,10 @@ mod postgres_tests {
                 .nip_fi_verifier
                 .as_deref()
                 .expect("verifier injected")
-                .verify_assertion(&same_key_assertion)
+                .verify_assertion(
+                    &same_key_assertion,
+                    &crate::nip_fi_core::test_support::binding(TEST_AUDIENCE)
+                )
                 .is_ok(),
             "pre-condition: same-key assertion must be accepted"
         );
@@ -7856,6 +7889,7 @@ mod postgres_tests {
                 nip_fi_assertion: None,
                 session_deadline: None,
                 nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
             });
             (conn, send_rx)
         }
@@ -8077,5 +8111,184 @@ mod postgres_tests {
 
         drop(conn);
         fx.drop().await;
+    }
+
+    /// An agent socket admitted with no owner, then linked to its owner by a
+    /// later `POST /events` carrying NIP-OA, closes when the owner is banned
+    /// or removed even though the owner-to-agent lookup fails: recording the
+    /// owner made the ownerless sockets reconnect. The same agent's socket in
+    /// another community stays up.
+    /// Mutation: drop `disconnect_unowned_agent_clusterwide` from
+    /// `materialize_nip_oa_owner` → the agent's sockets stay open → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn late_owner_link_closes_ownerless_agent_sockets_on_owner_revoke() {
+        use crate::state::CommunityConnectionControl;
+        use sqlx::postgres::PgConnectOptions;
+        use tokio_util::sync::CancellationToken;
+
+        for action in ["ban", "removal"] {
+            let mut state = bridge_handler_test_state()
+                .await
+                .expect("local Postgres and Redis");
+            // A schema whose `users` table can be taken away after the link,
+            // so only the owner-to-agent lookup fails at revoke time.
+            let db_url = crate::test_support::database_url();
+            let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "CREATE SCHEMA {schema}; \
+                 CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+                 CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+                 CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL);"
+            )))
+            .execute(state.db.pool())
+            .await
+            .expect("create schema");
+            let admin = state.db.pool().clone();
+            let pool = sqlx::PgPool::connect_with(
+                db_url
+                    .parse::<PgConnectOptions>()
+                    .expect("database url")
+                    .options([("search_path", schema.as_str())]),
+            )
+            .await
+            .expect("schema pool");
+            Arc::get_mut(&mut state).expect("unique state").db = buzz_db::Db::from_pool(pool);
+
+            let tenant = fresh_tenant("late-owner.test");
+            let other = fresh_tenant("late-owner-other.test");
+            let (owner, agent) = (Keys::generate(), Keys::generate());
+            let agent_bytes = agent.public_key().to_bytes();
+
+            // The agent's ownerless main and audio sockets, plus its socket in
+            // another community.
+            let root = CancellationToken::new();
+            let root_id = uuid::Uuid::new_v4();
+            let (tx, _rx) = tokio::sync::mpsc::channel(4);
+            let (ctrl, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+            let (terminal, _terminal_rx) = tokio::sync::mpsc::channel(1);
+            state.conn_manager.register(
+                root_id,
+                tx,
+                ctrl,
+                terminal,
+                None,
+                root.clone(),
+                tenant.community(),
+                Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                3,
+                crate::state::CommunityConnectionControl::new(root.clone()),
+            );
+            state
+                .conn_manager
+                .set_authenticated_pubkey(root_id, agent_bytes.to_vec());
+            let bound = |community| {
+                let control = CommunityConnectionControl::new(CancellationToken::new());
+                control.bind_pubkey(agent_bytes);
+                let guard = state.community_connections.register(
+                    uuid::Uuid::new_v4(),
+                    community,
+                    control.clone(),
+                );
+                (control, guard)
+            };
+            let (audio, _g1) = bound(tenant.community());
+            let (elsewhere, _g2) = bound(other.community());
+
+            // The real HTTP submit path records the owner from `x-auth-tag`.
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let mut headers = HeaderMap::new();
+            headers.insert("x-auth-tag", auth_tag.parse().expect("header value"));
+            let event = EventBuilder::new(Kind::TextNote, "linked")
+                .sign_with_keys(&agent)
+                .expect("sign event");
+            let _ = submit_event_authed(
+                &state,
+                &tenant,
+                &headers,
+                serde_json::to_vec(&event).expect("event json").as_slice(),
+                agent.public_key(),
+                fresh_nip98_event_id_bytes(),
+                Some(nostr::Timestamp::now().as_secs()),
+            )
+            .await;
+            assert!(
+                state
+                    .db
+                    .is_agent_owner(
+                        tenant.community(),
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner lookup"),
+                "{action}: the HTTP request recorded the owner"
+            );
+
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.users RENAME TO users_unavailable"
+            )))
+            .execute(&admin)
+            .await
+            .expect("break the owner-to-agent lookup");
+            let owner_hex = owner.public_key().to_hex();
+            match action {
+                "ban" => state
+                    .db
+                    .ban_community_member(
+                        tenant.community(),
+                        owner.public_key().as_bytes(),
+                        &[9u8; 32],
+                        None,
+                        None,
+                    )
+                    .await
+                    .map(|_| ())
+                    .expect("ban commits"),
+                _ => {
+                    buzz_db::relay_members::add_relay_member(
+                        state.db.pool(),
+                        tenant.community(),
+                        &owner_hex,
+                        "member",
+                        None,
+                    )
+                    .await
+                    .expect("seed member");
+                    state
+                        .db
+                        .remove_relay_member(tenant.community(), &owner_hex)
+                        .await
+                        .map(|_| ())
+                        .expect("removal commits");
+                }
+            }
+            let revoked = state
+                .revoke_live_access(
+                    &tenant,
+                    owner.public_key().as_bytes(),
+                    "owner-revoke",
+                    "blocked: you are banned from this community",
+                )
+                .await;
+            assert!(revoked.is_err(), "{action}: the failed lookup is reported");
+            assert!(
+                root.is_cancelled(),
+                "{action}: the agent's main socket closes"
+            );
+            assert!(
+                audio.cancellation_token().is_cancelled(),
+                "{action}: the agent's audio socket closes"
+            );
+            assert!(
+                !elsewhere.cancellation_token().is_cancelled(),
+                "{action}: the agent's socket in another community stays"
+            );
+            let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(&admin)
+                .await;
+        }
     }
 }

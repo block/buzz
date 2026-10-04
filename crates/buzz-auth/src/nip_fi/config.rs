@@ -60,6 +60,12 @@ pub(crate) const MAX_CLIENT_ID_BYTES: usize = 2_048;
 /// attacker-driven O(keys) scan.
 pub(crate) const MAX_JWKS_KEYS: usize = 64;
 
+/// Maximum accepted command-JWT `jti` length, in bytes. Each reservation
+/// stores the jti in the per-issuer deny shard, so this bounds its memory.
+/// A command-JWT rule, not an assertion bound, so it is not folded into
+/// `assertion_policy_id`.
+pub(crate) const MAX_JTI_BYTES: usize = 512;
+
 /// The compiled-verifier-behavior fingerprint folded into every
 /// [`AssertionPolicyId`]. It stands in for the normative semantic inputs that
 /// are not otherwise field-encoded: duplicate-member rejection, exact-byte
@@ -359,7 +365,13 @@ impl FreshnessClass {
 #[derive(Debug, Clone)]
 pub struct IssuerPolicy {
     issuer: String,
-    audiences: Vec<String>,
+    /// Accepted `aud` values for S4 command JWTs only. Assertion `aud` comes
+    /// from the per-community [`super::CommunityBinding`], never from here.
+    command_audiences: Vec<String>,
+    /// Expected `aud` of every community authorizing this issuer — the
+    /// issuer's side of the community allowlist (NIP-FI.md:145). Empty until
+    /// [`IssuerPolicy::authorized_for_communities`] sets it.
+    community_audiences: Vec<String>,
     token_class: TokenClass,
     freshness: FreshnessClass,
     algorithms: Vec<Algorithm>,
@@ -380,8 +392,8 @@ pub enum IssuerPolicyError {
     /// `iss` was empty or exceeded the length bound.
     #[error("invalid issuer")]
     InvalidIssuer,
-    /// The audience set was empty or contained an invalid value.
-    #[error("invalid audience set")]
+    /// The command audience set was empty or contained an invalid value.
+    #[error("invalid command audience set")]
     InvalidAudiences,
     /// The subject claim name was empty or exceeded the length bound.
     #[error("invalid subject claim")]
@@ -415,7 +427,7 @@ impl IssuerPolicy {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         issuer: String,
-        audiences: Vec<String>,
+        command_audiences: Vec<String>,
         token_class: TokenClass,
         freshness: FreshnessClass,
         algorithms: Vec<Algorithm>,
@@ -431,8 +443,8 @@ impl IssuerPolicy {
         if issuer.is_empty() || issuer.len() > MAX_URI_LEN {
             return Err(IssuerPolicyError::InvalidIssuer);
         }
-        if audiences.is_empty()
-            || audiences
+        if command_audiences.is_empty()
+            || command_audiences
                 .iter()
                 .any(|a| a.is_empty() || a.len() > MAX_URI_LEN)
         {
@@ -472,33 +484,33 @@ impl IssuerPolicy {
         // invariant under permutation and duplication (NIP-FI.md "Policy
         // identity and snapshots"). Subject-class value sets are already
         // canonicalized in `SubjectClassContract::new`.
-        let audiences = canonical_set(audiences);
-        let algorithms = canonical_algorithm_set(algorithms);
-
-        let id = derive_assertion_policy_id(
-            &issuer,
-            &audiences,
-            &token_class,
-            freshness,
-            &algorithms,
-            skew_seconds,
-            maximum_assertion_age_seconds,
-            maximum_status_age_seconds,
-            &jwks_source_contract,
-        );
-
-        Ok(Self {
+        let mut policy = Self {
             issuer,
-            audiences,
+            command_audiences: canonical_set(command_audiences),
+            community_audiences: Vec::new(),
             token_class,
             freshness,
-            algorithms,
+            algorithms: canonical_algorithm_set(algorithms),
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
             jwks_source_contract,
-            id,
-        })
+            // Placeholder, overwritten from the fully built policy below.
+            id: AssertionPolicyId([0u8; 32]),
+        };
+        policy.id = derive_assertion_policy_id(&policy);
+        Ok(policy)
+    }
+
+    /// Record the expected `aud` of every community that authorizes this
+    /// issuer and re-derive the policy ID over it, so changing the community
+    /// allowlist moves the ID (NIP-FI.md:145). Set-valued: order and
+    /// duplicates do not affect the ID.
+    #[must_use]
+    pub fn authorized_for_communities(mut self, community_audiences: Vec<String>) -> Self {
+        self.community_audiences = canonical_set(community_audiences);
+        self.id = derive_assertion_policy_id(&self);
+        self
     }
 
     /// The exact `iss` value this policy is selected by.
@@ -506,9 +518,14 @@ impl IssuerPolicy {
         &self.issuer
     }
 
-    /// The configured audiences; at least one must match the token `aud`.
-    pub fn audiences(&self) -> &[String] {
-        &self.audiences
+    /// The accepted command-JWT audiences; at least one must match its `aud`.
+    pub fn command_audiences(&self) -> &[String] {
+        &self.command_audiences
+    }
+
+    /// The expected `aud` of each community authorizing this issuer.
+    pub fn community_audiences(&self) -> &[String] {
+        &self.community_audiences
     }
 
     /// The single accepted token class.
@@ -646,18 +663,20 @@ fn algorithm_tag(algorithm: Algorithm) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn derive_assertion_policy_id(
-    issuer: &str,
-    audiences: &[String],
-    token_class: &TokenClass,
-    freshness: FreshnessClass,
-    algorithms: &[Algorithm],
-    skew_seconds: u64,
-    maximum_assertion_age_seconds: u64,
-    maximum_status_age_seconds: Option<u64>,
-    jwks_source_contract: &JwksSourceContract,
-) -> AssertionPolicyId {
+fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
+    let IssuerPolicy {
+        issuer,
+        command_audiences,
+        community_audiences,
+        token_class,
+        freshness,
+        algorithms,
+        skew_seconds,
+        maximum_assertion_age_seconds,
+        maximum_status_age_seconds,
+        jwks_source_contract,
+        id: _,
+    } = policy;
     let mut hasher = Sha256::new();
     hasher.update(b"buzz:nip-fi:assertion-policy:v1\0");
     // Compiled-verifier-behavior fingerprint: covers duplicate-member
@@ -678,7 +697,11 @@ fn derive_assertion_policy_id(
         hasher.update((bound as u64).to_be_bytes());
     }
     hash_field(&mut hasher, issuer.as_bytes());
-    hash_seq(&mut hasher, audiences.iter().map(String::as_bytes));
+    hash_seq(&mut hasher, command_audiences.iter().map(String::as_bytes));
+    hash_seq(
+        &mut hasher,
+        community_audiences.iter().map(String::as_bytes),
+    );
     hash_field(&mut hasher, token_class.discriminant().as_bytes());
     match token_class {
         TokenClass::AccessTokenAtJwt { subject_class } => {
@@ -710,7 +733,7 @@ fn derive_assertion_policy_id(
     );
     hasher.update(skew_seconds.to_be_bytes());
     hasher.update(maximum_assertion_age_seconds.to_be_bytes());
-    hasher.update(maximum_status_age_seconds.unwrap_or(0).to_be_bytes());
+    hasher.update((*maximum_status_age_seconds).unwrap_or(0).to_be_bytes());
     // Authenticated key-source contract (NIP-FI.md, "Policy identity and
     // snapshots"): URI selects the authenticated source; interval defines
     // bounded refresh; hard deadline defines the accepted time rule. These are

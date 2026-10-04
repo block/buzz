@@ -17,6 +17,10 @@
 /// the size cap) carries `bodyComplete: false`: the outcome is unknown, so the
 /// caller preserves idempotency and lets the retry dedupe even on a 4xx.
 ///
+/// `notSent` is `true` only when the desktop refused the request before sending
+/// it (a malformed intent, or the relay or signer changed): nothing reached the
+/// relay, so retrying the same intent can never succeed.
+///
 /// Serialises `rename_all = "camelCase"`; the JS bridge surfaces it as the
 /// rejected `TauriInvokeError.payload`, from which the UI reads `relayStatus`
 /// and `bodyComplete`.
@@ -32,9 +36,19 @@ pub struct AdminMutationError {
     /// Whether the relay's full response body was read. `true` only for an
     /// authoritative verdict; `false` when the body was lost or truncated.
     pub body_complete: bool,
+    /// Refused before sending; see the type docs.
+    pub not_sent: bool,
 }
 
 impl AdminMutationError {
+    /// Refused before any request was sent; retrying the same intent is futile.
+    pub(super) fn not_sent(message: String) -> Self {
+        Self {
+            not_sent: true,
+            ..Self::from(message)
+        }
+    }
+
     /// The relay answered with an HTTP status and its full body was read — an
     /// authoritative verdict.
     pub(super) fn authoritative(status: reqwest::StatusCode, message: String) -> Self {
@@ -42,6 +56,7 @@ impl AdminMutationError {
             message,
             relay_status: Some(status.as_u16()),
             body_complete: true,
+            not_sent: false,
         }
     }
 
@@ -52,6 +67,7 @@ impl AdminMutationError {
             message,
             relay_status: Some(status.as_u16()),
             body_complete: false,
+            not_sent: false,
         }
     }
 }
@@ -64,6 +80,7 @@ impl From<String> for AdminMutationError {
             message,
             relay_status: None,
             body_complete: false,
+            not_sent: false,
         }
     }
 }

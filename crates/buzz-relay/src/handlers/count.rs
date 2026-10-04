@@ -418,6 +418,7 @@ mod tests {
             nip_fi_assertion: None,
             session_deadline: Some(deadline),
             nip_fi_gate: gate,
+            community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
 
         let state = crate::state::tests::test_state().await;

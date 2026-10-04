@@ -102,8 +102,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // must be verified against the tenant-bound host, not a process-global
         // domain.
         let mode = state.config.nip_fi.mode;
-        if matches!(mode, buzz_auth::NipFiMode::Off) {
-            parse_git_auth_header(&parts.headers, method)?;
+        if !mode.restricts() {
+            if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
+                // Off returns `rejection` as is; shadow also records the
+                // enforce verdict for the failed proof, still with no DB work.
+                crate::nip_fi_http::observe_failed_proof(state, &parts.headers);
+                return Err(rejection);
+            }
         }
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved
@@ -111,14 +116,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // headers; the signed `u` tag is checked against the host that resolved
         // through the authoritative communities table, not a deployment-global
         // `config.relay_url` and not any client-supplied community value.
-        let raw_host = parts
-            .headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        let tenant = crate::nip_fi_shadow::bind_tenant(state, &parts.headers)
             .await
-            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,
@@ -207,7 +207,18 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
         let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        if crate::api::relay_members::enforce_relay_membership(
+        // A failed policy lookup is 503 (the canonical NIP-FI body when the
+        // mode restricts); only a real refusal is 403.
+        let unavailable = |legacy: Response| {
+            if mode.restricts() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+            } else {
+                legacy
+            }
+        };
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_git_membership(tenant.community()).await;
+        match crate::api::relay_members::check_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
@@ -215,10 +226,24 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             Some(signed_auth_created_at),
         )
         .await
-        .is_err()
         {
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-            return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
+            Ok(crate::api::relay_members::MembershipDecision::Denied) => {
+                warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
+                return Err(
+                    (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
+                return Err(unavailable(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "error: internal error checking relay membership",
+                    )
+                        .into_response(),
+                ));
+            }
         }
 
         deny_banned_git_principal(
@@ -228,7 +253,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             auth_tag,
             Some(signed_auth_created_at),
         )
-        .await?;
+        .await
+        .map_err(|denial| {
+            if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
+                unavailable(denial)
+            } else {
+                denial
+            }
+        })?;
 
         Ok(GitAuth { pubkey, tenant })
     }
@@ -4098,6 +4130,109 @@ mod off_mode_precedence_tests {
             Some(Arc::new(state))
         }
 
+        /// A NIP-98-authenticated Git request whose restriction lookup fails
+        /// answers 503, not the 403 a real ban or non-member gets. Enforce sends
+        /// the canonical NIP-FI `authorization unavailable` bytes; Off keeps the
+        /// legacy text. Mutations: treat every membership-step error as 403, or
+        /// skip the Enforce mapping → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn failed_restriction_lookup_is_503_not_403() {
+            use base64::Engine as _;
+            struct AdmitAnyAssertion(nostr::PublicKey);
+            impl buzz_auth::VerifyAssertion for AdmitAnyAssertion {
+                fn verify_assertion(
+                    &self,
+                    _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
+                ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
+                {
+                    Ok(buzz_auth::VerifiedAssertion::new_for_test(self.0))
+                }
+            }
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Enforce] {
+                let Some(mut state) = off_mode_state().await else {
+                    panic!("local Postgres not reachable");
+                };
+                let host = format!("git-ban-lookup-{}.test", uuid::Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let (db, admin, schema) =
+                    crate::test_support::restriction_lookup_failing_db().await;
+                let keys = nostr::Keys::generate();
+                {
+                    let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
+                    s.db = db;
+                    Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    Arc::make_mut(&mut s.config).nip_fi.communities =
+                        crate::nip_fi_core::test_support::any_host(
+                            "https://git-ban-lookup.relay.invalid",
+                        );
+                    s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion(keys.public_key())));
+                }
+                let scheme = if state.config.relay_url.starts_with("wss://") {
+                    "https"
+                } else {
+                    "http"
+                };
+                let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
+                let event_json = serde_json::to_string(
+                    &nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                        .tags([
+                            nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
+                            nostr::Tag::parse(["method", "GET"]).expect("method tag"),
+                        ])
+                        .sign_with_keys(&keys)
+                        .expect("sign NIP-98 event"),
+                )
+                .expect("serialize");
+                let auth = format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(event_json)
+                );
+                let req = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(GIT_PATH)
+                    .header("host", &host)
+                    .header("authorization", &auth)
+                    .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer any.valid.token")
+                    .body(axum::body::Body::empty())
+                    .expect("build request");
+                let resp = git_router(Arc::clone(&state))
+                    .oneshot(req)
+                    .await
+                    .expect("router oneshot");
+                let status = resp.status();
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                let expected: &[u8] = match mode {
+                    buzz_auth::NipFiMode::Off => b"authorization unavailable",
+                    _ => b"authorization unavailable\n",
+                };
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "{mode:?}: {body:?}"
+                );
+                assert_eq!(
+                    content_type.as_deref(),
+                    Some("text/plain; charset=utf-8"),
+                    "{mode:?}"
+                );
+                assert_eq!(body.as_ref(), expected, "{mode:?}");
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                    .execute(&admin)
+                    .await;
+            }
+        }
+
         async fn git_request(
             state: Arc<AppState>,
             host: &str,
@@ -4440,6 +4575,8 @@ mod off_mode_precedence_tests {
 
             let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
             config.require_auth_token = false;
             config.require_relay_membership = false;
             // Pin relay_url to a ws:// value so git_expected_url() deterministically
@@ -4579,6 +4716,8 @@ mod off_mode_precedence_tests {
 
             let mut config = crate::config::Config::for_test();
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
             config.require_auth_token = false;
             config.require_relay_membership = false;
             config.relay_url = "ws://nip-fi-git-pack-test.invalid".to_string();
@@ -4628,7 +4767,7 @@ mod off_mode_precedence_tests {
             // hitting the absent-verifier 503.  Without this, Case 3 sends
             // `Bearer !!!not-valid-base64!!!` which passes `extract_bearer_token`
             // (scheme/cardinality checks only) and then trips the absent-verifier
-            // check at nip_fi_http.rs:332-335 → 503, not 403.
+            // check in `nip_fi_core::evaluate_attached_assertion` → 503, not 403.
             // [FI-TRACE-DENIAL-ORACLE: verifier required for all crypto cases]
             let state = {
                 use buzz_auth::{

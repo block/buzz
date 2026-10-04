@@ -49,17 +49,9 @@ impl FromRequestParts<Arc<AppState>> for UploadContext {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let headers = &parts.headers;
-
         // Row zero: bind tenant from the request host.  Fail-closed:
         // unmapped host → 404.
-        let raw_host = headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
-            .await
-            .map_err(|_| MediaError::NotFound)?;
+        let tenant = bind_media_read_tenant(state, &parts.headers).await?;
 
         let route_mode = upload_route_mode(parts.uri.path())?;
 
@@ -107,6 +99,9 @@ impl IntoResponse for MediaDenial {
                     BlossomDenialKind::MissingEvidence => DenialClass::MissingEvidence,
                     BlossomDenialKind::EvidenceRejected => DenialClass::EvidenceRejected,
                     BlossomDenialKind::AuthorizationDenied => DenialClass::AuthorizationDenied,
+                    BlossomDenialKind::AuthorizationUnavailable => {
+                        DenialClass::AuthorizationUnavailable
+                    }
                 };
                 tracing::warn!(
                     error = %error,
@@ -132,6 +127,20 @@ impl IntoResponse for MediaDenial {
 /// response shape at the relay boundary.
 fn media_denial(error: MediaError, strictness: BlossomStrictness) -> MediaDenial {
     MediaDenial(error, strictness)
+}
+
+/// Map a shared membership-step refusal to media's response shape: a failed
+/// lookup stays 503, a real refusal (non-member or banned) is a policy denial.
+fn membership_denial(
+    (status, _): (StatusCode, axum::Json<serde_json::Value>),
+    strictness: BlossomStrictness,
+) -> MediaDenial {
+    let error = if status.is_server_error() {
+        MediaError::AuthorizationUnavailable
+    } else {
+        MediaError::RelayMembershipRequired
+    };
+    media_denial(error, strictness)
 }
 
 impl From<MediaError> for MediaDenial {
@@ -324,6 +333,12 @@ pub(crate) async fn upload_blob(
     // as the read path. [FI-TRACE-AUTHORITY-UNIFORM]
     let strictness = blossom_strictness_from_state(&state);
     let tenant_host = ctx.tenant.host().to_owned();
+    crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
+        let event = extract_blossom_auth(&headers).map_err(drop)?;
+        let strict = BlossomStrictness::Strict;
+        buzz_media::auth::verify_blossom_auth_event(&event, Some(&tenant_host), strict)
+            .map_err(drop)
+    });
     let headers_clone = headers.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
         let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| e.into_response())?;
@@ -374,7 +389,7 @@ pub(crate) async fn upload_blob(
     )
     .await
     .map(|_| ())
-    .map_err(|_| media_denial(MediaError::RelayMembershipRequired, strictness))
+    .map_err(|e| membership_denial(e, strictness))
     {
         return e.into_response();
     }
@@ -634,13 +649,9 @@ async fn bind_media_read_tenant(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<TenantContext, MediaError> {
-    let raw_host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    crate::tenant::bind_community(&state.db, raw_host)
+    crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| MediaError::NotFound)
+        .ok_or(MediaError::NotFound)
 }
 
 /// Extract and signature-verify the Blossom auth event for a GET/HEAD read.
@@ -690,7 +701,7 @@ async fn enforce_blossom_read_membership(
     )
     .await
     .map(|_| ())
-    .map_err(|_| media_denial(MediaError::RelayMembershipRequired, strictness))
+    .map_err(|e| membership_denial(e, strictness))
 }
 
 fn blob_cache_control() -> &'static str {
@@ -799,6 +810,15 @@ pub(crate) async fn get_blob(
     // In Enforce mode: extraction failure → NIP-FI denial bytes (MissingEvidence/
     // EvidenceRejected).  In Off mode: MediaError propagates unchanged [FI-INV-15].
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
+    crate::nip_fi_shadow::observe_strict_proof(&state, &req_headers, "blossom", || {
+        extract_blossom_read_proof(
+            &req_headers,
+            &sha256,
+            &tenant_host,
+            BlossomStrictness::Strict,
+        )
+        .map(drop)
+    });
     let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
@@ -1089,6 +1109,10 @@ pub(crate) async fn head_blob(
     let tenant_host = tenant.host().to_owned();
     let headers_clone = headers.clone();
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
+    crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
+        extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
+            .map(drop)
+    });
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
@@ -2133,6 +2157,8 @@ mod tests {
             config.require_auth_token = false;
             config.require_relay_membership = false;
             config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://relay.example");
 
             let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
                 .await
@@ -4283,6 +4309,76 @@ mod tests {
                     status,
                     StatusCode::NOT_FOUND,
                     "member {method}; body {body:?}"
+                );
+            }
+        }
+
+        /// Upload, GET and HEAD pass proof admission, then only the
+        /// restriction lookup fails: each answers 503 (unavailable), not the
+        /// 403 a real ban or non-member gets. Enforce sends the canonical
+        /// NIP-FI `authorization unavailable` bytes; Off keeps the legacy JSON.
+        /// HEAD carries the same status and headers with an empty body.
+        /// Mutations: map every membership-step refusal to
+        /// `RelayMembershipRequired` → 403 → RED; map a failed lookup to
+        /// `ServiceUnavailable` → Enforce gets legacy JSON → RED.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn failed_restriction_lookup_is_503_not_403() {
+            for (state_fn, assertion_for) in [
+                (
+                    Box::pin(media_off_test_state())
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = _>>>,
+                    false,
+                ),
+                (Box::pin(media_enforce_test_state()), true),
+            ] {
+                let (rt, mut state, host) = media_fixture(state_fn);
+                let (db, admin, schema) =
+                    rt.block_on(crate::test_support::restriction_lookup_failing_db());
+                Arc::get_mut(&mut state)
+                    .expect("fixture state is uniquely owned")
+                    .db = db;
+                let keys = Keys::generate();
+                let assertion =
+                    assertion_for.then(|| signed_assertion(&keys.public_key().to_hex()));
+                let upload_proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+                let read_proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
+                let assertion = assertion.as_deref();
+                for (response, context) in [
+                    (
+                        upload_request(&rt, &state, "/upload", &host, &[&upload_proof], assertion),
+                        "upload",
+                    ),
+                    (
+                        media_read(&rt, &state, "GET", &host, &read_proof, assertion),
+                        "GET",
+                    ),
+                    (
+                        media_read(&rt, &state, "HEAD", &host, &read_proof, assertion),
+                        "HEAD",
+                    ),
+                ] {
+                    let (content_type, body): (&str, &[u8]) = match (assertion_for, context) {
+                        (true, "HEAD") => ("text/plain; charset=utf-8", b""),
+                        (true, _) => ("text/plain; charset=utf-8", b"authorization unavailable\n"),
+                        (false, "HEAD") => ("application/json", b""),
+                        (false, _) => (
+                            "application/json",
+                            br#"{"error":"media service temporarily unavailable"}"#,
+                        ),
+                    };
+                    assert_exact_response(
+                        &response,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        content_type,
+                        None,
+                        body,
+                        &format!("{context} (NIP-FI {assertion_for})"),
+                    );
+                }
+                let _ = rt.block_on(
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                        .execute(&admin),
                 );
             }
         }

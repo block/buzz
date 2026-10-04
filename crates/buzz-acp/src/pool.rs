@@ -561,7 +561,11 @@ pub enum SteerError {
     ///   running or just ended.
     AgentError { code: i64, message: String },
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
-    /// violation, etc. The string carries the underlying `AcpError`'s display.
+    /// violation, etc. For read-loop (post-admission) failures the string
+    /// carries the underlying `AcpError`'s display. For admission refusals
+    /// returned by [`AgentPool::send_steer`] it instead carries the fixed
+    /// [`SteerAdmissionReason`] label so callers can log a structured
+    /// reason without dumping request content.
     Transport(String),
     /// At steer-write time neither steer transport was available: no
     /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
@@ -595,6 +599,80 @@ pub enum SteerError {
     /// for the channel. Never sent through the ack channel — the ack
     /// watcher is only spawned on `send_steer` success.
     PromptCompleted,
+}
+
+/// Fixed-vocabulary reason the stock admission owner
+/// ([`AgentPool::send_steer`]) refused a native-steer request before any
+/// wire write was attempted.
+///
+/// These are structured diagnostic labels only — never request content,
+/// agent output, or tokens. They classify *admission* (getting the request
+/// into the in-flight read loop's capacity-1 steer mailbox) and are
+/// deliberately distinct from post-admission failures: a steer that was
+/// admitted and then failed at the wire keeps [`SteerError::Transport`]
+/// carrying the underlying `AcpError` display, and `AgentError` /
+/// `ExpectedRunIdMissing` / `OutcomeRejected` keep their own variants (see
+/// [`SteerError::admission_reason`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerAdmissionReason {
+    /// No in-flight task owns the scope. Returned as
+    /// [`SteerError::PromptCompleted`], which keeps its distinct
+    /// release-and-normal-dispatch semantics — a separate branch, not a
+    /// transport refusal.
+    TaskAbsent,
+    /// The in-flight task has no `steer_tx` sender installed.
+    SenderAbsent,
+    /// The capacity-1 steer mailbox already holds one in-flight steer.
+    MailboxFull,
+    /// The read loop's steer receiver has been torn down.
+    MailboxClosed,
+}
+
+impl SteerAdmissionReason {
+    /// Fixed, greppable label. Carried in the admission refusal's
+    /// [`SteerError::Transport`] string and in the main loop's fallback
+    /// log `reason` field; never contains request content.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskAbsent => "task_absent",
+            Self::SenderAbsent => "sender_absent",
+            Self::MailboxFull => "mailbox_full",
+            Self::MailboxClosed => "mailbox_closed",
+        }
+    }
+
+    /// Wrap the reason as the transport-refusal error `send_steer` returns,
+    /// preserving the historical `Err(SteerError::Transport(_))` return
+    /// contract for these branches.
+    fn transport_refusal(self) -> SteerError {
+        SteerError::Transport(self.as_str().to_owned())
+    }
+}
+
+impl SteerError {
+    /// Structured admission-refusal classification for errors produced by
+    /// the stock admission owner, [`AgentPool::send_steer`]. Returns `None`
+    /// for every post-admission error — ack-native steer write failures
+    /// (`Transport` carrying an `AcpError` display), `AgentError`,
+    /// `ExpectedRunIdMissing`, and `OutcomeRejected` — so admission
+    /// refusals are never conflated with wire failures. The fixed labels
+    /// mirror [`SteerAdmissionReason::as_str`] and are pinned together by
+    /// unit tests.
+    pub fn admission_reason(&self) -> Option<SteerAdmissionReason> {
+        match self {
+            Self::PromptCompleted => Some(SteerAdmissionReason::TaskAbsent),
+            Self::Transport(msg) => match msg.as_str() {
+                "sender_absent" => Some(SteerAdmissionReason::SenderAbsent),
+                "mailbox_full" => Some(SteerAdmissionReason::MailboxFull),
+                "mailbox_closed" => Some(SteerAdmissionReason::MailboxClosed),
+                // Any other Transport string is a post-admission wire
+                // failure (an AcpError display from the read loop), not an
+                // admission refusal.
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// Outcome of a mid-turn steer, sent from the read loop back to the
@@ -1127,9 +1205,11 @@ impl AgentPool {
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
     /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
-    /// (already-in-flight write, or read loop torn down). Callers must
-    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
-    /// on `Err`.
+    /// (already-in-flight write, or read loop torn down); the `Transport`
+    /// string is the fixed [`SteerAdmissionReason`] label
+    /// (`sender_absent`/`mailbox_full`/`mailbox_closed`), never request
+    /// content. Callers must fall back to the universal
+    /// `ControlSignal::Steer` cancel+merge path on `Err`.
     ///
     /// This does **not** spawn the ack watcher — the caller owns the
     /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
@@ -1156,9 +1236,20 @@ impl AgentPool {
         let tx = meta
             .steer_tx
             .as_ref()
-            .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
-        tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .ok_or_else(|| SteerAdmissionReason::SenderAbsent.transport_refusal())?;
+        match tx.try_send(request) {
+            Ok(()) => Ok(()),
+            // Capacity-1 mailbox already holds one in-flight steer write.
+            // The refused request (including its oneshot ack) comes back
+            // inside the error and is dropped here, exactly as before.
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err(SteerAdmissionReason::MailboxFull.transport_refusal())
+            }
+            // Read loop receiver torn down before this request arrived.
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(SteerAdmissionReason::MailboxClosed.transport_refusal())
+            }
+        }
     }
 
     /// Durably associate a successful steer with the exact ACP session that
@@ -2335,6 +2426,9 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    // Thread conversation context requires the canonical root to distinguish
+    // concurrent threads in the same channel's activity.
+    let observer_thread_root = source.scope().and_then(SessionScope::root_event_id);
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2346,16 +2440,17 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
-    agent.acp.observe(
-        "turn_started",
-        serde_json::json!({
-            "source": match &source {
-                PromptSource::Channel(_) => "channel",
-                PromptSource::Heartbeat => "heartbeat",
-            },
-            "triggeringEventIds": triggering_event_ids,
-        }),
-    );
+    let mut turn_started_payload = serde_json::json!({
+        "source": match &source {
+            PromptSource::Channel(_) => "channel",
+            PromptSource::Heartbeat => "heartbeat",
+        },
+        "triggeringEventIds": triggering_event_ids,
+    });
+    if let Some(root) = observer_thread_root {
+        turn_started_payload["threadRootEventId"] = serde_json::json!(root);
+    }
+    agent.acp.observe("turn_started", turn_started_payload);
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -2390,6 +2485,7 @@ pub async fn run_prompt_task(
             turn_id.clone(),
             turn_started_at.clone(),
         ),
+        observer_thread_root.map(str::to_owned),
         ctx.turn_liveness_interval,
         Arc::clone(&liveness_state),
     );
@@ -2399,9 +2495,10 @@ pub async fn run_prompt_task(
     // Collects event IDs up front. On drop (any exit path — normal, early
     // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
+    // Edits react on their visible original message, not the auxiliary edit.
     let reaction_ids: Vec<String> = batch
         .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .map(|b| b.events.iter().map(|be| be.routing_event_id()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
@@ -4057,7 +4154,8 @@ fn resolve_context_target(batch: &FlushBatch, is_dm: bool) -> ContextTarget {
     let Some(last_event) = batch.events.last() else {
         return ContextTarget::None;
     };
-    if let Some(root_id) = crate::queue::parse_thread_tags(&last_event.event).root_event_id {
+    // Routing tags, not raw tags: an edit's history is its original's thread.
+    if let Some(root_id) = last_event.routing_thread_tags().root_event_id {
         return ContextTarget::Thread(root_id.to_ascii_lowercase());
     }
     if is_dm {
@@ -5016,6 +5114,7 @@ async fn run_turn_liveness(
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
     mut context: observer::ObserverContext,
+    thread_root_event_id: Option<String>,
     interval: Duration,
     state: Arc<Mutex<LivenessState>>,
 ) {
@@ -5043,12 +5142,11 @@ async fn run_turn_liveness(
             return;
         }
         context.session_id = guard.session_id.clone();
-        observer.emit(
-            "turn_liveness",
-            agent_index,
-            &context,
-            serde_json::json!({}),
-        );
+        let payload = match &thread_root_event_id {
+            Some(root) => serde_json::json!({ "threadRootEventId": root }),
+            None => serde_json::json!({}),
+        };
+        observer.emit("turn_liveness", agent_index, &context, payload);
         drop(guard);
     }
 }
@@ -5392,6 +5490,24 @@ pub(crate) async fn post_failure_notice(
     thread_tags: &ThreadTags,
     content: &str,
 ) {
+    let Some(event) = build_failure_notice_event(&rest.keys, channel_id, thread_tags, content)
+    else {
+        return;
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    }
+}
+
+/// Build the signed failure-notice event published by [`post_failure_notice`].
+pub(crate) fn build_failure_notice_event(
+    keys: &nostr::Keys,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) -> Option<nostr::Event> {
     let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
         let root_id = nostr::EventId::from_hex(root).ok()?;
         let parent_id = thread_tags
@@ -5416,20 +5532,15 @@ pub(crate) async fn post_failure_notice(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-            return;
+            return None;
         }
     };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
+    match builder.sign_with_keys(keys) {
+        Ok(e) => Some(e),
         Err(e) => {
             tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
-            return;
+            None
         }
-    };
-    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
 }
 
@@ -6852,6 +6963,7 @@ mod tests {
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
@@ -6942,6 +7054,124 @@ mod tests {
             pubkey: "author".into(),
             timestamp: "2026-08-09T00:00:00Z".into(),
             content: content.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_prompt_task_observes_thread_root_only_for_thread_scope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let root = "a".repeat(64);
+        for (scope, expected_root) in [
+            (thread_scope(channel_id, &root), Some(root.as_str())),
+            (conv(channel_id), None),
+        ] {
+            let acp = AcpClient::spawn("bash", &["-c".into(), "exec sleep 30".into()], &[], false)
+                .await
+                .expect("spawn observer test ACP process");
+            let mut agent = OwnedAgent {
+                index: 0,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                desired_model_request_id: None,
+                desired_model_pending_ack: false,
+                startup_effort: None,
+                agent_name: "observer-test-agent".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 1,
+            };
+            let observer = observer::ObserverHandle::in_process();
+            let mut observer_rx = observer.subscribe();
+            agent.acp.set_observer(Some(observer.clone()), 0);
+            let batch = FlushBatch {
+                channel_id,
+                scope,
+                events: vec![],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.turn_liveness_interval = Duration::from_millis(10);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind channel context server");
+            ctx.rest_client.base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                request_tx.send(()).unwrap();
+                // Hold the real lookup open until a liveness frame is observed.
+                let _ = release_rx.await;
+                socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            ctx.channel_info = ChannelInfoResolver::new(
+                HashMap::from([(
+                    channel_id,
+                    crate::relay::ChannelInfo {
+                        name: "test-channel".into(),
+                        channel_type: "stream".into(),
+                        description: None,
+                    },
+                )]),
+                ctx.rest_client.clone(),
+            );
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+            let prompt = tokio::spawn(run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::new(ctx),
+                result_tx,
+                None,
+                "observer-test-turn".into(),
+            ));
+            let liveness = tokio::time::timeout(Duration::from_secs(5), async {
+                request_rx.await.expect("channel context lookup started");
+                loop {
+                    let event = observer_rx.recv().await.expect("observer frame");
+                    if event.kind == "turn_liveness" {
+                        return event;
+                    }
+                }
+            })
+            .await;
+            // Release the fixture and shut down ACP before asserting the frame.
+            release_tx.send(()).unwrap();
+            prompt.await.expect("prompt task completed");
+            server.await.expect("channel context server completed");
+            let mut result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::ProjectContextIndeterminate(_)
+            ));
+            result.agent.acp.shutdown().await;
+            let starts: Vec<_> = observer
+                .snapshot()
+                .into_iter()
+                .filter(|event| event.kind == "turn_started")
+                .collect();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(
+                starts[0].payload.get("threadRootEventId"),
+                expected_root.map(serde_json::Value::from).as_ref(),
+                "turn start must identify only the canonical thread scope"
+            );
+            let liveness = liveness.expect("liveness during channel context lookup");
+            assert_eq!(
+                liveness.payload.get("threadRootEventId"),
+                expected_root.map(serde_json::Value::from).as_ref(),
+                "production liveness wiring must identify only the canonical thread scope"
+            );
         }
     }
 
@@ -7104,6 +7334,7 @@ done"#
                 channel_id,
                 scope: SessionScope::Conversation { channel_id },
                 events: vec![crate::queue::BatchEvent {
+                    edit: None,
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
@@ -7303,6 +7534,7 @@ done"#
             channel_id,
             scope: scope.clone(),
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: root,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
@@ -7314,6 +7546,7 @@ done"#
             channel_id,
             scope: scope.clone(),
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: trigger,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
@@ -7404,11 +7637,13 @@ done"#
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: new_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
             }],
             cancelled_events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: carry_over.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -7419,6 +7654,7 @@ done"#
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: next_event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -7575,6 +7811,7 @@ done"#
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: trigger,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -7857,6 +8094,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 root_event_id: root_id,
             },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: trigger,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
@@ -7910,6 +8148,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event: trigger,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
@@ -8150,6 +8389,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             channel_id: scope.channel_id(),
             scope,
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -8232,6 +8472,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         ]);
         let mut batch = batch_with_scope(conv(channel), current);
         batch.cancelled_events.push(crate::queue::BatchEvent {
+            edit: None,
             event: cancelled,
             prompt_tag: "cancelled".into(),
             received_at: std::time::Instant::now(),
@@ -8914,6 +9155,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             channel_id,
             scope: SessionScope::Conversation { channel_id },
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -9172,6 +9414,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                     Some(observer.clone()),
                     Some(0),
                     context,
+                    None,
                     Duration::from_secs(10),
                     Arc::clone(&state),
                 )),
@@ -9222,6 +9465,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
+                None,
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9274,6 +9518,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 Some(observer.clone()),
                 Some(0),
                 context,
+                None,
                 Duration::from_secs(10),
                 Arc::clone(&state),
             )),
@@ -9316,6 +9561,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(observer.clone()),
             Some(0),
             context,
+            None,
             Duration::ZERO,
             open_liveness_state(),
         );
@@ -9339,6 +9585,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             None,
             None,
             context,
+            None,
             Duration::from_secs(10),
             open_liveness_state(),
         );
@@ -9378,6 +9625,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(observer.clone()),
             Some(0),
             context,
+            None,
             Duration::from_secs(10),
             state,
         );
@@ -9569,6 +9817,191 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
         result.agent.acp.install_steer_rx(steer_rx);
         // Reaching here without a panic is the test.
+    }
+
+    // ── send_steer admission-reason tests ─────────────────────────────────
+    //
+    // These pin the fixed structured admission-refusal labels the stock
+    // admission owner (`send_steer`) reports, and that the fallback log's
+    // `reason` classification (via `SteerError::admission_reason`) matches
+    // them branch for branch without touching request content.
+
+    /// Insert an in-flight task_map entry for `scope` carrying `steer_tx`,
+    /// mirroring `mark_agent_busy` — the existing seam for simulating an
+    /// in-flight prompt task without spawning a real agent turn.
+    fn mark_agent_busy_with_steer_tx(
+        pool: &mut AgentPool,
+        scope: SessionScope,
+        steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    ) {
+        let abort = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort.id(),
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(scope.channel_id()),
+                scope: Some(scope),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+    }
+
+    /// A minimal steer request; the ack oneshot is dropped with the request
+    /// when admission refuses it, exactly as in production.
+    fn steer_request() -> SteerRequest {
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<SteerAck>();
+        SteerRequest {
+            prompt_blocks: vec!["steer block".into()],
+            ack_tx,
+        }
+    }
+
+    #[test]
+    fn send_steer_reports_task_absent_when_no_task_in_flight() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        // Unchanged return shape: the separate task-absent branch keeps
+        // PromptCompleted's release-and-normal-dispatch semantics.
+        assert!(matches!(err, SteerError::PromptCompleted));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::TaskAbsent)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_steer_reports_sender_absent_when_no_steer_sender_installed() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        // The existing seam inserts the in-flight task with steer_tx: None.
+        mark_agent_busy(&mut pool, 0, scope.clone());
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        assert!(matches!(&err, SteerError::Transport(msg) if msg == "sender_absent"));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::SenderAbsent)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_steer_reports_mailbox_full_when_one_steer_already_in_flight() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_agent_busy_with_steer_tx(&mut pool, scope.clone(), Some(tx.clone()));
+        // Fill the capacity-1 mailbox: one steer write already in flight.
+        tx.try_send(steer_request())
+            .expect("capacity-1 mailbox accepts the first in-flight steer");
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        assert!(matches!(&err, SteerError::Transport(msg) if msg == "mailbox_full"));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::MailboxFull)
+        );
+        // The already-admitted request is untouched by the refused second
+        // attempt: send results are preserved.
+        let admitted = rx.try_recv().expect("first in-flight steer still queued");
+        assert_eq!(admitted.prompt_blocks, vec!["steer block".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn send_steer_reports_mailbox_closed_after_receiver_dropped() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let (tx, rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_agent_busy_with_steer_tx(&mut pool, scope.clone(), Some(tx));
+        drop(rx); // read loop torn down before this request arrived
+        let err = pool.send_steer(&scope, steer_request()).unwrap_err();
+        assert!(matches!(&err, SteerError::Transport(msg) if msg == "mailbox_closed"));
+        assert_eq!(
+            err.admission_reason(),
+            Some(SteerAdmissionReason::MailboxClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_steer_ok_hands_request_to_read_loop_receiver() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let scope = conv(Uuid::nil());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_agent_busy_with_steer_tx(&mut pool, scope.clone(), Some(tx));
+        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel::<SteerAck>();
+        pool.send_steer(
+            &scope,
+            SteerRequest {
+                prompt_blocks: vec!["steer block".into()],
+                ack_tx,
+            },
+        )
+        .expect("admission succeeds with a live receiver");
+        let admitted = rx
+            .recv()
+            .await
+            .expect("request reaches the read loop mailbox");
+        assert_eq!(admitted.prompt_blocks, vec!["steer block".to_string()]);
+        admitted
+            .ack_tx
+            .send(SteerAck::PromptCompletedNeutral)
+            .expect("ack oneshot survives admission");
+        assert!(matches!(
+            ack_rx.try_recv(),
+            Ok(SteerAck::PromptCompletedNeutral)
+        ));
+    }
+
+    #[test]
+    fn steer_admission_reason_labels_round_trip_with_send_steer_refusals() {
+        // send_steer writes exactly these labels via transport_refusal;
+        // admission_reason must classify them back without drift.
+        for reason in [
+            SteerAdmissionReason::SenderAbsent,
+            SteerAdmissionReason::MailboxFull,
+            SteerAdmissionReason::MailboxClosed,
+        ] {
+            assert_eq!(reason.transport_refusal().admission_reason(), Some(reason));
+        }
+        assert_eq!(
+            SteerError::PromptCompleted.admission_reason(),
+            Some(SteerAdmissionReason::TaskAbsent)
+        );
+        // Fixed vocabulary the fallback log reports.
+        assert_eq!(SteerAdmissionReason::TaskAbsent.as_str(), "task_absent");
+        assert_eq!(SteerAdmissionReason::SenderAbsent.as_str(), "sender_absent");
+        assert_eq!(SteerAdmissionReason::MailboxFull.as_str(), "mailbox_full");
+        assert_eq!(
+            SteerAdmissionReason::MailboxClosed.as_str(),
+            "mailbox_closed"
+        );
+    }
+
+    #[test]
+    fn steer_admission_reason_excludes_post_admission_errors() {
+        // Ack-native write failures are built in the read loop AFTER
+        // admission (acp.rs carries the AcpError display); they and the
+        // other ack outcomes must never classify as admission refusals.
+        let post_admission = [
+            SteerError::Transport("I/O error: broken pipe mid-write".into()),
+            SteerError::AgentError {
+                code: -32601,
+                message: "method not found".into(),
+            },
+            SteerError::ExpectedRunIdMissing,
+            SteerError::OutcomeRejected {
+                outcome: "failed".into(),
+            },
+        ];
+        for err in post_admission {
+            assert_eq!(
+                err.admission_reason(),
+                None,
+                "{err:?} is post-admission and must not classify as admission"
+            );
+        }
     }
 
     // ── NIP-AM emit-hook unit tests ────────────────────────────────────────
@@ -10662,6 +11095,7 @@ done"#
             channel_id,
             scope: conv(channel_id),
             events: vec![crate::queue::BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),

@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
@@ -8,6 +9,9 @@ import 'buzz_navigation_metrics.dart';
 import 'directional_transition_scope.dart';
 import 'frosted_scroll_under_scope.dart';
 import 'ios_glass_navigation_button.dart';
+import 'ios_glass_navigation_action.dart';
+import 'ios_navigation_bar.dart';
+export 'ios_navigation_bar.dart' show IosNavigationAction;
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = buzzNavigationRowHeight;
@@ -65,7 +69,16 @@ double frostedAppBarHeight(
   double bottomHeight = 0,
   TextStyle? titleStyle,
   double titleContentHeight = 0,
+  bool nativeLargeTitle = false,
 }) {
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    return MediaQuery.paddingOf(context).top +
+        IosNavigationMetrics.of(context).compactHeight +
+        (nativeLargeTitle
+            ? IosNavigationMetrics.of(context).largeTitleHeight
+            : 0) +
+        bottomHeight;
+  }
   return MediaQuery.paddingOf(context).top +
       _barContentHeight(context, titleStyle, titleContentHeight) +
       bottomHeight +
@@ -143,8 +156,44 @@ class FrostedAppBar extends StatelessWidget {
   /// Opacity of the divider below the app bar.
   final double bottomDividerOpacity;
 
+  /// Explicit UIKit title for headers whose Flutter title is a custom widget.
+  final String? nativeTitle;
+
+  /// Optional second line and action for a native channel title.
+  final String? nativeSubtitle;
+
+  /// Existing retention disclosure displayed by the native conversation title.
+  final String? nativeEphemeralLabel;
+
+  /// Reactive counterpart avatar and presence badge for a native DM title.
+  final IosNavigationAction? nativeTitleAvatar;
+  final Color? nativeTitlePresenceColor;
+  final VoidCallback? onNativeTitlePressed;
+
+  /// Whether UIKit should expand the title at the top of the page.
+  final bool nativeLargeTitle;
+
+  /// Native replacement for a custom leading widget.
+  final IosNavigationAction? nativeLeading;
+
+  /// Native replacements for composite Flutter actions, including menus.
+  final List<IosNavigationAction>? nativeActions;
+
+  /// Uses a composable Flutter header while a backdrop covers the native view.
+  final ValueListenable<bool>? nativeViewSuppressed;
+
   const FrostedAppBar({
     super.key,
+    this.nativeTitle,
+    this.nativeSubtitle,
+    this.nativeEphemeralLabel,
+    this.nativeTitleAvatar,
+    this.nativeTitlePresenceColor,
+    this.onNativeTitlePressed,
+    this.nativeLargeTitle = false,
+    this.nativeLeading,
+    this.nativeActions,
+    this.nativeViewSuppressed,
     this.leading,
     this.automaticallyImplyLeading = true,
     this.title,
@@ -171,6 +220,85 @@ class FrostedAppBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final suppression = nativeViewSuppressed;
+    if (defaultTargetPlatform == TargetPlatform.iOS && suppression != null) {
+      return ValueListenableBuilder<bool>(
+        valueListenable: suppression,
+        builder: (context, suppressed, _) => _build(context, suppressed),
+      );
+    }
+    return _build(context, false);
+  }
+
+  Widget _build(BuildContext context, bool nativeSuppressed) {
+    if (defaultTargetPlatform == TargetPlatform.iOS && !nativeSuppressed) {
+      final offset = IosNavigationScrollScope.maybeOf(context);
+      Widget buildNative(double scrollOffset) {
+        final extra = nativeLargeTitle
+            ? (IosNavigationMetrics.of(context).largeTitleHeight - scrollOffset)
+                  .clamp(0.0, IosNavigationMetrics.of(context).largeTitleHeight)
+            : 0.0;
+        final barHeight =
+            MediaQuery.paddingOf(context).top +
+            IosNavigationMetrics.of(context).compactHeight +
+            extra;
+        return Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          height: barHeight + bottomHeight,
+          child: Column(
+            children: [
+              SizedBox(
+                height: barHeight,
+                child: IosNavigationBar(
+                  title:
+                      nativeTitle ??
+                      (title is Text ? (title as Text).data ?? '' : ''),
+                  subtitle: nativeSubtitle,
+                  ephemeralLabel: nativeEphemeralLabel,
+                  titleAvatar: nativeTitleAvatar,
+                  titlePresenceColor: nativeTitlePresenceColor,
+                  onTitlePressed: onNativeTitlePressed,
+                  largeTitle: nativeLargeTitle,
+                  foregroundColor: iconColor,
+                  leading: nativeLeading ?? _nativeAction(leading),
+                  onBack:
+                      automaticallyImplyLeading &&
+                          leading == null &&
+                          Navigator.canPop(context)
+                      ? () => Navigator.of(context).maybePop()
+                      : null,
+                  actions:
+                      nativeActions ??
+                      actions
+                          .map(_nativeAction)
+                          .whereType<IosNavigationAction>()
+                          .toList(),
+                ),
+              ),
+              if (bottom != null)
+                SizedBox(
+                  height: bottomHeight,
+                  child: bottom is SizedBox
+                      ? bottom
+                      : ColoredBox(
+                          color: context.colors.surface,
+                          child: bottom!,
+                        ),
+                ),
+            ],
+          ),
+        );
+      }
+
+      return offset == null
+          ? buildNative(0)
+          : ValueListenableBuilder<double>(
+              valueListenable: offset,
+              builder: (context, value, child) => buildNative(value),
+            );
+    }
     final topPadding = MediaQuery.paddingOf(context).top;
     final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
     final paintsBottomDivider =
@@ -183,6 +311,7 @@ class FrostedAppBar extends StatelessWidget {
       titleContentHeight,
     );
     final usesAutomaticIosGlassBackButton =
+        !nativeSuppressed &&
         leading == null &&
         automaticallyImplyLeading &&
         canPop &&
@@ -423,4 +552,63 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
   bool shouldRelayout(
     covariant _CenteredNavigationLayoutDelegate oldDelegate,
   ) => false;
+}
+
+IosNavigationAction? _nativeAction(Widget? widget) {
+  if (widget is Padding) return _nativeAction(widget.child);
+  if (widget is SizedBox) return _nativeAction(widget.child);
+  if (widget is IosGlassNavigationAction) {
+    return IosNavigationAction(
+      label: widget.label,
+      onPressed: widget.isBusy ? null : widget.onPressed,
+    );
+  }
+  if (widget is IosGlassNavigationButton) {
+    final symbol = switch (widget.icon) {
+      IosGlassNavigationIcon.back => 'chevron.backward',
+      IosGlassNavigationIcon.close => 'xmark',
+      IosGlassNavigationIcon.camera => 'camera',
+      IosGlassNavigationIcon.photoLibrary => 'photo.on.rectangle',
+      IosGlassNavigationIcon.palette => 'paintpalette',
+      IosGlassNavigationIcon.droplet => 'drop',
+      IosGlassNavigationIcon.emoji => 'face.smiling',
+      IosGlassNavigationIcon.person => 'person',
+      IosGlassNavigationIcon.frame => 'crop',
+      IosGlassNavigationIcon.rotateCamera =>
+        'arrow.triangle.2.circlepath.camera',
+      IosGlassNavigationIcon.shutter => 'circle',
+      IosGlassNavigationIcon.colorSwatch => 'circle.fill',
+      IosGlassNavigationIcon.sun => 'sun.max',
+      IosGlassNavigationIcon.moon => 'moon',
+      IosGlassNavigationIcon.systemAppearance => 'circle.lefthalf.filled',
+    };
+    return IosNavigationAction(
+      label: widget.label ?? widget.semanticLabel,
+      symbol: widget.label == null ? symbol : null,
+      selected: widget.isSelected,
+      onPressed: widget.isBusy ? null : widget.onPressed,
+    );
+  }
+  if (widget is IconButton) {
+    final icon = widget.icon is Icon ? (widget.icon as Icon).icon : null;
+    final symbol = icon == LucideIcons.x
+        ? 'xmark'
+        : icon == LucideIcons.chevronLeft || icon == LucideIcons.arrowLeft
+        ? 'chevron.backward'
+        : icon == LucideIcons.users
+        ? 'person.2'
+        : 'ellipsis';
+    return IosNavigationAction(
+      label: widget.tooltip ?? 'Action',
+      symbol: symbol,
+      onPressed: widget.onPressed,
+    );
+  }
+  if (widget is ButtonStyleButton && widget.child is Text) {
+    return IosNavigationAction(
+      label: (widget.child as Text).data ?? '',
+      onPressed: widget.onPressed,
+    );
+  }
+  return null;
 }

@@ -23,6 +23,7 @@ export default defineConfig({
         "**/mock-subscription-readiness.spec.ts",
         "**/owned-agent-discovery.spec.ts",
         "**/thread-head-stale-edit.spec.ts",
+        "**/thread-follow.spec.ts",
         "**/sidebar-offcanvas-rail.spec.ts",
         "**/tooltip-semantics.spec.ts",
         "**/search-scope-screenshots.spec.ts",

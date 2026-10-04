@@ -25,7 +25,7 @@ impl Fixture {
             .unwrap();
         let host = format!("artifact-review-{}.local", Uuid::new_v4());
         state.db.ensure_configured_community(&host).await.unwrap();
-        state.db.ensure_future_partitions(1).await.unwrap();
+        state.db.ensure_future_partitions(1, true).await.unwrap();
         let tenant = crate::tenant::bind_community(&state.db, &host)
             .await
             .unwrap();

@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:ui' as ui;
+import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
+import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
@@ -11,6 +14,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -112,7 +116,10 @@ Future<void> _pumpSheet(
   bool canManageMessage = false,
   List<TimelineMessage>? allMessages,
   ReminderService? reminderService,
+  Rect? anchorRect,
+  bool nativePresentation = false,
 }) async {
+  Future<void>? presentation;
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -133,12 +140,16 @@ Future<void> _pumpSheet(
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) => TextButton(
-              onPressed: () => showMessageActions(
+              onPressed: () => presentation = showMessageActions(
                 context: context,
                 ref: ref,
                 message: message,
                 channelId: _channelId,
                 canManageMessage: canManageMessage,
+                anchorRect: anchorRect,
+                captureAnchorSnapshot: nativePresentation
+                    ? _testMessageSnapshot
+                    : null,
                 allMessages: allMessages,
                 currentPubkey: 'self',
                 isMember: true,
@@ -150,7 +161,14 @@ Future<void> _pumpSheet(
       ),
     ),
   );
-  await tester.tap(find.text('open'));
+  if (nativePresentation) {
+    await tester.runAsync(() async {
+      await tester.tap(find.text('open'));
+      await presentation;
+    });
+  } else {
+    await tester.tap(find.text('open'));
+  }
   await tester.pumpAndSettle();
 }
 
@@ -581,6 +599,398 @@ void main() {
     expect(snapshot.height, 80);
   });
 
+  testWidgets(
+    'native menu respects ownership and dispatches the target read action',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      Map<Object?, Object?>? payload;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'supportsMessage') return {'supported': true};
+          payload = call.arguments as Map<Object?, Object?>;
+          return {'action': 'read'};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      final notifier = _FakeReadStateNotifier(
+        _readState(const {_channelId: 100000}),
+      );
+      await _pumpSheet(
+        tester,
+        message: _message(),
+        prefs: await _mockPrefs(),
+        readStateOverride: () => notifier,
+        anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+        nativePresentation: true,
+      );
+      expect(payload?['previewBytes'], isA<Uint8List>());
+      expect(notifier.markedUnread, ['msg:msg-1']);
+      final actions = (payload!['actions'] as List)
+          .cast<Map<Object?, Object?>>();
+      expect(actions.map((a) => a['id']), isNot(contains('edit')));
+      expect(actions.map((a) => a['id']), isNot(contains('delete')));
+      expect(find.text('Copy text'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('system messages use the native tray without action rows', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    Map<Object?, Object?>? payload;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        if (call.method == 'supportsMessage') return {'supported': true};
+        payload = call.arguments as Map<Object?, Object?>;
+        return <String, Object?>{};
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(isSystem: true),
+      prefs: await _mockPrefs(),
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+      nativePresentation: true,
+    );
+    expect(payload?['actions'], isEmpty);
+    expect(payload?['reactions'], isNotEmpty);
+    expect(payload?['previewBytes'], isA<Uint8List>());
+    expect(find.byType(BottomSheet), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  for (final selectedAction in <String?>[
+    null,
+    'follow',
+    'unmount',
+    'unmountFailure',
+    'overlap',
+  ]) {
+    testWidgets('native focus and source lifecycle for $selectedAction', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final focus = FocusNode();
+      late Completer<void> ready;
+      late Completer<Map<String, Object?>> result;
+      await tester.runAsync(() async {
+        ready = Completer<void>();
+        result = Completer<Map<String, Object?>>();
+      });
+      final visibility = <bool>[];
+      var dismissed = 0;
+      var focusRestores = 0;
+      late BuildContext pageContext;
+      late WidgetRef pageRef;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'supportsMessage') return {'supported': true};
+          expect(visibility, isEmpty);
+          final args = call.arguments as Map;
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            NativeMessagePresentation.channel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('messagePresented', args['requestId']),
+            ),
+            (_) {},
+          );
+          ready.complete();
+          return result.future;
+        },
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(await _mockPrefs()),
+            myPubkeyProvider.overrideWithValue('self'),
+            readStateProvider.overrideWith(
+              () => _FakeReadStateNotifier(
+                _readState(const {_channelId: 100000}),
+              ),
+            ),
+            reminderServiceProvider.overrideWithValue(null),
+          ],
+          child: MaterialApp(
+            home: Consumer(
+              builder: (context, ref, _) {
+                pageContext = context;
+                pageRef = ref;
+                return Scaffold(body: TextField(focusNode: focus));
+              },
+            ),
+          ),
+        ),
+      );
+      focus.requestFocus();
+      await tester.pump();
+      late Future<void> presentation;
+      Future<void> openMenu() => showMessageActions(
+        context: pageContext,
+        ref: pageRef,
+        message: _message(),
+        channelId: _channelId,
+        canManageMessage: false,
+        anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+        captureAnchorSnapshot: _testMessageSnapshot,
+        composerFocusNode: focus,
+        restoreComposerFocus: () {
+          focusRestores++;
+          focus.requestFocus();
+        },
+        onPopoverPreviewVisibilityChanged: visibility.add,
+        onPopoverDismissed: () => dismissed++,
+      );
+      await tester.runAsync(() async {
+        presentation = openMenu();
+        if (selectedAction == 'overlap') {
+          // A is awaiting preflight/capture, so both gestures could see focus.
+          await openMenu();
+          expect(focusRestores, 0);
+        }
+        await ready.future;
+      });
+      await tester.pump();
+      expect(focus.hasFocus, isFalse);
+      expect(visibility, [true]);
+      if (selectedAction == 'overlap') {
+        await tester.runAsync(openMenu);
+        await tester.pump();
+        expect(focus.hasFocus, isFalse);
+        expect(focusRestores, 0);
+      }
+      if (selectedAction?.startsWith('unmount') == true) {
+        await tester.pumpWidget(const SizedBox.shrink());
+      }
+      await tester.runAsync(() async {
+        if (selectedAction == 'unmountFailure') {
+          result.completeError(PlatformException(code: 'presentation-failed'));
+        } else {
+          result.complete({
+            if (selectedAction == 'follow') 'action': selectedAction,
+          });
+        }
+        await presentation;
+      });
+      await tester.pump();
+      final restores = selectedAction == null || selectedAction == 'overlap';
+      expect(focus.hasFocus, restores);
+      expect(focusRestores, restores ? 1 : 0);
+      expect(visibility, [true, false]);
+      expect(dismissed, selectedAction?.startsWith('unmount') == true ? 0 : 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+      focus.dispose();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  for (final (reactionFirst, missingSnapshot) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets(
+      'cross-surface native ownership reactionFirst=$reactionFirst missingSnapshot=$missingSnapshot',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final focus = FocusNode();
+        late Completer<Map<String, Object?>> result;
+        late Completer<Map<String, Object?>> support;
+        late Completer<void> entered;
+        late Completer<void> ready;
+        await tester.runAsync(() async {
+          result = Completer();
+          support = Completer();
+          entered = Completer();
+          ready = Completer();
+        });
+        var messages = 0;
+        var reactions = 0;
+        var restores = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          (call) async {
+            if (call.method == 'supportsMessage') {
+              entered.complete();
+              return support.future;
+            }
+            if (call.method == 'message') messages++;
+            if (call.method == 'reactions') reactions++;
+            ready.complete();
+            return result.future;
+          },
+        );
+        late BuildContext pageContext;
+        late WidgetRef pageRef;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(await _mockPrefs()),
+              myPubkeyProvider.overrideWithValue('self'),
+              readStateProvider.overrideWith(
+                () => _FakeReadStateNotifier(
+                  _readState(const {_channelId: 100000}),
+                ),
+              ),
+              reminderServiceProvider.overrideWithValue(null),
+            ],
+            child: MaterialApp(
+              home: Consumer(
+                builder: (context, ref, _) {
+                  pageContext = context;
+                  pageRef = ref;
+                  return Scaffold(
+                    body: TextField(focusNode: focus, showCursor: false),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+        focus.requestFocus();
+        await tester.pump();
+        Future<void> message() => showMessageActions(
+          context: pageContext,
+          ref: pageRef,
+          message: _message(),
+          channelId: _channelId,
+          canManageMessage: false,
+          anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+          captureAnchorSnapshot: missingSnapshot ? null : _testMessageSnapshot,
+          composerFocusNode: focus,
+          restoreComposerFocus: () {
+            restores++;
+            focus.requestFocus();
+          },
+        );
+        Future<void> reaction() => showReactionDetailSheet(
+          context: pageContext,
+          channelId: _channelId,
+          reactions: const [
+            TimelineReaction(
+              emoji: '❤️',
+              count: 1,
+              reactedByCurrentUser: false,
+              userPubkeys: [],
+            ),
+          ],
+          initialEmoji: '❤️',
+        );
+        late Future<void> owner;
+        await tester.runAsync(() async {
+          if (reactionFirst) {
+            owner = reaction();
+            await ready.future;
+            await message();
+          } else {
+            owner = message();
+            await entered.future;
+            await reaction();
+            expect(reactions, 0);
+            support.complete({'supported': true});
+            await ready.future;
+          }
+        });
+        await tester.pump();
+        expect(messages, reactionFirst ? 0 : 1);
+        expect(reactions, reactionFirst ? 1 : 0);
+        expect(restores, 0);
+        expect(focus.hasFocus, reactionFirst);
+        expect(find.byType(BottomSheet), findsNothing);
+        await tester.runAsync(() async {
+          result.complete({});
+          await owner;
+        });
+        await tester.pumpAndSettle();
+        expect(focus.hasFocus, isTrue);
+        expect(restores, reactionFirst ? 0 : 1);
+        await tester.pumpWidget(const SizedBox.shrink());
+        focus.dispose();
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
+  testWidgets('native dismissal does not open the Flutter sheet', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async => call.method == 'supportsMessage'
+          ? {'supported': true}
+          : <String, Object?>{},
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(),
+      prefs: await _mockPrefs(),
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+      nativePresentation: true,
+    );
+    expect(find.text('Copy text'), findsNothing);
+    expect(find.text('open'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('unavailable native presentation falls back to message actions', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (_) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(),
+      prefs: await _mockPrefs(),
+      canManageMessage: true,
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+    );
+    expect(find.text('Edit message'), findsOneWidget);
+    expect(find.text('Delete message'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   group('showMessageActions', () {
     testWidgets('composes the tray, lifted preview, and compact actions', (
       tester,
@@ -644,6 +1054,17 @@ void main() {
         '${platform.name} composition keeps the action menu near the safe bottom',
         (tester) async {
           debugDefaultTargetPlatformOverride = platform;
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            NativeMessagePresentation.channel,
+            (_) async => null,
+          );
+          addTearDown(
+            () =>
+                tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+                  NativeMessagePresentation.channel,
+                  null,
+                ),
+          );
           try {
             final prefs = await _mockPrefs();
             await _pumpMessageActionsPopover(
@@ -1069,6 +1490,16 @@ void main() {
       tester,
     ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
       ui.Image? snapshot;
       try {
         final prefs = await _mockPrefs();

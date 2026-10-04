@@ -192,6 +192,87 @@ class _MembersButton extends ConsumerWidget {
   }
 }
 
+// Both renderers subscribe to the same counterpart identity and presence.
+({
+  String label,
+  String? pubkey,
+  String? avatarUrl,
+  String initial,
+  bool isAgent,
+  String? presence,
+  String presenceLabel,
+})
+_watchDmHeader(WidgetRef ref, Channel channel, String? currentPubkey) {
+  final normalizedCurrent = currentPubkey?.toLowerCase();
+
+  String? otherPubkey;
+  for (final pk in channel.participantPubkeys) {
+    if (pk.toLowerCase() != normalizedCurrent) {
+      otherPubkey = pk.toLowerCase();
+      break;
+    }
+  }
+
+  final profile = ref.watch(
+    userCacheProvider.select(
+      (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
+    ),
+  );
+  final presence = ref.watch(
+    presenceCacheProvider.select(
+      (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
+    ),
+  );
+
+  if (otherPubkey != null) {
+    if (profile == null) {
+      ref.read(userCacheProvider.notifier).preload([otherPubkey]);
+    }
+    ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+  }
+
+  final avatarUrl = profile?.avatarUrl;
+  final isAgent =
+      (otherPubkey != null &&
+          ref
+              .watch(agentMentionPubkeysProvider(channel.id))
+              .contains(otherPubkey)) ||
+      profile?.ownerPubkey != null;
+
+  // Keyed to the hex public key when the participant is unnamed and the
+  // profile isn't cached — the compact-npub participant label would
+  // otherwise render `N` for every unnamed DM counterpart. Selection skips
+  // the current user like the header label does, so the initial always
+  // identifies the same counterpart the label names.
+  final initial =
+      profile?.initial ??
+      dmAvatarInitial(channel, currentPubkey: currentPubkey);
+  final presenceLabel = switch (presence) {
+    'online' => 'Online',
+    'away' => 'Away',
+    'offline' => 'Offline',
+    _ => 'Unknown',
+  };
+
+  return (
+    label: ref.watch(
+      identityNameSourcesProvider.select(
+        (names) => resolveDmChannelDisplayLabel(
+          channel,
+          currentPubkey: currentPubkey,
+          names: names,
+        ),
+      ),
+    ),
+    pubkey: otherPubkey,
+    avatarUrl: avatarUrl,
+    initial: initial,
+    isAgent: isAgent,
+    presence: presence,
+    presenceLabel: presenceLabel,
+  );
+}
+
 class _DmAppBarTitle extends ConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
@@ -200,57 +281,13 @@ class _DmAppBarTitle extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final normalizedCurrent = currentPubkey?.toLowerCase();
-
-    String? otherPubkey;
-    for (final pk in channel.participantPubkeys) {
-      if (pk.toLowerCase() != normalizedCurrent) {
-        otherPubkey = pk.toLowerCase();
-        break;
-      }
-    }
-
-    final profile = ref.watch(
-      userCacheProvider.select(
-        (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
-      ),
-    );
-    final presence = ref.watch(
-      presenceCacheProvider.select(
-        (presenceMap) => otherPubkey == null
-            ? 'offline'
-            : (presenceMap[otherPubkey] ?? 'offline'),
-      ),
-    );
-
-    if (otherPubkey != null) {
-      if (profile == null) {
-        ref.read(userCacheProvider.notifier).preload([otherPubkey]);
-      }
-      ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
-    }
-
-    final avatarUrl = profile?.avatarUrl;
-    final isAgent =
-        (otherPubkey != null &&
-            ref
-                .watch(agentMentionPubkeysProvider(channel.id))
-                .contains(otherPubkey)) ||
-        profile?.ownerPubkey != null;
+    final identity = _watchDmHeader(ref, channel, currentPubkey);
+    final avatarUrl = identity.avatarUrl;
     final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
-    // Keyed to the hex public key when the participant is unnamed and the
-    // profile isn't cached — the compact-npub participant label would
-    // otherwise render `N` for every unnamed DM counterpart. Selection skips
-    // the current user like the header label does, so the initial always
-    // identifies the same counterpart the label names.
-    final initial =
-        profile?.initial ??
-        dmAvatarInitial(channel, currentPubkey: currentPubkey);
-    final presenceLabel = switch (presence) {
-      'online' => 'Online',
-      'away' => 'Away',
-      _ => 'Offline',
-    };
+    final initial = identity.initial;
+    final isAgent = identity.isAgent;
+    final presence = identity.presence;
+    final presenceLabel = identity.presenceLabel;
 
     return Row(
       children: [
@@ -278,22 +315,24 @@ class _DmAppBarTitle extends ConsumerWidget {
               ),
             ),
           ),
-          badge: Center(
-            child: FractionallySizedBox(
-              widthFactor: _dmPresenceDotRatio,
-              heightFactor: _dmPresenceDotRatio,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: switch (presence) {
-                    'online' => context.appColors.success,
-                    'away' => context.appColors.warning,
-                    _ => context.colors.outline,
-                  },
-                  shape: BoxShape.circle,
+          badge: presence == null
+              ? null
+              : Center(
+                  child: FractionallySizedBox(
+                    widthFactor: _dmPresenceDotRatio,
+                    heightFactor: _dmPresenceDotRatio,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: switch (presence) {
+                          'online' => context.appColors.success,
+                          'away' => context.appColors.warning,
+                          _ => context.colors.outline,
+                        },
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ),
         ),
         const SizedBox(width: Grid.xxs),
         Expanded(
@@ -306,10 +345,7 @@ class _DmAppBarTitle extends ConsumerWidget {
                 children: [
                   Flexible(
                     child: Text(
-                      resolveDmChannelDisplayLabel(
-                        channel,
-                        currentPubkey: currentPubkey,
-                      ),
+                      identity.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       key: const ValueKey('dm-header-name'),

@@ -1,3 +1,7 @@
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
@@ -91,10 +95,67 @@ void main() {
         ),
       },
     );
-    expect(sources.missingOwnerProfiles([_human, _wesAgent]), {_wes});
+    expect(sources.scope([_human, _wesAgent]).missingOwnerProfiles(), {_wes});
     expect(
       sources.scope([_human, _wesAgent]).labelFor(_wesAgent),
       'Honey (agent)',
     );
+  });
+
+  test('mention picker labels compare all choices but keep wire names', () {
+    final candidates = [
+      MentionCandidate(pubkey: _human, displayName: 'Honey', isMember: true),
+      MentionCandidate(
+        pubkey: _wesAgent,
+        displayName: 'Honey',
+        isAgent: true,
+        ownerPubkey: _wes,
+      ),
+    ];
+    final names = mentionPickerNames(_sources(), candidates);
+    final labeled = [
+      for (final c in candidates)
+        c.withContextLabel(names.resolve(c.pubkey)?.name),
+    ];
+    // A query that matches only the agent still shows its contextual label.
+    final ranked = rankMentionCandidates(labeled, 'hon');
+    expect(ranked.map((c) => c.pickerLabel), ['Honey', 'Wes’s Honey']);
+    // The inserted mention text still uses the agent's own name.
+    expect(ranked.map((c) => c.label), ['Honey', 'Honey']);
+  });
+
+  test('a searched agent keeps its owner before its profile is cached', () {
+    final scout = _key('d');
+    final myScout = _key('e');
+    // Only the viewer's profile is cached; the viewer's newly searched agent
+    // is not, and the member bot has no known owner.
+    final sources = IdentityNameSources(
+      viewer: _logan,
+      profiles: {_logan: UserProfile(pubkey: _logan, displayName: 'Logan')},
+    );
+    final candidates = buildMentionCandidates(
+      members: [
+        ChannelMember(
+          pubkey: scout,
+          role: 'bot',
+          joinedAt: DateTime(2026),
+          displayName: 'Scout',
+        ),
+      ],
+      relayAgents: const [],
+      sharedChannelIds: const {},
+      userCache: sources.profiles,
+      ownerByAgentPubkey: const {},
+      searchResults: [
+        UserProfile(pubkey: myScout, displayName: 'Scout', ownerPubkey: _logan),
+      ],
+      currentPubkey: _logan,
+    );
+    expect(candidates.map((c) => c.pubkey), [scout, myScout]);
+    final names = mentionPickerNames(sources, candidates);
+    expect(names.labelFor(myScout), 'Scout');
+    expect(names.labelFor(scout), isNot('Scout'));
+    // The owner is the viewer, whose profile is cached: nothing to load.
+    expect(names.missingOwnerProfiles(), isEmpty);
   });
 }

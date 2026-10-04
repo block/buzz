@@ -16,9 +16,9 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/utils/string_utils.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_profile_sheet.dart';
 import 'forum_models.dart';
@@ -348,7 +348,7 @@ class _OriginalPost extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(post.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, post.channelId, pk);
 
     final userCache = ref.watch(userCacheProvider);
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
@@ -364,6 +364,11 @@ class _OriginalPost extends ConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      post.channelId,
+      post.mentionPubkeys,
+    );
 
     return Padding(
       padding: const EdgeInsets.all(Grid.xs),
@@ -373,7 +378,11 @@ class _OriginalPost extends ConsumerWidget {
           Row(
             children: [
               GestureDetector(
-                onTap: () => showUserProfileSheet(context, post.pubkey),
+                onTap: () => showUserProfileSheet(
+                  context,
+                  post.pubkey,
+                  names: channelIdentityNamesProvider(post.channelId),
+                ),
                 child: _Avatar(
                   key: ValueKey('forum-original-avatar-${post.eventId}'),
                   profile: profile,
@@ -388,7 +397,11 @@ class _OriginalPost extends ConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () => showUserProfileSheet(context, post.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          post.pubkey,
+                          names: channelIdentityNamesProvider(post.channelId),
+                        ),
                         child: Text(
                           displayName,
                           maxLines: 1,
@@ -418,12 +431,17 @@ class _OriginalPost extends ConsumerWidget {
           MessageContent(
             content: post.content,
             mentionNames: mentionNames,
+            mentionLabels: mentionLabels,
             agentMentionPubkeys: agentMentionPubkeys,
             tags: post.tags,
             baseStyle: messageBodyTextStyle.copyWith(
               color: context.colors.onSurface,
             ),
-            onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+            onMentionTap: (pubkey) => showUserProfileSheet(
+              context,
+              pubkey,
+              names: channelIdentityNamesProvider(post.channelId),
+            ),
           ),
         ],
       ),
@@ -450,7 +468,7 @@ class _ReplyRow extends ConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(reply.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, channelId, pk);
 
     final userCache = ref.watch(userCacheProvider);
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
@@ -466,6 +484,11 @@ class _ReplyRow extends ConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      reply.mentionPubkeys,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -478,7 +501,11 @@ class _ReplyRow extends ConsumerWidget {
           Row(
             children: [
               GestureDetector(
-                onTap: () => showUserProfileSheet(context, reply.pubkey),
+                onTap: () => showUserProfileSheet(
+                  context,
+                  reply.pubkey,
+                  names: channelIdentityNamesProvider(channelId),
+                ),
                 child: _Avatar(
                   key: ValueKey('forum-reply-avatar-${reply.eventId}'),
                   profile: profile,
@@ -493,8 +520,11 @@ class _ReplyRow extends ConsumerWidget {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () =>
-                            showUserProfileSheet(context, reply.pubkey),
+                        onTap: () => showUserProfileSheet(
+                          context,
+                          reply.pubkey,
+                          names: channelIdentityNamesProvider(channelId),
+                        ),
                         child: Text(
                           displayName,
                           maxLines: 1,
@@ -539,12 +569,17 @@ class _ReplyRow extends ConsumerWidget {
             child: MessageContent(
               content: reply.content,
               mentionNames: mentionNames,
+              mentionLabels: mentionLabels,
               agentMentionPubkeys: agentMentionPubkeys,
               tags: reply.tags,
               baseStyle: messageBodyTextStyle.copyWith(
                 color: context.colors.onSurface,
               ),
-              onMentionTap: (pubkey) => showUserProfileSheet(context, pubkey),
+              onMentionTap: (pubkey) => showUserProfileSheet(
+                context,
+                pubkey,
+                names: channelIdentityNamesProvider(channelId),
+              ),
             ),
           ),
         ],

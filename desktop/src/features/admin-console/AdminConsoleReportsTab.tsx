@@ -303,7 +303,7 @@ function EnforcementStateBlock({
  *
  * Source: relay_admin_actions.rs and admin_outbox_worker.rs notice paths.
  */
-function reasonAudienceCopy(action: AdminReportAction): string {
+export function reasonAudienceCopy(action: AdminReportAction): string {
   switch (action) {
     case "delete":
       return "Sent verbatim to the affected user and posted publicly in the room.";
@@ -407,7 +407,7 @@ function ResolveReportForm({
     const payload = frozenRef.current;
 
     try {
-      const resolution = await resolveAdminReport(origin, report.id, {
+      const resolution = await resolveAdminReport(origin, report, {
         action: payload.action,
         requestId: payload.requestId,
         expirationSecs: payload.expirationSecs,

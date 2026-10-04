@@ -1,3 +1,4 @@
+import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import type { AgentAvailabilityReader } from "./useAgentAvailability";
@@ -87,11 +88,15 @@ export async function startManagedAgentWithRules({
 
 export async function respawnManagedAgentWithRules({
   agent,
+  relayUrl,
   startManagedAgent,
   stopManagedAgent,
   onStopped,
 }: {
   agent: ManagedAgent;
+  /** The active community's relay: the workspace pair the native stop and
+   * start target. A removal of it during the stop cancels the start. */
+  relayUrl: string | undefined;
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
   /** Called after a successful stop and before start begins — use this to
@@ -99,8 +104,12 @@ export async function respawnManagedAgentWithRules({
   onStopped?: () => void;
 }) {
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
+    const assertRelayNotRemoved = relayUrl
+      ? captureRelayRemovals(relayUrl)
+      : () => {};
     await stopManagedAgent(agent.pubkey);
     onStopped?.();
+    assertRelayNotRemoved();
   }
 
   await startManagedAgent(agent.pubkey);

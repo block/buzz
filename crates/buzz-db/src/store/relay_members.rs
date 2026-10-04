@@ -544,7 +544,7 @@ pub enum TransferResult {
     LifecycleConflict,
     /// Durable deletion intent exists and wins over ownership mutation.
     DeletionPending,
-    /// The transferee already owns the maximum number of communities.
+    /// The transferee has reached the active or lifetime community limit.
     /// Enforced atomically inside the transfer transaction so concurrent
     /// transfers to the same recipient cannot both pass the limit.
     LimitReached,
@@ -570,8 +570,11 @@ pub const MAX_COMMUNITIES_PER_OWNER: i64 = 5;
 ///
 /// Reads `BUZZ_MAX_COMMUNITIES_PER_OWNER` once (cached for the process
 /// lifetime); a missing, unparsable, or non-positive value falls back to
-/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the cap
-/// without a source change while keeping the stock default for everyone else.
+/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the active
+/// cap without a source change while keeping the stock default for everyone
+/// else. [`MAX_LIFETIME_COMMUNITIES_PER_OWNER`] still applies and counts live
+/// ownership, so values above it are unreachable: no owner can hold more live
+/// communities than the lifetime cap allows.
 pub fn max_communities_per_owner() -> i64 {
     static LIMIT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -604,6 +607,72 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
     h as i64
 }
 
+/// Lifetime cap on communities a pubkey may own, counting owner-deleted
+/// communities whose tombstones permanently retain their hosts. Bounds
+/// create-then-delete host squatting. Absolute: it does not scale with
+/// `BUZZ_MAX_COMMUNITIES_PER_OWNER`.
+pub const MAX_LIFETIME_COMMUNITIES_PER_OWNER: i64 = 20;
+
+/// One owner's quota usage, read inside the admitting transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnerQuota {
+    /// Live ownership plus incomplete owner-deletion reservations.
+    pub active: i64,
+    /// Live ownership plus every non-aborted owner deletion, completed or not.
+    pub lifetime: i64,
+}
+
+impl OwnerQuota {
+    /// Whether this owner may gain one more community.
+    pub fn admits(self) -> bool {
+        self.active < max_communities_per_owner()
+            && self.lifetime < MAX_LIFETIME_COMMUNITIES_PER_OWNER
+    }
+}
+
+/// Read an owner's active and lifetime community counts.
+///
+/// `UNION` deliberately de-duplicates the live membership and deletion row
+/// before PostgreSQL purges membership. An active reservation remains until
+/// the logical-completion transition records `completed_at`; the lifetime
+/// count keeps it forever. Aborted requests restore the community, which is
+/// then counted through its live membership.
+pub(crate) async fn owner_quota_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner_pubkey: &str,
+) -> Result<OwnerQuota> {
+    let (active, lifetime): (i64, i64) = sqlx::query_as(
+        r#"
+        WITH owned AS (
+            SELECT community_id
+            FROM relay_members
+            WHERE pubkey = $1 AND role = 'owner'
+        ), deleted AS (
+            SELECT community_id, completed_at
+            FROM community_deletion_requests
+            WHERE request_origin = 'owner'
+              AND owner_pubkey = $1
+              AND stage <> 'aborted'
+        )
+        SELECT
+            (SELECT count(*) FROM (
+                SELECT community_id FROM owned
+                UNION
+                SELECT community_id FROM deleted WHERE completed_at IS NULL
+            ) active)::BIGINT,
+            (SELECT count(*) FROM (
+                SELECT community_id FROM owned
+                UNION
+                SELECT community_id FROM deleted
+            ) lifetime)::BIGINT
+        "#,
+    )
+    .bind(owner_pubkey)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(OwnerQuota { active, lifetime })
+}
+
 /// Atomically transfers ownership of `community` to `new_owner_pubkey`.
 ///
 /// Runs in a single transaction:
@@ -618,8 +687,8 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
 /// 3. Locks the current owner row `FOR UPDATE` and verifies
 ///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
 ///    a delayed/retried request overwrites a completed transfer.
-/// 4. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
-///    counting owned communities inside the same transaction.
+/// 4. Enforces the transferee's active and lifetime limits
+///    ([`OwnerQuota::admits`]) inside the same transaction.
 /// 5. Upserts `new_owner_pubkey` as `owner` (insert or promote).
 /// 6. Demotes every other owner in this community to `member` — **not**
 ///    `admin`, per product decision: the former owner retains no management
@@ -698,14 +767,7 @@ pub async fn transfer_ownership(
     // 4. Enforce the transferee's community ownership limit inside the same
     //    transaction that holds the advisory lock. This is the authoritative
     //    check — kgoose's preflight count is advisory only.
-    let owned_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
-    )
-    .bind(&pubkey)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    if owned_count >= max_communities_per_owner() {
+    if !owner_quota_in_transaction(&mut tx, &pubkey).await?.admits() {
         tx.rollback().await?;
         return Ok(TransferResult::LimitReached);
     }
@@ -823,6 +885,18 @@ impl Db {
             }
             RouteDecision::Writer => is_relay_member(&self.pool, community, pubkey).await,
         }
+    }
+
+    /// Writer-authoritative [`Db::is_relay_member`]: never replica-routed.
+    /// For admission fences that run after a removal's disconnect may already
+    /// have passed, where a stale replica answer would grant lasting access.
+    #[datastore_span(name = "is_relay_member_writer", system = "postgresql")]
+    pub async fn is_relay_member_writer(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<bool> {
+        is_relay_member(&self.pool, community, pubkey).await
     }
 
     /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
@@ -1242,6 +1316,20 @@ mod postgres_tests {
         assert_eq!(
             super::effective_owner_limit(Some("-5")),
             super::MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    #[test]
+    fn owner_quota_admits_only_under_active_and_lifetime_caps() {
+        let quota = |active, lifetime| super::OwnerQuota { active, lifetime };
+        let limit = super::max_communities_per_owner();
+        let lifetime = super::MAX_LIFETIME_COMMUNITIES_PER_OWNER;
+        assert!(quota(0, 0).admits());
+        assert!(quota(limit - 1, lifetime - 1).admits());
+        assert!(!quota(limit, limit).admits(), "active cap");
+        assert!(
+            !quota(0, lifetime).admits(),
+            "tombstones count toward lifetime"
         );
     }
 

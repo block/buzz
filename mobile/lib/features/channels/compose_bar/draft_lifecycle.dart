@@ -81,6 +81,10 @@ void _useComposeDraftLifecycle({
   required _IOSAttachmentPopoverController iosAttachmentPopover,
   required VoidCallback onDraftIdentityChanged,
 }) {
+  // Retire the old listener before restoring another scope's text: replacement
+  // effects can run before the previous effect's cleanup.
+  final owner = useMemoized(Object.new, [draftKey, draftIdentity]);
+  final currentOwner = useRef(owner)..value = owner;
   final lastDraftIdentity = useRef<String?>(null);
   useEffect(() {
     final identity = '$draftIdentity\u0000$draftKey';
@@ -126,6 +130,7 @@ void _useComposeDraftLifecycle({
       for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
     };
     void persistDraft() {
+      if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
       if (text != lastPersistedText) {
         // Prune before the atomic snapshot, not in a later editor listener.

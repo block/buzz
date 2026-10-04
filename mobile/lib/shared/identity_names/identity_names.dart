@@ -32,15 +32,18 @@ class IdentityNameSources {
   ///
   /// Name: non-blank profile display name, then agent-directory name, then
   /// [fallbackName], then the compact npub. The resolver trims the name.
+  /// Owner: cached profile, then agent directory, then [fallbackOwner].
   NamingIdentity? factFor(
     String pubkey, {
     String? fallbackName,
+    String? fallbackOwner,
     bool isAgent = false,
   }) {
     final key = pubkey.toLowerCase();
     if (!_hexPubkey.hasMatch(key)) return null;
     final profile = profiles[key];
-    final owner = (profile?.ownerPubkey ?? agentOwners[key])?.toLowerCase();
+    final owner = (profile?.ownerPubkey ?? agentOwners[key] ?? fallbackOwner)
+        ?.toLowerCase();
     return NamingIdentity(
       pubkey: key,
       name:
@@ -53,14 +56,6 @@ class IdentityNameSources {
     );
   }
 
-  /// Owner keys of [candidates] whose profile is not cached yet. Callers load
-  /// them so readable owner prefixes can appear; none are invented meanwhile.
-  Set<String> missingOwnerProfiles(Iterable<String> candidates) => candidates
-      .map((key) => factFor(key)?.ownerPubkey)
-      .nonNulls
-      .where((owner) => !profiles.containsKey(owner))
-      .toSet();
-
   /// Owner lookup fact: only a real, non-blank owner profile name.
   NamingIdentity? _ownerFact(String owner) {
     final name = _nonBlank(profiles[owner]?.displayName);
@@ -70,11 +65,15 @@ class IdentityNameSources {
   /// Resolves labels for one view. [candidates] is the view's comparison
   /// context (for example channel members); [agentPubkeys] adds view-local
   /// agent roles such as channel bots; [fallbackNames] supplies view-local
-  /// names used only when no profile or directory name exists.
+  /// names used only when no profile or directory name exists;
+  /// [ownerPubkeys] supplies view-local owner hints (for example from a
+  /// search result that is not cached yet), used only when no cached profile
+  /// or directory owner exists.
   IdentityNames scope(
     Iterable<String> candidates, {
     Set<String> agentPubkeys = const {},
     Map<String, String> fallbackNames = const {},
+    Map<String, String> ownerPubkeys = const {},
   }) => IdentityNames._(
     this,
     {
@@ -84,6 +83,10 @@ class IdentityNameSources {
     {for (final key in agentPubkeys) key.toLowerCase()},
     {
       for (final MapEntry(:key, :value) in fallbackNames.entries)
+        key.toLowerCase(): value,
+    },
+    {
+      for (final MapEntry(:key, :value) in ownerPubkeys.entries)
         key.toLowerCase(): value,
     },
   );
@@ -100,6 +103,7 @@ class IdentityNames {
   final Set<String> _candidates;
   final Set<String> _agentPubkeys;
   final Map<String, String> _fallbackNames;
+  final Map<String, String> _ownerPubkeys;
   final Map<String, ResolvedIdentityName?> _outside = {};
   late final Map<String, ResolvedIdentityName> _members = _resolve(_candidates);
 
@@ -108,10 +112,44 @@ class IdentityNames {
     this._candidates,
     this._agentPubkeys,
     this._fallbackNames,
+    this._ownerPubkeys,
   );
 
   /// The comparison context's lowercase keys.
   Set<String> get candidates => _candidates;
+
+  /// The same comparison context and view-local facts, resolved against
+  /// [sources]. A destination opened from this view (a sheet or route) uses
+  /// it with its live sources, so its labels follow later profile and owner
+  /// changes instead of keeping the opener's snapshot.
+  IdentityNames withSources(IdentityNameSources sources) =>
+      identical(sources, _sources)
+      ? this
+      : IdentityNames._(
+          sources,
+          _candidates,
+          _agentPubkeys,
+          _fallbackNames,
+          _ownerPubkeys,
+        );
+
+  /// Owner keys of the context (or of [keys] only) whose profile is not
+  /// cached yet. Callers load them so readable owner prefixes can appear;
+  /// none are invented meanwhile.
+  Set<String> missingOwnerProfiles([Iterable<String>? keys]) =>
+      (keys?.map((key) => key.toLowerCase()) ?? _candidates)
+          .map(_factFor)
+          .map((fact) => fact?.ownerPubkey)
+          .nonNulls
+          .where((owner) => !_sources.profiles.containsKey(owner))
+          .toSet();
+
+  NamingIdentity? _factFor(String key) => _sources.factFor(
+    key,
+    fallbackName: _fallbackNames[key],
+    fallbackOwner: _ownerPubkeys[key],
+    isAgent: _agentPubkeys.contains(key),
+  );
 
   /// The resolved label and qualifier for [pubkey], or null for an invalid key.
   ResolvedIdentityName? resolve(String pubkey) {
@@ -138,11 +176,7 @@ class IdentityNames {
     final facts = <NamingIdentity>[];
     final owners = <String>{};
     for (final key in candidates) {
-      final fact = _sources.factFor(
-        key,
-        fallbackName: _fallbackNames[key],
-        isAgent: _agentPubkeys.contains(key),
-      );
+      final fact = _factFor(key);
       if (fact == null) continue;
       facts.add(fact);
       if (fact.ownerPubkey case final owner? when !candidates.contains(owner)) {

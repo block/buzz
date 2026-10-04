@@ -1,5 +1,13 @@
 import 'dart:async';
+
+import '../profile/presence_snapshot_test.dart'
+    show PresenceTestRelay, presenceEvent;
 import 'dart:math';
+import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
+import 'package:flutter/rendering.dart';
+import 'package:buzz/shared/community/community_membership_provider.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -18,6 +26,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
@@ -30,10 +39,26 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
+part 'channels_page_test/presence_tests.dart';
+
 void main() {
+  setUpAll(() async {
+    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS')) {
+      for (final font in {
+        'Inter': 'assets/fonts/InterVariable.ttf',
+        'packages/lucide_icons_flutter/Lucide':
+            'packages/lucide_icons_flutter/assets/lucide.ttf',
+      }.entries) {
+        await (FontLoader(
+          font.key,
+        )..addFont(rootBundle.load(font.value))).load();
+      }
+    }
+  });
   Widget buildTestable({
     required List<Override> overrides,
     bool previewDirectory = false,
+    Brightness brightness = Brightness.light,
     double keyboardInset = 0,
     bool disableAnimations = false,
     double bottomPadding = 0,
@@ -59,10 +84,13 @@ void main() {
         dmDirectoryPreviewEnabledProvider.overrideWith(
           (ref) => previewDirectory,
         ),
+        appLifecycleProvider.overrideWith(() => _CommunitySettingsLifecycle()),
         ...overrides,
       ],
       child: MaterialApp(
-        theme: AppTheme.light(topSectionGradient: topSectionGradient),
+        theme: brightness == Brightness.dark
+            ? AppTheme.dark()
+            : AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
@@ -76,6 +104,10 @@ void main() {
           children: [
             ChannelsPage(
               settingsPageBuilder: _buildSettingsPage,
+              communityInvitePageBuilder: (_) =>
+                  const Scaffold(body: Text('Invite destination')),
+              communityAppearancePageBuilder: (_) =>
+                  const Scaffold(body: Text('Appearance destination')),
               onSettingsTransitionProgress:
                   onSettingsTransitionProgress ?? (_) {},
               tabReselection: tabReselection,
@@ -133,6 +165,62 @@ void main() {
       isMember: true,
     ),
   ];
+
+  presenceListTests(
+    (overrides) => buildTestable(overrides: overrides),
+    testChannels,
+  );
+
+  testWidgets('DM tile presence observation failure hides the dot', (
+    tester,
+  ) async {
+    final relay = PresenceTestRelay();
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          relaySessionProvider.overrideWith(() => relay),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final dot = find.descendant(
+      of: _dmTileFor('Alice'),
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is Container &&
+            widget.constraints?.maxWidth == 8 &&
+            widget.constraints?.maxHeight == 8,
+      ),
+    );
+    expect(dot, findsNothing);
+    relay.results.removeAt(0).complete([
+      presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+    ]);
+    await tester.pumpAndSettle();
+    expect(dot, findsOneWidget);
+    final onlineColor =
+        (tester.widget<Container>(dot).decoration as BoxDecoration).color;
+    await tester.pump(const Duration(seconds: 60));
+    relay.results.removeAt(0).completeError(Exception('unavailable'));
+    await tester.pumpAndSettle();
+    expect(dot, findsNothing);
+    await tester.pump(const Duration(seconds: 60));
+    relay.results.removeAt(0).complete([]);
+    await tester.pumpAndSettle();
+    expect(dot, findsOneWidget);
+    expect(
+      (tester.widget<Container>(dot).decoration as BoxDecoration).color,
+      isNot(onlineColor),
+    );
+    relay.emit(presenceEvent('alice', 'online', timestamp: 21));
+    await tester.pumpAndSettle();
+    expect(
+      (tester.widget<Container>(dot).decoration as BoxDecoration).color,
+      onlineColor,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the
@@ -1060,6 +1148,119 @@ void main() {
     expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
   });
 
+  for (final brightness in Brightness.values) {
+    testWidgets('community settings opens destinations in ${brightness.name}', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final community = Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          brightness: brightness,
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            communityListProvider.overrideWith(
+              () => _FakeCommunityListNotifier([community]),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => community),
+            currentCommunityRoleProvider.overrideWithValue(
+              const AsyncData(CommunityMemberRole.admin),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BuzzSheetHeader), findsNothing);
+      expect(find.text('Community settings'), findsOneWidget);
+      expect(find.text('Invite'), findsOneWidget);
+      expect(find.text('Appearance'), findsOneWidget);
+      expect(find.text('Remove community'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Remove community')).dy,
+        greaterThan(tester.getTopLeft(find.text('Appearance')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Remove community')).dy,
+        lessThan(tester.getTopLeft(find.text('Switch communities')).dy),
+      );
+      await tester.tap(find.text('Remove community'));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove community?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Community settings'), findsOneWidget);
+
+      expect(
+        tester.getTopLeft(find.text('Appearance')).dy,
+        lessThan(tester.getTopLeft(find.text('Switch communities')).dy),
+      );
+      if (Platform.environment['COMMUNITY_SCREENSHOTS'] case final directory?) {
+        final boundary = tester
+            .element(find.byKey(const Key('community-switcher-sheet')))
+            .findAncestorRenderObjectOfType<RenderRepaintBoundary>()!;
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 2);
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          await Directory(directory).create(recursive: true);
+          await File(
+            '$directory/community-${brightness.name}.png',
+          ).writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+      }
+      await tester.tap(find.text('Appearance'));
+      await tester.pumpAndSettle();
+      expect(find.text('Appearance destination'), findsOneWidget);
+      expect(find.text('Community settings'), findsNothing);
+      Navigator.of(tester.element(find.text('Appearance destination'))).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Invite'));
+      await tester.pumpAndSettle();
+      expect(find.text('Invite destination'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('community settings hides invite for members', (tester) async {
+    final community = Community(
+      id: 'alpha',
+      name: 'Alpha',
+      relayUrl: 'wss://alpha.example.com',
+      addedAt: DateTime(2025),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(
+            () => _FakeCommunityListNotifier([community]),
+          ),
+          activeCommunityProvider.overrideWith((ref) async => community),
+          currentCommunityRoleProvider.overrideWithValue(
+            const AsyncData(CommunityMemberRole.member),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+    expect(find.text('Invite'), findsNothing);
+    expect(find.text('Appearance'), findsOneWidget);
+  });
+
   testWidgets('community switcher separates selection from edit removal', (
     tester,
   ) async {
@@ -1105,7 +1306,7 @@ void main() {
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Switch Community'), findsOneWidget);
+    expect(find.text('Community settings'), findsOneWidget);
     final options = find.byKey(const Key('community-switcher-options'));
     expect(options, findsOneWidget);
     final editButton = find.byKey(const Key('community-switcher-edit'));
@@ -1113,7 +1314,7 @@ void main() {
     expect(find.byTooltip('Close sheet'), findsNothing);
     expect(
       tester.getCenter(editButton).dx,
-      greaterThan(tester.getCenter(find.text('Switch Community')).dx),
+      greaterThan(tester.getCenter(find.text('Community settings')).dx),
     );
     expect(find.text('alpha.example.com'), findsOneWidget);
     expect(find.text('bravo.example.com'), findsOneWidget);
@@ -1230,7 +1431,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(communityNotifier.removedIds, ['bravo']);
-    expect(find.text('Switch Community'), findsOneWidget);
+    expect(find.text('Community settings'), findsOneWidget);
     expect(find.text('Bravo'), findsNothing);
     expect(find.text('Done'), findsOneWidget);
 
@@ -1305,7 +1506,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(
-      tester.getSize(find.byKey(const Key('community-switcher-title'))).height,
+      tester.getSize(find.text('Community settings')).height,
       greaterThan(32),
     );
   });
@@ -2656,6 +2857,14 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   }) async => [];
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
@@ -2755,4 +2964,9 @@ String _dmTileAvatarInitial(WidgetTester tester, String labelText) {
     find.descendant(of: avatar, matching: find.byType(Text)),
   );
   return initial.data!;
+}
+
+class _CommunitySettingsLifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
 }

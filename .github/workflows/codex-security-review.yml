@@ -16,10 +16,10 @@ jobs:
     name: Authorize Security Review
     # This workflow posts an advisory review; its skipped jobs are not a merge
     # gate and must not be configured as required status checks.
-    # MEMBER and OWNER are GitHub's associations for members of the `block`
-    # organization. The trusted prepare step checks the live PR instead of the
-    # event snapshot. Outside contributors require this exact command from one
-    # of those members: @buzz-security-review <full-head-sha>
+    # The trusted prepare step checks the live PR author's repo permission
+    # (write, maintain, or admin), not author_association, which hides private
+    # org membership from the workflow token. Other PRs require this exact
+    # command from a user with write access: @buzz-security-review <full-head-sha>
     if: >-
       github.repository == 'block/buzz' && (
         (
@@ -28,8 +28,7 @@ jobs:
         ) || (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
-          startsWith(github.event.comment.body, '@buzz-security-review ') &&
-          contains(fromJSON('["MEMBER", "OWNER"]'), github.event.comment.author_association)
+          startsWith(github.event.comment.body, '@buzz-security-review ')
         )
       )
     runs-on: ubuntu-latest
@@ -307,7 +306,8 @@ jobs:
           codex-version: '0.150.1'
           model: ${{ env.CODEX_MODEL }}
           codex-args: '["-c","model_reasoning_effort=${{ env.CODEX_REASONING_EFFORT }}"]'
-          # The trusted authorization job already enforced repository membership.
+          # The trusted authorization job already required repo write access for the
+          # PR author or the authorizing commenter.
           allow-users: '*'
           safety-strategy: drop-sudo
           permission-profile: ':read-only'

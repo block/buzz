@@ -27,9 +27,7 @@ pub(crate) async fn accept(
             .ok_or_else(|| {
                 IngestError::CanvasConflict("conflict: artifact head unavailable".into())
             })?;
-        super::ingest::check_channel_write(tenant, state, auth, source)
-            .await
-            .map_err(IngestError::Rejected)?;
+        super::ingest::check_channel_write(tenant, state, auth, source).await?;
         Some(source)
     } else {
         None

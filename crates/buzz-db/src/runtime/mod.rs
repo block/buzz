@@ -544,6 +544,9 @@ pub struct DbConfig {
     /// (env `BUZZ_DB_STATEMENT_TIMEOUT_MS`). `0` disables it and is the
     /// default because migrations and backfills may legitimately run long.
     pub statement_timeout_ms: u64,
+    /// Whether every new writer-pool connection defaults all transactions to
+    /// read-only. Intended for operator audit commands, never the relay pool.
+    pub default_transaction_read_only: bool,
 }
 
 impl Default for DbConfig {
@@ -564,6 +567,7 @@ impl Default for DbConfig {
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: 0,
+            default_transaction_read_only: false,
         }
     }
 }
@@ -649,6 +653,7 @@ impl Db {
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.statement_timeout_ms;
+        let default_transaction_read_only = config.default_transaction_read_only;
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
@@ -693,11 +698,17 @@ impl Db {
                     if let Err(error) = sqlx::query(
                         "SELECT set_config('lock_timeout', $1, false), \
                                 set_config('idle_in_transaction_session_timeout', $2, false), \
-                                set_config('statement_timeout', $3, false)",
+                                set_config('statement_timeout', $3, false), \
+                                set_config('default_transaction_read_only', $4, false)",
                     )
                     .bind(lock_timeout_ms.to_string())
                     .bind(idle_txn_timeout_ms.to_string())
                     .bind(statement_timeout_ms.to_string())
+                    .bind(if default_transaction_read_only {
+                        "on"
+                    } else {
+                        "off"
+                    })
                     .execute(&mut *conn)
                     .await
                     {
@@ -1224,6 +1235,35 @@ impl Db {
         sqlx::Transaction::begin(connection, None)
             .await
             .map_err(Into::into)
+    }
+
+    /// Begin an event-write transaction and guard its community against
+    /// concurrent deletion.
+    pub async fn begin_community_write_transaction(
+        &self,
+        community: CommunityId,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.begin_event_write_transaction().await?;
+        self.deletion_store()
+            .guard_transaction(&mut tx, community)
+            .await?;
+        Ok(tx)
+    }
+
+    /// Begin an event-write transaction that takes the shared replica-floor
+    /// advisory lock.
+    ///
+    /// This is a lock-ordering foundation only. Floor correctness remains
+    /// authoritative at commit time via the existing trigger/GUC contract.
+    pub async fn begin_replica_floor_locked_event_write_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.begin_event_write_transaction().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(replica_fence::REPLICA_FLOOR_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
     }
 
     /// Begin an event-write transaction through the pre-operation API name.
