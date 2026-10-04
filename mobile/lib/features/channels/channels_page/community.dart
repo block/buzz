@@ -1,118 +1,210 @@
 part of '../channels_page.dart';
 
 class _CommunitySwitcherSheet extends HookConsumerWidget {
-  const _CommunitySwitcherSheet();
+  const _CommunitySwitcherSheet({
+    this.invitePageBuilder,
+    this.appearancePageBuilder,
+  });
+
+  final WidgetBuilder? invitePageBuilder;
+  final WidgetBuilder? appearancePageBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communitiesAsync = ref.watch(communityListProvider);
     final activeAsync = ref.watch(activeCommunityProvider);
     final isEditing = useState(false);
+    final role = ref.watch(currentCommunityRoleProvider);
+    final canInvite = role.hasError || canManageCommunityInvites(role.value);
+
+    void openPage(WidgetBuilder builder) {
+      final navigator = Navigator.of(context, rootNavigator: true);
+      Navigator.of(context).pop();
+      navigator.push(MaterialPageRoute<void>(builder: builder));
+    }
 
     return SafeArea(
-      child: BuzzTitledSheetLayout(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         key: const Key('community-switcher-sheet'),
-        title: 'Switch Community',
-        titleKey: const Key('community-switcher-title'),
-        showDragHandle: true,
-        trailing: SizedBox(
-          key: const Key('community-switcher-edit'),
-          width: 56,
-          height: 44,
-          child: TextButton(
-            onPressed: () => isEditing.value = !isEditing.value,
-            style: TextButton.styleFrom(
-              minimumSize: const Size(56, 44),
-              padding: EdgeInsets.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: Text(isEditing.value ? 'Done' : 'Edit'),
-          ),
-        ),
-        child: communitiesAsync.when(
-          loading: () => const SizedBox(
-            height: 120,
-            child: Center(
-              child: BuzzLoadingIndicator(
-                size: 40,
-                semanticLabel: 'Loading communities',
-              ),
-            ),
-          ),
-          error: (e, _) => Padding(
-            padding: const EdgeInsets.all(Grid.xs),
-            child: Text('Error loading communities: $e'),
-          ),
-          data: (communities) {
-            final activeId = activeAsync.value?.id;
-            return SingleChildScrollView(
-              padding: const EdgeInsets.only(bottom: Grid.xs),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-                child: Material(
-                  key: const Key('community-switcher-options'),
-                  color: context.colors.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(Radii.card),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    children: [
-                      for (
-                        var index = 0;
-                        index < communities.length;
-                        index++
-                      ) ...[
-                        if (index > 0) const _CommunitySwitcherDivider(),
-                        _CommunitySwitcherTile(
-                          community: communities[index],
-                          isActive: communities[index].id == activeId,
-                          isEditing: isEditing.value,
-                          onTap: isEditing.value
-                              ? null
-                              : () async {
-                                  final community = communities[index];
-                                  if (community.id != activeId) {
-                                    await ref
-                                        .read(communityListProvider.notifier)
-                                        .switchCommunity(community.id);
-                                  }
-                                  if (context.mounted) {
-                                    Navigator.of(context).pop();
-                                  }
-                                },
-                          onRemove: () => _confirmRemoveCommunity(
-                            context,
-                            ref,
-                            communities[index],
-                            closeSheetAfterRemoval:
-                                communities[index].id == activeId,
-                          ),
-                        ),
-                      ],
-                      if (communities.isNotEmpty)
-                        const _CommunitySwitcherDivider(),
-                      _AddCommunityTile(
-                        onTap: () {
-                          final nav = Navigator.of(
-                            context,
-                            rootNavigator: true,
-                          );
-                          ref.read(pairingProvider.notifier).reset();
-                          Navigator.of(context).pop();
-                          nav.push(
-                            MaterialPageRoute<void>(
-                              builder: (_) =>
-                                  const PairingPage(addingCommunity: true),
-                            ),
-                          );
-                        },
-                      ),
-                    ],
+        children: [
+          const SizedBox(height: Grid.xs),
+          Flexible(
+            child: communitiesAsync.when(
+              loading: () => const SizedBox(
+                height: 120,
+                child: Center(
+                  child: BuzzLoadingIndicator(
+                    size: 40,
+                    semanticLabel: 'Loading communities',
                   ),
                 ),
               ),
-            );
-          },
-        ),
+              error: (e, _) => Padding(
+                padding: const EdgeInsets.all(Grid.xs),
+                child: Text('Error loading communities: $e'),
+              ),
+              data: (communities) {
+                final activeId = activeAsync.value?.id;
+                final activeCommunity = communities
+                    .where((community) => community.id == activeId)
+                    .firstOrNull;
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.only(bottom: Grid.xs),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (activeCommunity != null ||
+                          appearancePageBuilder != null ||
+                          (canInvite && invitePageBuilder != null))
+                        AppListCard(
+                          label: 'Community settings',
+                          children: [
+                            if (canInvite && invitePageBuilder != null)
+                              AppListRow(
+                                icon: LucideIcons.userPlus,
+                                title: 'Invite',
+                                trailing: const Icon(
+                                  LucideIcons.chevronRight,
+                                  size: 18,
+                                ),
+                                onTap: () => openPage(invitePageBuilder!),
+                              ),
+                            if (appearancePageBuilder != null)
+                              AppListRow(
+                                icon: LucideIcons.sunMoon,
+                                title: 'Appearance',
+                                trailing: const Icon(
+                                  LucideIcons.chevronRight,
+                                  size: 18,
+                                ),
+                                onTap: () => openPage(appearancePageBuilder!),
+                              ),
+                            if (activeCommunity != null)
+                              AppListRow(
+                                icon: LucideIcons.circleMinus,
+                                title: 'Remove community',
+                                titleColor: context.colors.error,
+                                onTap: () => _confirmRemoveCommunity(
+                                  context,
+                                  ref,
+                                  activeCommunity,
+                                  closeSheetAfterRemoval: true,
+                                ),
+                              ),
+                          ],
+                        ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Grid.gutter,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Switch communities',
+                                style: context.textTheme.labelMedium?.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              key: const Key('community-switcher-edit'),
+                              width: 56,
+                              height: 44,
+                              child: TextButton(
+                                onPressed: () =>
+                                    isEditing.value = !isEditing.value,
+                                style: TextButton.styleFrom(
+                                  minimumSize: const Size(56, 44),
+                                  padding: EdgeInsets.zero,
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: Text(isEditing.value ? 'Done' : 'Edit'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Grid.gutter,
+                        ),
+                        child: Material(
+                          key: const Key('community-switcher-options'),
+                          color: context.colors.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(Radii.card),
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            children: [
+                              for (
+                                var index = 0;
+                                index < communities.length;
+                                index++
+                              ) ...[
+                                if (index > 0)
+                                  const _CommunitySwitcherDivider(),
+                                _CommunitySwitcherTile(
+                                  community: communities[index],
+                                  isActive: communities[index].id == activeId,
+                                  isEditing: isEditing.value,
+                                  onTap: isEditing.value
+                                      ? null
+                                      : () async {
+                                          final community = communities[index];
+                                          if (community.id != activeId) {
+                                            await ref
+                                                .read(
+                                                  communityListProvider
+                                                      .notifier,
+                                                )
+                                                .switchCommunity(community.id);
+                                          }
+                                          if (context.mounted) {
+                                            Navigator.of(context).pop();
+                                          }
+                                        },
+                                  onRemove: () => _confirmRemoveCommunity(
+                                    context,
+                                    ref,
+                                    communities[index],
+                                    closeSheetAfterRemoval:
+                                        communities[index].id == activeId,
+                                  ),
+                                ),
+                              ],
+                              if (communities.isNotEmpty)
+                                const _CommunitySwitcherDivider(),
+                              _AddCommunityTile(
+                                onTap: () {
+                                  final nav = Navigator.of(
+                                    context,
+                                    rootNavigator: true,
+                                  );
+                                  ref.read(pairingProvider.notifier).reset();
+                                  Navigator.of(context).pop();
+                                  nav.push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => const PairingPage(
+                                        addingCommunity: true,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

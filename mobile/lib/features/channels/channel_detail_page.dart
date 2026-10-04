@@ -14,6 +14,8 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/huddle/huddle.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -25,6 +27,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
@@ -38,6 +41,7 @@ import '../forum/forum_posts_view.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
@@ -569,21 +573,119 @@ class ChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, readTimestamp]);
 
+    final nativeDm =
+        resolvedChannel.isDm && defaultTargetPlatform == TargetPlatform.iOS
+        ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
+        : null;
+    final nativeMembersWorking =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        resolvedChannel.isDm &&
+        _showsMembersAction(resolvedChannel) &&
+        ref.watch(workingBotPubkeysProvider(resolvedChannel.id)).isNotEmpty;
+    final nativeMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
+    final nativeMemberCount =
+        nativeMembers.value?.length ?? resolvedChannel.memberCount;
+    final nativeMemberLabel =
+        '$nativeMemberCount ${nativeMemberCount == 1 ? 'member' : 'members'}';
+    Future<void> openChannelDetails() async {
+      final shouldClose = await showChannelDetailsPage(
+        context: context,
+        channel: resolvedChannel,
+        currentPubkey: currentPubkey,
+        onMemberTap: (context, pubkey) => showUserProfileSheet(
+          context,
+          pubkey,
+          names: channelIdentityNamesProvider(resolvedChannel.id),
+        ),
+        sectionId: ref
+            .read(channelSectionsProvider)
+            .store
+            .assignments[resolvedChannel.id],
+      );
+      if (shouldClose == true && context.mounted) {
+        Navigator.of(context).pop();
+      }
+    }
+
     return FrostedScaffold(
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
-        leading: usesNativeIosGlassBackButton
-            ? IosGlassNavigationButton(
-                key: const ValueKey('channel-ios-glass-back'),
-                icon: IosGlassNavigationIcon.back,
-                semanticLabel: 'Back',
-                onPressed: () => Navigator.of(context).maybePop(),
-                width: iosGlassChannelHeaderLeadingWidth,
-                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                nativeViewSuppressed: messageActionBackdropActive,
-              )
-            : null,
+        nativeViewSuppressed: messageActionBackdropActive,
+        nativeEphemeralLabel: ephemeralChannelDisplay(
+          resolvedChannel,
+        )?.tooltipLabel,
+        nativeTitle:
+            nativeDm?.label ??
+            resolveDmChannelDisplayLabel(
+              resolvedChannel,
+              currentPubkey: currentPubkey,
+            ),
+        nativeSubtitle: resolvedChannel.isDm
+            ? nativeDm?.presenceLabel
+            : nativeMemberLabel,
+        nativeTitleAvatar: nativeDm == null
+            ? null
+            : IosNavigationAction(
+                label: nativeDm.label,
+                avatarIdentity: nativeDm.pubkey,
+                avatarIsAgent: nativeDm.isAgent,
+                avatarInitial: nativeDm.initial,
+                imageUrl: nativeDm.avatarUrl,
+              ),
+        nativeTitlePresenceColor: nativeDm?.presence == null
+            ? null
+            : switch (nativeDm!.presence) {
+                'online' => context.appColors.success,
+                'away' => context.appColors.warning,
+                _ => context.colors.outline,
+              },
+        onNativeTitlePressed: resolvedChannel.isDm ? null : openChannelDetails,
+        nativeActions: [
+          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+            _huddleNavigationAction(context, ref, resolvedChannel, [
+              ...messagesState.value ?? const [],
+              ...huddleLifecycle,
+            ]),
+          if (resolvedChannel.isDm && _showsMembersAction(resolvedChannel))
+            IosNavigationAction(
+              label: 'View members',
+              symbol: 'person.2',
+              activityColor: nativeMembersWorking
+                  ? context.appColors.success
+                  : null,
+              activityLabel: nativeMembersWorking ? 'Agent working' : null,
+              onPressed: () => showBuzzModalBottomSheet<void>(
+                context: context,
+                title: 'Members',
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (_) => MembersSheet(
+                  channel: resolvedChannel,
+                  currentPubkey: currentPubkey,
+                ),
+              ),
+            ),
+          if (resolvedChannel.isDm)
+            IosNavigationAction(
+              label: 'Channel actions',
+              symbol: 'ellipsis',
+              onPressed: () async {
+                final shouldClose = await showChannelActionsSheet(
+                  context: context,
+                  channel: resolvedChannel,
+                  isUnread: false,
+                  sectionId: ref
+                      .read(channelSectionsProvider)
+                      .store
+                      .assignments[resolvedChannel.id],
+                );
+                if (shouldClose == true && context.mounted) {
+                  Navigator.of(context).pop();
+                }
+              },
+            ),
+        ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
@@ -600,21 +702,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 )
               : _ChannelAppBarTitle(
                   channel: resolvedChannel,
-                  onTap: () async {
-                    final shouldClose = await showChannelDetailsPage(
-                      context: context,
-                      channel: resolvedChannel,
-                      currentPubkey: currentPubkey,
-                      onMemberTap: showUserProfileSheet,
-                      sectionId: ref
-                          .read(channelSectionsProvider)
-                          .store
-                          .assignments[resolvedChannel.id],
-                    );
-                    if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop();
-                    }
-                  },
+                  onTap: openChannelDetails,
                 ),
         ),
         actions: resolvedChannel.isDm
@@ -715,12 +803,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                                 titleContentHeight: appBarTitleContentHeight,
                               ),
                             ),
-                            child: Center(
-                              child: Text(
-                                'Failed to load messages',
-                                style: context.textTheme.bodyMedium?.copyWith(
-                                  color: context.colors.error,
-                                ),
+                            child: LoadErrorView(
+                              message: 'Failed to load messages',
+                              onRetry: () => ref.invalidate(
+                                channelMessagesProvider(channel.id),
                               ),
                             ),
                           ),
@@ -789,7 +875,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                   alignment: Alignment.bottomCenter,
                   child: typingEntries.isEmpty
                       ? const SizedBox.shrink()
-                      : ChannelTypingIndicator(entries: typingEntries),
+                      : ChannelTypingIndicator(
+                          channelId: resolvedChannel.id,
+                          entries: typingEntries,
+                        ),
                 ),
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
@@ -817,7 +906,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                         alignment: Alignment.bottomCenter,
                         child: typingEntries.isEmpty
                             ? const SizedBox.shrink()
-                            : ChannelTypingIndicator(entries: typingEntries),
+                            : ChannelTypingIndicator(
+                                channelId: resolvedChannel.id,
+                                entries: typingEntries,
+                              ),
                       ),
                       ComposeBar(
                         channelId: channel.id,

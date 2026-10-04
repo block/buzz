@@ -366,8 +366,10 @@ pub async fn update_relay_member_role(
 /// Ensures the configured owner pubkey holds the `"owner"` role *in
 /// `community`*, and demotes any other owners in that community to `"admin"`.
 /// This handles owner rotation: if `RELAY_OWNER_PUBKEY` changes, the old owner
-/// is automatically demoted. Scoped to one community — an owner of community A
-/// is never bootstrapped into community B.
+/// is automatically demoted only while the community is active and has no
+/// durable deletion intent. Scoped to one community — an owner of community A
+/// is never bootstrapped into community B. Initial insertion and exact-owner
+/// convergence remain allowed because neither rotates existing ownership.
 ///
 /// Runs in a single transaction. Safe to call at every startup — idempotent.
 ///
@@ -383,13 +385,93 @@ pub async fn bootstrap_owner(
     community: CommunityId,
     owner_pubkey: &str,
 ) -> Result<()> {
-    bootstrap_owner_with_operation(
+    match bootstrap_owner_with_operation(
         pool,
         community,
         owner_pubkey,
         observability::WriterOperation::Bootstrap,
     )
-    .await
+    .await?
+    {
+        ProvisionOwnerResult::Applied => Ok(()),
+        ProvisionOwnerResult::LifecycleConflict => Err(DbError::AccessDenied(
+            "community lifecycle freezes owner rotation".to_string(),
+        )),
+        ProvisionOwnerResult::DeletionPending => Err(DbError::AccessDenied(
+            "community deletion is pending".to_string(),
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OwnerMutationMode {
+    Transfer,
+    Converge,
+}
+
+enum OwnerMutationAdmission {
+    Allowed(Vec<String>),
+    NotFound,
+    LifecycleConflict,
+    DeletionPending,
+}
+
+async fn lock_owner_mutation_admission(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    proposed_owner: &str,
+    mode: OwnerMutationMode,
+) -> Result<OwnerMutationAdmission> {
+    crate::deletion::lock_community_deletion_shared(tx, community).await?;
+    let target = sqlx::query(
+        "SELECT archived_at, deletion_state, deleted_at FROM communities \
+         WHERE id = $1 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(target) = target else {
+        return Ok(OwnerMutationAdmission::NotFound);
+    };
+    let existing_owners: Vec<String> = sqlx::query_scalar(
+        "SELECT pubkey FROM relay_members \
+         WHERE community_id = $1 AND role = 'owner' \
+         ORDER BY pubkey FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let changes_existing_owner = match mode {
+        OwnerMutationMode::Transfer => true,
+        OwnerMutationMode::Converge => {
+            !(existing_owners.is_empty()
+                || existing_owners.len() == 1 && existing_owners[0] == proposed_owner)
+        }
+    };
+    if !changes_existing_owner {
+        return Ok(OwnerMutationAdmission::Allowed(existing_owners));
+    }
+
+    let deletion_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+         WHERE community_id = $1 AND stage <> 'aborted')",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(&mut **tx)
+    .await?;
+    if deletion_pending {
+        return Ok(OwnerMutationAdmission::DeletionPending);
+    }
+
+    let archived_at: Option<chrono::DateTime<chrono::Utc>> = target.try_get("archived_at")?;
+    let deletion_state: String = target.try_get("deletion_state")?;
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> = target.try_get("deleted_at")?;
+    if archived_at.is_some() || deletion_state != "active" || deleted_at.is_some() {
+        return Ok(OwnerMutationAdmission::LifecycleConflict);
+    }
+
+    Ok(OwnerMutationAdmission::Allowed(existing_owners))
 }
 
 async fn bootstrap_owner_with_operation(
@@ -397,10 +479,24 @@ async fn bootstrap_owner_with_operation(
     community: CommunityId,
     owner_pubkey: &str,
     operation: observability::WriterOperation,
-) -> Result<()> {
+) -> Result<ProvisionOwnerResult> {
     let pubkey = owner_pubkey.to_ascii_lowercase();
     let connection = observability::acquire_writer(pool, operation).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    match lock_owner_mutation_admission(&mut tx, community, &pubkey, OwnerMutationMode::Converge)
+        .await?
+    {
+        OwnerMutationAdmission::Allowed(_) => {}
+        OwnerMutationAdmission::NotFound | OwnerMutationAdmission::LifecycleConflict => {
+            tx.rollback().await?;
+            return Ok(ProvisionOwnerResult::LifecycleConflict);
+        }
+        OwnerMutationAdmission::DeletionPending => {
+            tx.rollback().await?;
+            return Ok(ProvisionOwnerResult::DeletionPending);
+        }
+    }
 
     // 1. Upsert the configured owner for this community.
     sqlx::query(
@@ -424,7 +520,7 @@ async fn bootstrap_owner_with_operation(
     .await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(ProvisionOwnerResult::Applied)
 }
 
 /// The result of a transfer-ownership attempt.
@@ -444,10 +540,25 @@ pub enum TransferResult {
     /// concurrent transfer or owner rotation has already changed ownership.
     /// The caller must NOT retry blindly — re-read ownership and re-evaluate.
     OwnerConflict,
-    /// The transferee already owns the maximum number of communities.
+    /// The community is archived, quiescing, or deleted; ownership is frozen.
+    LifecycleConflict,
+    /// Durable deletion intent exists and wins over ownership mutation.
+    DeletionPending,
+    /// The transferee has reached the active or lifetime community limit.
     /// Enforced atomically inside the transfer transaction so concurrent
     /// transfers to the same recipient cannot both pass the limit.
     LimitReached,
+}
+
+/// Result of converging an owner through deployment-root provisioning.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProvisionOwnerResult {
+    /// The initial owner was inserted or existing ownership converged.
+    Applied,
+    /// The community lifecycle freezes ownership mutation.
+    LifecycleConflict,
+    /// Durable deletion intent exists and wins over owner convergence.
+    DeletionPending,
 }
 
 /// Default maximum number of communities a single pubkey can own. Enforced at
@@ -459,8 +570,11 @@ pub const MAX_COMMUNITIES_PER_OWNER: i64 = 5;
 ///
 /// Reads `BUZZ_MAX_COMMUNITIES_PER_OWNER` once (cached for the process
 /// lifetime); a missing, unparsable, or non-positive value falls back to
-/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the cap
-/// without a source change while keeping the stock default for everyone else.
+/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the active
+/// cap without a source change while keeping the stock default for everyone
+/// else. [`MAX_LIFETIME_COMMUNITIES_PER_OWNER`] still applies and counts live
+/// ownership, so values above it are unreachable: no owner can hold more live
+/// communities than the lifetime cap allows.
 pub fn max_communities_per_owner() -> i64 {
     static LIMIT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -493,6 +607,72 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
     h as i64
 }
 
+/// Lifetime cap on communities a pubkey may own, counting owner-deleted
+/// communities whose tombstones permanently retain their hosts. Bounds
+/// create-then-delete host squatting. Absolute: it does not scale with
+/// `BUZZ_MAX_COMMUNITIES_PER_OWNER`.
+pub const MAX_LIFETIME_COMMUNITIES_PER_OWNER: i64 = 20;
+
+/// One owner's quota usage, read inside the admitting transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnerQuota {
+    /// Live ownership plus incomplete owner-deletion reservations.
+    pub active: i64,
+    /// Live ownership plus every non-aborted owner deletion, completed or not.
+    pub lifetime: i64,
+}
+
+impl OwnerQuota {
+    /// Whether this owner may gain one more community.
+    pub fn admits(self) -> bool {
+        self.active < max_communities_per_owner()
+            && self.lifetime < MAX_LIFETIME_COMMUNITIES_PER_OWNER
+    }
+}
+
+/// Read an owner's active and lifetime community counts.
+///
+/// `UNION` deliberately de-duplicates the live membership and deletion row
+/// before PostgreSQL purges membership. An active reservation remains until
+/// the logical-completion transition records `completed_at`; the lifetime
+/// count keeps it forever. Aborted requests restore the community, which is
+/// then counted through its live membership.
+pub(crate) async fn owner_quota_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner_pubkey: &str,
+) -> Result<OwnerQuota> {
+    let (active, lifetime): (i64, i64) = sqlx::query_as(
+        r#"
+        WITH owned AS (
+            SELECT community_id
+            FROM relay_members
+            WHERE pubkey = $1 AND role = 'owner'
+        ), deleted AS (
+            SELECT community_id, completed_at
+            FROM community_deletion_requests
+            WHERE request_origin = 'owner'
+              AND owner_pubkey = $1
+              AND stage <> 'aborted'
+        )
+        SELECT
+            (SELECT count(*) FROM (
+                SELECT community_id FROM owned
+                UNION
+                SELECT community_id FROM deleted WHERE completed_at IS NULL
+            ) active)::BIGINT,
+            (SELECT count(*) FROM (
+                SELECT community_id FROM owned
+                UNION
+                SELECT community_id FROM deleted
+            ) lifetime)::BIGINT
+        "#,
+    )
+    .bind(owner_pubkey)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(OwnerQuota { active, lifetime })
+}
+
 /// Atomically transfers ownership of `community` to `new_owner_pubkey`.
 ///
 /// Runs in a single transaction:
@@ -500,13 +680,17 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
 ///    so that concurrent transfers to the same recipient serialize. The same
 ///    lock key is also used by `Db::create_community_with_owner` to prevent
 ///    transfer-vs-create races.
-/// 2. Locks the current owner row `FOR UPDATE` and verifies
+/// 2. Locks the community row and rejects archive/non-active lifecycle or any
+///    non-aborted deletion request.
+///    Owner-deletion admission takes the same row lock, so whichever operation
+///    commits first makes the other re-evaluate and conflict.
+/// 3. Locks the current owner row `FOR UPDATE` and verifies
 ///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
 ///    a delayed/retried request overwrites a completed transfer.
-/// 3. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
-///    counting owned communities inside the same transaction.
-/// 4. Upserts `new_owner_pubkey` as `owner` (insert or promote).
-/// 5. Demotes every other owner in this community to `member` — **not**
+/// 4. Enforces the transferee's active and lifetime limits
+///    ([`OwnerQuota::admits`]) inside the same transaction.
+/// 5. Upserts `new_owner_pubkey` as `owner` (insert or promote).
+/// 6. Demotes every other owner in this community to `member` — **not**
 ///    `admin`, per product decision: the former owner retains no management
 ///    capabilities.
 ///
@@ -533,18 +717,28 @@ pub async fn transfer_ownership(
     )
     .await?;
 
-    // 2. Lock the current owner row FOR UPDATE and verify the expected owner.
-    //    FOR UPDATE prevents the stale-owner race: a concurrent transfer that
-    //    already changed the owner will block on this lock until our txn
-    //    completes (or vice versa), and the expected_owner check will fail.
-    let existing_owners: Vec<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM relay_members \
-         WHERE community_id = $1 AND role = 'owner' \
-         FOR UPDATE",
+    let existing_owners = match lock_owner_mutation_admission(
+        &mut tx,
+        community,
+        &pubkey,
+        OwnerMutationMode::Transfer,
     )
-    .bind(community.as_uuid())
-    .fetch_all(&mut *tx)
-    .await?;
+    .await?
+    {
+        OwnerMutationAdmission::Allowed(existing_owners) => existing_owners,
+        OwnerMutationAdmission::NotFound => {
+            tx.rollback().await?;
+            return Ok(TransferResult::NoOwner);
+        }
+        OwnerMutationAdmission::LifecycleConflict => {
+            tx.rollback().await?;
+            return Ok(TransferResult::LifecycleConflict);
+        }
+        OwnerMutationAdmission::DeletionPending => {
+            tx.rollback().await?;
+            return Ok(TransferResult::DeletionPending);
+        }
+    };
 
     if existing_owners.is_empty() {
         tx.rollback().await?;
@@ -570,22 +764,15 @@ pub async fn transfer_ownership(
         existing_owners.iter().find(|p| **p != pubkey).cloned()
     };
 
-    // 3. Enforce the transferee's community ownership limit inside the same
+    // 4. Enforce the transferee's community ownership limit inside the same
     //    transaction that holds the advisory lock. This is the authoritative
     //    check — kgoose's preflight count is advisory only.
-    let owned_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
-    )
-    .bind(&pubkey)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    if owned_count >= max_communities_per_owner() {
+    if !owner_quota_in_transaction(&mut tx, &pubkey).await?.admits() {
         tx.rollback().await?;
         return Ok(TransferResult::LimitReached);
     }
 
-    // 4. Upsert the new owner.
+    // 5. Upsert the new owner.
     sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'owner', NULL) \
@@ -596,7 +783,7 @@ pub async fn transfer_ownership(
     .execute(&mut *tx)
     .await?;
 
-    // 5. Demote all other owners to member (not admin).
+    // 6. Demote all other owners to member (not admin).
     sqlx::query(
         "UPDATE relay_members SET role = 'member', updated_at = now() \
          WHERE community_id = $1 AND role = 'owner' AND pubkey <> $2",
@@ -700,6 +887,18 @@ impl Db {
         }
     }
 
+    /// Writer-authoritative [`Db::is_relay_member`]: never replica-routed.
+    /// For admission fences that run after a removal's disconnect may already
+    /// have passed, where a stale replica answer would grant lasting access.
+    #[datastore_span(name = "is_relay_member_writer", system = "postgresql")]
+    pub async fn is_relay_member_writer(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<bool> {
+        is_relay_member(&self.pool, community, pubkey).await
+    }
+
     /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
     #[datastore_span(name = "get_relay_member", system = "postgresql")]
     pub async fn get_relay_member(
@@ -798,7 +997,11 @@ impl Db {
 
     /// Ensure an owner during operator-driven community provisioning.
     #[datastore_span(name = "provision_owner", system = "postgresql")]
-    pub async fn provision_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
+    pub async fn provision_owner(
+        &self,
+        community: CommunityId,
+        owner_pubkey: &str,
+    ) -> Result<ProvisionOwnerResult> {
         bootstrap_owner_with_operation(
             &self.pool,
             community,
@@ -1117,6 +1320,20 @@ mod postgres_tests {
     }
 
     #[test]
+    fn owner_quota_admits_only_under_active_and_lifetime_caps() {
+        let quota = |active, lifetime| super::OwnerQuota { active, lifetime };
+        let limit = super::max_communities_per_owner();
+        let lifetime = super::MAX_LIFETIME_COMMUNITIES_PER_OWNER;
+        assert!(quota(0, 0).admits());
+        assert!(quota(limit - 1, lifetime - 1).admits());
+        assert!(!quota(limit, limit).admits(), "active cap");
+        assert!(
+            !quota(0, lifetime).admits(),
+            "tombstones count toward lifetime"
+        );
+    }
+
+    #[test]
     fn owner_limit_honors_positive_override() {
         assert_eq!(super::effective_owner_limit(Some("100")), 100);
         assert_eq!(super::effective_owner_limit(Some(" 12 ")), 12);
@@ -1338,6 +1555,50 @@ mod postgres_tests {
 
         assert_eq!(result, TransferResult::AlreadyOwner);
 
+        assert_role(&pool, community, &owner, "owner").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_ownership_rejects_archived_community_without_membership_change() {
+        let pool = setup_pool().await;
+        let (community, owner) = owned_community(&pool).await;
+        let replacement = test_pubkey();
+        sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("archive community");
+
+        let result = transfer_ownership(&pool, community, &replacement, &owner)
+            .await
+            .expect("transfer archived community");
+
+        assert_eq!(result, TransferResult::LifecycleConflict);
+        assert_role(&pool, community, &owner, "owner").await;
+        assert!(
+            get_relay_member(&pool, community, &replacement)
+                .await
+                .expect("get replacement")
+                .is_none(),
+            "archived transfer must not add the replacement owner"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn provision_owner_still_bootstraps_initial_owner() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let db = Db::from_pool(pool.clone());
+
+        assert_eq!(
+            db.provision_owner(community, &owner)
+                .await
+                .expect("provision initial owner"),
+            ProvisionOwnerResult::Applied
+        );
         assert_role(&pool, community, &owner, "owner").await;
     }
 

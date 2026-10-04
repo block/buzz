@@ -1,5 +1,60 @@
 # Changelog
 
+## [Unreleased]
+
+### Desktop and shared changes
+
+- Follow or unfollow delivered channel messages before their first reply.
+
+## v0.5.26
+
+### Desktop and shared changes
+
+- fix(desktop): correct Grok Build setup guide URL ([#4846](https://github.com/block/buzz/pull/4846)) ([`7ebf1beb44139264e9c5c7fee6970429ff66f934`](https://github.com/block/buzz/commit/7ebf1beb44139264e9c5c7fee6970429ff66f934))
+- feat(relay): implement NIP-AR channel artifacts ([#7919](https://github.com/block/buzz/pull/7919)) ([`12670bd0f037c66a682272bb81c46c3f254fad74`](https://github.com/block/buzz/commit/12670bd0f037c66a682272bb81c46c3f254fad74))
+- fix(desktop): resolve unlisted project channel requests ([#7619](https://github.com/block/buzz/pull/7619)) ([`c96553eb13a073ca9f4ee1547b50ba3d28dfd4db`](https://github.com/block/buzz/commit/c96553eb13a073ca9f4ee1547b50ba3d28dfd4db))
+- Schedule the deletion drain safely ([#7827](https://github.com/block/buzz/pull/7827)) ([`6918dd3a83fd7aacf6d8e4634d3864eb10ead61d`](https://github.com/block/buzz/commit/6918dd3a83fd7aacf6d8e4634d3864eb10ead61d))
+- test(desktop): wait for channel head refresh before paging thread summary test ([#7955](https://github.com/block/buzz/pull/7955)) ([`f1e50be4103addabd497563495e0ffe5bda07ef7`](https://github.com/block/buzz/commit/f1e50be4103addabd497563495e0ffe5bda07ef7))
+- 🤖 perf: bound long-thread aux reads and make query deadlines terminal ([#7854](https://github.com/block/buzz/pull/7854)) ([`9b1c4f98e2981d6d89fbfa3154b8ef0b3b6ad334`](https://github.com/block/buzz/commit/9b1c4f98e2981d6d89fbfa3154b8ef0b3b6ad334))
+- Add native HPKE encryption for nsec backups ([#7849](https://github.com/block/buzz/pull/7849)) ([`cc36d25bec2d34340ab7aace50110f51162edd7a`](https://github.com/block/buzz/commit/cc36d25bec2d34340ab7aace50110f51162edd7a))
+- test(desktop): scope video menu e2e probes to emitted messages ([#7953](https://github.com/block/buzz/pull/7953)) ([`548718e042decbc059fd7ebfb9b9ad2459ac258d`](https://github.com/block/buzz/commit/548718e042decbc059fd7ebfb9b9ad2459ac258d))
+- fix(sidebar): converge stale-at-open state across devices (sections/sort/stars/mutes) ([#7805](https://github.com/block/buzz/pull/7805)) ([`52c4c08c9ef349f2bb994ca40e98faa0f44209ea`](https://github.com/block/buzz/commit/52c4c08c9ef349f2bb994ca40e98faa0f44209ea))
+- feat(nip-fi): harden Blossom kind-24242 verifier to NIP-FI spec ([#7288](https://github.com/block/buzz/pull/7288)) ([`f7ff4294fa95191d1fc7b29a765e6f0b48db6bd8`](https://github.com/block/buzz/commit/f7ff4294fa95191d1fc7b29a765e6f0b48db6bd8))
+- fix(ci): select runtime suites from PR changes only ([#7843](https://github.com/block/buzz/pull/7843)) ([`02c6309f534050e54c8d36f5ce90e48e4dd152b1`](https://github.com/block/buzz/commit/02c6309f534050e54c8d36f5ce90e48e4dd152b1))
+- test(desktop): synchronize upload edit smoke test ([#7903](https://github.com/block/buzz/pull/7903)) ([`a1fb6645d994e72b5f39fae8bd482d400e4005b6`](https://github.com/block/buzz/commit/a1fb6645d994e72b5f39fae8bd482d400e4005b6))
+- feat(desktop): relay admin console for the /api/admin/v1 operator surface ([#4768](https://github.com/block/buzz/pull/4768)) ([`8f8c4dfadecb2298a9140af5d323487aaad844ab`](https://github.com/block/buzz/commit/8f8c4dfadecb2298a9140af5d323487aaad844ab))
+
+### Other repository changes
+
+- fix(db): audit partition catalog before creation ([#6515](https://github.com/block/buzz/pull/6515)) ([`14a752fb2445790bf4620348e485e8576371f906`](https://github.com/block/buzz/commit/14a752fb2445790bf4620348e485e8576371f906))
+- feat(mobile): show contextual names in channel conversations ([#7895](https://github.com/block/buzz/pull/7895)) ([`4ef23609b7025bc356a9ea078834d57b69ec33cf`](https://github.com/block/buzz/commit/4ef23609b7025bc356a9ea078834d57b69ec33cf))
+- feat(buzz-relay): NIP-FI stateless enforcement (S3) — upgrade gate, NIP-42 pairing, session lifetime, JWKS warm ([#7224](https://github.com/block/buzz/pull/7224)) ([`8519db1532efd6cda8f72bb6454c00fc3f87cfba`](https://github.com/block/buzz/commit/8519db1532efd6cda8f72bb6454c00fc3f87cfba))
+- feat(web): add Browse releases link next to invite download ([#2255](https://github.com/block/buzz/pull/2255)) ([`b9d22a273f2225917f13b13a9fde305629126502`](https://github.com/block/buzz/commit/b9d22a273f2225917f13b13a9fde305629126502))
+- docs(nips): fix stray angle brackets in created_at clauses ([#4486](https://github.com/block/buzz/pull/4486)) ([`12423f2868b810240a6b949d21c8a09e9e8a1994`](https://github.com/block/buzz/commit/12423f2868b810240a6b949d21c8a09e9e8a1994))
+- docs: specify desktop-driven mobile push suppression ([#7809](https://github.com/block/buzz/pull/7809)) ([`45c288c1793bbbbbbb1be88f8a53c6aecfff8d2f`](https://github.com/block/buzz/commit/45c288c1793bbbbbbb1be88f8a53c6aecfff8d2f))
+- feat(mobile): add the contextual identity-name resolver ([#7894](https://github.com/block/buzz/pull/7894)) ([`efe04288ea907adfe91a38ae916c0d364c315cca`](https://github.com/block/buzz/commit/efe04288ea907adfe91a38ae916c0d364c315cca))
+- Automate owner deletion preparation ([#7830](https://github.com/block/buzz/pull/7830)) ([`bba75a71eb5a719b597479ec848053cde364befd`](https://github.com/block/buzz/commit/bba75a71eb5a719b597479ec848053cde364befd))
+- fix(mobile): stale community selection during mobile invite setup ([#7951](https://github.com/block/buzz/pull/7951)) ([`662014d544f835a075f0020e7d161fe7985d7959`](https://github.com/block/buzz/commit/662014d544f835a075f0020e7d161fe7985d7959))
+- Add owner deletion admission control plane ([#7818](https://github.com/block/buzz/pull/7818)) ([`15d44dcceee0679979991b3100f21f01fc799693`](https://github.com/block/buzz/commit/15d44dcceee0679979991b3100f21f01fc799693))
+- Make relay readiness process-local ([#7341](https://github.com/block/buzz/pull/7341)) ([`b37e477211313a94344a31aea4b180ed4effe0b8`](https://github.com/block/buzz/commit/b37e477211313a94344a31aea4b180ed4effe0b8))
+- 🤖 docs(nip-fi): remove implementation references from the spec ([#7912](https://github.com/block/buzz/pull/7912)) ([`447951a19c00edfa6432636f50782445929ab678`](https://github.com/block/buzz/commit/447951a19c00edfa6432636f50782445929ab678))
+- fix(relay): fail startup on invalid operator listener config ([#7933](https://github.com/block/buzz/pull/7933)) ([`ebe99a46e8802b9ff20fdf6a1028ce93bdefaa43`](https://github.com/block/buzz/commit/ebe99a46e8802b9ff20fdf6a1028ce93bdefaa43))
+- fix(db): limit event transactions to listener mention kinds ([#7932](https://github.com/block/buzz/pull/7932)) ([`1846094b3111a059f856bb4f3466c102fad17ef7`](https://github.com/block/buzz/commit/1846094b3111a059f856bb4f3466c102fad17ef7))
+- feat(relay): deliver pubkey mentions to relay companions ([#7793](https://github.com/block/buzz/pull/7793)) ([`c4c86006f2d67b2ea9055780129ee7ce95c54e0a`](https://github.com/block/buzz/commit/c4c86006f2d67b2ea9055780129ee7ce95c54e0a))
+- docs(protocol): propose simplified channel artifacts ([#7791](https://github.com/block/buzz/pull/7791)) ([`b0d6fb8ad27f6f255a5044e49ed0a59e11542914`](https://github.com/block/buzz/commit/b0d6fb8ad27f6f255a5044e49ed0a59e11542914))
+- feat(push): support configurable HTTP(S) delivery URLs ([#7877](https://github.com/block/buzz/pull/7877)) ([`781d39510cf23cfe224e8f521ae06a23377e06de`](https://github.com/block/buzz/commit/781d39510cf23cfe224e8f521ae06a23377e06de))
+- feat(relay): enforce NIP-FI assertion+NIP-98 pairing on HTTP ingress ([#7264](https://github.com/block/buzz/pull/7264)) ([`6410e685a80d42db0645fadc9bbe710559ef911e`](https://github.com/block/buzz/commit/6410e685a80d42db0645fadc9bbe710559ef911e))
+- fix(ci): run the admin disabled-mode DB test in the PostgreSQL lane ([#7900](https://github.com/block/buzz/pull/7900)) ([`b65cff31a4c5f4a0af63952b60a21fd73195321a`](https://github.com/block/buzz/commit/b65cff31a4c5f4a0af63952b60a21fd73195321a))
+- 🤖 docs: add pre-PR checklist and review guidance to AGENTS.md ([#7897](https://github.com/block/buzz/pull/7897)) ([`9c7687cc914cd8eddee7ba25cb980ad1a6bc0fdc`](https://github.com/block/buzz/commit/9c7687cc914cd8eddee7ba25cb980ad1a6bc0fdc))
+- docs: specify durable data backfills ([#7326](https://github.com/block/buzz/pull/7326)) ([`9263cda8455b8fd27f4491e5e4fc0ebc2ce2e8bc`](https://github.com/block/buzz/commit/9263cda8455b8fd27f4491e5e4fc0ebc2ce2e8bc))
+- docs(vision): add /buzz/v1 read endpoints to the protocol contract ([#7879](https://github.com/block/buzz/pull/7879)) ([`930b8bb800d8149ce29a881ba4c5d9f424580434`](https://github.com/block/buzz/commit/930b8bb800d8149ce29a881ba4c5d9f424580434))
+- 🤖 fix(justfile): point just staging at the current staging relay ([#7881](https://github.com/block/buzz/pull/7881)) ([`20131488528e35e6c50f4ccdb0490a9135c28edf`](https://github.com/block/buzz/commit/20131488528e35e6c50f4ccdb0490a9135c28edf))
+- fix(relay-admin): make thread deletions atomic and fence expired action leases under row lock ([#7853](https://github.com/block/buzz/pull/7853)) ([`676e8c43825fa478850a3a320b1367d3288cce1a`](https://github.com/block/buzz/commit/676e8c43825fa478850a3a320b1367d3288cce1a))
+- fix(mobile): keep retired sections manager out of successor cache ([#7873](https://github.com/block/buzz/pull/7873)) ([`28a8b90805278a91d723731bf7b824cea473bcfa`](https://github.com/block/buzz/commit/28a8b90805278a91d723731bf7b824cea473bcfa))
+- Select one feature flag provider at compile time ([#7677](https://github.com/block/buzz/pull/7677)) ([`8f6b66f9ff6b2e42cd713506805763269375b473`](https://github.com/block/buzz/commit/8f6b66f9ff6b2e42cd713506805763269375b473))
+
+[Compare desktop-v0.5.25...desktop-v0.5.26](https://github.com/block/buzz/compare/desktop-v0.5.25...desktop-v0.5.26)
+
 ## v0.5.25
 
 ### Desktop and shared changes

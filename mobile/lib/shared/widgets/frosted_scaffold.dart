@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'ios_navigation_bar.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
@@ -36,6 +38,9 @@ class FrostedScaffold extends HookWidget {
   /// surface roles.
   final bool useUtilitySurfaceTheme;
 
+  /// Reserves the native large title above fixed controls.
+  final bool nativePinnedBody;
+
   const FrostedScaffold({
     super.key,
     required this.appBar,
@@ -45,10 +50,59 @@ class FrostedScaffold extends HookWidget {
     this.backgroundColor,
     this.backgroundGradient,
     this.useUtilitySurfaceTheme = false,
+    this.nativePinnedBody = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final scrollOffset = useValueNotifier(0.0);
+    final pinnedController = useScrollController(keepScrollOffset: false);
+    // A keyed page/tab owns both coordinated positions and their restoration
+    // bucket, so a new timeline cannot restore a stale inner offset.
+    final pinnedStorage = useMemoized(PageStorageBucket.new);
+    final pinnedKey = useMemoized(GlobalKey<NestedScrollViewState>.new);
+    final collapseExtent = appBar.nativeLargeTitle
+        ? IosNavigationMetrics.of(context).largeTitleHeight
+        : 0.0;
+    final previousExtent = useRef(collapseExtent);
+    // Redistribute consumed distance after native metric changes without
+    // shifting the visible content or expanding a deeply scrolled title.
+    useEffect(() {
+      final old = previousExtent.value;
+      previousExtent.value = collapseExtent;
+      final inner = pinnedKey.currentState?.innerController;
+      if (old != collapseExtent &&
+          pinnedController.hasClients &&
+          pinnedController.offset >= old &&
+          inner != null &&
+          inner.hasClients &&
+          inner.offset > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!pinnedController.hasClients || !inner.hasClients) return;
+          final total = pinnedController.offset + inner.offset;
+          pinnedController.jumpTo(collapseExtent.clamp(0.0, total));
+          inner.jumpTo((total - collapseExtent).clamp(0.0, double.infinity));
+        });
+      }
+      return null;
+    }, [collapseExtent]);
+    final nativePinned =
+        nativePinnedBody && defaultTargetPlatform == TargetPlatform.iOS;
+    useEffect(() {
+      void update() {
+        if (pinnedController.hasClients) {
+          final inner = pinnedKey.currentState?.innerController;
+          scrollOffset.value =
+              (pinnedController.offset +
+                      (inner != null && inner.hasClients ? inner.offset : 0))
+                  .clamp(0.0, double.infinity);
+        }
+      }
+
+      if (!nativePinned) return null;
+      pinnedController.addListener(update);
+      return () => pinnedController.removeListener(update);
+    }, [nativePinned, pinnedController]);
     final isScrolledUnder = useState(false);
     final pendingScrolledUnder = useRef<bool?>(null);
     final scrollUpdateScheduled = useRef(false);
@@ -76,6 +130,25 @@ class FrostedScaffold extends HookWidget {
 
     final observedBody = NotificationListener<ScrollNotification>(
       onNotification: (notification) {
+        if (nativePinned &&
+            notification.metrics.axis == Axis.vertical &&
+            pinnedController.hasClients) {
+          final inner = pinnedKey.currentState?.innerController;
+          scrollOffset.value =
+              (pinnedController.offset +
+                      (inner != null && inner.hasClients ? inner.offset : 0))
+                  .clamp(0.0, double.infinity);
+        }
+        if (!nativePinned &&
+            notification.depth == 0 &&
+            notification.metrics.axis == Axis.vertical) {
+          // Keep real depth so a later UIKit metrics update (Dynamic Type or
+          // rotation) can apply its new collapse range without another scroll.
+          final next = notification.metrics.pixels.clamp(0.0, double.infinity);
+          if ((scrollOffset.value - next).abs() > 0.1) {
+            scrollOffset.value = next;
+          }
+        }
         if (notification.depth != 0 ||
             notification.metrics.axis != Axis.vertical ||
             (notification is! ScrollUpdateNotification &&
@@ -88,13 +161,23 @@ class FrostedScaffold extends HookWidget {
       },
       child: body,
     );
-    final scaffold = Scaffold(
-      backgroundColor: backgroundColor,
-      resizeToAvoidBottomInset: resizeToAvoidBottomInset,
-      floatingActionButton: floatingActionButton,
-      body: FrostedScrollUnderScope(
-        isScrolledUnder: isScrolledUnder.value,
-        child: Stack(children: _stackChildren(observedBody)),
+    final scaffold = IosNavigationScrollScope(
+      offset: scrollOffset,
+      child: Scaffold(
+        backgroundColor: backgroundColor,
+        resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+        floatingActionButton: floatingActionButton,
+        body: FrostedScrollUnderScope(
+          isScrolledUnder: isScrolledUnder.value,
+          child: Stack(
+            children: _stackChildren(
+              observedBody,
+              pinnedController,
+              pinnedStorage,
+              pinnedKey,
+            ),
+          ),
+        ),
       ),
     );
     if (!useUtilitySurfaceTheme) return scaffold;
@@ -104,7 +187,12 @@ class FrostedScaffold extends HookWidget {
     );
   }
 
-  List<Widget> _stackChildren(Widget observedBody) {
+  List<Widget> _stackChildren(
+    Widget observedBody,
+    ScrollController pinnedController,
+    PageStorageBucket pinnedStorage,
+    GlobalKey<NestedScrollViewState> pinnedKey,
+  ) {
     final backdrop = backgroundGradient == null
         ? const <Widget>[]
         : [
@@ -117,7 +205,25 @@ class FrostedScaffold extends HookWidget {
         'frosted-scaffold-body-transition-transform',
       ),
       opacityKey: const ValueKey('frosted-scaffold-body-transition-opacity'),
-      child: observedBody,
+      child: nativePinnedBody && defaultTargetPlatform == TargetPlatform.iOS
+          ? PageStorage(
+              bucket: pinnedStorage,
+              child: NestedScrollView(
+                key: pinnedKey,
+                controller: pinnedController,
+                headerSliverBuilder: (context, innerScrolled) => [
+                  SliverToBoxAdapter(
+                    child: SizedBox(
+                      height: appBar.nativeLargeTitle
+                          ? IosNavigationMetrics.of(context).largeTitleHeight
+                          : 0,
+                    ),
+                  ),
+                ],
+                body: observedBody,
+              ),
+            )
+          : observedBody,
     );
     // The bar must be painted after the scrollable sheet: [BackdropFilter]
     // only samples pixels that were already painted behind it. This is the

@@ -293,19 +293,12 @@ async fn mint_invite_checked(
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
 
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
-        Ok(t) => t,
-        Err(_) => {
-            return api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        }
+    let Some(tenant) = crate::nip_fi_shadow::bind_tenant(&state, &headers).await else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "relay: no community is configured for this host",
+        )
+        .into_response();
     };
 
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites");
@@ -329,10 +322,23 @@ async fn mint_invite_checked(
         Err(resp) => return resp,
     };
     let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, _signed_created_at) = admission.into_extra();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
 
     // Replay detection runs after NIP-98+assertion admission (both proofs verified).
     if let Err(e) = bridge::check_nip98_replay(&state, &tenant, event_id_bytes).await {
+        return e.into_response();
+    }
+
+    // Membership and community ban, same step as the other NIP-98 routes.
+    if let Err(e) = super::relay_members::enforce_relay_membership(
+        &state,
+        tenant.community(),
+        pubkey.as_bytes(),
+        super::relay_members::extract_auth_tag_header(&headers),
+        signed_created_at,
+    )
+    .await
+    {
         return e.into_response();
     }
 
@@ -724,7 +730,7 @@ mod postgres_tests {
     /// Build a closed-relay (`require_relay_membership = true`) test state with
     /// a fresh community on `host`; returns `None` when Postgres is unavailable.
     async fn invite_test_state(host: &str) -> Option<Arc<AppState>> {
-        let mut config = crate::config::Config::from_env().ok()?;
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -1908,6 +1914,8 @@ mod postgres_tests {
         let mut config = (*state.config).clone();
         config.require_auth_token = true;
         config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
         state.config = Arc::new(config);
         if !with_verifier {
             return Arc::new(state);

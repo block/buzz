@@ -73,44 +73,43 @@ void main() {
       expect(calls, isEmpty);
     });
 
-    testWidgets(
-      'Settings explains push is unavailable without offering opt-in',
-      (tester) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        SharedPreferences.setMockInitialValues({});
-        final prefs = await SharedPreferences.getInstance();
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              savedPrefsProvider.overrideWithValue(prefs),
-              activeCommunityProvider.overrideWith(
-                (ref) async => Community.create(
-                  name: 'Team',
-                  relayUrl: 'wss://relay.example',
-                ),
-              ),
-              buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-                () async =>
-                    throw StateError('must not query notification permission'),
-              ),
-            ],
-            child: MaterialApp(
-              theme: AppTheme.light(),
-              home: SettingsPage(
-                profileHeader: const SizedBox.shrink(),
-                invitePageBuilder: (_) => const SizedBox.shrink(),
-                identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+    testWidgets('Settings hides notifications without push capability', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            activeCommunityProvider.overrideWith(
+              (ref) async => Community.create(
+                name: 'Team',
+                relayUrl: 'wss://relay.example',
               ),
             ),
+            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
+              () async =>
+                  throw StateError('must not query notification permission'),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
           ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('Unavailable in this build'), findsOneWidget);
-        expect(find.byType(Switch), findsNothing);
-        expect(tester.takeException(), isNull);
-        debugDefaultTargetPlatformOverride = null;
-      },
-    );
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Notifications'), findsNothing);
+      expect(find.text('Push notifications'), findsNothing);
+      expect(find.byType(Switch), findsNothing);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
   }, skip: Env.pushGatewayConfigured);
 }

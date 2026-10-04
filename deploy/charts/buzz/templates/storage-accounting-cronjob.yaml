@@ -2,7 +2,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "buzz.fullname" . }}-storage-accounting
+  name: {{ include "buzz.cronJobName" (dict "root" . "suffix" "storage-accounting") }}
   labels:
     {{- include "buzz.labels" . | nindent 4 }}
     app.kubernetes.io/component: storage-accounting

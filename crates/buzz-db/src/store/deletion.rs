@@ -27,6 +27,8 @@ pub const POSTGRES_STORE_NAME: &str = "postgres";
 pub const OBJECT_STORE_NAME: &str = "object_store";
 /// Durable name of the Redis/cache manifest component.
 pub const REDIS_STORE_NAME: &str = "redis";
+/// Owner acknowledgement contract accepted by the first self-serve deletion API.
+pub const OWNER_DELETION_ACKNOWLEDGEMENT_VERSION: i32 = 1;
 
 /// Deployment-global advisory-lock key serializing schema migration with
 /// destructive deletion.
@@ -49,6 +51,25 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
     "community_serving_write_leases",
 ];
 
+/// Operator-global staff enforcement tables that still hold one community's
+/// rows, keyed by `report_community_id` instead of `community_id`.
+///
+/// Each entry is `(table, row source)`; the row source binds the community as
+/// `$1` and is prefixed with `DELETE`, `SELECT count(*)`, or `SELECT EXISTS`.
+/// The order is FK-safe for deletion: outbox rows before their actions, and
+/// both before `moderation_reports`.
+pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
+    (
+        "relay_admin_outbox",
+        "FROM relay_admin_outbox WHERE action_id IN \
+         (SELECT id FROM relay_admin_actions WHERE report_community_id = $1)",
+    ),
+    (
+        "relay_admin_actions",
+        "FROM relay_admin_actions WHERE report_community_id = $1",
+    ),
+];
+
 /// Expected community-scoped tables purged by V1.
 ///
 /// Catalog inventory compares the live database against this exact set before
@@ -57,6 +78,8 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "api_tokens",
     "archived_identities",
+    "artifact_heads",
+    "artifact_revisions",
     "audit_log",
     "channel_members",
     "channels",
@@ -105,6 +128,8 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "push_leases",
     "relay_invites",
     "delivery_log",
+    "artifact_heads",
+    "artifact_revisions",
     "events",
     "parameterized_event_watermarks",
     "git_repo_names",
@@ -220,7 +245,7 @@ impl FromStr for DeletionStage {
 }
 
 /// Durable community deletion request.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DeletionRequest {
     /// Request identifier.
     pub id: Uuid,
@@ -233,8 +258,16 @@ pub struct DeletionRequest {
     pub stage: DeletionStage,
     /// Stage at which the current consecutive retry streak started.
     pub retry_stage: Option<DeletionStage>,
-    /// Operator identity that submitted the request.
+    /// Legacy display identity that submitted the request.
     pub requested_by: String,
+    /// Whether the request originated from an operator or operator-attested owner intent.
+    pub request_origin: DeletionRequestOrigin,
+    /// Current owner identity asserted by the mediating operator at admission.
+    pub owner_pubkey: Option<String>,
+    /// Deployment operator that attested to the owner intent.
+    pub mediating_operator_pubkey: Option<String>,
+    /// Owner-facing destructive-action acknowledgement contract version.
+    pub acknowledgement_version: Option<i32>,
     /// Optional request reason.
     pub reason: Option<String>,
     /// Frozen catalog manifest.
@@ -281,6 +314,49 @@ pub struct DeletionRequest {
     pub aborted_at: Option<DateTime<Utc>>,
     /// Terminal logical-deletion time.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Durable provenance class for a community deletion request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionRequestOrigin {
+    /// Request was submitted directly by a deployment operator.
+    Operator,
+    /// Request records operator-attested owner intent.
+    Owner,
+}
+
+impl FromStr for DeletionRequestOrigin {
+    type Err = DbError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "owner" => Ok(Self::Owner),
+            other => Err(DbError::InvalidData(format!(
+                "unknown community deletion request origin: {other}"
+            ))),
+        }
+    }
+}
+
+/// Result of atomically admitting operator-attested owner deletion intent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnerDeletionAdmission {
+    /// A new request was created or the stable request UUID converged to its row.
+    Accepted(Box<DeletionRequest>),
+    /// The exact host is absent or the asserted owner is no longer current.
+    NotFoundOrNotOwner,
+    /// The community exists and is current-owner controlled, but is not archived.
+    NotArchived,
+    /// The community is already quiescing, fenced, or deleted.
+    LifecycleConflict,
+    /// The asserted community UUID does not match the host's community.
+    CommunityIdMismatch,
+    /// The request UUID targets different intent, or another active request exists.
+    RequestConflict,
+    /// The owner acknowledgement contract is not supported.
+    UnsupportedAcknowledgementVersion,
 }
 
 /// Frozen PostgreSQL catalog inventory.
@@ -555,10 +631,36 @@ pub struct DeletionApproval {
     pub inventory_digest: String,
     /// Approving operator identity.
     pub approved_by: String,
+    /// Bounded provenance for the approval decision.
+    pub approval_origin: DeletionApprovalOrigin,
     /// Optional approval note.
     pub note: Option<String>,
     /// Approval timestamp.
     pub approved_at: DateTime<Utc>,
+}
+
+/// Durable provenance class for an inventory approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionApprovalOrigin {
+    /// A deployment operator explicitly approved the inventory.
+    Operator,
+    /// Privileged policy approved operator-attested owner intent automatically.
+    OwnerAutomatic,
+}
+
+impl FromStr for DeletionApprovalOrigin {
+    type Err = DbError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "owner_automatic" => Ok(Self::OwnerAutomatic),
+            other => Err(DbError::InvalidData(format!(
+                "unknown community deletion approval origin: {other}"
+            ))),
+        }
+    }
 }
 
 /// Monotonic lease token required by every execution mutation.
@@ -626,6 +728,28 @@ pub struct ServingLeaseStats {
 #[derive(Clone)]
 pub struct DeletionStore {
     pool: PgPool,
+}
+
+/// Client-side bound on one serving-write lease call, writer checkout included.
+///
+/// Serving paths hold session effect permits across these calls, so each must
+/// end by construction: `statement_timeout` bounds server execution but not a
+/// stalled connection or an unanswered response.
+pub const SERVING_WRITE_LEASE_SQL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Server-side bound, below the client bound so an ordinary slow statement ends
+/// as a normal error on a connection that stays reusable.
+const SERVING_WRITE_LEASE_STATEMENT_TIMEOUT_SQL: &str = "SET LOCAL statement_timeout = '1500ms'";
+
+/// Begin a lease transaction whose statements carry the lease statement bound.
+async fn serving_lease_transaction(
+    connection: &mut PgConnection,
+) -> Result<Transaction<'_, Postgres>> {
+    let mut tx = sqlx::Connection::begin(connection).await?;
+    sqlx::query(SERVING_WRITE_LEASE_STATEMENT_TIMEOUT_SQL)
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
 }
 
 impl Db {
@@ -697,6 +821,12 @@ impl DeletionStore {
     }
 
     /// Persist a request. Only active non-tombstone communities may be submitted.
+    ///
+    /// `requested_by` is recorded on a new row and is also the convergence key
+    /// when a `submitted` request already exists. Owner provenance pins an
+    /// owner-origin request's `requested_by` to its `owner_pubkey`, so taking
+    /// one over manually means passing that owner pubkey; the operator's own
+    /// pubkey conflicts with the existing request instead of converging.
     pub async fn submit(
         &self,
         community_host: &str,
@@ -742,6 +872,153 @@ impl DeletionStore {
         }
     }
 
+    /// Atomically admit an archived current owner's deletion intent.
+    ///
+    /// `request_id` is both the durable request id and the caller's stable
+    /// correlation/idempotency identity. Replays return the existing request at
+    /// its current stage. This operation only persists intent; it never
+    /// inventories, approves, quiesces, or executes deletion.
+    ///
+    /// The owner's consent arrives as the calling operator's assertion: the
+    /// operator authenticated the owner and collected the acknowledgement
+    /// upstream. This layer records that provenance and checks that
+    /// `owner_pubkey` is the community's sole current owner; it never verifies an
+    /// owner-signed attestation.
+    ///
+    /// `expected_community_id`, when present, must name the host's community.
+    /// It is checked only after sole-owner authority is proven (so non-owners
+    /// see the same not-found as an unknown host) and, on replay, only against
+    /// a stored request for the same host.
+    pub async fn admit_owner_request(
+        &self,
+        normalized_community_host: &str,
+        owner_pubkey: &str,
+        mediating_operator_pubkey: &str,
+        acknowledgement_version: i32,
+        request_id: Uuid,
+        expected_community_id: Option<Uuid>,
+    ) -> Result<OwnerDeletionAdmission> {
+        if acknowledgement_version != OWNER_DELETION_ACKNOWLEDGEMENT_VERSION {
+            return Ok(OwnerDeletionAdmission::UnsupportedAcknowledgementVersion);
+        }
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let mediating_operator_pubkey = mediating_operator_pubkey.to_ascii_lowercase();
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('buzz-owner-deletion-intent:' || $1::text, 0))",
+        )
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(row) = sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1")
+            .bind(request_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            let existing = row_to_request(row)?;
+            if existing.community_host == normalized_community_host
+                && expected_community_id.is_some_and(|id| id != *existing.community_id.as_uuid())
+            {
+                tx.rollback().await?;
+                return Ok(OwnerDeletionAdmission::CommunityIdMismatch);
+            }
+            let converges = existing.community_host == normalized_community_host
+                && existing.request_origin == DeletionRequestOrigin::Owner
+                && existing.owner_pubkey.as_deref() == Some(owner_pubkey.as_str())
+                && existing.acknowledgement_version == Some(acknowledgement_version);
+            tx.rollback().await?;
+            return Ok(if converges {
+                OwnerDeletionAdmission::Accepted(Box::new(existing))
+            } else {
+                OwnerDeletionAdmission::RequestConflict
+            });
+        }
+
+        let target = sqlx::query(
+            "SELECT id, host, archived_at, deletion_state, deleted_at \
+             FROM communities WHERE host = $1 FOR UPDATE",
+        )
+        .bind(normalized_community_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(target) = target else {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::NotFoundOrNotOwner);
+        };
+        let community_id: Uuid = target.try_get("id")?;
+        let canonical_host: String = target.try_get("host")?;
+        let deletion_state: String = target.try_get("deletion_state")?;
+        let deleted_at: Option<DateTime<Utc>> = target.try_get("deleted_at")?;
+        if deletion_state != "active" || deleted_at.is_some() {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::LifecycleConflict);
+        }
+
+        let current_owners: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM relay_members \
+             WHERE community_id = $1 AND role = 'owner' ORDER BY pubkey FOR UPDATE",
+        )
+        .bind(community_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if current_owners.len() != 1 || current_owners.first() != Some(&owner_pubkey) {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::NotFoundOrNotOwner);
+        }
+        // Only after sole-owner authority is proven, so non-owners still see the
+        // same 404 as an unknown host whatever `community_id` they assert.
+        if expected_community_id.is_some_and(|id| id != community_id) {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::CommunityIdMismatch);
+        }
+        if target
+            .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
+            .is_none()
+        {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::NotArchived);
+        }
+        let active_request_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+             WHERE community_id = $1 AND stage <> 'aborted')",
+        )
+        .bind(community_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active_request_exists {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::RequestConflict);
+        }
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO community_deletion_requests (
+                id, community_id, community_host, requested_by, request_origin,
+                owner_pubkey, mediating_operator_pubkey, acknowledgement_version
+            ) VALUES ($1, $2, $3, $4, 'owner', $4, $5, $6)
+            ON CONFLICT (community_id) WHERE stage <> 'aborted' DO NOTHING
+            RETURNING *
+            "#,
+        )
+        .bind(request_id)
+        .bind(community_id)
+        .bind(canonical_host)
+        .bind(owner_pubkey)
+        .bind(mediating_operator_pubkey)
+        .bind(acknowledgement_version)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(OwnerDeletionAdmission::RequestConflict);
+        };
+        let request = row_to_request(row)?;
+        tx.commit().await?;
+        Ok(OwnerDeletionAdmission::Accepted(Box::new(request)))
+    }
+
     /// List requests newest first with a hard bound.
     pub async fn list(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
         let rows = sqlx::query(
@@ -767,7 +1044,7 @@ impl DeletionStore {
     pub async fn inspect(&self, request_id: Uuid) -> Result<DeletionInspection> {
         let request = self.get(request_id).await?;
         let approval_row = sqlx::query(
-            "SELECT inventory_digest, approved_by, note, approved_at \
+            "SELECT inventory_digest, approved_by, approval_origin, note, approved_at \
              FROM community_deletion_approvals WHERE request_id = $1",
         )
         .bind(request_id)
@@ -778,6 +1055,7 @@ impl DeletionStore {
                 Ok::<DeletionApproval, DbError>(DeletionApproval {
                     inventory_digest: hex::encode(row.try_get::<Vec<u8>, _>("inventory_digest")?),
                     approved_by: row.try_get("approved_by")?,
+                    approval_origin: row.try_get::<String, _>("approval_origin")?.parse()?,
                     note: row.try_get("note")?,
                     approved_at: row.try_get("approved_at")?,
                 })
@@ -962,6 +1240,14 @@ impl DeletionStore {
                 .await?;
             row_counts.insert(table.clone(), count);
         }
+        for (table, rows) in RELAY_ADMIN_TABLES {
+            let sql = format!("SELECT count(*)::BIGINT {rows}");
+            let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
+                .bind(community.as_uuid())
+                .fetch_one(&self.pool)
+                .await?;
+            row_counts.insert((*table).to_owned(), count);
+        }
         Ok(SchemaManifest {
             scoped_tables: live_tables.into_iter().collect(),
             row_counts,
@@ -995,7 +1281,7 @@ impl DeletionStore {
         .bind(schema)
         .bind(storage)
         .bind(frozen)
-        .bind(digest)
+        .bind(&digest)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
@@ -1037,8 +1323,8 @@ impl DeletionStore {
         }
         sqlx::query(
             "INSERT INTO community_deletion_approvals \
-             (request_id, community_id, inventory_digest, approved_by, note) \
-             VALUES ($1, $2, $3, $4, $5)",
+             (request_id, community_id, inventory_digest, approved_by, approval_origin, note) \
+             VALUES ($1, $2, $3, $4, 'operator', $5)",
         )
         .bind(request_id)
         .bind(community_id)
@@ -1082,6 +1368,255 @@ impl DeletionStore {
         lease_duration: Duration,
     ) -> Result<Option<ClaimedDeletion>> {
         self.claim(None, owner, lease_duration).await
+    }
+
+    /// Claim the oldest due operator-attested owner submission for preparation.
+    pub async fn claim_next_owner_submission(
+        &self,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedDeletion>> {
+        self.claim_owner_submission(None, owner, lease_duration)
+            .await
+    }
+
+    /// Claim one due operator-attested owner submission by request id.
+    pub async fn claim_specific_owner_submission(
+        &self,
+        request_id: Uuid,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedDeletion>> {
+        self.claim_owner_submission(Some(request_id), owner, lease_duration)
+            .await
+    }
+
+    async fn claim_owner_submission(
+        &self,
+        request_id: Option<Uuid>,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<ClaimedDeletion>> {
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"WITH candidate AS (
+                SELECT id FROM community_deletion_requests
+                WHERE ($1::uuid IS NULL OR id = $1)
+                  AND request_origin = 'owner' AND acknowledgement_version = $4
+                  AND stage = 'submitted'
+                  AND blocked_at IS NULL AND next_attempt_at <= now()
+                  AND (lease_until IS NULL OR lease_until < now())
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED LIMIT 1
+            )
+            UPDATE community_deletion_requests request
+            SET lease_owner = $2, lease_generation = lease_generation + 1,
+                lease_until = now() + make_interval(secs => $3),
+                attempts = attempts + 1, updated_at = now()
+            FROM candidate WHERE request.id = candidate.id
+            RETURNING request.*"#,
+        )
+        .bind(request_id)
+        .bind(owner)
+        .bind(lease_seconds)
+        .bind(OWNER_DELETION_ACKNOWLEDGEMENT_VERSION)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let request = row_to_request(row)?;
+        let lease = LeaseToken {
+            request_id: request.id,
+            owner: owner.to_owned(),
+            generation: request.lease_generation,
+            community_id: request.community_id,
+            fence_generation: request.fence_generation,
+        };
+        Ok(Some(ClaimedDeletion { request, lease }))
+    }
+
+    /// Renew a live owner-submission preparation lease.
+    pub async fn heartbeat_owner_submission(
+        &self,
+        token: &LeaseToken,
+        executor_mode: &str,
+        lease_duration: Duration,
+        draining: bool,
+    ) -> Result<()> {
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        verify_owner_submission_lease(&mut tx, token).await?;
+        let affected = sqlx::query(
+            "UPDATE community_deletion_requests SET lease_until = \
+             now() + make_interval(secs => $4), updated_at = now() \
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .bind(lease_seconds)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(stale_lease_error(token));
+        }
+        upsert_executor_heartbeat(&mut tx, token, executor_mode, draining).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically freeze inventory and approve operator-attested owner intent.
+    pub async fn complete_owner_preparation(
+        &self,
+        token: &LeaseToken,
+        inventory: &FrozenInventory,
+    ) -> Result<DeletionRequest> {
+        validate_storage_manifest(&inventory.storage)?;
+        let digest = inventory.digest()?;
+        let schema = serde_json::to_value(&inventory.schema)?;
+        let storage = serde_json::to_value(&inventory.storage)?;
+        let frozen = serde_json::to_value(inventory)?;
+        let mut tx = self.pool.begin().await?;
+
+        lock_community_deletion_shared(&mut tx, token.community_id).await?;
+        let community = sqlx::query(
+            "SELECT archived_at, deletion_state, deleted_at FROM communities \
+             WHERE id = $1 FOR UPDATE",
+        )
+        .bind(token.community_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::DeletionSafety(format!(
+                "owner deletion {} community is missing before automatic approval",
+                token.request_id
+            ))
+        })?;
+        let current_owners: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM relay_members \
+             WHERE community_id = $1 AND role = 'owner' ORDER BY pubkey FOR UPDATE",
+        )
+        .bind(token.community_id.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+        let request_row =
+            sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
+                .bind(token.request_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| stale_lease_error(token))?;
+        let request = row_to_request(request_row)?;
+        let lease_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3 \
+               AND lease_until >= now())",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .fetch_one(&mut *tx)
+        .await?;
+        let lease_matches = lease_live
+            && request.community_id == token.community_id
+            && request.request_origin == DeletionRequestOrigin::Owner
+            && request.acknowledgement_version == Some(OWNER_DELETION_ACKNOWLEDGEMENT_VERSION)
+            && request.lease_owner.as_deref() == Some(token.owner.as_str())
+            && request.lease_generation == token.generation
+            && request.blocked_reason.is_none();
+        if !lease_matches {
+            return Err(stale_lease_error(token));
+        }
+        let archived_at: Option<DateTime<Utc>> = community.try_get("archived_at")?;
+        let deletion_state: String = community.try_get("deletion_state")?;
+        let deleted_at: Option<DateTime<Utc>> = community.try_get("deleted_at")?;
+        let owner_authority_matches = request.owner_pubkey.as_ref().is_some_and(|owner| {
+            current_owners.len() == 1 && current_owners.first() == Some(owner)
+        });
+        if archived_at.is_none()
+            || deletion_state != "active"
+            || deleted_at.is_some()
+            || !owner_authority_matches
+        {
+            return Err(DbError::DeletionSafety(format!(
+                "owner deletion {} community archive, lifecycle, or sole-owner authority drifted",
+                token.request_id
+            )));
+        }
+        if request.stage == DeletionStage::Approved {
+            let approval: Option<(Vec<u8>, String, String)> = sqlx::query_as(
+                "SELECT inventory_digest, approved_by, approval_origin \
+                 FROM community_deletion_approvals WHERE request_id = $1",
+            )
+            .bind(token.request_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let expected_operator = request.mediating_operator_pubkey.as_deref();
+            let digest_hex = hex::encode(&digest);
+            let converged = request.inventory_digest.as_deref() == Some(digest_hex.as_str())
+                && approval
+                    .as_ref()
+                    .is_some_and(|(approved_digest, approved_by, origin)| {
+                        approved_digest.as_slice() == digest
+                            && Some(approved_by.as_str()) == expected_operator
+                            && origin == "owner_automatic"
+                    });
+            if converged {
+                tx.commit().await?;
+                return Ok(request);
+            }
+            return Err(DbError::DeletionSafety(format!(
+                "deletion {} automatic preparation does not match frozen approval evidence",
+                token.request_id
+            )));
+        }
+        if request.stage != DeletionStage::Submitted {
+            return Err(stale_lease_error(token));
+        }
+        let mediating_operator = request.mediating_operator_pubkey.clone().ok_or_else(|| {
+            DbError::DeletionSafety(format!(
+                "owner deletion {} is missing mediating operator provenance",
+                token.request_id
+            ))
+        })?;
+        sqlx::query(
+            "UPDATE community_deletion_requests SET stage = 'inventoried', \
+             schema_manifest = $2, storage_manifest = $3, inventory_manifest = $4, \
+             inventory_digest = $5, inventory_frozen_at = now(), updated_at = now() \
+             WHERE id = $1",
+        )
+        .bind(token.request_id)
+        .bind(schema)
+        .bind(storage)
+        .bind(frozen)
+        .bind(&digest)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO community_deletion_approvals \
+             (request_id, community_id, inventory_digest, approved_by, approval_origin) \
+             VALUES ($1, $2, $3, $4, 'owner_automatic')",
+        )
+        .bind(token.request_id)
+        .bind(token.community_id.as_uuid())
+        .bind(digest)
+        .bind(mediating_operator)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query(
+            "UPDATE community_deletion_requests SET stage = 'approved', \
+             retry_count = 0, retry_stage = NULL, next_attempt_at = now(), \
+             last_error = NULL, last_error_at = NULL, updated_at = now() \
+             WHERE id = $1 AND stage = 'inventoried' RETURNING *",
+        )
+        .bind(token.request_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row_to_request(row)
     }
 
     async fn claim(
@@ -1214,19 +1749,7 @@ impl DeletionStore {
         if affected != 1 {
             return Err(stale_lease_error(token));
         }
-        sqlx::query(
-            "INSERT INTO community_deletion_executor_heartbeats \
-             (executor_id, mode, request_id, draining) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (executor_id) DO UPDATE SET mode = EXCLUDED.mode, \
-                 request_id = EXCLUDED.request_id, heartbeat_at = now(), \
-                 draining = EXCLUDED.draining, stopped_at = NULL",
-        )
-        .bind(&token.owner)
-        .bind(executor_mode)
-        .bind(token.request_id)
-        .bind(draining)
-        .execute(&mut *tx)
-        .await?;
+        upsert_executor_heartbeat(&mut tx, token, executor_mode, draining).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1284,6 +1807,7 @@ impl DeletionStore {
         .bind(token.community_id.as_uuid())
         .fetch_one(&mut *tx)
         .await?;
+        verify_lease(&mut tx, token, DeletionStage::Approved).await?;
         sqlx::query(
             "UPDATE community_deletion_requests SET pre_quiesce_archived_at = $2, \
                     quiescing_started_at = now(), updated_at = now() \
@@ -1752,6 +2276,25 @@ impl DeletionStore {
         }
 
         let mut deleted = BTreeMap::new();
+        // Staff enforcement rows are operator-global, so the scoped loop never
+        // sees them. They must go before moderation_reports (FK order).
+        for (table, rows) in RELAY_ADMIN_TABLES {
+            let sql = format!("DELETE {rows}");
+            let affected = sqlx::query(AssertSqlSafe(sql))
+                .bind(token.community_id.as_uuid())
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            deleted.insert((*table).to_owned(), affected);
+            checkpoint_completed_tx(
+                &mut tx,
+                token,
+                DeletionStage::BindingsRemoved,
+                &format!("purge:{table}"),
+                serde_json::json!({"rows": affected}),
+            )
+            .await?;
+        }
         // The order is child-before-parent/FK-safe, not alphabetical. Cascades
         // can make later units observe zero rows; each scoped WHERE stays idempotent.
         for table in PURGE_SCOPED_TABLES {
@@ -1857,9 +2400,14 @@ impl DeletionStore {
                 token.community_id
             )));
         }
-        for table in EXPECTED_SCOPED_TABLES {
-            let sql =
-                format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE community_id = $1 LIMIT 1)");
+        let scoped = EXPECTED_SCOPED_TABLES
+            .iter()
+            .map(|table| (*table, format!("FROM {table} WHERE community_id = $1")));
+        let relay_admin = RELAY_ADMIN_TABLES
+            .iter()
+            .map(|(table, rows)| (*table, (*rows).to_owned()));
+        for (table, rows) in scoped.chain(relay_admin) {
+            let sql = format!("SELECT EXISTS(SELECT 1 {rows} LIMIT 1)");
             let remains: bool = sqlx::query_scalar(AssertSqlSafe(sql))
                 .bind(token.community_id.as_uuid())
                 .fetch_one(&mut *tx)
@@ -2010,7 +2558,92 @@ impl DeletionStore {
         Ok(())
     }
 
-    /// Terminally abort an approved or fenced request before object deletion begins.
+    /// Persist a retryable owner-inventory failure and release its preparation lease.
+    pub async fn record_owner_preparation_retry(
+        &self,
+        token: &LeaseToken,
+        unit_key: &str,
+        error: &str,
+        retry_after: Duration,
+    ) -> Result<()> {
+        let bounded = bound_text(error, 4096);
+        let retry_seconds = i64::try_from(retry_after.as_secs()).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        verify_owner_submission_lease(&mut tx, token).await?;
+        let (retry_count, retry_stage): (i32, Option<String>) = sqlx::query_as(
+            "SELECT retry_count, retry_stage FROM community_deletion_requests \
+             WHERE id = $1 FOR UPDATE",
+        )
+        .bind(token.request_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let consecutive_retries = if retry_stage.as_deref() == Some("submitted") {
+            retry_count.saturating_add(1)
+        } else {
+            1
+        };
+        let exhausted = consecutive_retries >= 8;
+        checkpoint_failed_tx(&mut tx, token, DeletionStage::Submitted, unit_key, &bounded).await?;
+        sqlx::query(
+            "UPDATE community_deletion_requests SET retry_count = $5, \
+             retry_stage = 'submitted', last_error = $4, last_error_at = now(), \
+             next_attempt_at = CASE WHEN $6 THEN next_attempt_at \
+                                    ELSE now() + make_interval(secs => $7) END, \
+             blocked_at = CASE WHEN $6 THEN now() ELSE blocked_at END, \
+             blocked_reason = CASE WHEN $6 THEN $4 ELSE blocked_reason END, \
+             lease_owner = NULL, lease_until = NULL, updated_at = now() \
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .bind(&bounded)
+        .bind(consecutive_retries)
+        .bind(exhausted)
+        .bind(retry_seconds)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Permanently block unsafe owner inventory preparation and release its lease.
+    pub async fn block_owner_preparation(
+        &self,
+        token: &LeaseToken,
+        unit_key: &str,
+        error: &str,
+    ) -> Result<()> {
+        let bounded = bound_text(error, 4096);
+        let mut tx = self.pool.begin().await?;
+        verify_owner_submission_lease(&mut tx, token).await?;
+        checkpoint_failed_tx(&mut tx, token, DeletionStage::Submitted, unit_key, &bounded).await?;
+        sqlx::query(
+            "UPDATE community_deletion_requests SET blocked_at = now(), blocked_reason = $4, \
+             last_error = $4, last_error_at = now(), lease_owner = NULL, lease_until = NULL, \
+             updated_at = now() WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3",
+        )
+        .bind(token.request_id)
+        .bind(&token.owner)
+        .bind(token.generation)
+        .bind(&bounded)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Terminally abort a request at the reversible pre-destruction boundary.
+    ///
+    /// `submitted`, `inventoried`, `approved`, and `fenced` are reversible:
+    /// nothing tenant-visible has been destroyed, so abort releases the durable
+    /// request fence over owner listing, unarchive, and owner rotation. Owner
+    /// admission deliberately has no owner-facing cancellation, so this
+    /// privileged path is the only recovery when preparation cannot continue.
+    /// Abort reverses deletion intent, not the owner's archive decision: the
+    /// community stays archived and the owner restores it explicitly.
+    /// Stages from `drained` onward stay closed because tenant-state destruction
+    /// may have begun.
     pub async fn abort(
         &self,
         request_id: Uuid,
@@ -2033,9 +2666,16 @@ impl DeletionStore {
         .await?
         .map(CommunityId::from_uuid)
         .ok_or_else(|| DbError::NotFound(format!("community deletion {request_id}")))?;
-        // Every lifecycle transition takes the community lock before any row lock.
-        // Inverting this order lets abort and the executor deadlock each other.
+        // Every lifecycle transition takes the community advisory lock before any
+        // row lock, then the community row before the request row. Inverting
+        // either order lets abort and the executor deadlock each other.
         lock_community_deletion(&mut tx, community_id).await?;
+        let (old_generation, current_archived_at): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT deletion_fence_generation, archived_at FROM communities WHERE id = $1 FOR UPDATE",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_one(&mut *tx)
+        .await?;
         let row = sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
             .bind(request_id)
             .fetch_optional(&mut *tx)
@@ -2049,7 +2689,10 @@ impl DeletionStore {
         }
         if !matches!(
             request.stage,
-            DeletionStage::Approved | DeletionStage::Fenced
+            DeletionStage::Submitted
+                | DeletionStage::Inventoried
+                | DeletionStage::Approved
+                | DeletionStage::Fenced
         ) {
             return Err(DbError::DeletionSafety(format!(
                 "deletion {request_id} at stage {} cannot be aborted",
@@ -2068,12 +2711,6 @@ impl DeletionStore {
                 "deletion {request_id} cannot abort while {active_writes} serving write lease(s) remain active"
             )));
         }
-        let (old_generation, current_archived_at): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT deletion_fence_generation, archived_at FROM communities WHERE id = $1 FOR UPDATE",
-        )
-        .bind(request.community_id.as_uuid())
-        .fetch_one(&mut *tx)
-        .await?;
         let new_generation = old_generation.checked_add(1).ok_or_else(|| {
             DbError::DeletionSafety("community deletion fence generation overflow".to_string())
         })?;
@@ -2388,6 +3025,37 @@ impl DeletionStore {
         Ok(())
     }
 
+    /// Run one serving-lease SQL operation within `budget`, checkout included.
+    ///
+    /// On timeout the connection is detached and closed rather than returned:
+    /// its protocol state is unknown, so no later writer may inherit it. A
+    /// commit cut off this way may still land; the row then self-expires at
+    /// `lease_until` and grants nothing, as after a crash mid-operation.
+    async fn bounded_serving_lease_sql<T>(
+        &self,
+        budget: Duration,
+        operation: impl AsyncFnOnce(&mut PgConnection) -> Result<T>,
+    ) -> Result<T> {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut connection = crate::observability::acquire_writer_until(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+            deadline,
+        )
+        .await?;
+        match tokio::time::timeout_at(deadline, operation(&mut connection)).await {
+            Ok(result) => result,
+            Err(_) => {
+                drop(connection.detach());
+                Err(sqlx::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "serving write lease SQL exceeded its deadline",
+                ))
+                .into())
+            }
+        }
+    }
+
     /// Acquire a durable, expiring lease for an external serving side effect.
     ///
     /// The short transaction shares the same advisory lock as the destructive
@@ -2401,59 +3069,57 @@ impl DeletionStore {
         lease_duration: Duration,
     ) -> Result<ServingWriteLease> {
         let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
-        let connection = crate::observability::acquire_writer(
-            &self.pool,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        // The assertion owns both the shared ordering lock and the supported
-        // READ COMMITTED check. The lease table is trigger-excluded, so this
-        // explicit admission is its database-enforced write fence.
-        if let Err(error) = sqlx::query("SELECT assert_community_write_allowed($1)")
-            .bind(community.as_uuid())
-            .execute(&mut *tx)
-            .await
-        {
-            if error.as_database_error().is_some_and(|database_error| {
-                database_error.code().as_deref() == Some("55000")
-                    && database_error.message().starts_with("community write")
-            }) {
-                return Err(DbError::AccessDenied(format!(
-                    "community {community} is write-fenced or missing"
-                )));
+        self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
+            let mut tx = serving_lease_transaction(connection).await?;
+            // The assertion owns both the shared ordering lock and the supported
+            // READ COMMITTED check. The lease table is trigger-excluded, so this
+            // explicit admission is its database-enforced write fence.
+            if let Err(error) = sqlx::query("SELECT assert_community_write_allowed($1)")
+                .bind(community.as_uuid())
+                .execute(&mut *tx)
+                .await
+            {
+                if error.as_database_error().is_some_and(|database_error| {
+                    database_error.code().as_deref() == Some("55000")
+                        && database_error.message().starts_with("community write")
+                }) {
+                    return Err(DbError::AccessDenied(format!(
+                        "community {community} is write-fenced or missing"
+                    )));
+                }
+                return Err(error.into());
             }
-            return Err(error.into());
-        }
-        let row = sqlx::query(
-            "INSERT INTO community_serving_write_leases \
+            let row = sqlx::query(
+                "INSERT INTO community_serving_write_leases \
              (community_id, operation, owner, fence_generation, lease_until) \
              SELECT id, $2, $3, deletion_fence_generation, \
                     now() + make_interval(secs => $4) \
              FROM communities WHERE id = $1 AND deletion_state = 'active' \
                AND deleted_at IS NULL \
              RETURNING id, generation, fence_generation, lease_until",
-        )
-        .bind(community.as_uuid())
-        .bind(operation)
-        .bind(owner)
-        .bind(lease_seconds)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| {
-            DbError::AccessDenied(format!("community {community} is write-fenced or missing"))
-        })?;
-        let lease = ServingWriteLease {
-            id: row.try_get("id")?,
-            community_id: community,
-            operation: operation.to_owned(),
-            owner: owner.to_owned(),
-            generation: row.try_get("generation")?,
-            fence_generation: row.try_get("fence_generation")?,
-            lease_until: row.try_get("lease_until")?,
-        };
-        tx.commit().await?;
-        Ok(lease)
+            )
+            .bind(community.as_uuid())
+            .bind(operation)
+            .bind(owner)
+            .bind(lease_seconds)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                DbError::AccessDenied(format!("community {community} is write-fenced or missing"))
+            })?;
+            let lease = ServingWriteLease {
+                id: row.try_get("id")?,
+                community_id: community,
+                operation: operation.to_owned(),
+                owner: owner.to_owned(),
+                generation: row.try_get("generation")?,
+                fence_generation: row.try_get("fence_generation")?,
+                lease_until: row.try_get("lease_until")?,
+            };
+            tx.commit().await?;
+            Ok(lease)
+        })
+        .await
     }
 
     /// Renew an already-admitted external side-effect lease while the community
@@ -2508,25 +3174,25 @@ impl DeletionStore {
 
     /// Release a serving side-effect lease. A stale release is harmless.
     pub async fn release_serving_write_lease(&self, lease: &ServingWriteLease) -> Result<bool> {
-        let mut connection = crate::observability::acquire_writer(
-            &self.pool,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        let deleted = sqlx::query(
-            "DELETE FROM community_serving_write_leases \
+        self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
+            let mut tx = serving_lease_transaction(connection).await?;
+            let deleted = sqlx::query(
+                "DELETE FROM community_serving_write_leases \
              WHERE id = $1 AND community_id = $2 AND owner = $3 AND generation = $4 \
                AND fence_generation = $5",
-        )
-        .bind(lease.id)
-        .bind(lease.community_id.as_uuid())
-        .bind(&lease.owner)
-        .bind(lease.generation)
-        .bind(lease.fence_generation)
-        .execute(&mut *connection)
-        .await?
-        .rows_affected();
-        Ok(deleted == 1)
+            )
+            .bind(lease.id)
+            .bind(lease.community_id.as_uuid())
+            .bind(&lease.owner)
+            .bind(lease.generation)
+            .bind(lease.fence_generation)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+            Ok(deleted == 1)
+        })
+        .await
     }
 
     /// Check that an external side-effect lease remains current for finalization.
@@ -2535,15 +3201,11 @@ impl DeletionStore {
     /// work remains blocked, preserving an accurate drain without abandoning an
     /// admitted remote effect.
     pub async fn verify_serving_write_lease(&self, lease: &ServingWriteLease) -> Result<()> {
-        let connection = crate::observability::acquire_writer(
-            &self.pool,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        lock_community_deletion_shared(&mut tx, lease.community_id).await?;
-        let valid: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases lease \
+        self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
+            let mut tx = serving_lease_transaction(connection).await?;
+            lock_community_deletion_shared(&mut tx, lease.community_id).await?;
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases lease \
              JOIN communities community ON community.id = lease.community_id \
              WHERE lease.id = $1 AND lease.community_id = $2 AND lease.owner = $3 \
                AND lease.generation = $4 AND lease.fence_generation = $5 \
@@ -2551,23 +3213,25 @@ impl DeletionStore {
                AND community.deleted_at IS NULL \
                AND community.deletion_state IN ('active', 'quiescing') \
                AND community.deletion_fence_generation = lease.fence_generation)",
-        )
-        .bind(lease.id)
-        .bind(lease.community_id.as_uuid())
-        .bind(&lease.owner)
-        .bind(lease.generation)
-        .bind(lease.fence_generation)
-        .fetch_one(&mut *tx)
-        .await?;
-        if valid {
-            tx.commit().await?;
-            Ok(())
-        } else {
-            Err(DbError::AccessDenied(format!(
-                "stale serving write lease {}",
-                lease.id
-            )))
-        }
+            )
+            .bind(lease.id)
+            .bind(lease.community_id.as_uuid())
+            .bind(&lease.owner)
+            .bind(lease.generation)
+            .bind(lease.fence_generation)
+            .fetch_one(&mut *tx)
+            .await?;
+            if valid {
+                tx.commit().await?;
+                Ok(())
+            } else {
+                Err(DbError::AccessDenied(format!(
+                    "stale serving write lease {}",
+                    lease.id
+                )))
+            }
+        })
+        .await
     }
 
     /// Delete expired serving leases in a bounded batch.
@@ -2674,7 +3338,7 @@ async fn lock_community_deletion(
     Ok(())
 }
 
-async fn lock_community_deletion_shared(
+pub(crate) async fn lock_community_deletion_shared(
     tx: &mut Transaction<'_, Postgres>,
     community: CommunityId,
 ) -> Result<()> {
@@ -2916,6 +3580,55 @@ fn validate_manifest_key_chunks(
     Ok(())
 }
 
+async fn upsert_executor_heartbeat(
+    tx: &mut Transaction<'_, Postgres>,
+    token: &LeaseToken,
+    executor_mode: &str,
+    draining: bool,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO community_deletion_executor_heartbeats \
+         (executor_id, mode, request_id, draining) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (executor_id) DO UPDATE SET mode = EXCLUDED.mode, \
+             request_id = EXCLUDED.request_id, heartbeat_at = now(), \
+             draining = EXCLUDED.draining, stopped_at = NULL",
+    )
+    .bind(&token.owner)
+    .bind(executor_mode)
+    .bind(token.request_id)
+    .bind(draining)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn verify_owner_submission_lease(
+    tx: &mut Transaction<'_, Postgres>,
+    token: &LeaseToken,
+) -> Result<()> {
+    let valid = sqlx::query_scalar::<_, Uuid>(
+        "SELECT request.id FROM community_deletion_requests request \
+         WHERE request.id = $1 AND request.community_id = $4 \
+           AND request.request_origin = 'owner' AND request.stage = 'submitted' \
+           AND request.acknowledgement_version = $5 \
+           AND request.lease_owner = $2 AND request.lease_generation = $3 \
+           AND request.lease_until >= now() AND request.blocked_at IS NULL \
+         FOR UPDATE",
+    )
+    .bind(token.request_id)
+    .bind(&token.owner)
+    .bind(token.generation)
+    .bind(token.community_id.as_uuid())
+    .bind(OWNER_DELETION_ACKNOWLEDGEMENT_VERSION)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if valid.is_some() {
+        Ok(())
+    } else {
+        Err(stale_lease_error(token))
+    }
+}
+
 async fn verify_lease(
     tx: &mut Transaction<'_, Postgres>,
     token: &LeaseToken,
@@ -3112,6 +3825,10 @@ fn row_to_request(row: sqlx::postgres::PgRow) -> Result<DeletionRequest> {
             .map(|stage| stage.parse())
             .transpose()?,
         requested_by: row.try_get("requested_by")?,
+        request_origin: row.try_get::<String, _>("request_origin")?.parse()?,
+        owner_pubkey: row.try_get("owner_pubkey")?,
+        mediating_operator_pubkey: row.try_get("mediating_operator_pubkey")?,
+        acknowledgement_version: row.try_get("acknowledgement_version")?,
         reason: row.try_get("reason")?,
         schema_manifest: row.try_get("schema_manifest")?,
         storage_manifest: row.try_get("storage_manifest")?,
@@ -3413,10 +4130,216 @@ mod tests {
     }
 }
 
+/// Shared `community_deletion_owner_provenance` contract cases.
+///
+/// The same table is asserted against the migration-upgrade schema
+/// (`runtime::migration::postgres_tests`) and the desired-state bootstrap
+/// schema (`postgres_tests` below), so the two schema sources cannot drift
+/// into different owner-provenance guarantees.
+#[cfg(test)]
+pub(crate) mod owner_provenance_contract {
+    use sqlx::{PgPool, Row};
+    use uuid::Uuid;
+
+    /// Constraint that must reject every malformed owner-provenance row.
+    pub(crate) const CONSTRAINT: &str = "community_deletion_owner_provenance";
+
+    const VALID_OWNER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const VALID_OPERATOR: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// One rejected owner-origin row: `(case name, owner, mediator, ack, requested_by)`.
+    type Case = (
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<i32>,
+        &'static str,
+    );
+
+    /// Every owner-origin row the constraint must refuse.
+    pub(crate) fn rejected_cases() -> Vec<Case> {
+        vec![
+            (
+                "missing owner_pubkey",
+                None,
+                Some(VALID_OPERATOR),
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "missing mediating_operator_pubkey",
+                Some(VALID_OWNER),
+                None,
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "missing acknowledgement_version",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                None,
+                VALID_OWNER,
+            ),
+            (
+                "owner_pubkey too short",
+                Some("abc"),
+                Some(VALID_OPERATOR),
+                Some(1),
+                "abc",
+            ),
+            (
+                "owner_pubkey uppercase hex",
+                Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                Some(VALID_OPERATOR),
+                Some(1),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+            (
+                "owner_pubkey non-hex",
+                Some("zzzz111111111111111111111111111111111111111111111111111111111111"),
+                Some(VALID_OPERATOR),
+                Some(1),
+                "zzzz111111111111111111111111111111111111111111111111111111111111",
+            ),
+            (
+                "mediating_operator_pubkey too short",
+                Some(VALID_OWNER),
+                Some("abc"),
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "mediating_operator_pubkey uppercase hex",
+                Some(VALID_OWNER),
+                Some("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                Some(1),
+                VALID_OWNER,
+            ),
+            (
+                "acknowledgement_version zero",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                Some(0),
+                VALID_OWNER,
+            ),
+            (
+                "acknowledgement_version negative",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                Some(-1),
+                VALID_OWNER,
+            ),
+            (
+                "requested_by is not the owner",
+                Some(VALID_OWNER),
+                Some(VALID_OPERATOR),
+                Some(1),
+                VALID_OPERATOR,
+            ),
+        ]
+    }
+
+    async fn seed_community(pool: &PgPool) -> Uuid {
+        let host = format!("owner-provenance-{}.example", Uuid::new_v4().simple());
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO communities (host) VALUES ($1) RETURNING id")
+            .bind(&host)
+            .fetch_one(pool)
+            .await
+            .expect("seed owner-provenance community")
+    }
+
+    async fn insert_owner_row(
+        pool: &PgPool,
+        owner: Option<&str>,
+        mediator: Option<&str>,
+        acknowledgement: Option<i32>,
+        requested_by: &str,
+    ) -> Result<(), sqlx::Error> {
+        let community_id = seed_community(pool).await;
+        let host: String = sqlx::query("SELECT host FROM communities WHERE id = $1")
+            .bind(community_id)
+            .fetch_one(pool)
+            .await
+            .expect("seeded host")
+            .try_get("host")
+            .expect("host column");
+        sqlx::query(
+            "INSERT INTO community_deletion_requests \
+             (id, community_id, community_host, requested_by, request_origin, \
+              owner_pubkey, mediating_operator_pubkey, acknowledgement_version) \
+             VALUES ($1, $2, $3, $4, 'owner', $5, $6, $7)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(community_id)
+        .bind(host)
+        .bind(requested_by)
+        .bind(owner)
+        .bind(mediator)
+        .bind(acknowledgement)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    }
+
+    /// Assert the live schema refuses every malformed owner row and still
+    /// admits a well-formed one.
+    pub(crate) async fn assert_contract(pool: &PgPool) {
+        for (name, owner, mediator, acknowledgement, requested_by) in rejected_cases() {
+            let error = insert_owner_row(pool, owner, mediator, acknowledgement, requested_by)
+                .await
+                .expect_err(&format!("owner-provenance case must be rejected: {name}"));
+            let constraint = error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint);
+            assert_eq!(
+                constraint,
+                Some(CONSTRAINT),
+                "case {name:?} must fail {CONSTRAINT}, got: {error}"
+            );
+        }
+
+        // Falsifiability: the constraint must still admit well-formed intent.
+        insert_owner_row(
+            pool,
+            Some(VALID_OWNER),
+            Some(VALID_OPERATOR),
+            Some(1),
+            VALID_OWNER,
+        )
+        .await
+        .expect("well-formed owner provenance must be accepted");
+
+        // The operator branch stays exclusive of owner columns.
+        let community_id = seed_community(pool).await;
+        let operator_with_owner_columns = sqlx::query(
+            "INSERT INTO community_deletion_requests \
+             (id, community_id, community_host, requested_by, request_origin, owner_pubkey) \
+             VALUES ($1, $2, 'operator.example', 'operator', 'operator', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(community_id)
+        .bind(VALID_OWNER)
+        .execute(pool)
+        .await;
+        assert_eq!(
+            operator_with_owner_columns
+                .expect_err("operator-origin rows must not carry owner provenance")
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some(CONSTRAINT)
+        );
+    }
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
-    use crate::{CreateCommunityWithOwnerResult, Db, DbConfig};
+    use crate::{
+        relay_members::{ProvisionOwnerResult, TransferResult},
+        CreateCommunityWithOwnerResult, Db, DbConfig, UnarchiveCommunityResult,
+    };
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr;
 
     async fn store() -> (Db, DeletionStore) {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -3485,6 +4408,1808 @@ mod postgres_tests {
         (request, inventory)
     }
 
+    async fn archived_owned_community(db: &Db) -> (String, String, CommunityId) {
+        let host = format!("owner-delete-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let CreateCommunityWithOwnerResult::Created(created) = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create owned community")
+        else {
+            panic!("expected a fresh community")
+        };
+        db.archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        (host, owner, created.id)
+    }
+
+    struct AdmissionInsertGate {
+        connection: sqlx::pool::PoolConnection<Postgres>,
+        trigger_name: String,
+        function_name: String,
+        first_key: i32,
+        second_key: i32,
+    }
+
+    async fn install_admission_insert_gate(db: &Db, request_id: Uuid) -> AdmissionInsertGate {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let trigger_name = format!("owner_admission_gate_{suffix}");
+        let function_name = format!("owner_admission_gate_fn_{suffix}");
+        let first_key = (request_id.as_u128() as u32 & 0x7fff_ffff) as i32;
+        let second_key = ((request_id.as_u128() >> 32) as u32 & 0x7fff_ffff) as i32;
+        let mut connection = db.pool.acquire().await.expect("acquire gate connection");
+        sqlx::query("SELECT pg_advisory_lock(712345, 193847)")
+            .execute(&mut *connection)
+            .await
+            .expect("serialize admission gate fixtures");
+        sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(first_key)
+            .bind(second_key)
+            .execute(&mut *connection)
+            .await
+            .expect("hold admission gate");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.id = '{request_id}'::uuid THEN \
+                 PERFORM pg_advisory_xact_lock({first_key}, {second_key}); \
+               END IF; \
+               RETURN NEW; \
+             END $$"
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install admission gate function");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON community_deletion_requests \
+             FOR EACH ROW EXECUTE FUNCTION {function_name}()"
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install admission gate trigger");
+        AdmissionInsertGate {
+            connection,
+            trigger_name,
+            function_name,
+            first_key,
+            second_key,
+        }
+    }
+
+    async fn wait_for_admission_gate(db: &Db, gate: &AdmissionInsertGate) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid = $1::oid AND objid = $2::oid \
+                       AND objsubid = 2 AND NOT granted)",
+                )
+                .bind(gate.first_key)
+                .bind(gate.second_key)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect admission gate");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner admission reached gated insert");
+    }
+
+    async fn release_admission_insert_gate(gate: &mut AdmissionInsertGate) {
+        sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(gate.first_key)
+            .bind(gate.second_key)
+            .execute(&mut *gate.connection)
+            .await
+            .expect("release admission gate");
+    }
+
+    async fn remove_admission_insert_gate(db: &Db, mut gate: AdmissionInsertGate) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP TRIGGER {} ON community_deletion_requests",
+            gate.trigger_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove admission gate trigger");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP FUNCTION {}()",
+            gate.function_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove admission gate function");
+        sqlx::query("SELECT pg_advisory_unlock(712345, 193847)")
+            .execute(&mut *gate.connection)
+            .await
+            .expect("release admission fixture serialization");
+    }
+
+    struct OwnerConvergenceGate {
+        connection: sqlx::pool::PoolConnection<Postgres>,
+        trigger_name: String,
+        function_name: String,
+        first_key: i32,
+        second_key: i32,
+    }
+
+    async fn install_owner_convergence_gate(
+        db: &Db,
+        community: CommunityId,
+        owner: &str,
+    ) -> OwnerConvergenceGate {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let trigger_name = format!("a_owner_convergence_gate_{suffix}");
+        let function_name = format!("owner_convergence_gate_fn_{suffix}");
+        let gate_id = Uuid::new_v4();
+        let first_key = (gate_id.as_u128() as u32 & 0x7fff_ffff) as i32;
+        let second_key = ((gate_id.as_u128() >> 32) as u32 & 0x7fff_ffff) as i32;
+        let mut connection = db.pool.acquire().await.expect("acquire gate connection");
+        sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(first_key)
+            .bind(second_key)
+            .execute(&mut *connection)
+            .await
+            .expect("hold owner convergence gate");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.community_id = '{}'::uuid AND NEW.pubkey = '{}' THEN \
+                 PERFORM pg_advisory_xact_lock({first_key}, {second_key}); \
+               END IF; \
+               RETURN NEW; \
+             END $$",
+            community.as_uuid(),
+            owner
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install owner convergence gate function");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON relay_members \
+             FOR EACH ROW EXECUTE FUNCTION {function_name}()"
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("install owner convergence gate trigger");
+        OwnerConvergenceGate {
+            connection,
+            trigger_name,
+            function_name,
+            first_key,
+            second_key,
+        }
+    }
+
+    async fn wait_for_owner_convergence_gate(db: &Db, gate: &OwnerConvergenceGate) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid = $1::oid AND objid = $2::oid \
+                       AND objsubid = 2 AND NOT granted)",
+                )
+                .bind(gate.first_key)
+                .bind(gate.second_key)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect owner convergence gate");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner convergence reached gated member update");
+    }
+
+    async fn release_owner_convergence_gate(gate: &mut OwnerConvergenceGate) {
+        sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+            .bind(gate.first_key)
+            .bind(gate.second_key)
+            .execute(&mut *gate.connection)
+            .await
+            .expect("release owner convergence gate");
+    }
+
+    async fn remove_owner_convergence_gate(db: &Db, gate: OwnerConvergenceGate) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP TRIGGER {} ON relay_members",
+            gate.trigger_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove owner convergence gate trigger");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP FUNCTION {}()",
+            gate.function_name
+        )))
+        .execute(&db.pool)
+        .await
+        .expect("remove owner convergence gate function");
+    }
+
+    async fn contender_db(application_name: &str) -> Db {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        let options = PgConnectOptions::from_str(&database_url)
+            .expect("parse test database URL")
+            .application_name(application_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect contender DB");
+        Db::from_pool(pool)
+    }
+
+    async fn wait_for_contender_lock(db: &Db, application_name: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND application_name = $1 \
+                       AND wait_event_type = 'Lock')",
+                )
+                .bind(application_name)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect contender lock");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("contender reached community row lock");
+    }
+
+    async fn membership_roles(db: &Db, community: CommunityId) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
+        )
+        .bind(community.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("read membership roles")
+    }
+
+    async fn assert_owner_admission_is_only_committed_mutation(
+        db: &Db,
+        community: CommunityId,
+        request_id: Uuid,
+    ) {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_requests \
+                 WHERE id = $1 AND community_id = $2 AND stage = 'submitted'",
+            )
+            .bind(request_id)
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("count admitted request"),
+            1
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT archived_at IS NOT NULL FROM communities WHERE id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("read archive state"),
+            "the losing mutation must not clear archive state"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_requires_current_owner_and_archived_active_target() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+
+        let admitted = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit archived owner request");
+        let OwnerDeletionAdmission::Accepted(request) = admitted else {
+            panic!("expected accepted owner request")
+        };
+        assert_eq!(request.id, request_id);
+        assert_eq!(request.community_id, community);
+        assert_eq!(request.community_host, host);
+        assert_eq!(request.stage, DeletionStage::Submitted);
+        assert_eq!(request.request_origin, DeletionRequestOrigin::Owner);
+        assert_eq!(request.owner_pubkey.as_deref(), Some(owner.as_str()));
+        assert_eq!(request.mediating_operator_pubkey.as_deref(), Some(operator));
+        assert_eq!(request.acknowledgement_version, Some(1));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT deletion_state FROM communities WHERE id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("community lifecycle"),
+            "active",
+            "admission must not prematurely quiesce the community"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_rejects_non_archived_non_owner_and_stale_owner() {
+        let (db, store) = store().await;
+        let host = format!("owner-delete-active-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let CreateCommunityWithOwnerResult::Created(created) = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community")
+        else {
+            panic!("expected fresh community")
+        };
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        assert_eq!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
+                .await
+                .expect("non-archived admission result"),
+            OwnerDeletionAdmission::NotArchived
+        );
+        db.archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive")
+            .expect("owned community");
+        assert_eq!(
+            store
+                .admit_owner_request(&host, &outsider, operator, 1, Uuid::new_v4(), None)
+                .await
+                .expect("non-owner admission result"),
+            OwnerDeletionAdmission::NotFoundOrNotOwner
+        );
+        assert_eq!(
+            db.transfer_ownership(created.id, &replacement, &owner)
+                .await
+                .expect("reject archived owner rotation"),
+            TransferResult::LifecycleConflict
+        );
+        assert!(matches!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
+                .await
+                .expect("current-owner admission result"),
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_rejects_legacy_co_owners_without_persisting_a_request() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let extra_owner = "f".repeat(64);
+        assert!(
+            extra_owner > owner,
+            "extra owner must sort after the admitted owner"
+        );
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(community.as_uuid())
+        .bind(&extra_owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed legacy co-owner");
+
+        assert_eq!(
+            store
+                .admit_owner_request(
+                    &host,
+                    &owner,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    1,
+                    Uuid::new_v4(),
+                    None,
+                )
+                .await
+                .expect("legacy co-owner admission result"),
+            OwnerDeletionAdmission::NotFoundOrNotOwner,
+        );
+        let request_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count deletion requests");
+        assert_eq!(request_count, 0, "failed admission must not persist intent");
+        assert_eq!(
+            membership_roles(&db, community).await.len(),
+            2,
+            "failed admission must not alter either legacy owner",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn accepted_owner_deletion_blocks_legacy_owner_convergence_without_membership_change() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let before = membership_roles(&db, community).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(matches!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
+                .await
+                .expect("admit owner request"),
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+
+        assert_eq!(
+            db.provision_owner(community, &replacement)
+                .await
+                .expect("legacy convergence result"),
+            ProvisionOwnerResult::DeletionPending
+        );
+        assert_eq!(membership_roles(&db, community).await, before);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn same_owner_convergence_serializes_with_abort_without_deadlock() {
+        let mut deadlocks = Vec::new();
+        for stage in [DeletionStage::Submitted, DeletionStage::Inventoried] {
+            let (db, store) = store().await;
+            let (host, owner, community) = archived_owned_community(&db).await;
+            let OwnerDeletionAdmission::Accepted(request) = store
+                .admit_owner_request(
+                    &host,
+                    &owner,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    1,
+                    Uuid::new_v4(),
+                    None,
+                )
+                .await
+                .expect("admit owner deletion")
+            else {
+                panic!("expected accepted owner deletion")
+            };
+            if stage == DeletionStage::Inventoried {
+                let inventory = FrozenInventory {
+                    schema: store
+                        .inventory_schema(community)
+                        .await
+                        .expect("inventory schema"),
+                    storage: empty_storage_manifest(community),
+                };
+                let inventoried = store
+                    .freeze_inventory(request.id, &inventory)
+                    .await
+                    .expect("freeze inventory");
+                assert_eq!(inventoried.stage, DeletionStage::Inventoried);
+            }
+
+            let mut gate = install_owner_convergence_gate(&db, community, &owner).await;
+            let convergence_db =
+                contender_db(&format!("owner-convergence-{}", Uuid::new_v4().simple())).await;
+            let converging = tokio::spawn({
+                let owner = owner.clone();
+                async move { convergence_db.provision_owner(community, &owner).await }
+            });
+            wait_for_owner_convergence_gate(&db, &gate).await;
+
+            let abort_application = format!("owner-abort-{}", Uuid::new_v4().simple());
+            let abort_store = contender_db(&abort_application).await.deletion_store();
+            let aborting = tokio::spawn(async move {
+                abort_store
+                    .abort(request.id, "operator", "same-owner convergence race")
+                    .await
+            });
+            wait_for_contender_lock(&db, &abort_application).await;
+            release_owner_convergence_gate(&mut gate).await;
+
+            let (convergence_join, abort_join) = tokio::join!(
+                tokio::time::timeout(Duration::from_secs(5), converging),
+                tokio::time::timeout(Duration::from_secs(5), aborting),
+            );
+            remove_owner_convergence_gate(&db, gate).await;
+            let convergence_result = convergence_join
+                .expect("same-owner convergence must not hang")
+                .expect("join same-owner convergence");
+            let abort_result = abort_join
+                .expect("abort must not hang")
+                .expect("join abort");
+            if matches!(
+                &convergence_result,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
+            ) || matches!(
+                &abort_result,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
+            ) {
+                deadlocks.push(format!(
+                    "{stage}: convergence={convergence_result:?}, abort={abort_result:?}"
+                ));
+                continue;
+            }
+            assert_eq!(
+                convergence_result.expect("same-owner convergence"),
+                ProvisionOwnerResult::Applied
+            );
+            assert_eq!(
+                abort_result.expect("abort request").stage,
+                DeletionStage::Aborted
+            );
+        }
+        assert!(
+            deadlocks.is_empty(),
+            "same-owner convergence and abort must serialize without 40P01:\n{}",
+            deadlocks.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_serializes_before_normal_transfer() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let before = membership_roles(&db, community).await;
+        let request_id = Uuid::new_v4();
+        let mut gate = install_admission_insert_gate(&db, request_id).await;
+        let admission = tokio::spawn({
+            let store = store.clone();
+            let host = host.clone();
+            let owner = owner.clone();
+            async move {
+                store
+                    .admit_owner_request(
+                        &host,
+                        &owner,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        1,
+                        request_id,
+                        None,
+                    )
+                    .await
+            }
+        });
+        wait_for_admission_gate(&db, &gate).await;
+
+        let application_name = format!("owner-transfer-{}", Uuid::new_v4().simple());
+        let contender = contender_db(&application_name).await;
+        let transfer = tokio::spawn({
+            let owner = owner.clone();
+            let replacement = replacement.clone();
+            async move {
+                contender
+                    .transfer_ownership(community, &replacement, &owner)
+                    .await
+            }
+        });
+        wait_for_contender_lock(&db, &application_name).await;
+        release_admission_insert_gate(&mut gate).await;
+
+        let admission_result = admission.await.expect("join admission").expect("admission");
+        let transfer_result = transfer.await.expect("join transfer").expect("transfer");
+        remove_admission_insert_gate(&db, gate).await;
+        assert!(matches!(
+            admission_result,
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+        assert_eq!(transfer_result, TransferResult::DeletionPending);
+        assert_eq!(membership_roles(&db, community).await, before);
+        assert_owner_admission_is_only_committed_mutation(&db, community, request_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_serializes_before_unarchive() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let before = membership_roles(&db, community).await;
+        let request_id = Uuid::new_v4();
+        let mut gate = install_admission_insert_gate(&db, request_id).await;
+        let admission = tokio::spawn({
+            let store = store.clone();
+            let host = host.clone();
+            let owner = owner.clone();
+            async move {
+                store
+                    .admit_owner_request(
+                        &host,
+                        &owner,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        1,
+                        request_id,
+                        None,
+                    )
+                    .await
+            }
+        });
+        wait_for_admission_gate(&db, &gate).await;
+
+        let application_name = format!("owner-unarchive-{}", Uuid::new_v4().simple());
+        let contender = contender_db(&application_name).await;
+        let unarchive = tokio::spawn({
+            let host = host.clone();
+            let owner = owner.clone();
+            async move { contender.unarchive_community_owned_by(&host, &owner).await }
+        });
+        wait_for_contender_lock(&db, &application_name).await;
+        release_admission_insert_gate(&mut gate).await;
+
+        let admission_result = admission.await.expect("join admission").expect("admission");
+        let unarchive_result = unarchive.await.expect("join unarchive").expect("unarchive");
+        remove_admission_insert_gate(&db, gate).await;
+        assert!(matches!(
+            admission_result,
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+        assert_eq!(unarchive_result, UnarchiveCommunityResult::DeletionPending);
+        assert_eq!(membership_roles(&db, community).await, before);
+        assert_owner_admission_is_only_committed_mutation(&db, community, request_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_serializes_before_legacy_owner_rotation() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let before = membership_roles(&db, community).await;
+        let request_id = Uuid::new_v4();
+        let mut gate = install_admission_insert_gate(&db, request_id).await;
+        let admission = tokio::spawn({
+            let store = store.clone();
+            let host = host.clone();
+            let owner = owner.clone();
+            async move {
+                store
+                    .admit_owner_request(
+                        &host,
+                        &owner,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        1,
+                        request_id,
+                        None,
+                    )
+                    .await
+            }
+        });
+        wait_for_admission_gate(&db, &gate).await;
+
+        let application_name = format!("owner-legacy-{}", Uuid::new_v4().simple());
+        let contender = contender_db(&application_name).await;
+        let provision = tokio::spawn({
+            let replacement = replacement.clone();
+            async move { contender.provision_owner(community, &replacement).await }
+        });
+        wait_for_contender_lock(&db, &application_name).await;
+        release_admission_insert_gate(&mut gate).await;
+
+        let admission_result = admission.await.expect("join admission").expect("admission");
+        let provision_result = provision
+            .await
+            .expect("join legacy convergence")
+            .expect("legacy convergence");
+        remove_admission_insert_gate(&db, gate).await;
+        assert!(matches!(
+            admission_result,
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+        assert_eq!(provision_result, ProvisionOwnerResult::DeletionPending);
+        assert_eq!(membership_roles(&db, community).await, before);
+        assert_owner_admission_is_only_committed_mutation(&db, community, request_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_admission_replay_converges_after_stage_advancement_and_rejects_retargeting() {
+        let (db, store) = store().await;
+        let (host, owner, _) = archived_owned_community(&db).await;
+        let (other_host, other_owner, _) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let OwnerDeletionAdmission::Accepted(first) = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("first admission")
+        else {
+            panic!("expected accepted request")
+        };
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(first.community_id)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(first.community_id),
+        };
+        store
+            .freeze_inventory(first.id, &inventory)
+            .await
+            .expect("advance request");
+
+        let OwnerDeletionAdmission::Accepted(replayed) = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("replay admission")
+        else {
+            panic!("expected converged replay")
+        };
+        assert_eq!(replayed.id, first.id);
+        assert_eq!(replayed.stage, DeletionStage::Inventoried);
+        assert_eq!(
+            store
+                .admit_owner_request(&other_host, &other_owner, operator, 1, request_id, None)
+                .await
+                .expect("retargeting result"),
+            OwnerDeletionAdmission::RequestConflict
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_owner_admission_duplicates_return_one_stable_request() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let (first, second) = tokio::join!(
+            store.admit_owner_request(&host, &owner, operator, 1, request_id, None),
+            store.admit_owner_request(&host, &owner, operator, 1, request_id, None),
+        );
+        let accepted_id = |result: Result<OwnerDeletionAdmission>| {
+            let OwnerDeletionAdmission::Accepted(request) = result.expect("admission") else {
+                panic!("expected accepted request")
+            };
+            request.id
+        };
+        assert_eq!(accepted_id(first), request_id);
+        assert_eq!(accepted_id(second), request_id);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1 AND stage <> 'aborted'"
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("active request count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn accepted_owner_request_blocks_unarchive_and_transfer_and_suppresses_owner_list_row() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let new_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let OwnerDeletionAdmission::Accepted(_) = store
+            .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
+            .await
+            .expect("admit owner request")
+        else {
+            panic!("expected accepted request")
+        };
+
+        assert_eq!(
+            db.unarchive_community_owned_by(&host, &owner)
+                .await
+                .expect("unarchive result"),
+            UnarchiveCommunityResult::DeletionPending
+        );
+        assert_eq!(
+            db.transfer_ownership(community, &new_owner, &owner)
+                .await
+                .expect("transfer result"),
+            TransferResult::DeletionPending
+        );
+        assert!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("owner list")
+                .communities
+                .iter()
+                .all(|row| row.id != community),
+            "accepted deletion requests must not remain actionable archived rows"
+        );
+    }
+
+    /// Desired-state bootstrap half of the owner-provenance contract.
+    ///
+    /// The migration-upgrade half lives in `runtime::migration::postgres_tests`
+    /// and asserts the same shared case table.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn desired_state_schema_enforces_owner_provenance_contract() {
+        let (db, _) = store().await;
+        owner_provenance_contract::assert_contract(&db.pool).await;
+    }
+
+    /// Privileged recovery abort at the reversible pre-approval boundary.
+    ///
+    /// Owner admission has no owner-facing cancellation. When preparation
+    /// cannot safely continue, an operator aborts the request; that must
+    /// release the durable request fence over listing, unarchive, and owner
+    /// rotation without silently unarchiving the community behind the owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn privileged_abort_of_submitted_owner_request_releases_the_request_fence() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let new_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let OwnerDeletionAdmission::Accepted(request) = store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request")
+        else {
+            panic!("expected accepted request")
+        };
+        assert_eq!(request.stage, DeletionStage::Submitted);
+        assert_eq!(
+            db.transfer_ownership(community, &new_owner, &owner)
+                .await
+                .expect("fenced transfer"),
+            TransferResult::DeletionPending
+        );
+
+        let aborted = store
+            .abort(
+                request_id,
+                "recovery-operator",
+                "owner preparation cannot continue",
+            )
+            .await
+            .expect("privileged abort at the reversible submitted boundary");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+        assert_eq!(aborted.aborted_by.as_deref(), Some("recovery-operator"));
+        assert_eq!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("quota after abort")
+                .quota_used,
+            1,
+            "abort releases the request reservation but preserved membership still counts"
+        );
+
+        // Abort reverses deletion intent, not the owner's archive decision.
+        let (deletion_state, archived_at): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT deletion_state, archived_at FROM communities WHERE id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("community lifecycle after abort");
+        assert_eq!(deletion_state, "active");
+        assert!(
+            archived_at.is_some(),
+            "abort must not unarchive the community on the owner's behalf"
+        );
+
+        assert!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("owner list after abort")
+                .communities
+                .iter()
+                .any(|row| row.id == community),
+            "aborting the request must restore the owner's actionable archived row"
+        );
+        let UnarchiveCommunityResult::Unarchived(restored) = db
+            .unarchive_community_owned_by(&host, &owner)
+            .await
+            .expect("unarchive after abort")
+        else {
+            panic!("aborting the request must restore owner-authorized unarchive")
+        };
+        assert_eq!(restored.id, community);
+        assert_eq!(
+            db.transfer_ownership(community, &new_owner, &owner)
+                .await
+                .expect("transfer after abort"),
+            TransferResult::Transferred {
+                previous_owner: Some(owner.clone()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn privileged_abort_fences_a_live_owner_preparation_lease() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+        let (lease_owner, lease_generation, lease_is_live): (Option<String>, i64, bool) =
+            sqlx::query_as(
+                "SELECT lease_owner, lease_generation, lease_until >= now() \
+                 FROM community_deletion_requests WHERE id = $1",
+            )
+            .bind(request_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read live preparation lease");
+        assert_eq!(lease_owner.as_deref(), Some("preparer"));
+        assert_eq!(lease_generation, claim.lease.generation);
+        assert!(lease_is_live, "preparation lease must be live before abort");
+
+        let aborted = store
+            .abort(request_id, "recovery-operator", "cancel live preparation")
+            .await
+            .expect("abort live preparation");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+        assert_eq!(aborted.lease_generation, claim.lease.generation + 1);
+        assert!(aborted.lease_owner.is_none());
+        assert!(aborted.lease_until.is_none());
+
+        let heartbeat_error = store
+            .heartbeat_owner_submission(&claim.lease, "drain", DEFAULT_LEASE_DURATION, false)
+            .await
+            .expect_err("aborted preparation lease cannot heartbeat");
+        assert!(is_stale_deletion_lease(&heartbeat_error));
+        let completion_error = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect_err("aborted preparation lease cannot approve");
+        assert!(is_stale_deletion_lease(&completion_error));
+
+        let request = store.get(request_id).await.expect("load aborted request");
+        assert_eq!(request.stage, DeletionStage::Aborted);
+        assert!(request.inventory_digest.is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_approvals WHERE request_id = $1",
+            )
+            .bind(request_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count automatic approvals"),
+            0
+        );
+    }
+
+    /// The reversible boundary extends through `fenced`. From `drained`
+    /// onward, destruction may have begun, so abort must stay closed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn privileged_abort_spans_only_the_reversible_pre_destruction_boundary() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        assert_eq!(request.stage, DeletionStage::Inventoried);
+        let aborted = store
+            .abort(request.id, "recovery-operator", "inventory needs recovery")
+            .await
+            .expect("privileged abort at the inventoried boundary");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+
+        for irreversible in [
+            DeletionStage::Drained,
+            DeletionStage::BindingsRemoved,
+            DeletionStage::PostgresPurged,
+            DeletionStage::CachePurged,
+            DeletionStage::LogicallyVerified,
+            DeletionStage::RetentionPending,
+        ] {
+            let (later, _) = inventoried_request(&db, &store).await;
+            sqlx::query("UPDATE community_deletion_requests SET stage = $2 WHERE id = $1")
+                .bind(later.id)
+                .bind(irreversible.to_string())
+                .execute(&db.pool)
+                .await
+                .expect("advance stage");
+            let error = store
+                .abort(later.id, "recovery-operator", "too late")
+                .await
+                .expect_err("abort must stay closed after destruction begins");
+            assert!(
+                error.to_string().contains("cannot be aborted"),
+                "unexpected error at {irreversible}: {error}"
+            );
+            assert_eq!(
+                store.get(later.id).await.expect("unchanged request").stage,
+                irreversible,
+                "a refused abort must not move the request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_claim_is_owner_only_concurrent_and_reclaimable() {
+        let (db, store) = store().await;
+        let (owner_host, owner, _) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        let OwnerDeletionAdmission::Accepted(owner_request) = store
+            .admit_owner_request(&owner_host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request")
+        else {
+            panic!("expected accepted owner request")
+        };
+        let operator_host = format!("operator-delete-{}.example", Uuid::new_v4().simple());
+        db.ensure_configured_community(&operator_host)
+            .await
+            .expect("create operator community");
+        let operator_request = store
+            .submit(&operator_host, "manual-operator", None)
+            .await
+            .expect("submit manual request");
+
+        let (first, second) = tokio::join!(
+            store.claim_specific_owner_submission(
+                owner_request.id,
+                "preparer-a",
+                DEFAULT_LEASE_DURATION,
+            ),
+            store.claim_specific_owner_submission(
+                owner_request.id,
+                "preparer-b",
+                DEFAULT_LEASE_DURATION,
+            ),
+        );
+        let claims = [first.expect("first claim"), second.expect("second claim")];
+        assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+        let claim = claims.into_iter().flatten().next().expect("one winner");
+        assert_eq!(claim.request.id, owner_request.id);
+        assert_eq!(claim.request.request_origin, DeletionRequestOrigin::Owner);
+        assert_ne!(claim.request.id, operator_request.id);
+        assert!(store
+            .claim_specific_owner_submission(
+                operator_request.id,
+                "operator-preparer",
+                DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("operator request selection")
+            .is_none());
+
+        store
+            .heartbeat_owner_submission(&claim.lease, "drain", DEFAULT_LEASE_DURATION, false)
+            .await
+            .expect("heartbeat owner preparation");
+        sqlx::query(
+            "UPDATE community_deletion_requests SET lease_until = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(owner_request.id)
+        .execute(&db.pool)
+        .await
+        .expect("expire preparation lease");
+        let successor = store
+            .claim_specific_owner_submission(owner_request.id, "preparer-c", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("reclaim expired preparation")
+            .expect("expired owner preparation is reclaimable");
+        assert_eq!(successor.request.id, owner_request.id);
+        assert!(successor.lease.generation > claim.lease.generation);
+        assert!(store
+            .heartbeat_owner_submission(&claim.lease, "drain", DEFAULT_LEASE_DURATION, false)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn blocked_owner_submission_cannot_be_claimed() {
+        let (db, store) = store().await;
+        let (host, owner, _) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request");
+        sqlx::query(
+            "UPDATE community_deletion_requests SET blocked_at = now(), \
+             blocked_reason = 'operator hold' WHERE id = $1",
+        )
+        .bind(request_id)
+        .execute(&db.pool)
+        .await
+        .expect("block owner submission before claim");
+
+        assert!(store
+            .claim_specific_owner_submission(
+                request_id,
+                "specific-preparer",
+                DEFAULT_LEASE_DURATION
+            )
+            .await
+            .expect("specific claim selection")
+            .is_none());
+        assert!(store
+            .claim_next_owner_submission("next-preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("next claim selection")
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn blocked_claimed_owner_submission_cannot_heartbeat_or_approve() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        sqlx::query(
+            "UPDATE community_deletion_requests SET blocked_at = now(), \
+             blocked_reason = 'operator hold' WHERE id = $1",
+        )
+        .bind(request_id)
+        .execute(&db.pool)
+        .await
+        .expect("block owner submission while retaining lease");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+
+        assert!(store
+            .heartbeat_owner_submission(&claim.lease, "drain", DEFAULT_LEASE_DURATION, false)
+            .await
+            .is_err());
+        assert!(store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .get(request_id)
+                .await
+                .expect("load blocked request")
+                .stage,
+            DeletionStage::Submitted
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_approvals WHERE request_id = $1",
+            )
+            .bind(request_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count automatic approvals"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_atomically_approves_exact_inventory_and_converges() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        assert_eq!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("initial owner quota")
+                .quota_used,
+            1
+        );
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request");
+        let pending_quota = db
+            .list_communities_owned_by(&owner)
+            .await
+            .expect("pending owner quota");
+        assert!(pending_quota.communities.is_empty());
+        assert_eq!(
+            pending_quota.quota_used, 1,
+            "membership and incomplete request must deduplicate"
+        );
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+
+        let approved = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect("complete owner preparation");
+        assert_eq!(approved.stage, DeletionStage::Approved);
+        assert_eq!(
+            approved.inventory_digest,
+            Some(hex::encode(inventory.digest().unwrap()))
+        );
+        let replay = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect("ambiguous commit replay converges");
+        assert_eq!(replay, approved);
+        let inspection = store.inspect(request_id).await.expect("inspect approval");
+        let approval = inspection.approval.expect("automatic approval evidence");
+        assert_eq!(
+            approval.approval_origin,
+            DeletionApprovalOrigin::OwnerAutomatic
+        );
+        assert_eq!(approval.approved_by, operator);
+        assert!(store
+            .claim_specific(request_id, "other-executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("existing execution claim remains approval-bound")
+            .is_none());
+        store
+            .verify_execution_token(&claim.lease, DeletionStage::Approved)
+            .await
+            .expect("retained lease is immediately execution eligible");
+
+        let changed = FrozenInventory {
+            schema: inventory.schema.clone(),
+            storage: StorageManifest {
+                version: inventory.storage.version,
+                prefixes: inventory
+                    .storage
+                    .prefixes
+                    .iter()
+                    .cloned()
+                    .map(|mut prefix| {
+                        prefix.total_bytes += 1;
+                        prefix
+                    })
+                    .collect(),
+            },
+        };
+        assert!(store
+            .complete_owner_preparation(&claim.lease, &changed)
+            .await
+            .is_err());
+
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("quota after membership purge")
+                .quota_used,
+            1,
+            "the incomplete owner request must reserve the slot after membership purge"
+        );
+        store
+            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("cache");
+        store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .expect("logical postgres verify");
+        store
+            .mark_logically_verified(&token, serde_json::json!({"all": true}))
+            .await
+            .expect("mark verified");
+        assert_eq!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("quota before logical completion")
+                .quota_used,
+            1
+        );
+        store
+            .mark_retention_pending(&token, serde_json::json!({"shared_cas": "retained"}))
+            .await
+            .expect("production terminal transition");
+        assert_eq!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("quota after logical completion")
+                .quota_used,
+            0,
+            "the production logical-completion transition releases the slot"
+        );
+        assert!(db
+            .lookup_community_by_host_for_management(&host)
+            .await
+            .expect("permanent tombstone lookup")
+            .is_some());
+        assert_eq!(
+            db.create_community_with_owner(&host, &owner)
+                .await
+                .expect("recreate tombstoned host"),
+            CreateCommunityWithOwnerResult::HostExists
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rechecks_archived_current_owner_before_automatic_approval() {
+        enum AuthorityDrift {
+            Unarchived,
+            OwnerChanged,
+        }
+
+        let mut failures = Vec::new();
+        for drift in [AuthorityDrift::Unarchived, AuthorityDrift::OwnerChanged] {
+            let label = match drift {
+                AuthorityDrift::Unarchived => "unarchived",
+                AuthorityDrift::OwnerChanged => "owner-changed",
+            };
+            let (db, store) = store().await;
+            let (host, owner, community) = archived_owned_community(&db).await;
+            let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            let request_id = Uuid::new_v4();
+            store
+                .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+                .await
+                .expect("admit owner request");
+            let claim = store
+                .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+                .await
+                .expect("claim owner request")
+                .expect("owner request is preparable");
+            let inventory = FrozenInventory {
+                schema: store
+                    .inventory_schema(community)
+                    .await
+                    .expect("schema inventory"),
+                storage: empty_storage_manifest(community),
+            };
+
+            match drift {
+                AuthorityDrift::Unarchived => {
+                    sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
+                        .bind(community.as_uuid())
+                        .execute(&db.pool)
+                        .await
+                        .expect("simulate stale archive authority");
+                }
+                AuthorityDrift::OwnerChanged => {
+                    sqlx::query(
+                        "UPDATE relay_members SET role = 'member' \
+                         WHERE community_id = $1 AND pubkey = $2 AND role = 'owner'",
+                    )
+                    .bind(community.as_uuid())
+                    .bind(&owner)
+                    .execute(&db.pool)
+                    .await
+                    .expect("simulate stale owner authority");
+                }
+            }
+
+            let completion = store
+                .complete_owner_preparation(&claim.lease, &inventory)
+                .await;
+            let request = store.get(request_id).await.expect("load request");
+            let approval_count = sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM community_deletion_approvals WHERE request_id = $1",
+            )
+            .bind(request_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count automatic approvals");
+            if completion.is_ok()
+                || request.stage != DeletionStage::Submitted
+                || request.inventory_digest.is_some()
+                || approval_count != 0
+            {
+                failures.push(format!(
+                    "{label}: completion={completion:?}, stage={}, inventory_frozen={}, approvals={approval_count}",
+                    request.stage,
+                    request.inventory_digest.is_some(),
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "stale owner authority reached automatic approval: {failures:#?}"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum OwnerPreparationAuthorityDrift {
+        ReplacedSoleOwner,
+        ExtraCoOwner,
+        InactiveDeletionState,
+        DeletedAtSet,
+    }
+
+    async fn assert_owner_preparation_rejects_authority_drift(
+        drift: OwnerPreparationAuthorityDrift,
+    ) {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit sole owner's intent");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner submission")
+            .expect("owner submission is preparable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+        let extra_owner = "f".repeat(64);
+        assert!(
+            extra_owner > owner,
+            "extra owner must sort after admitted owner"
+        );
+
+        match drift {
+            OwnerPreparationAuthorityDrift::ReplacedSoleOwner => {
+                sqlx::query(
+                    "UPDATE relay_members SET role = 'member' \
+                     WHERE community_id = $1 AND pubkey = $2 AND role = 'owner'",
+                )
+                .bind(community.as_uuid())
+                .bind(&owner)
+                .execute(&db.pool)
+                .await
+                .expect("remove admitted owner's authority");
+                sqlx::query(
+                    "INSERT INTO relay_members (community_id, pubkey, role) \
+                     VALUES ($1, $2, 'owner')",
+                )
+                .bind(community.as_uuid())
+                .bind(&extra_owner)
+                .execute(&db.pool)
+                .await
+                .expect("install different sole owner");
+            }
+            OwnerPreparationAuthorityDrift::ExtraCoOwner => {
+                sqlx::query(
+                    "INSERT INTO relay_members (community_id, pubkey, role) \
+                     VALUES ($1, $2, 'owner')",
+                )
+                .bind(community.as_uuid())
+                .bind(&extra_owner)
+                .execute(&db.pool)
+                .await
+                .expect("install later-sorting legacy co-owner");
+            }
+            OwnerPreparationAuthorityDrift::InactiveDeletionState
+            | OwnerPreparationAuthorityDrift::DeletedAtSet => {
+                let mut tx = db.pool.begin().await.expect("open fixture transaction");
+                sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true)")
+                    .bind(community.as_uuid().to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("scope fixture to this community");
+                sqlx::query("SELECT set_config('buzz.deletion_fence_generation', '0', true)")
+                    .execute(&mut *tx)
+                    .await
+                    .expect("scope fixture generation");
+                let statement = match drift {
+                    OwnerPreparationAuthorityDrift::InactiveDeletionState => {
+                        "UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1"
+                    }
+                    OwnerPreparationAuthorityDrift::DeletedAtSet => {
+                        "UPDATE communities SET deleted_at = now() WHERE id = $1"
+                    }
+                    _ => unreachable!("matched only lifecycle fixture variants"),
+                };
+                sqlx::query(statement)
+                    .bind(community.as_uuid())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("establish independent lifecycle drift");
+                tx.commit().await.expect("commit fixture drift");
+            }
+        }
+
+        let current_owners: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM relay_members WHERE community_id = $1 AND role = 'owner' \
+             ORDER BY pubkey",
+        )
+        .bind(community.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("inspect current owners");
+        let (archived_at, deletion_state, deleted_at): (
+            Option<DateTime<Utc>>,
+            String,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT archived_at, deletion_state, deleted_at FROM communities WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect lifecycle fixture");
+        assert!(archived_at.is_some(), "archive guard must remain satisfied");
+        match drift {
+            OwnerPreparationAuthorityDrift::ReplacedSoleOwner => {
+                assert_eq!(current_owners, vec![extra_owner]);
+                assert_eq!(deletion_state, "active");
+                assert!(deleted_at.is_none());
+            }
+            OwnerPreparationAuthorityDrift::ExtraCoOwner => {
+                assert_eq!(current_owners, vec![owner, extra_owner]);
+                assert_eq!(deletion_state, "active");
+                assert!(deleted_at.is_none());
+            }
+            OwnerPreparationAuthorityDrift::InactiveDeletionState => {
+                assert_eq!(current_owners, vec![owner]);
+                assert_eq!(deletion_state, "quiescing");
+                assert!(deleted_at.is_none());
+            }
+            OwnerPreparationAuthorityDrift::DeletedAtSet => {
+                assert_eq!(current_owners, vec![owner]);
+                assert_eq!(deletion_state, "active");
+                assert!(deleted_at.is_some());
+            }
+        }
+
+        let before = store
+            .get(request_id)
+            .await
+            .expect("request before preparation");
+        assert_eq!(before.stage, DeletionStage::Submitted);
+        assert!(before.inventory_digest.is_none());
+        let failure = store
+            .complete_owner_preparation(&claim.lease, &inventory)
+            .await
+            .expect_err("drift must prevent automatic approval");
+        assert!(
+            matches!(failure, DbError::DeletionSafety(_))
+                && failure.to_string().contains("sole-owner authority drifted"),
+            "{failure}"
+        );
+        assert_eq!(
+            store
+                .get(request_id)
+                .await
+                .expect("request after rejection"),
+            before
+        );
+        let approvals: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_approvals WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count approvals after rejection");
+        assert_eq!(approvals, 0, "no digest-bound approval may be recorded");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_different_sole_owner_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::ReplacedSoleOwner,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_later_co_owner_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::ExtraCoOwner,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_inactive_state_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::InactiveDeletionState,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_rejects_deleted_at_before_approval() {
+        assert_owner_preparation_rejects_authority_drift(
+            OwnerPreparationAuthorityDrift::DeletedAtSet,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_owner_preparation_generation_cannot_freeze_or_approve() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request");
+        let stale = store
+            .claim_specific_owner_submission(request_id, "stale-preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        sqlx::query(
+            "UPDATE community_deletion_requests SET lease_until = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(stale.request.id)
+        .execute(&db.pool)
+        .await
+        .expect("expire stale lease");
+        let successor = store
+            .claim_specific_owner_submission(
+                request_id,
+                "successor-preparer",
+                DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("reclaim owner request")
+            .expect("expired request is reclaimable");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: empty_storage_manifest(community),
+        };
+        assert!(is_stale_deletion_lease(
+            &store
+                .complete_owner_preparation(&stale.lease, &inventory)
+                .await
+                .expect_err("stale generation cannot commit")
+        ));
+        let approved = store
+            .complete_owner_preparation(&successor.lease, &inventory)
+            .await
+            .expect("successor commits preparation");
+        assert_eq!(approved.stage, DeletionStage::Approved);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_preparation_retry_block_and_privileged_abort_are_recoverable() {
+        let (db, store) = store().await;
+        let (host, owner, community) = archived_owned_community(&db).await;
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let request_id = Uuid::new_v4();
+        store
+            .admit_owner_request(&host, &owner, operator, 1, request_id, None)
+            .await
+            .expect("admit owner request");
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim owner request")
+            .expect("owner request is preparable");
+        store
+            .record_owner_preparation_retry(
+                &claim.lease,
+                "inventory",
+                "temporary object-store failure",
+                Duration::ZERO,
+            )
+            .await
+            .expect("record preparation retry");
+        let retried = store.get(request_id).await.expect("load retried request");
+        assert_eq!(retried.retry_stage, Some(DeletionStage::Submitted));
+        assert_eq!(retried.retry_count, 1);
+        assert!(retried.lease_owner.is_none());
+
+        let claim = store
+            .claim_specific_owner_submission(request_id, "preparer-2", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("reclaim owner request")
+            .expect("retried request is due");
+        store
+            .block_owner_preparation(&claim.lease, "inventory", "unsafe storage taxonomy")
+            .await
+            .expect("block preparation");
+        assert_eq!(
+            store
+                .get(request_id)
+                .await
+                .expect("load blocked request")
+                .blocked_reason
+                .as_deref(),
+            Some("unsafe storage taxonomy")
+        );
+        let aborted = store
+            .abort(
+                request_id,
+                "recovery-operator",
+                "cannot safely enumerate storage",
+            )
+            .await
+            .expect("abort submitted request");
+        assert_eq!(aborted.stage, DeletionStage::Aborted);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT deletion_state FROM communities WHERE id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("community lifecycle"),
+            "active"
+        );
+        assert!(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT archived_at FROM communities WHERE id = $1"
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("community archive state")
+        .is_some());
+        assert!(matches!(
+            store
+                .admit_owner_request(&host, &owner, operator, 1, Uuid::new_v4(), None)
+                .await
+                .expect("fresh owner request after recovery abort"),
+            OwnerDeletionAdmission::Accepted(_)
+        ));
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn approval_boundary_blocks_claim_until_exact_inventory_is_approved() {
@@ -3533,6 +6258,16 @@ mod postgres_tests {
             .await
             .expect("approve");
         assert_eq!(approved.stage, DeletionStage::Approved);
+        assert_eq!(
+            store
+                .inspect(request.id)
+                .await
+                .expect("inspect manual approval")
+                .approval
+                .expect("manual approval evidence")
+                .approval_origin,
+            DeletionApprovalOrigin::Operator
+        );
         assert_eq!(
             approved.inventory_digest,
             Some(hex::encode(inventory.digest().unwrap()))
@@ -3755,6 +6490,12 @@ mod postgres_tests {
             .execute(&mut *gate)
             .await
             .expect("hold community lock");
+        let mut request_gate = db.pool.begin().await.expect("begin request gate");
+        sqlx::query("SELECT id FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
+            .bind(request.id)
+            .execute(&mut *request_gate)
+            .await
+            .expect("hold request row gate");
 
         let abort_store = store.clone();
         let aborting = tokio::spawn(async move {
@@ -3776,25 +6517,67 @@ mod postgres_tests {
             "forward transition must queue on the same lock"
         );
         gate.commit().await.expect("release lock gate");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !aborting.is_finished(),
+            "abort must still be queued while the request row stays locked"
+        );
+        assert!(
+            !forwarding.is_finished(),
+            "quiescing must still be queued while the request row stays locked"
+        );
+        request_gate
+            .commit()
+            .await
+            .expect("release request row gate");
 
         let aborted = tokio::time::timeout(Duration::from_secs(5), aborting)
             .await
             .expect("abort must not deadlock")
-            .expect("abort task")
-            .expect("abort wins lock queue");
-        assert_eq!(aborted.stage, DeletionStage::Aborted);
-        let forward_error = tokio::time::timeout(Duration::from_secs(5), forwarding)
+            .expect("abort task");
+        let forwarding = tokio::time::timeout(Duration::from_secs(5), forwarding)
             .await
             .expect("forward transition must not deadlock")
-            .expect("forward task")
-            .expect_err("post-lock lease verification rejects aborted request");
+            .expect("forward task");
+
         assert!(
             !matches!(
-                &forward_error,
-                DbError::Sqlx(sqlx::Error::Database(error)) if error.code().as_deref() == Some("40P01")
+                &aborted,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
+            ),
+            "abort must not report a PostgreSQL deadlock"
+        );
+        assert!(
+            !matches!(
+                &forwarding,
+                Err(DbError::Sqlx(sqlx::Error::Database(error)))
+                    if error.code().as_deref() == Some("40P01")
             ),
             "serialization must not report a PostgreSQL deadlock"
         );
+
+        match (aborted, forwarding) {
+            (Ok(aborted), Ok(())) => {
+                assert_eq!(aborted.stage, DeletionStage::Aborted);
+                let reloaded = store.get(request.id).await.expect("reload request");
+                assert_eq!(reloaded.stage, DeletionStage::Aborted);
+                assert!(
+                    reloaded.quiescing_started_at.is_some(),
+                    "successful quiescing should persist its durable intent before abort"
+                );
+            }
+            (Ok(aborted), Err(DbError::AccessDenied(message))) => {
+                assert_eq!(aborted.stage, DeletionStage::Aborted);
+                assert!(
+                    message.contains("stale deletion lease"),
+                    "post-lock quiescing must reject a stale aborted lease: {message}"
+                );
+            }
+            (aborted, forwarding) => panic!(
+                "unexpected abort/quiesce outcome: abort={aborted:?}, forward={forwarding:?}"
+            ),
+        }
     }
 
     #[tokio::test]
@@ -4077,6 +6860,155 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn compliant_writer_shared_xact_lock_blocks_deletion_exclusive_xact_lock() {
+        let (db, _) = store().await;
+        let community = db
+            .ensure_configured_community(&format!(
+                "community-lock-contract-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("create community")
+            .id;
+
+        let writer = db
+            .begin_community_write_transaction(community)
+            .await
+            .expect("open writer transaction with community lock");
+
+        let mut shared_contender = db.pool.begin().await.expect("begin shared contender");
+        let shared_taken: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock_shared(community_deletion_lock_key($1))",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&mut *shared_contender)
+        .await
+        .expect("try shared deletion lock");
+        assert!(
+            shared_taken,
+            "compliant writer must allow another shared community deletion lock holder"
+        );
+        shared_contender
+            .rollback()
+            .await
+            .expect("rollback shared contender");
+
+        let mut deleter = db.pool.begin().await.expect("begin deletion contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community.as_uuid())
+                .fetch_one(&mut *deleter)
+                .await
+                .expect("try deletion exclusive lock");
+        assert!(
+            !exclusive_taken,
+            "compliant writer must hold shared community lock that blocks deletion exclusive lock"
+        );
+        deleter
+            .rollback()
+            .await
+            .expect("rollback deletion contender");
+        writer
+            .rollback()
+            .await
+            .expect("rollback writer transaction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_fence_rejects_fresh_begin_transaction_after_fence() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        store.fence(&claim.lease).await.expect("fence");
+
+        let error = db
+            .begin_community_write_transaction(request.community_id)
+            .await
+            .expect_err("fenced community must reject fresh write admission");
+        assert!(
+            matches!(
+                &error,
+                DbError::AccessDenied(message)
+                    if message
+                        == &format!("community {} is write-fenced (fenced)", request.community_id)
+            ),
+            "expected write-fenced access denial, got: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn begin_quiescing_waits_for_open_admitted_writer_note_update() {
+        let (db, store) = store().await;
+        let (request, _) = inventoried_request(&db, &store).await;
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+
+        let pubkey = [7_u8; 32];
+        let added_by = [8_u8; 32];
+        assert!(
+            db.add_to_allowlist(request.community_id, &pubkey, &added_by, Some("before"))
+                .await
+                .expect("seed allowlist row"),
+            "seeded allowlist row must insert"
+        );
+
+        let mut admitted_writer = db
+            .begin_community_write_transaction(request.community_id)
+            .await
+            .expect("open admitted writer");
+        let updated = sqlx::query(
+            "UPDATE pubkey_allowlist SET note = $3 WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(request.community_id.as_uuid())
+        .bind(pubkey.to_vec())
+        .bind("during")
+        .execute(&mut *admitted_writer)
+        .await
+        .expect("update allowlist note")
+        .rows_affected();
+        assert_eq!(updated, 1, "note-only update must touch the seeded row");
+
+        let store_for_quiesce = store.clone();
+        let lease = claim.lease.clone();
+        let quiescing =
+            tokio::spawn(async move { store_for_quiesce.begin_quiescing(&lease).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !quiescing.is_finished(),
+            "begin_quiescing must wait for an admitted writer holding the shared deletion lock"
+        );
+
+        admitted_writer
+            .commit()
+            .await
+            .expect("release admitted writer");
+        quiescing
+            .await
+            .expect("quiesce task")
+            .expect("quiesce after writer release");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn fence_waits_for_open_write_and_rejects_it_after_transition() {
         let (db, store) = store().await;
         let (request, _) = inventoried_request(&db, &store).await;
@@ -4168,6 +7100,84 @@ mod postgres_tests {
                 Some("25000")
             );
         }
+    }
+
+    /// A lease operation that outlives its client-side budget returns a timeout
+    /// and its connection is never handed to a later writer.
+    ///
+    /// Mutation oracle: return the connection to the pool instead of detaching
+    /// it → the stalled backend is checked out again → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn serving_lease_sql_timeout_discards_the_connection() {
+        let (db, store) = store().await;
+        let stalled_pid = std::sync::Arc::new(std::sync::Mutex::new(None::<i32>));
+        let recorded = std::sync::Arc::clone(&stalled_pid);
+        let started = std::time::Instant::now();
+        let error = store
+            .bounded_serving_lease_sql(Duration::from_millis(200), async move |connection| {
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *connection)
+                    .await?;
+                *recorded.lock().unwrap() = Some(pid);
+                let mut tx = serving_lease_transaction(connection).await?;
+                sqlx::query("SELECT pg_sleep(1)").execute(&mut *tx).await?;
+                Ok(())
+            })
+            .await
+            .expect_err("stalled lease SQL must time out");
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "client bound must fire first"
+        );
+        assert!(
+            matches!(&error, DbError::Sqlx(sqlx::Error::Io(io)) if io.kind() == std::io::ErrorKind::TimedOut),
+            "unexpected error: {error:?}"
+        );
+        let stalled_pid = stalled_pid.lock().unwrap().expect("operation ran");
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            let mut connection = db.pool().acquire().await.expect("acquire");
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("pid");
+            assert_ne!(
+                pid, stalled_pid,
+                "timed-out connection returned to the pool"
+            );
+            held.push(connection);
+        }
+    }
+
+    /// The lease transaction's own statement bound ends a slow statement as an
+    /// ordinary query cancellation, well inside the client budget.
+    ///
+    /// Mutation oracle: drop the `SET LOCAL statement_timeout` → the sleep
+    /// runs to completion → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn serving_lease_statement_timeout_cancels_slow_statement() {
+        let (_db, store) = store().await;
+        let error = store
+            .bounded_serving_lease_sql(Duration::from_secs(5), async |connection| {
+                let mut tx = serving_lease_transaction(connection).await?;
+                sqlx::query("SELECT pg_sleep(3)").execute(&mut *tx).await?;
+                Ok(())
+            })
+            .await
+            .expect_err("slow statement must be cancelled");
+        let DbError::Sqlx(sqlx_error) = &error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(
+            sqlx_error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("57014"),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -4458,7 +7468,15 @@ mod postgres_tests {
             .await
             .expect("bindings");
         let first = store.purge_postgres(&token).await.expect("purge postgres");
-        assert_eq!(first.len(), EXPECTED_SCOPED_TABLES.len());
+        let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
+            .iter()
+            .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))
+            .copied()
+            .collect();
+        assert_eq!(
+            first.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            expected_tables
+        );
         assert!(
             store.purge_postgres(&token).await.is_err(),
             "completed stage cannot be replayed under stale checkpoint state"
@@ -4870,6 +7888,156 @@ mod postgres_tests {
         .execute(&admin)
         .await
         .expect("drop probe database");
+    }
+
+    /// Seed one report-backed and one direct staff action, each with an outbox
+    /// row, in `community`. Returns the action ids.
+    async fn seed_relay_admin_rows(db: &Db, community: Uuid) -> [Uuid; 2] {
+        let report_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO moderation_reports \
+             (community_id, report_event_id, reporter_pubkey, target_kind, target_pubkey, report_type) \
+             VALUES ($1, $2, $3, 'pubkey', $4, 'spam') RETURNING id",
+        )
+        .bind(community)
+        .bind(Uuid::new_v4().as_bytes().repeat(2))
+        .bind([2u8; 32].as_slice())
+        .bind([3u8; 32].as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("seed report");
+        let mut ids = [Uuid::nil(); 2];
+        for (slot, report) in ids.iter_mut().zip([Some(report_id), None]) {
+            let action_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO relay_admin_actions \
+                 (report_id, report_community_id, request_id, actor_pubkey, actor_role, \
+                  action, state, enforcement_target_pubkey) \
+                 VALUES ($1, $2, $3, $4, 'operator', 'ban', 'succeeded', $5) RETURNING id",
+            )
+            .bind(report)
+            .bind(community)
+            .bind(Uuid::new_v4())
+            .bind([4u8; 32].as_slice())
+            .bind([3u8; 32].as_slice())
+            .fetch_one(&db.pool)
+            .await
+            .expect("seed relay admin action");
+            sqlx::query(
+                "INSERT INTO relay_admin_outbox (action_id, task_type, state) \
+                 VALUES ($1, 'reporter_notice', 'delivered')",
+            )
+            .bind(action_id)
+            .execute(&db.pool)
+            .await
+            .expect("seed relay admin outbox");
+            *slot = action_id;
+        }
+        ids
+    }
+
+    async fn relay_admin_row_counts(db: &Db, community: Uuid) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM relay_admin_actions WHERE report_community_id = $1), \
+                    (SELECT count(*) FROM relay_admin_outbox o JOIN relay_admin_actions a \
+                       ON a.id = o.action_id WHERE a.report_community_id = $1)",
+        )
+        .bind(community)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count relay admin rows")
+    }
+
+    /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK
+    /// their action. Purge must delete the community's report-backed and direct
+    /// rows in FK order and leave other communities' rows alone.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn purge_postgres_succeeds_with_relay_admin_action_rows() {
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = *request.community_id.as_uuid();
+        seed_relay_admin_rows(&db, community).await;
+        let bystander = db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("create bystander community")
+            .id
+            .as_uuid()
+            .to_owned();
+        seed_relay_admin_rows(&db, bystander).await;
+        let live = store
+            .inventory_schema(request.community_id)
+            .await
+            .expect("inventory");
+        assert_eq!(live.row_counts.get("relay_admin_outbox"), Some(&2));
+        assert_eq!(live.row_counts.get("relay_admin_actions"), Some(&2));
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+
+        assert_eq!(deleted.get("relay_admin_outbox"), Some(&2));
+        assert_eq!(deleted.get("relay_admin_actions"), Some(&2));
+        assert_eq!(relay_admin_row_counts(&db, community).await, (0, 0));
+        assert_eq!(relay_admin_row_counts(&db, bystander).await, (2, 2));
+
+        // Logical verification must prove these tables empty too: a straggler
+        // direct action (not write-fenced, no report FK) fails the proof.
+        store
+            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("cache");
+        let straggler: Uuid = sqlx::query_scalar(
+            "INSERT INTO relay_admin_actions \
+             (report_community_id, request_id, actor_pubkey, actor_role, action, state, \
+              enforcement_target_pubkey) \
+             VALUES ($1, $2, $3, 'operator', 'ban', 'succeeded', $4) RETURNING id",
+        )
+        .bind(community)
+        .bind(Uuid::new_v4())
+        .bind([4u8; 32].as_slice())
+        .bind([3u8; 32].as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("seed straggler");
+        let err = store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .expect_err("straggler relay admin action must fail verification");
+        assert!(
+            err.to_string().contains("relay_admin_actions"),
+            "unexpected verification error: {err}"
+        );
+        sqlx::query("DELETE FROM relay_admin_actions WHERE id = $1")
+            .bind(straggler)
+            .execute(&db.pool)
+            .await
+            .expect("remove straggler");
+        store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .expect("verify after straggler removed");
     }
 
     /// A database bootstrapped from `schema/schema.sql` (the pgschema

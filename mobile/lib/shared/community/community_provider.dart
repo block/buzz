@@ -618,21 +618,11 @@ final activeCommunityProvider = FutureProvider<Community?>((ref) async {
 
   if (communities.isEmpty) return null;
 
-  if (activeId == null) {
-    // No active ID stored but communities exist — fall back to first.
-    await storage.saveActiveId(communities.first.id);
-    return communities.first;
-  }
-
-  try {
-    return communities.firstWhere((w) => w.id == activeId);
-  } on StateError {
-    // Active ID points to a community that no longer exists.
-    // Fall back to first community.
-    if (communities.isNotEmpty) {
-      await storage.saveActiveId(communities.first.id);
-      return communities.first;
-    }
-    return null;
-  }
+  // This projection can outlive the list it captured above. Never persist a
+  // fallback here: a newer authentication may already have selected a community
+  // absent from that list. Authentication owns durable active-ID repair.
+  return communities.firstWhere(
+    (community) => community.id == activeId,
+    orElse: () => communities.first,
+  );
 });

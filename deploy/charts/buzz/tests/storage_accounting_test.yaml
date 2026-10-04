@@ -54,6 +54,10 @@ tests:
           value: CronJob
         template: templates/storage-accounting-cronjob.yaml
       - equal:
+          path: metadata.name
+          value: RELEASE-NAME-buzz-storage-accounting
+        template: templates/storage-accounting-cronjob.yaml
+      - equal:
           path: spec.concurrencyPolicy
           value: Forbid
         template: templates/storage-accounting-cronjob.yaml
@@ -142,4 +146,22 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_GIT_HOOK_HMAC_SECRET
+        template: templates/storage-accounting-cronjob.yaml
+
+  - it: preserves the storage suffix without a trailing separator after truncation
+    set:
+      fullnameOverride: storage-accounting-fullname-that-needs-truncation-at-the-separator
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      storageAccounting.enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: storage-accounting-fullname-that-storage-accounting
         template: templates/storage-accounting-cronjob.yaml

@@ -13,13 +13,15 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/community/community_icon_provider.dart';
+import '../../shared/community/community_membership_provider.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/app_list_card.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -30,6 +32,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
 import '../pairing/pairing_provider.dart';
@@ -161,12 +164,20 @@ _UnreadChannelState _computeUnreadChannelState({
 class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
+    this.communityInvitePageBuilder,
+    this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
     this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+
+  /// Builds the invite destination opened from the community sheet.
+  final WidgetBuilder? communityInvitePageBuilder;
+
+  /// Builds the appearance destination opened from the community sheet.
+  final WidgetBuilder? communityAppearancePageBuilder;
 
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
@@ -192,6 +203,7 @@ class ChannelsPage extends HookConsumerWidget {
       context,
       titleStyle: headerTitleStyle,
       bottomHeight: _kTopSectionBottomPadding,
+      nativeLargeTitle: true,
     );
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
@@ -308,11 +320,27 @@ class ChannelsPage extends HookConsumerWidget {
       showBuzzModalBottomSheet<void>(
         context: context,
         showCloseButton: false,
-        showDragHandle: false,
-        builder: (_) => const _CommunitySwitcherSheet(),
+        showDragHandle: true,
+        builder: (_) => _CommunitySwitcherSheet(
+          invitePageBuilder: communityInvitePageBuilder,
+          appearancePageBuilder: communityAppearancePageBuilder,
+        ),
       );
     }
 
+    final activeCommunity = ref
+        .watch(activeCommunityProvider)
+        .unwrapPrevious()
+        .value;
+    final communityRelay = activeCommunity?.relayUrl;
+    final communityAvatar = communityRelay == null
+        ? null
+        : ref
+              .watch(communityIconProvider(communityRelay))
+              .unwrapPrevious()
+              .value;
+    final profile = ref.watch(profileProvider).unwrapPrevious().value;
+    final communityName = activeCommunity?.name.trim() ?? '';
     final topSectionGradient = context.appColors.topSectionGradient;
     final usesPinnedGradient = topSectionGradient != null;
 
@@ -322,6 +350,33 @@ class ChannelsPage extends HookConsumerWidget {
           : context.colors.surface,
       backgroundGradient: topSectionGradient,
       appBar: FrostedAppBar(
+        nativeTitle: communityName.isEmpty ? 'Community' : communityName,
+        nativeLargeTitle: true,
+        nativeLeading: IosNavigationAction(
+          label: 'Switch community',
+          avatarIdentity: activeCommunity?.id,
+          symbol: 'building.2.crop.circle',
+          imageUrl: communityAvatar,
+          avatarInitial: communityName.isEmpty
+              ? '?'
+              : communityName.substring(0, 1).toUpperCase(),
+          onPressed: openCommunitySwitcher,
+        ),
+        nativeActions: [
+          IosNavigationAction(
+            label: 'Settings',
+            avatarIdentity: '${activeCommunity?.id}:${activeCommunity?.pubkey}',
+            symbol: 'person.crop.circle',
+            imageUrl: profile?.avatarUrl,
+            avatarInitial: profile?.initial ?? '?',
+            onPressed: () => Navigator.of(context).push(
+              _SettingsPageRoute(
+                builder: settingsPageBuilder,
+                onTransitionProgress: onSettingsTransitionProgress,
+              ),
+            ),
+          ),
+        ],
         horizontalInset: _kTopSectionInset,
         // Let the full Buzz gradient show at rest. Once the list begins to
         // move beneath this row, build up blur over the first 64dp of scroll

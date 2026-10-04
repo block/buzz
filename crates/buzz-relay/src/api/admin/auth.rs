@@ -259,6 +259,19 @@ pub async fn resolve_admin_principal(
     state: &AppState,
     pubkey: [u8; 32],
 ) -> Result<AdminPrincipal, ApiError> {
+    lookup_admin_principal(state, pubkey)
+        .await?
+        .ok_or_else(ApiError::forbidden)
+}
+
+/// Effective staff grant for `pubkey`, same precedence as
+/// [`resolve_admin_principal`]. `Ok(None)` means "not staff"; a roster lookup
+/// failure is an `Err`, so callers fail closed instead of treating it as
+/// "not staff".
+pub async fn lookup_admin_principal(
+    state: &AppState,
+    pubkey: [u8; 32],
+) -> Result<Option<AdminPrincipal>, ApiError> {
     let pubkey_hex = hex::encode(pubkey);
     let cfg = &state.config;
 
@@ -268,11 +281,11 @@ pub async fn resolve_admin_principal(
         .iter()
         .any(|pk| pk == &pubkey_hex)
     {
-        return Ok(AdminPrincipal {
+        return Ok(Some(AdminPrincipal {
             pubkey,
             role: AdminRole::Operator,
             source: AdminSource::Config,
-        });
+        }));
     }
 
     // 2. Owner fallback B: only when configured RELAY_OPERATOR_PUBKEYS is empty.
@@ -280,11 +293,11 @@ pub async fn resolve_admin_principal(
     if cfg.relay_operator_pubkeys.is_empty() {
         if let Some(ref owner_hex) = cfg.relay_owner_pubkey {
             if owner_hex == &pubkey_hex {
-                return Ok(AdminPrincipal {
+                return Ok(Some(AdminPrincipal {
                     pubkey,
                     role: AdminRole::Operator,
                     source: AdminSource::OwnerFallback,
-                });
+                }));
             }
         }
     }
@@ -309,15 +322,15 @@ pub async fn resolve_admin_principal(
                 return Err(ApiError::forbidden());
             }
         };
-        return Ok(AdminPrincipal {
+        return Ok(Some(AdminPrincipal {
             pubkey,
             role,
             source: AdminSource::Db,
-        });
+        }));
     }
 
     // 4. No grant found.
-    Err(ApiError::forbidden())
+    Ok(None)
 }
 
 /// Require that this request resolved a principal (nip98 mode) and return it.

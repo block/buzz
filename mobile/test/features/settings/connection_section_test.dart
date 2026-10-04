@@ -5,6 +5,7 @@ import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,75 +16,124 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
-  testWidgets('shows a compact copyable identity row', (tester) async {
-    MethodCall? clipboardCall;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-          if (call.method == 'Clipboard.setData') clipboardCall = call;
+  testWidgets(
+    'shows a compact copyable identity row',
+    (tester) async {
+      var successFeedback = false;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/haptics'),
+        (call) async {
+          expect(call.method, 'success');
+          successFeedback = true;
           return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/haptics'),
+          null,
+        );
+      });
+      MethodCall? clipboardCall;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') clipboardCall = call;
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
 
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
-          authProvider.overrideWith(_AuthNotifier.new),
-          pairingProvider.overrideWith(
-            () => _PairingNotifier(Future<bool>.value(true)),
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+            authProvider.overrideWith(_AuthNotifier.new),
+            pairingProvider.overrideWith(
+              () => _PairingNotifier(Future<bool>.value(true)),
+            ),
+            savedPrefsProvider.overrideWithValue(prefs),
+          ],
+          child: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
-          savedPrefsProvider.overrideWithValue(prefs),
-        ],
-        child: SettingsPage(
-          profileHeader: const SizedBox.shrink(),
-          invitePageBuilder: (_) => const SizedBox.shrink(),
-          identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.ensureVisible(find.text('Identity (pubkey)'));
-    await tester.pumpAndSettle();
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.text('Copy public key (npub)'));
+      await tester.pumpAndSettle();
 
-    final expectedPubkey = nostr.Keys(
-      '1111111111111111111111111111111111111111111111111111111111111111',
-    ).public;
-    // Keys('1'×64).public ↔ this npub — the NIP-19 canonical vector for the
-    // identity row, hardcoded so the codec itself stays under test.
-    const expectedNpub =
-        'npub1fu64hh9hes90w2808n8tjc2ajp5yhddjef0ctx4s7zmsgp6cwx4qgy4eg9';
-    expect(find.text('Connected to'), findsNothing);
-    expect(find.text('https://relay.test'), findsNothing);
-    // Neither the raw hex key nor the full npub is rendered visually — the
-    // full npub is exposed through a11y and the clipboard only.
-    expect(find.text(expectedPubkey), findsNothing);
-    expect(find.text(expectedNpub), findsNothing);
-    // The identity row's a11y value carries the full npub (not raw hex).
-    expect(
-      find.ancestor(
-        of: find.text('Identity (pubkey)'),
-        matching: find.byWidgetPredicate(
-          (widget) =>
-              widget is Semantics && widget.properties.value == expectedNpub,
+      final expectedPubkey = nostr.Keys(
+        '1111111111111111111111111111111111111111111111111111111111111111',
+      ).public;
+      // Keys('1'×64).public ↔ this npub — the NIP-19 canonical vector for the
+      // identity row, hardcoded so the codec itself stays under test.
+      const expectedNpub =
+          'npub1fu64hh9hes90w2808n8tjc2ajp5yhddjef0ctx4s7zmsgp6cwx4qgy4eg9';
+      final statusCard = find.byKey(const ValueKey('status-identity-options'));
+      expect(
+        find.descendant(of: statusCard, matching: find.text('Set status')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: statusCard,
+          matching: find.text('Copy public key (npub)'),
         ),
-      ),
-      findsOneWidget,
-    );
-    final copy = tester.getRect(find.byIcon(LucideIcons.copy));
-    final chevron = tester.getRect(find.byIcon(LucideIcons.chevronRight).first);
-    expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
+        findsOneWidget,
+      );
+      expect(
+        tester.getTopLeft(find.text('Copy public key (npub)')).dy,
+        lessThan(tester.getTopLeft(find.text('Display name')).dy),
+      );
+      expect(find.text('Connection'), findsNothing);
+      final sendCard = find.ancestor(
+        of: find.text('Send identity to desktop'),
+        matching: find.byType(AppListCard),
+      );
+      expect(
+        find.descendant(
+          of: sendCard,
+          matching: find.text('Copy public key (npub)'),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Connected to'), findsNothing);
+      expect(find.text('https://relay.test'), findsNothing);
+      // Neither the raw hex key nor the full npub is rendered visually — the
+      // full npub is exposed through a11y and the clipboard only.
+      expect(find.text(expectedPubkey), findsNothing);
+      expect(find.text(expectedNpub), findsNothing);
+      // The identity row's a11y value carries the full npub (not raw hex).
+      expect(
+        find.ancestor(
+          of: find.text('Copy public key (npub)'),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.value == expectedNpub,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final copy = tester.getRect(find.byIcon(LucideIcons.copy));
+      final chevron = tester.getRect(
+        find.byIcon(LucideIcons.chevronRight).first,
+      );
+      expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
 
-    await tester.tap(find.text('Identity (pubkey)'));
-    await tester.pump();
-    expect(clipboardCall?.method, 'Clipboard.setData');
-    expect(clipboardCall?.arguments, {'text': expectedNpub});
-    expect(find.text('Pubkey copied'), findsOneWidget);
-  });
+      await tester.tap(find.text('Copy public key (npub)'));
+      await tester.pump();
+      expect(successFeedback, isTrue);
+      expect(clipboardCall?.method, 'Clipboard.setData');
+      expect(clipboardCall?.arguments, {'text': expectedNpub});
+      expect(find.text('Public key (npub) copied'), findsOneWidget);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 
   testWidgets('waits for a resumed frame before navigating after auth', (
     tester,
@@ -103,7 +153,6 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
-          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
@@ -141,7 +190,6 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
-          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
@@ -181,7 +229,6 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
-          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
@@ -224,7 +271,6 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
-          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
@@ -268,7 +314,6 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
-          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),

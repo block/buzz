@@ -24,6 +24,7 @@ buzz-media = { workspace = true }
 nostr = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 deadpool-redis = { workspace = true }

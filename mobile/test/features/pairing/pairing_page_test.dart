@@ -1,4 +1,7 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,13 +9,12 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/features/pairing/pairing_page/onboarding_wordmark.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
-import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
-import 'package:buzz/shared/widgets/tappable_flapping_bee.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -25,8 +27,14 @@ void main() {
         WidgetHelpers.testable(child: const PairingPage()),
       );
 
-      expect(find.byType(TappableFlappingBee), findsOneWidget);
-      expect(find.text('Welcome to Buzz'), findsOneWidget);
+      expect(find.bySemanticsLabel('Buzz'), findsOneWidget);
+      expect(find.text('Welcome to Buzz'), findsNothing);
+      expect(
+        find.text(
+          'Your people, your agents, your projects —\nall in one place.',
+        ),
+        findsOneWidget,
+      );
       expect(find.text('Scan a QR code'), findsOneWidget);
       expect(find.text('Use pairing code'), findsOneWidget);
       expect(find.text('Connect'), findsNothing);
@@ -47,10 +55,74 @@ void main() {
         find.widgetWithText(TextButton, 'Use pairing code'),
       );
 
+      final glassFinder = find.widgetWithText(FilledButton, 'Scan a QR code');
+      expect(
+        find.descendant(of: glassFinder, matching: find.byType(BackdropFilter)),
+        findsOneWidget,
+      );
+      expect(scanButton.height, greaterThanOrEqualTo(44));
+      expect(pairingCodeButton.height, greaterThanOrEqualTo(44));
+      expect(
+        tester
+            .widget<TextButton>(
+              find.widgetWithText(TextButton, 'Use pairing code'),
+            )
+            .style!
+            .backgroundColor!
+            .resolve({}),
+        Colors.transparent,
+      );
       expect(scanButton.width, lessThan(440));
       expect(pairingCodeButton.width, lessThan(440));
       expect(find.byType(OutlinedButton), findsNothing);
     });
+
+    testWidgets(
+      'docks welcome actions and keeps pairing reachable with keyboard',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
+        addTearDown(tester.view.reset);
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            child: const PairingPage(),
+            disableAnimations: true,
+          ),
+        );
+        final toggle = find.widgetWithText(TextButton, 'Use pairing code');
+        expect(tester.getBottomLeft(toggle).dy, 844 - 34 - Grid.sm);
+        expect(
+          tester
+              .getBottomLeft(find.byKey(const Key('pairing-buzz-wordmark')))
+              .dy,
+          lessThan(tester.getTopLeft(toggle).dy - 150),
+        );
+
+        final wordmark = find.byKey(const Key('pairing-buzz-wordmark'));
+        final originalFrame = tester.getRect(wordmark);
+        for (final distance in [-150.0, 150.0]) {
+          await tester.drag(find.byType(CustomScrollView), Offset(0, distance));
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(tester.getRect(wordmark), originalFrame);
+          expect(tester.getBottomLeft(toggle).dy, 844 - 34 - Grid.sm);
+        }
+
+        await _expandPairingCode(tester);
+        tester.view.physicalSize = const Size(360, 560);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 240);
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), 'pairing-code-draft');
+        final connect = find.widgetWithText(FilledButton, 'Connect');
+        await tester.ensureVisible(connect);
+        await tester.pump();
+        expect(connect.hitTestable(), findsOneWidget);
+        expect(tester.getBottomLeft(connect).dy, lessThanOrEqualTo(560 - 240));
+        expect(find.text('pairing-code-draft'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
 
     testWidgets('uses dark status-bar icons on the onboarding surface', (
       tester,
@@ -66,6 +138,93 @@ void main() {
       expect(overlay.value.statusBarIconBrightness, Brightness.dark);
       expect(overlay.value.statusBarColor, Colors.transparent);
     });
+
+    testWidgets(
+      'switches welcome artwork and readable controls with appearance',
+      (tester) async {
+        Future<void> show(Brightness brightness) async {
+          await tester.pumpWidget(
+            ProviderScope(
+              child: MaterialApp(
+                theme: brightness == Brightness.dark
+                    ? AppTheme.dark()
+                    : AppTheme.light(),
+                home: const PairingPage(),
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 300));
+        }
+
+        await show(Brightness.light);
+        var decoration =
+            tester
+                    .widget<DecoratedBox>(
+                      find.byKey(const Key('pairing-onboarding-background')),
+                    )
+                    .decoration
+                as BoxDecoration;
+        expect(
+          (decoration.image!.image as AssetImage).assetName,
+          'assets/images/shell-gradient.png',
+        );
+        expect(decoration.image!.fit, BoxFit.fill);
+        await _expandPairingCode(tester);
+        await tester.enterText(find.byType(TextField), 'pairing-code-draft');
+
+        await show(Brightness.dark);
+        decoration =
+            tester
+                    .widget<DecoratedBox>(
+                      find.byKey(const Key('pairing-onboarding-background')),
+                    )
+                    .decoration
+                as BoxDecoration;
+        expect(decoration.image, isNull);
+        expect(decoration.color, const Color(0xFF11181D));
+        expect(
+          tester
+              .widget<OnboardingWordmark>(
+                find.byKey(const Key('pairing-buzz-wordmark')),
+              )
+              .color,
+          const Color(0xFFE6EDF0),
+        );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).style!.color,
+          const Color(0xFFE6EDF0),
+        );
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField))
+              .decoration!
+              .fillColor,
+          const Color(0xFF233039),
+        );
+        expect(find.text('pairing-code-draft'), findsOneWidget);
+        expect(
+          tester
+              .widget<AnnotatedRegion<SystemUiOverlayStyle>>(
+                find.byKey(const Key('pairing-onboarding-system-overlay')),
+              )
+              .value
+              .statusBarIconBrightness,
+          Brightness.light,
+        );
+
+        await show(Brightness.light);
+        expect(
+          tester
+              .widget<OnboardingWordmark>(
+                find.byKey(const Key('pairing-buzz-wordmark')),
+              )
+              .color,
+          isNull,
+        );
+        expect(find.text('pairing-code-draft'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('uses the onboarding surface for dark-theme SAS verification', (
       tester,
@@ -83,18 +242,14 @@ void main() {
         find.byKey(const Key('pairing-sas-system-overlay')),
       );
 
-      expect(overlay.value.statusBarIconBrightness, Brightness.dark);
+      expect(overlay.value.statusBarIconBrightness, Brightness.light);
       expect(overlay.value.statusBarColor, Colors.transparent);
       final background = tester.widget<DecoratedBox>(
         find.byKey(const Key('pairing-onboarding-background')),
       );
       final backgroundDecoration = background.decoration as BoxDecoration;
-      final backgroundGradient =
-          backgroundDecoration.gradient! as LinearGradient;
-      expect(backgroundGradient.colors, const [
-        Color(0xFFD7D72E),
-        Color(0xFFD7E7F6),
-      ]);
+      expect(backgroundDecoration.color, const Color(0xFF11181D));
+      expect(backgroundDecoration.image, isNull);
       expect(
         tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
         Colors.transparent,
@@ -140,7 +295,7 @@ void main() {
       expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
     });
 
-    testWidgets('uses the native glass back control on iOS', (tester) async {
+    testWidgets('uses the native navigation bar on iOS', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
@@ -148,25 +303,9 @@ void main() {
         WidgetHelpers.testable(child: const PairingPage(addingCommunity: true)),
       );
 
-      final nativeBack = tester.widget<UiKitView>(find.byType(UiKitView));
-      expect(nativeBack.viewType, 'buzz/navigation_glass');
-      expect(nativeBack.creationParams, containsPair('icon', 'back'));
-      expect(
-        nativeBack.creationParams,
-        containsPair('buttonCenterX', iosGlassChannelHeaderButtonCenterX),
-      );
-      expect(
-        nativeBack.creationParams,
-        containsPair('hitTargetWidth', iosGlassChannelHeaderLeadingWidth),
-      );
-      final backRect = tester.getRect(
-        find.byKey(const ValueKey('pairing-ios-glass-back')),
-      );
-      expect(
-        backRect.left + iosGlassChannelHeaderButtonCenterX,
-        Grid.quarter + iosGlassChannelHeaderButtonCenterX,
-      );
-      expect(find.byTooltip('Back'), findsOneWidget);
+      final nativeBar = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(nativeBar.viewType, 'buzz/ios_navigation_bar');
+      expect(nativeBar.creationParams, containsPair('title', 'Add Community'));
       debugDefaultTargetPlatformOverride = null;
     });
 
@@ -284,6 +423,8 @@ void main() {
 
       await _expandPairingCode(tester);
       await tester.enterText(find.byType(TextField), 'nostrpair://ordinary');
+      await tester.ensureVisible(find.text('Connect'));
+      await tester.pump();
       await tester.tap(find.text('Connect'));
       await tester.pump();
 
@@ -306,6 +447,8 @@ void main() {
       await _expandPairingCode(tester);
       const code = 'nostrpair://desktop?mode=recover';
       await tester.enterText(find.byType(TextField), code);
+      await tester.ensureVisible(find.text('Connect'));
+      await tester.pump();
       await tester.tap(find.text('Connect'));
       await tester.pump();
 
@@ -464,9 +607,9 @@ void main() {
         );
       }
 
-      const onboardingInk = Color(0xFF111111);
-      const onboardingMutedInk = Color(0xB3111111);
-      const onboardingCtaLabel = Color(0xFFD7E6F0);
+      const onboardingInk = Color(0xFFE6EDF0);
+      const onboardingMutedInk = Color(0xFFAAB8C0);
+      const onboardingCtaLabel = Color(0xFF172229);
       final theme = AppTheme.dark();
       final protectionTile = tester.widget<CheckboxListTile>(
         find.byKey(const Key('protect-sensitive-actions-checkbox')),
@@ -482,7 +625,7 @@ void main() {
       final firstDigitContainer = tester.widget<Container>(digitFinders.first);
       final firstDigitDecoration =
           firstDigitContainer.decoration! as BoxDecoration;
-      expect(firstDigitDecoration.color, Colors.white.withValues(alpha: 0.7));
+      expect(firstDigitDecoration.color, const Color(0xFF233039));
       expect(
         (firstDigitDecoration.border! as Border).top.color,
         theme.colorScheme.primary.withValues(alpha: 0.15),
@@ -558,14 +701,13 @@ void main() {
       );
     });
 
-    testWidgets('uses accessible SAS error contrast in both themes', (
-      tester,
-    ) async {
-      const errorMessage = 'Identity confirmation failed. Nothing transferred.';
-      const errorInk = Color(0xFF7A1025);
-      const gradientColors = [Color(0xFFD7D72E), Color(0xFFD7E7F6)];
-
-      for (final theme in [AppTheme.light(), AppTheme.dark()]) {
+    for (final brightness in Brightness.values) {
+      testWidgets('uses accessible SAS error contrast in ${brightness.name}', (
+        tester,
+      ) async {
+        const errorMessage =
+            'Identity confirmation failed. Nothing transferred.';
+        final isDark = brightness == Brightness.dark;
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
@@ -573,21 +715,104 @@ void main() {
                 () => _ConfirmingSasPairingNotifier(errorMessage: errorMessage),
               ),
             ],
-            child: MaterialApp(theme: theme, home: const PairingPage()),
+            child: MaterialApp(
+              theme: isDark ? AppTheme.dark() : AppTheme.light(),
+              home: const PairingPage(),
+            ),
           ),
         );
+        await tester.pumpAndSettle();
 
-        final errorText = tester.widget<Text>(find.text(errorMessage));
-        expect(errorText.style?.color, errorInk);
-        for (final background in gradientColors) {
+        final errorFinder = find.text(errorMessage);
+        expect(Theme.of(tester.element(errorFinder)).brightness, brightness);
+        final errorInk = tester.widget<Text>(errorFinder).style!.color!;
+        expect(
+          errorInk,
+          isDark ? const Color(0xFFFFAAA0) : const Color(0xFF7A1025),
+        );
+
+        final backgroundFinder = find.byKey(
+          const Key('pairing-onboarding-background'),
+        );
+        final background = tester.widget<DecoratedBox>(backgroundFinder);
+        final decoration = background.decoration as BoxDecoration;
+        expect(
+          decoration.color,
+          isDark ? const Color(0xFF11181D) : const Color(0xFFE7F0EF),
+        );
+        if (isDark) {
+          expect(decoration.image, isNull);
+        } else {
           expect(
-            _contrastRatio(errorInk, background),
-            greaterThanOrEqualTo(4.5),
+            (decoration.image!.image as AssetImage).assetName,
+            'assets/images/shell-gradient.png',
+          );
+          await tester.runAsync(
+            () => precacheImage(
+              decoration.image!.image,
+              tester.element(backgroundFinder),
+            ),
           );
         }
+        final size = tester.getSize(backgroundFinder);
+        final errorRect = tester
+            .getRect(errorFinder)
+            .shift(-tester.getTopLeft(backgroundFinder));
+
+        // Render the production decoration and painter without foreground
+        // content, so sampled pixels are the actual surface behind the error.
+        const captureKey = Key('sas-error-background-capture');
+        await tester.pumpWidget(
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: RepaintBoundary(
+              key: captureKey,
+              child: SizedBox.fromSize(
+                size: size,
+                child: DecoratedBox(
+                  decoration: decoration,
+                  child: CustomPaint(
+                    painter: (background.child! as CustomPaint).painter,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final boundary = tester.renderObject<RenderRepaintBoundary>(
+          find.byKey(captureKey),
+        );
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 1);
+          try {
+            final pixels = (await image.toByteData(
+              format: ui.ImageByteFormat.rawRgba,
+            ))!;
+            for (var y = errorRect.top.ceil(); y < errorRect.bottom; y += 4) {
+              for (var x = errorRect.left.ceil(); x < errorRect.right; x += 4) {
+                final offset = (y * image.width + x) * 4;
+                expect(pixels.getUint8(offset + 3), 255);
+                final surface = Color.fromARGB(
+                  255,
+                  pixels.getUint8(offset),
+                  pixels.getUint8(offset + 1),
+                  pixels.getUint8(offset + 2),
+                );
+                expect(
+                  _contrastRatio(errorInk, surface),
+                  greaterThanOrEqualTo(4.5),
+                  reason: '${brightness.name} error contrast at ($x, $y)',
+                );
+              }
+            }
+          } finally {
+            image.dispose();
+          }
+        });
         expect(tester.takeException(), isNull);
-      }
-    });
+      });
+    }
 
     testWidgets('keeps SAS actions above the keyboard on small screens', (
       tester,
@@ -641,8 +866,11 @@ double _contrastRatio(Color foreground, Color background) {
 }
 
 Future<void> _expandPairingCode(WidgetTester tester) async {
+  await tester.ensureVisible(find.text('Use pairing code'));
+  await tester.pump();
   await tester.tap(find.text('Use pairing code'));
-  await tester.pumpAndSettle();
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
 }
 
 class _ErrorPairingNotifier extends Notifier<PairingState>

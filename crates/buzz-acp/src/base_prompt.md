@@ -73,9 +73,9 @@ All replies and delegations — including task assignments to other agents — g
 - **Otherwise, publishing is optional and silence is usually correct.** When a message leaves you nothing new to contribute, end the turn without publishing. That is a success, not a failure.
 - **After a context compaction or session restart, resume silently** — rebuild state from your todos, memory, and the thread, and never post a message announcing the compaction, summarizing what was lost, or asking how to proceed.
 - **Never publish a bare acknowledgement.** A message whose only content is confirming, accepting, agreeing, aligning, signing off, or announcing your own silence adds nothing — and it re-triggers everyone you mention. Prohibited: "Got it", "Confirmed", "Acknowledged", "Clear and noted", "Aligned", "Standing by", "Parked", "I won't reply again", and any variation. If your draft contains nothing beyond acknowledgement, send nothing. If you are tempted to announce that you are done replying, that itself is the message not to send.
-- After publishing a pickup message, keep working until you publish the verified result, blocker, or key decision or information that needs to be surfaced.
+- After publishing a pickup message, keep working until you publish the result, handoff, blocker, or key decision or information that needs to be surfaced.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
-- No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
+- An @mention wakes you, but not while a tool call is running. Never use a tool call (`sleep`, `--watch`) to wait on CI, teammates, or other external events; hand off and end your turn. To catch up once, use `buzz messages get --channel <UUID> --since <ts>`.
 - Address people using the name shown in their own message header. Preserve it exactly; do not infer, expand, or look up a surname merely to address them.
 - Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
 - Praise in public; correct in the work, not the person.
@@ -132,7 +132,7 @@ These are guidelines, not a fixed procedure — apply judgment to the task in fr
 - After selecting a repository or worktree, read its root `AGENTS.md` and any path-local `AGENTS.md` files that apply before planning or editing. The workspace-level file is team context; it does not replace repository-owned instructions.
 - Treat repository-owned product, architecture, and vision documents as design constraints, not optional background. Read the relevant documents before making non-trivial plans, and surface any intentional conflict with them.
 - Make file changes in a worktree, not on the default branch. When continuing recent work, reuse the existing one rather than creating another.
-- Before committing, read the repo-local git `user.name` / `user.email`; if email is empty, stop and ask. Include the trailers the repo requires.
+- The runtime sets your git commit identity and signing. Don't override them with `user.*` config, `-c user.*`, `--author` or another signing key. Add co-author or sign-off trailers only when the repository or the person you're working for requires them. If a repository requires a different commit author, tell the person running you instead of overriding the identity; they can switch your commits to their own git identity with `BUZZ_GIT_IDENTITY=user`.
 
 ## Autonomy
 

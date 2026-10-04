@@ -47,6 +47,13 @@ void exactMentionTests() {
     }
   }
 
+  // Same-name members get contextual picker labels (`Scout · <npub suffix>`);
+  // the inserted mention text still uses the plain name.
+  Finder scoutRows() => find.descendant(
+    of: find.byKey(const ValueKey('mention-suggestions-popover')),
+    matching: find.textContaining('Scout'),
+  );
+
   Future<void> pick(
     WidgetTester tester,
     String text, {
@@ -54,7 +61,8 @@ void exactMentionTests() {
   }) async {
     await tester.enterText(find.byType(TextField), text);
     await tester.pumpAndSettle();
-    await tester.tap(last ? find.text('Scout').last : find.text('Scout').first);
+    final rows = scoutRows();
+    await tester.tap(last ? rows.last : rows.first);
     await tester.pumpAndSettle();
   }
 
@@ -253,6 +261,14 @@ void exactMentionTests() {
         members(),
         (_, keys, {mediaTags = const []}) async => sent = keys,
       );
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      final labels = [
+        for (final row in scoutRows().evaluate()) (row.widget as Text).data!,
+      ];
+      expect(labels, hasLength(2));
+      expect(labels.toSet(), hasLength(2));
+      expect(labels, everyElement(startsWith('Scout · ')));
       await pick(tester, '@');
       final controller = tester
           .widget<TextField>(find.byType(TextField))

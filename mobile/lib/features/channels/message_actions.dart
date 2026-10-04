@@ -25,6 +25,8 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/widgets/sheet_divider.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/native_message_presentation.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
@@ -45,6 +47,7 @@ part 'message_actions/quick_reaction_row.dart';
 part 'message_actions/message_action_popover.dart';
 part 'message_actions/message_action_popover_widgets.dart';
 part 'message_actions/message_reaction_tray.dart';
+part 'message_actions/native_actions.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
@@ -71,7 +74,7 @@ final _messageActionBackdropFilter = ImageFilter.blur(
 /// [restoreComposerFocus] only after a dismissal with no selected action. The
 /// restorer must remain callable for the same lifetime and no-op if its composer
 /// is later disposed or replaced.
-void showMessageActions({
+Future<void> showMessageActions({
   required BuildContext context,
   required WidgetRef ref,
   required TimelineMessage message,
@@ -88,7 +91,29 @@ void showMessageActions({
   VoidCallback? restoreComposerFocus,
   bool isArchived = false,
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
-}) {
+}) async {
+  if (NativeMessagePresentation.isSupportedPlatform &&
+      anchorRect != null &&
+      await _showNativeMessageActions(
+        context: context,
+        ref: ref,
+        message: message,
+        channelId: channelId,
+        canManageMessage: canManageMessage,
+        allMessages: allMessages,
+        currentPubkey: currentPubkey,
+        isMember: isMember,
+        isArchived: isArchived,
+        anchorRect: anchorRect,
+        captureAnchorSnapshot: captureAnchorSnapshot,
+        composerFocusNode: composerFocusNode,
+        restoreComposerFocus: restoreComposerFocus,
+        onPopoverPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
+        onPopoverDismissed: onPopoverDismissed,
+      )) {
+    return;
+  }
+  if (!context.mounted) return;
   final hasReactionOnlyActions = message.isSystem && !canManageMessage;
   if (anchorRect != null && hasReactionOnlyActions) {
     _showMessageReactionPopover(

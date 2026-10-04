@@ -6,6 +6,7 @@ mod git_runtime_tests;
 
 mod acp;
 mod config;
+mod edit_routing;
 mod engram_fetch;
 mod filter;
 mod isolated_execution;
@@ -15,6 +16,7 @@ mod pool_lifecycle;
 mod prompt_framing;
 mod prompt_project;
 mod queue;
+mod recovery_wake;
 mod relay;
 mod run_task;
 mod runtime;
@@ -33,7 +35,6 @@ use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -596,6 +597,9 @@ struct NormalListenerIngress {
     buzz_event: relay::BuzzEvent,
     effective_author: String,
     prompt_tag: String,
+    /// Original-message routing for an admitted edit; see
+    /// [`NormalListenerIngress::resolve_edit_routing`].
+    edit: Option<queue::ResolvedEdit>,
 }
 
 impl AuthorizedNormalListenerEvent {
@@ -616,6 +620,7 @@ impl AuthorizedNormalListenerEvent {
             buzz_event,
             effective_author,
             prompt_tag: matched.prompt_tag,
+            edit: None,
         })
     }
 }
@@ -624,9 +629,12 @@ struct QueuedNormalListenerEvent {
     accepted: bool,
     scope: scope::SessionScope,
     effective_author: String,
-    event_id_hex: String,
-    event_for_steer: nostr::Event,
-    prompt_tag_for_steer: String,
+    /// Visible message that owns this event's lifecycle reactions: the
+    /// original for an edit, otherwise the event itself.
+    reaction_target_id: String,
+    /// The admitted event as a native steer would render it, including an
+    /// edit's resolved original-message routing.
+    steer_event: queue::BatchEvent,
 }
 
 impl QueuedNormalListenerEvent {
@@ -635,7 +643,7 @@ impl QueuedNormalListenerEvent {
             return;
         }
         let rest_client = rest_client.clone();
-        let event_id = self.event_id_hex.clone();
+        let event_id = self.reaction_target_id.clone();
         tokio::spawn(async move {
             pool::reaction_add(&rest_client, &event_id, "👀").await;
         });
@@ -655,13 +663,19 @@ impl QueuedNormalListenerEvent {
         let Some(signal) = mode_gate_signal(handling, &self.effective_author, owner) else {
             return;
         };
+        // A native steer keeps the running turn's `<context>`, so it may only
+        // carry a message that replies in the same thread. Under the channel
+        // policy one session spans threads; a message for another thread takes
+        // the cancel+merge path, whose re-prompt carries its own `<context>`.
+        let same_reply_thread = queue.in_flight_reply_thread(&self.scope)
+            == Some(self.steer_event.reply_thread().as_str());
         let native_attempted = matches!(signal, ControlSignal::Steer)
+            && same_reply_thread
             && try_native_steer(
                 pool,
                 queue,
                 self.scope.clone(),
-                self.event_for_steer,
-                self.prompt_tag_for_steer,
+                self.steer_event,
                 steer_ack_tx,
             );
         if !native_attempted {
@@ -671,6 +685,31 @@ impl QueuedNormalListenerEvent {
 }
 
 impl NormalListenerIngress {
+    /// Resolve an admitted edit's original message once, before its session
+    /// scope is derived, so scope, reactions, prompt, typing, steering, and
+    /// failure notices all share one routing authority. The lookup is bounded
+    /// and only runs for kind:40003 events that already matched a rule (by
+    /// default: edits that newly mention this agent).
+    async fn resolve_edit_routing(mut self, rest_client: &relay::RestClient) -> Self {
+        self.edit = edit_routing::resolve_edit(
+            &self.buzz_event.event,
+            self.buzz_event.channel_id,
+            rest_client,
+        )
+        .await;
+        self
+    }
+
+    fn session_scope(&self, policy: scope::SessionPolicy, is_dm: bool) -> scope::SessionScope {
+        scope::SessionScope::derive_routed(
+            policy,
+            self.buzz_event.channel_id,
+            is_dm,
+            &self.buzz_event.event,
+            self.edit.as_ref(),
+        )
+    }
+
     fn push(
         self,
         queue: &mut EventQueue,
@@ -680,25 +719,31 @@ impl NormalListenerIngress {
             buzz_event,
             effective_author,
             prompt_tag,
+            edit,
         } = self;
-        let event_id_hex = buzz_event.event.id.to_hex();
-        let event_for_steer = buzz_event.event.clone();
-        let prompt_tag_for_steer = prompt_tag.clone();
+        let reaction_target_id = queue::reaction_target_id(&buzz_event.event);
+        let received_at = std::time::Instant::now();
+        let steer_event = queue::BatchEvent {
+            event: buzz_event.event.clone(),
+            prompt_tag: prompt_tag.clone(),
+            received_at,
+            edit: edit.clone(),
+        };
         let channel_id = buzz_event.channel_id;
         let accepted = queue.push(QueuedEvent {
             channel_id,
             scope: session_scope.clone(),
             event: buzz_event.event,
-            received_at: std::time::Instant::now(),
+            received_at,
             prompt_tag,
+            edit,
         });
         QueuedNormalListenerEvent {
             accepted,
             scope: session_scope,
             effective_author,
-            event_id_hex,
-            event_for_steer,
-            prompt_tag_for_steer,
+            reaction_target_id,
+            steer_event,
         }
     }
 }
@@ -2741,42 +2786,7 @@ async fn run_harness(
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
-    let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
-        SubscribeMode::Mentions => {
-            vec![SubscriptionRule {
-                name: "mentions".into(),
-                channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_else(|| {
-                    vec![
-                        KIND_STREAM_MESSAGE,
-                        KIND_WORKFLOW_APPROVAL_REQUESTED,
-                        KIND_STREAM_REMINDER,
-                    ]
-                }),
-                require_mention: !config.no_mention_filter,
-                filter: None,
-                compiled_filter: None,
-                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                prompt_tag: Some("@mention".into()),
-            }]
-        }
-        SubscribeMode::All => {
-            vec![SubscriptionRule {
-                name: "all".into(),
-                channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_default(),
-                require_mention: false,
-                filter: None,
-                compiled_filter: None,
-                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-                prompt_tag: Some("all".into()),
-            }]
-        }
-        SubscribeMode::Config => {
-            // load_rules() already warns if the config file has zero rules.
-            config::load_rules(&config.config_path)?
-        }
-    };
+    let rules = startup_subscription_rules(config)?;
 
     let channel_filters = config::resolve_channel_filters(config, &channel_ids, &rules);
     if channel_filters.is_empty() {
@@ -2997,6 +3007,7 @@ async fn run_harness(
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
         HoldDeadline,
+        Recovery(recovery_wake::RecoveryWake),
     }
 
     loop {
@@ -3082,37 +3093,8 @@ async fn run_harness(
             }
         }
 
-        let mut respawn_collected = false;
-        while let Ok(rr) = respawn_rx.try_recv() {
-            crash_history[rr.index].respawn_in_flight = false;
-            match rr.result {
-                Ok((acp, protocol_version, agent_name)) => {
-                    let agent = OwnedAgent {
-                        index: rr.index,
-                        acp,
-                        state: SessionState::default(),
-                        model_capabilities: None,
-                        desired_model: config.model.clone(),
-                        model_overridden: false,
-                        desired_model_request_id: None,
-                        desired_model_pending_ack: false,
-                        startup_effort: config.effort_level.clone(),
-                        agent_name,
-                        goose_system_prompt_supported: None,
-                        protocol_version,
-                    };
-                    pool.return_agent(agent);
-                    tracing::info!(agent = rr.index, "respawn complete");
-                    respawn_collected = true;
-                }
-                Err(e) => {
-                    crash_history[rr.index].mark_spawn_failed();
-                    tracing::warn!(agent = rr.index, "respawn failed: {e} — circuit re-opened");
-                }
-            }
-        }
         // Reap completed respawn handles from the JoinSet. Payloads are
-        // delivered out-of-band through `respawn_rx` (drained above), so the
+        // delivered out-of-band through `respawn_rx` (selected below), so the
         // JoinSet is never joined by the normal flow — Tokio retains finished
         // tasks until `join_next`, so without this the set grows on every
         // refill/crash recovery and `!respawn_tasks.is_empty()` would stay true
@@ -3122,20 +3104,14 @@ async fn run_harness(
         // slot's `respawn_in_flight` is cleared when its payload is received),
         // not JoinSet occupancy.
         while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
-        // Flush requeued events that were waiting for a live agent. Without
-        // this, batches requeued during crash recovery sit idle until the
-        // next relay event arrives — which can be minutes on quiet channels.
-        if respawn_collected {
-            for (scope, thread_tags) in dispatch_pending(
-                &mut pool,
-                &mut queue,
-                &ctx,
-                &mut last_activity,
-                observer.as_ref(),
-            ) {
-                typing_channels.insert(scope, thread_tags);
-            }
-        }
+        // Retry deadlines are actionable only with idle capacity. A busy pool
+        // wakes on its result/respawn instead of spinning on an expired retry.
+        let retry_at = if pool_ready && pool.any_idle() {
+            queue.next_retry_deadline()
+        } else {
+            None
+        };
+        let maintenance_at = pool_ready.then_some(last_maintenance + maintenance_interval);
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
@@ -3144,6 +3120,13 @@ async fn run_harness(
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
                 biased;
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("shutting down");
+                    break;
+                }
+                wake = recovery_wake::wait(&mut respawn_rx, retry_at, maintenance_at) => {
+                    Some(PoolEvent::Recovery(wake))
+                }
                 // recv() returning None means all senders dropped (pool was torn down).
                 // Break cleanly instead of panicking.
                 r = result_rx.recv(), if pool_ready => match r {
@@ -3530,6 +3513,7 @@ async fn run_harness(
                                 tracing::debug!("authorized event matched no rule — dropping");
                                 continue;
                             };
+                            let ingress = ingress.resolve_edit_routing(&ctx.rest_client).await;
                             // Derive the session scope once, at admission, from
                             // the operator policy, DM status, and NIP-10 thread
                             // tags. Under the default `channel` policy this is
@@ -3537,15 +3521,13 @@ async fn run_harness(
                             // channel-keyed routing. Telemetry only for now —
                             // queue/pool partitioning by scope lands in a
                             // follow-up (see ticket outline steps 2–4).
-                            let session_scope = scope::SessionScope::derive(
+                            let session_scope = ingress.session_scope(
                                 config.session_policy,
-                                ingress.buzz_event.channel_id,
                                 is_dm_channel(
                                     ingress.buzz_event.channel_id,
                                     &ctx.channel_info,
                                 )
                                 .await,
-                                &ingress.buzz_event.event,
                             );
                             tracing::debug!(
                                 channel_id = %session_scope.channel_id(),
@@ -3730,14 +3712,56 @@ async fn run_harness(
                     }
                     None
                 }
-                _ = shutdown_rx.changed() => {
-                    tracing::info!("shutting down");
-                    break;
-                }
             }
         };
 
         match pool_event {
+            Some(PoolEvent::Recovery(wake)) => {
+                match wake {
+                    recovery_wake::RecoveryWake::Respawn(rr) => {
+                        crash_history[rr.index].respawn_in_flight = false;
+                        match rr.result {
+                            Ok((acp, protocol_version, agent_name)) => {
+                                let agent = OwnedAgent {
+                                    index: rr.index,
+                                    acp,
+                                    state: SessionState::default(),
+                                    model_capabilities: None,
+                                    desired_model: config.model.clone(),
+                                    model_overridden: false,
+                                    desired_model_request_id: None,
+                                    desired_model_pending_ack: false,
+                                    startup_effort: config.effort_level.clone(),
+                                    agent_name,
+                                    goose_system_prompt_supported: None,
+                                    protocol_version,
+                                };
+                                pool.return_agent(agent);
+                                tracing::info!(agent = rr.index, "respawn complete");
+                            }
+                            Err(e) => {
+                                crash_history[rr.index].mark_spawn_failed();
+                                tracing::warn!(
+                                    agent = rr.index,
+                                    "respawn failed: {e} — circuit re-opened"
+                                );
+                            }
+                        }
+                    }
+                    // Maintenance runs at the top of the next iteration.
+                    recovery_wake::RecoveryWake::Maintenance => continue,
+                    recovery_wake::RecoveryWake::Retry => {}
+                }
+                for (scope, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    observer.as_ref(),
+                ) {
+                    typing_channels.insert(scope, thread_tags);
+                }
+            }
             Some(PoolEvent::Result(result)) => {
                 // Stop the typing indicator for the completed turn's exact scope,
                 // not the whole channel — a sibling thread still running in the
@@ -4309,8 +4333,7 @@ fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     scope: scope::SessionScope,
-    event: nostr::Event,
-    prompt_tag: String,
+    be: queue::BatchEvent,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
     let channel_id = scope.channel_id();
@@ -4327,21 +4350,11 @@ fn try_native_steer(
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    let (tag, closing) = queue::native_steer_framing();
-    let event_id_hex = event.id.to_hex();
-    let be = queue::BatchEvent {
-        event,
-        prompt_tag: prompt_tag.clone(),
-        received_at: std::time::Instant::now(),
-    };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let new_message = prompt_framing::semantic_section(tag, "");
-    let event_section = prompt_framing::semantic_section_with_attributes(
-        "buzz-event",
-        &[("type", prompt_tag.as_str())],
-        &event_block,
-    );
-    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
+    // The caller steers natively only a message in the running turn's reply
+    // thread, so the turn's own `<context>` still routes the reply. An edit's
+    // block names its original (`Edit of:`) and the original's thread root.
+    let event_id_hex = be.event.id.to_hex();
+    let body = native_steer_body(channel_id, &be);
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
@@ -4387,13 +4400,320 @@ fn try_native_steer(
             true
         }
         Err(e) => {
+            // Structured fixed-reason label from the stock admission owner
+            // (`pool::send_steer`): task_absent / sender_absent /
+            // mailbox_full / mailbox_closed. Only admission refusals reach
+            // this arm — the ack watcher is spawned solely on `Ok(())`, so
+            // ack-native write failures are logged by the main loop's
+            // SteerAck arm instead and are never conflated with admission.
+            // The label never carries request content.
+            let reason = e
+                .admission_reason()
+                .map(|reason| reason.as_str())
+                .unwrap_or("unclassified");
             tracing::info!(
                 channel = %channel_id,
-                error = ?e,
+                reason,
                 "non-cancelling steer not accepted — falling back to cancel+merge"
             );
             false
         }
+    }
+}
+
+/// Render the prompt delta sent by [`try_native_steer`].
+fn native_steer_body(channel_id: Uuid, be: &queue::BatchEvent) -> String {
+    let (tag, closing) = queue::native_steer_framing();
+    let event_block = queue::format_event_block(channel_id, None, be, None);
+    let new_message = prompt_framing::semantic_section(tag, "");
+    let event_section = prompt_framing::semantic_section_with_attributes(
+        "buzz-event",
+        &[("type", be.prompt_tag.as_str())],
+        &event_block,
+    );
+    format!("{new_message}\n\n{event_section}\n\n{closing}")
+}
+
+// ── try_native_steer fallback-log tests ───────────────────────────────────────
+//
+// Regression for the production tracing event `try_native_steer`'s Err arm
+// emits before the caller falls back to the universal cancel+merge path. The
+// `send_steer` admission-reason tests in pool.rs pin the refusal *labels*
+// through `SteerError::admission_reason` alone — mutating this log's `reason`
+// field leaves that suite green. These tests instead drive the REAL
+// `try_native_steer` (real pool, real queue, real signed event, real steer
+// body construction) through each of the four admission refusal branches and
+// pin the log itself: the exact reason label, the exact production message,
+// exactly the `channel`+`reason` fields (never request or error content), and
+// the unchanged `false` return that keeps the caller on the fallback.
+#[cfg(test)]
+mod try_native_steer_fallback_log_tests {
+    use super::*;
+    use crate::pool::{SteerRequest, TaskMeta};
+    use nostr::{EventBuilder, Keys, Kind};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Sentinel carried in the real event content — it flows into the steer
+    /// request body `try_native_steer` builds, and the fallback log must
+    /// never surface it.
+    const SECRET_REQUEST_CONTENT: &str = "SECRET-STEER-REQUEST-CONTENT";
+
+    /// One captured fallback log event: the exact values recorded for the
+    /// message/channel/reason fields, plus the names of any field beyond
+    /// that fixed vocabulary.
+    #[derive(Debug, Default)]
+    struct FallbackLog {
+        message: Option<String>,
+        channel: Option<String>,
+        reason: Option<String>,
+        unexpected_fields: Vec<String>,
+    }
+
+    /// Records event field values (str values via `record_str`, Display and
+    /// format_args values via `record_debug`, exactly as tracing routes them)
+    /// and collects any field outside the fixed message/channel/reason set.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        log: FallbackLog,
+    }
+
+    impl Recorder {
+        fn store(&mut self, name: &str, value: String) {
+            match name {
+                "message" => self.log.message = Some(value),
+                "channel" => self.log.channel = Some(value),
+                "reason" => self.log.reason = Some(value),
+                _ => self.log.unexpected_fields.push(name.to_string()),
+            }
+        }
+    }
+
+    impl tracing::field::Visit for Recorder {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.store(field.name(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.store(field.name(), format!("{value:?}"));
+        }
+    }
+
+    /// Captures INFO events on `buzz_acp` carrying a `reason` field — the
+    /// fallback log's signature — mirroring the workspace's Layer+Visit
+    /// capture fixture (buzz-agent `count_silent_turn_warnings`).
+    struct Capture {
+        logs: Arc<std::sync::Mutex<Vec<FallbackLog>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::INFO {
+                return;
+            }
+            if event.metadata().target() != "buzz_acp" {
+                return;
+            }
+            let mut recorder = Recorder::default();
+            event.record(&mut recorder);
+            if recorder.log.reason.is_some() {
+                self.logs
+                    .lock()
+                    .unwrap()
+                    .push(std::mem::take(&mut recorder.log));
+            }
+        }
+    }
+
+    /// Conversation scope for the steered channel — the same shape the
+    /// pool.rs admission fixtures use.
+    fn steer_scope() -> scope::SessionScope {
+        scope::SessionScope::Conversation {
+            channel_id: Uuid::nil(),
+        }
+    }
+
+    /// A real signed kind:20001 stream message whose content becomes part of
+    /// the real steer request body `try_native_steer` builds.
+    fn stream_event() -> nostr::Event {
+        EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            SECRET_REQUEST_CONTENT,
+        )
+        .sign_with_keys(&Keys::generate())
+        .expect("sign test stream message")
+    }
+
+    /// Insert an in-flight task_map entry for `scope` carrying `steer_tx`,
+    /// mirroring `mark_agent_busy` — the existing seam for simulating an
+    /// in-flight prompt task without spawning a real agent turn (same shape
+    /// as the pool.rs `mark_agent_busy_with_steer_tx` fixture).
+    fn mark_in_flight_with_steer_tx(
+        pool: &mut AgentPool,
+        busy_scope: scope::SessionScope,
+        steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    ) {
+        let abort = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort.id(),
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(busy_scope.channel_id()),
+                scope: Some(busy_scope),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+    }
+
+    /// Drive the REAL `try_native_steer` exactly as the production caller
+    /// (`QueuedNormalListenerEvent::steer_or_interrupt`) does — event already
+    /// pushed into the queue, steer-eligible event, live steer-ack channel —
+    /// under a capturing subscriber. Returns the function's return value and
+    /// the fallback logs it emitted on this thread.
+    fn try_native_steer_capturing(pool: &mut AgentPool) -> (bool, Vec<FallbackLog>) {
+        let busy_scope = steer_scope();
+        let event = stream_event();
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        // Caller invariant: the event is already queued before the steer
+        // attempt (see `try_native_steer`'s doc comment).
+        assert!(
+            queue.push(QueuedEvent {
+                channel_id: Uuid::nil(),
+                scope: busy_scope.clone(),
+                event: event.clone(),
+                received_at: std::time::Instant::now(),
+                prompt_tag: "mention".into(),
+                edit: None,
+            }),
+            "queued event must be accepted before the steer attempt"
+        );
+        let (steer_ack_tx, _steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture { logs: logs.clone() });
+        let returned = tracing::subscriber::with_default(subscriber, || {
+            try_native_steer(
+                pool,
+                &mut queue,
+                busy_scope.clone(),
+                queue::BatchEvent {
+                    event,
+                    prompt_tag: "mention".into(),
+                    received_at: std::time::Instant::now(),
+                    edit: None,
+                },
+                &steer_ack_tx,
+            )
+        });
+        let logs_out = std::mem::take(&mut *logs.lock().unwrap());
+        (returned, logs_out)
+    }
+
+    /// Assert the captured logs are exactly one production fallback event for
+    /// `expected_reason`: exact message, exact reason, exact channel, no
+    /// additional fields, and no request or error content anywhere.
+    fn assert_single_fallback_log(logs: &[FallbackLog], expected_reason: &str) {
+        assert_eq!(
+            logs.len(),
+            1,
+            "exactly one fallback log must be emitted per refusal, got {logs:?}"
+        );
+        let log = &logs[0];
+        assert_eq!(
+            log.message.as_deref(),
+            Some("non-cancelling steer not accepted — falling back to cancel+merge"),
+            "fallback log message must stay the exact production bytes"
+        );
+        assert_eq!(
+            log.reason.as_deref(),
+            Some(expected_reason),
+            "fallback log reason must be the exact admission label"
+        );
+        let expected_channel = Uuid::nil().to_string();
+        assert_eq!(
+            log.channel.as_deref(),
+            Some(expected_channel.as_str()),
+            "fallback log channel must be the scope's channel id"
+        );
+        assert!(
+            log.unexpected_fields.is_empty(),
+            "fallback log must carry only channel+reason — no request/error \
+             content fields: {:?}",
+            log.unexpected_fields
+        );
+        let rendered = format!("{log:?}");
+        assert!(
+            !rendered.contains(SECRET_REQUEST_CONTENT),
+            "fallback log must not leak request content: {rendered}"
+        );
+    }
+
+    /// No in-flight task owns the scope: `send_steer` refuses with
+    /// `PromptCompleted`, classified as `task_absent`.
+    #[test]
+    fn try_native_steer_logs_task_absent_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "task_absent");
+    }
+
+    /// The in-flight task has no steer sender installed: `sender_absent`.
+    #[tokio::test]
+    async fn try_native_steer_logs_sender_absent_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        mark_in_flight_with_steer_tx(&mut pool, steer_scope(), None);
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "sender_absent");
+    }
+
+    /// The capacity-1 steer mailbox already holds one in-flight steer:
+    /// `mailbox_full`.
+    #[tokio::test]
+    async fn try_native_steer_logs_mailbox_full_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_in_flight_with_steer_tx(&mut pool, steer_scope(), Some(tx.clone()));
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
+        tx.try_send(SteerRequest {
+            prompt_blocks: vec!["first in-flight steer".into()],
+            ack_tx,
+        })
+        .expect("capacity-1 mailbox accepts the first in-flight steer");
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "mailbox_full");
+    }
+
+    /// The read loop's steer receiver is torn down: `mailbox_closed`.
+    #[tokio::test]
+    async fn try_native_steer_logs_mailbox_closed_reason_and_keeps_fallback() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (tx, rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        mark_in_flight_with_steer_tx(&mut pool, steer_scope(), Some(tx));
+        drop(rx); // read loop torn down before this steer arrived
+        let (returned, logs) = try_native_steer_capturing(&mut pool);
+        assert!(
+            !returned,
+            "refused native steer must keep the cancel+merge fallback"
+        );
+        assert_single_fallback_log(&logs, "mailbox_closed");
     }
 }
 
@@ -4473,7 +4793,7 @@ fn dispatch_pending(
         let typing_scope = batch
             .events
             .last()
-            .map(|event| queue::parse_thread_tags(&event.event))
+            .map(queue::BatchEvent::routing_thread_tags)
             .unwrap_or_default();
         // Scope-level affinity: reuse the worker that already holds THIS
         // thread's provider session so a temporarily busy worker cannot cause
@@ -4628,27 +4948,60 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Thread placement for a batch's terminal failure notice.
+///
+/// Ordinary events keep their own thread tags. An edit follows its verified
+/// original message (`edit`): into the original's thread when it is a reply,
+/// otherwise as a reply to the original itself — the edited message may be
+/// far up the channel, so a top-level notice would be detached from the
+/// request. An unverified original is never claimed as a thread root: if it
+/// is itself a thread reply, the relay rejects the notice for mismatched
+/// ancestry and the user sees nothing. Such a notice posts at top level.
+fn failure_notice_thread_tags(
+    last: &queue::BatchEvent,
+    edit: Option<&queue::ResolvedEdit>,
+) -> ThreadTags {
+    let tags = queue::routing_thread_tags(&last.event, edit);
+    match (queue::edit_target_id(&last.event), edit) {
+        (Some(target), Some(_)) if tags.root_event_id.is_none() => ThreadTags {
+            root_event_id: Some(target.clone()),
+            parent_event_id: Some(target),
+            mentioned_pubkeys: tags.mentioned_pubkeys,
+        },
+        _ => tags,
+    }
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
-/// dead-letter path so neither duplicates the tokio::spawn block.
+/// dead-letter path so neither duplicates the tokio::spawn block. An edit
+/// whose original was not resolved at admission gets one more lookup here, so
+/// a transient fetch failure does not detach the notice from its thread.
 fn spawn_failure_notice(
     rest_client: Option<&relay::RestClient>,
     batch: &FlushBatch,
     content: String,
 ) {
-    if let Some(rest) = rest_client {
-        let thread_tags = batch
-            .events
-            .last()
-            .map(|be| queue::parse_thread_tags(&be.event))
-            .unwrap_or_default();
-        let rest = rest.clone();
-        let channel_id = batch.channel_id;
-        tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
-        });
-    }
+    let Some(rest) = rest_client else {
+        return;
+    };
+    let Some(last) = batch.events.last().cloned() else {
+        return;
+    };
+    let rest = rest.clone();
+    let channel_id = batch.channel_id;
+    tokio::spawn(async move {
+        let edit = match last.edit.clone() {
+            Some(edit) => Some(edit),
+            None if queue::edit_target_id(&last.event).is_some() => {
+                edit_routing::resolve_edit(&last.event, channel_id, &rest).await
+            }
+            None => None,
+        };
+        let thread_tags = failure_notice_thread_tags(&last, edit.as_ref());
+        pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5813,16 +6166,20 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         if !config_options.is_empty() {
             println!("Models (stable configOptions):");
             for opt in &config_options {
-                let config_id = opt.get("configId").and_then(|v| v.as_str()).unwrap_or("?");
+                let config_id = opt
+                    .get("id")
+                    .or_else(|| opt.get("configId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let display = opt
-                    .get("displayName")
+                    .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or(config_id);
-                println!("  {display} (configId: {config_id})");
+                println!("  {display} (id: {config_id})");
                 if let Some(options) = opt.get("options").and_then(|v| v.as_array()) {
                     for o in options {
                         let val = o.get("value").and_then(|v| v.as_str()).unwrap_or("?");
-                        let name = o.get("displayName").and_then(|v| v.as_str()).unwrap_or(val);
+                        let name = o.get("name").and_then(|v| v.as_str()).unwrap_or(val);
                         println!("    - {name} (value: {val})");
                     }
                 }
@@ -6339,6 +6696,7 @@ mod owner_control_command_tests {
 
         let oldest = std::time::Instant::now() - Duration::from_secs(1);
         queue.push(queue::QueuedEvent {
+            edit: None,
             channel_id,
             scope: held_scope.clone(),
             event: make_event(KIND_STREAM_MESSAGE, "held", None),
@@ -6347,6 +6705,7 @@ mod owner_control_command_tests {
         });
         for i in 0..500 {
             queue.push(queue::QueuedEvent {
+                edit: None,
                 channel_id,
                 scope: surviving_scope.clone(),
                 event: make_event(KIND_STREAM_MESSAGE, &format!("new-{i}"), None),
@@ -9180,15 +9539,182 @@ mod build_mcp_servers_tests {
         }
     }
 
-    #[test]
-    fn session_new_forwards_complete_git_block_without_duplicate_names() {
-        let mut config = test_config();
-        let git = git::GitEnvironment::install(
+    /// Restores the runner's saved variables and clears fixture ones on drop,
+    /// so a panic mid-install cannot leave the process environment altered.
+    struct EnvRestore {
+        saved: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        fixture: Vec<String>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for name in &self.fixture {
+                std::env::remove_var(name);
+            }
+            for (name, value) in &self.saved {
+                std::env::set_var(name, value);
+            }
+        }
+    }
+
+    /// Run `GitEnvironment::install` with `vars` set and the runner's own
+    /// `GIT_CONFIG*` / `BUZZ_GIT_IDENTITY` hidden, so an agent session's
+    /// inherited identity cannot leak into the result. Caller holds `ENV_LOCK`.
+    fn install_git_with_env(
+        config: &Config,
+        vars: &[(String, String)],
+    ) -> anyhow::Result<git::GitEnvironment> {
+        let restore = EnvRestore {
+            saved: std::env::vars_os()
+                .filter(|(name, _)| {
+                    name.to_str().is_some_and(|name| {
+                        name.starts_with("GIT_CONFIG") || name == "BUZZ_GIT_IDENTITY"
+                    })
+                })
+                .collect(),
+            fixture: vars.iter().map(|(name, _)| name.clone()).collect(),
+        };
+        for (name, _) in &restore.saved {
+            std::env::remove_var(name);
+        }
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
+        git::GitEnvironment::install(
             &config.keys,
             &config.relay_url,
             &std::env::current_exe().unwrap(),
         )
-        .unwrap();
+    }
+
+    #[test]
+    fn invalid_git_identity_mode_fails_install() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let err = install_git_with_env(
+            &test_config(),
+            &[("BUZZ_GIT_IDENTITY".into(), "human".into())],
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("BUZZ_GIT_IDENTITY"), "{err}");
+    }
+
+    #[test]
+    fn user_mode_mcp_block_drops_inherited_identity_and_signing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let inherited = [
+            ("user.name", "Inherited Agent"),
+            ("USER.EMAIL", "inherited@example.invalid"),
+            ("user.signingKey", "inherited-key"),
+            ("GPG.Format", "openpgp"),
+            ("GPG.x509.PROGRAM", "inherited-signer"),
+            ("commit.gpgsign", "true"),
+            ("TAG.GPGSIGN", "true"),
+            ("Include.Path", "/tmp/identity.inc"),
+            ("INCLUDEIF.gitdir:/.PATH", "/tmp/identity.inc"),
+            ("Author.Name", "Inherited Author"),
+            ("Author.Email", "author@example.invalid"),
+            ("COMMITTER.name", "Inherited Committer"),
+            ("committer.EMAIL", "committer@example.invalid"),
+            ("gpg.X509.program", "distinct-subsection"),
+            ("core.abbrev", "12"),
+        ];
+        let mut vars = vec![
+            ("BUZZ_GIT_IDENTITY".into(), "user".into()),
+            ("GIT_CONFIG_COUNT".into(), inherited.len().to_string()),
+        ];
+        for (i, (key, value)) in inherited.iter().enumerate() {
+            vars.push((format!("GIT_CONFIG_KEY_{i}"), key.to_string()));
+            vars.push((format!("GIT_CONFIG_VALUE_{i}"), value.to_string()));
+        }
+        let mut config = test_config();
+        let git = install_git_with_env(&config, &vars).unwrap();
+        config.persona_env_vars.extend(git.env.iter().cloned());
+        let servers = build_mcp_servers(&config);
+        let env = &servers[0].env;
+        let value_of = |name: &str| {
+            env.iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.value.clone())
+        };
+        let count: usize = value_of("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+        let entries: Vec<(String, String)> = (0..count)
+            .map(|i| {
+                (
+                    value_of(&format!("GIT_CONFIG_KEY_{i}")).unwrap(),
+                    value_of(&format!("GIT_CONFIG_VALUE_{i}")).unwrap(),
+                )
+            })
+            .collect();
+        for (key, _) in &inherited[..13] {
+            assert!(
+                !entries.iter().any(|(forwarded, _)| forwarded == key),
+                "{key} leaked: {entries:?}"
+            );
+        }
+        for survivor in [
+            ("gpg.X509.program", "distinct-subsection"),
+            ("core.abbrev", "12"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|(key, value)| (key.as_str(), value.as_str()) == survivor),
+                "{survivor:?} must survive unchanged: {entries:?}"
+            );
+        }
+        for absent in ["user.name", "user.email", "gpg.format", "commit.gpgSign"] {
+            assert!(
+                !entries.iter().any(|(key, _)| key == absent),
+                "user mode must not set {absent}: {entries:?}"
+            );
+        }
+        assert!(
+            entries.iter().any(|(key, _)| key == "nostr.keyfile"),
+            "{entries:?}"
+        );
+        assert_eq!(value_of("BUZZ_GIT_IDENTITY").as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn for_config_replaces_persona_git_identity_with_resolved_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = test_config();
+        config
+            .persona_env_vars
+            .push(("BUZZ_GIT_IDENTITY".into(), "stale".into()));
+        let restore = EnvRestore {
+            saved: std::env::vars_os()
+                .filter(|(name, _)| name == "BUZZ_GIT_IDENTITY")
+                .collect(),
+            fixture: vec!["BUZZ_GIT_IDENTITY".into()],
+        };
+        std::env::set_var("BUZZ_GIT_IDENTITY", "user");
+        let _git = git::GitEnvironment::for_config(&mut config).unwrap();
+        drop(restore);
+        let modes: Vec<_> = config
+            .persona_env_vars
+            .iter()
+            .filter(|(name, _)| name == "BUZZ_GIT_IDENTITY")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(modes, ["user"]);
+        let servers = build_mcp_servers(&config);
+        let forwarded: Vec<_> = servers[0]
+            .env
+            .iter()
+            .filter(|entry| entry.name == "BUZZ_GIT_IDENTITY")
+            .map(|entry| entry.value.as_str())
+            .collect();
+        assert_eq!(forwarded, ["user"]);
+    }
+
+    #[test]
+    fn session_new_forwards_complete_git_block_without_duplicate_names() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = test_config();
+        let git = install_git_with_env(&config, &[]).unwrap();
         config.persona_env_vars.extend(git.env.iter().cloned());
         let servers = build_mcp_servers(&config);
         let env = &servers[0].env;
@@ -9363,6 +9889,267 @@ mod build_mcp_servers_tests {
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+}
+
+/// Local admission rules for the normal listener. The relay subscription is
+/// derived separately (`config::resolve_channel_filters`); an event must pass
+/// both, so each default kind has to be present here too.
+fn startup_subscription_rules(config: &Config) -> Result<Vec<SubscriptionRule>> {
+    let rules = match config.subscribe_mode {
+        SubscribeMode::Mentions => {
+            vec![SubscriptionRule {
+                name: "mentions".into(),
+                channels: filter::ChannelScope::All("all".into()),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(config::default_mention_kinds),
+                require_mention: !config.no_mention_filter,
+                filter: None,
+                compiled_filter: None,
+                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                prompt_tag: Some("@mention".into()),
+            }]
+        }
+        SubscribeMode::All => {
+            vec![SubscriptionRule {
+                name: "all".into(),
+                channels: filter::ChannelScope::All("all".into()),
+                kinds: config.kinds_override.clone().unwrap_or_default(),
+                require_mention: false,
+                filter: None,
+                compiled_filter: None,
+                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                prompt_tag: Some("all".into()),
+            }]
+        }
+        SubscribeMode::Config => {
+            // load_rules() already warns if the config file has zero rules.
+            config::load_rules(&config.config_path)?
+        }
+    };
+    Ok(rules)
+}
+
+#[cfg(test)]
+mod edit_mention_admission_tests {
+    use super::*;
+    use crate::edit_routing::test_support::edit_event;
+
+    /// Default normal-mode admission: an edit that newly mentions the agent
+    /// matches the startup rule; an edit without the agent's `p` tag does not.
+    #[tokio::test]
+    async fn default_startup_rules_admit_only_edits_that_mention_the_agent() {
+        let mut config = build_mcp_servers_tests::test_config();
+        config.subscribe_mode = SubscribeMode::Mentions;
+        let agent = config.keys.public_key().to_hex();
+        let rules = startup_subscription_rules(&config).expect("mentions rules");
+        let channel_id = Uuid::new_v4();
+        let target = "ab".repeat(32);
+
+        let mentioned = edit_event(&target, &[["p", agent.as_str()]]);
+        assert!(
+            filter::match_event(&mentioned, channel_id, &rules, &agent)
+                .await
+                .is_some(),
+            "a mention added by an edit must wake the agent"
+        );
+        let unmentioned = edit_event(&target, &[]);
+        assert!(
+            filter::match_event(&unmentioned, channel_id, &rules, &agent)
+                .await
+                .is_none(),
+            "an edit that does not mention the agent must not wake it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod edit_native_steer_tests {
+    use super::*;
+    use crate::edit_routing::test_support::{edit_event, message};
+
+    /// A steered edit renders its original's routing, not the edit's own
+    /// bare `e` tag, so the live turn replies in the original's thread.
+    #[test]
+    fn native_steer_body_carries_edit_original_routing() {
+        let root = "ab".repeat(32);
+        let original = message(Some(&root));
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let be = queue::BatchEvent {
+            event: edit.clone(),
+            prompt_tag: "@mention".into(),
+            received_at: std::time::Instant::now(),
+            edit: Some(queue::ResolvedEdit {
+                target_event_id: original.id.to_hex(),
+                target_thread_tags: queue::parse_thread_tags(&original),
+            }),
+        };
+        let body = native_steer_body(Uuid::new_v4(), &be);
+        assert!(
+            body.contains(&format!("Edit of: {}", original.id.to_hex())),
+            "{body}"
+        );
+        assert!(body.contains(&format!("root={root}")), "{body}");
+    }
+
+    /// The listener hands the steer path the same resolved route it queues.
+    #[test]
+    fn listener_steer_event_keeps_resolved_edit() {
+        let original = message(None);
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let channel_id = Uuid::new_v4();
+        let resolved = queue::ResolvedEdit {
+            target_event_id: original.id.to_hex(),
+            target_thread_tags: queue::parse_thread_tags(&original),
+        };
+        let ingress = NormalListenerIngress {
+            buzz_event: relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id,
+                event: edit,
+            },
+            effective_author: "author".into(),
+            prompt_tag: "@mention".into(),
+            edit: Some(resolved.clone()),
+        };
+        let scope = ingress.session_scope(scope::SessionPolicy::Channel, false);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let queued = ingress.push(&mut queue, scope);
+        assert_eq!(queued.steer_event.edit, Some(resolved));
+        assert_eq!(queued.reaction_target_id, original.id.to_hex());
+    }
+
+    /// Drive a routed edit of `original` through the listener's steer decision
+    /// while a turn for `running_event` is in flight under the channel policy.
+    /// Returns the native steer request, if any, and the control signal sent
+    /// to the running turn, if any.
+    fn steer_edit_into_running_turn(
+        running_event: nostr::Event,
+        original: &nostr::Event,
+    ) -> (Option<pool::SteerRequest>, Option<ControlSignal>) {
+        let channel_id = Uuid::new_v4();
+        let ingress =
+            |event: nostr::Event, edit: Option<queue::ResolvedEdit>| NormalListenerIngress {
+                buzz_event: relay::BuzzEvent {
+                    connection_generation: 0,
+                    channel_id,
+                    event,
+                },
+                effective_author: "author".into(),
+                prompt_tag: "@mention".into(),
+                edit,
+            };
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let running = ingress(running_event, None);
+        let scope = running.session_scope(scope::SessionPolicy::Channel, false);
+        running.push(&mut queue, scope.clone());
+        queue.flush_next().expect("running turn");
+        assert!(queue.is_scope_in_flight(&scope));
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (control_tx, mut control_rx) = tokio::sync::oneshot::channel();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope.clone()),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let resolved = queue::ResolvedEdit {
+            target_event_id: original.id.to_hex(),
+            target_thread_tags: queue::parse_thread_tags(original),
+        };
+        let edit_ingress = ingress(edit, Some(resolved));
+        assert_eq!(
+            edit_ingress.session_scope(scope::SessionPolicy::Channel, false),
+            scope,
+            "channel policy: one session spans every thread"
+        );
+        let (ack_tx, _ack_rx) = mpsc::unbounded_channel();
+        edit_ingress
+            .push(&mut queue, scope.clone())
+            .steer_or_interrupt(
+                MultipleEventHandling::Steer,
+                None,
+                &mut pool,
+                &mut queue,
+                &ack_tx,
+            );
+        (steer_rx.try_recv().ok(), control_rx.try_recv().ok())
+    }
+
+    /// A routed edit whose original is in the running turn's thread is
+    /// steered natively, carrying the original's route, and the running turn
+    /// is not cancelled.
+    #[tokio::test]
+    async fn routed_edit_in_running_thread_steers_natively() {
+        let root = "ab".repeat(32);
+        let original = message(Some(&root));
+        let (steer, control) = steer_edit_into_running_turn(message(Some(&root)), &original);
+
+        let request = steer.expect("edit is sent as a native steer");
+        let body = request.prompt_blocks.join("\n");
+        assert!(
+            body.contains(&format!("Edit of: {}", original.id.to_hex())),
+            "{body}"
+        );
+        assert!(body.contains(&format!("root={root}")), "{body}");
+        assert_eq!(
+            control, None,
+            "native steer must not cancel the running turn"
+        );
+    }
+
+    /// Editing the top-level message a turn is working on steers that turn:
+    /// replies to the edit belong to the same new thread.
+    #[tokio::test]
+    async fn edit_of_running_top_level_trigger_steers_natively() {
+        let original = message(None);
+        let (steer, control) = steer_edit_into_running_turn(original.clone(), &original);
+
+        assert!(steer.is_some(), "edit is sent as a native steer");
+        assert_eq!(
+            control, None,
+            "native steer must not cancel the running turn"
+        );
+    }
+
+    /// Under the channel policy a turn started from thread A can be running
+    /// when an edit whose original is in thread B arrives. A native steer
+    /// would leave the turn's `<context>` replying to A, so the edit takes the
+    /// cancel+merge path instead; its re-prompt routes replies to B.
+    #[tokio::test]
+    async fn routed_edit_for_another_thread_cancels_and_merges() {
+        let thread_b = "ab".repeat(32);
+        let original = message(Some(&thread_b));
+        let (steer, control) = steer_edit_into_running_turn(message(None), &original);
+
+        assert!(steer.is_none(), "no native steer into thread A's turn");
+        assert_eq!(control, Some(ControlSignal::Steer));
+    }
+
+    /// The same rule covers a top-level original: replies to it open a thread
+    /// rooted at the original, not at the running turn's top-level trigger.
+    #[tokio::test]
+    async fn routed_edit_for_another_top_level_message_cancels_and_merges() {
+        let original = message(None);
+        let (steer, control) = steer_edit_into_running_turn(message(None), &original);
+
+        assert!(steer.is_none(), "no native steer across top-level threads");
+        assert_eq!(control, Some(ControlSignal::Steer));
     }
 }
 
@@ -9941,6 +10728,7 @@ mod error_outcome_emission_tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         queue.push(queue::QueuedEvent {
+            edit: None,
             channel_id,
             scope: scope.clone(),
             event,
@@ -10138,6 +10926,7 @@ mod error_outcome_emission_tests {
                 channel_id: __cid,
                 scope: scope::SessionScope::Conversation { channel_id: __cid },
                 events: vec![BatchEvent {
+                    edit: None,
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
@@ -10247,6 +11036,7 @@ mod error_outcome_emission_tests {
                 channel_id,
                 scope: scope::SessionScope::Conversation { channel_id },
                 events: vec![BatchEvent {
+                    edit: None,
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
@@ -10368,6 +11158,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                edit: None,
                 event: EventBuilder::new(Kind::Custom(9), "test")
                     .sign_with_keys(&Keys::generate())
                     .unwrap(),
@@ -10464,6 +11255,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                edit: None,
                 event: EventBuilder::new(Kind::Custom(9), "final-attempt")
                     .sign_with_keys(&Keys::generate())
                     .unwrap(),
@@ -10545,6 +11337,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                edit: None,
                 event: original_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -10575,6 +11368,7 @@ mod error_outcome_emission_tests {
         // out on drain — so it is already queued by the time
         // handle_prompt_result runs.
         queue.push(QueuedEvent {
+            edit: None,
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             event: new_event.clone(),
@@ -10816,6 +11610,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: session_scope.clone(),
             events: vec![BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -10970,6 +11765,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -11045,8 +11841,22 @@ mod error_outcome_emission_tests {
         );
     }
 
-    #[tokio::test]
-    async fn model_not_found_posts_recovery_notice_without_retrying() {
+    /// Run a model-not-found turn failure for `event` through
+    /// `handle_prompt_result` and capture the real signed notice it posts.
+    async fn capture_model_not_found_notice(
+        event: nostr::Event,
+        edit: Option<queue::ResolvedEdit>,
+    ) -> (nostr::Event, relay::RestClient, uuid::Uuid) {
+        capture_model_not_found_notice_with_lookup(event, edit, serde_json::json!([])).await
+    }
+
+    /// Like [`capture_model_not_found_notice`], but answers any `/query`
+    /// lookup made before the notice with `lookup`.
+    async fn capture_model_not_found_notice_with_lookup(
+        event: nostr::Event,
+        edit: Option<queue::ResolvedEdit>,
+        lookup: serde_json::Value,
+    ) -> (nostr::Event, relay::RestClient, uuid::Uuid) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -11056,21 +11866,12 @@ mod error_outcome_emission_tests {
             keys: Keys::generate(),
             auth_tag_json: None,
         };
-        let keys = Keys::generate();
-        let root = nostr::EventId::from_byte_array([0xaa; 32]);
-        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
-        let event = EventBuilder::new(Kind::Custom(9), "test")
-            .tags([
-                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
-                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
-            ])
-            .sign_with_keys(&keys)
-            .unwrap();
         let channel_id = uuid::Uuid::new_v4();
         let batch = FlushBatch {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                edit,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
@@ -11163,35 +11964,65 @@ mod error_outcome_emission_tests {
 
         // Capture the real signed notice sent by handle_prompt_result, without a live relay.
         let notice: nostr::Event = tokio::time::timeout(Duration::from_secs(3), async {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(socket);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert_eq!(line, "POST /events HTTP/1.1\r\n");
-            let mut content_length = None;
-            for _ in 0..64 {
-                line.clear();
-                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
-                if line == "\r\n" {
-                    break;
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let is_lookup = line == "POST /query HTTP/1.1\r\n";
+                if !is_lookup {
+                    assert_eq!(line, "POST /events HTTP/1.1\r\n");
                 }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                let mut content_length = None;
+                for _ in 0..64 {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let size = content_length.expect("request Content-Length");
+                assert!(size < 65536);
+                let mut body = vec![0; size];
+                reader.read_exact(&mut body).await.unwrap();
+                let reply = if is_lookup { lookup.to_string() } else { "{}".to_string() };
+                reader
+                    .get_mut()
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if !is_lookup {
+                    break serde_json::from_slice(&body).unwrap();
                 }
             }
-            let size = content_length.expect("request Content-Length");
-            assert!(size < 65536);
-            let mut body = vec![0; size];
-            reader.read_exact(&mut body).await.unwrap();
-            reader
-                .get_mut()
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .await
-                .unwrap();
-            serde_json::from_slice(&body).unwrap()
         })
         .await
         .expect("failure notice must be posted on the first failure");
+        (notice, rest, channel_id)
+    }
+
+    #[tokio::test]
+    async fn model_not_found_posts_recovery_notice_without_retrying() {
+        let keys = Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xaa; 32]);
+        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (notice, rest, channel_id) = capture_model_not_found_notice(event, None).await;
         notice.verify().unwrap();
         assert_eq!(notice.pubkey, rest.keys.public_key());
         assert_eq!(notice.kind, Kind::Custom(9));
@@ -11208,6 +12039,85 @@ mod error_outcome_emission_tests {
         let threading = queue::parse_thread_tags(&notice);
         assert_eq!(threading.root_event_id, Some(root.to_hex()));
         assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
+    }
+
+    /// A terminal failure for an edit posts into the original's thread, not
+    /// at channel top level (the edit's bare `e` tag is not a thread link).
+    #[tokio::test]
+    async fn failure_notice_for_threaded_edit_posts_in_original_thread() {
+        let root = "aa".repeat(32);
+        let original = crate::edit_routing::test_support::message(Some(&root));
+        let edit = crate::edit_routing::test_support::edit_event(&original.id.to_hex(), &[]);
+        let resolved = queue::ResolvedEdit {
+            target_event_id: original.id.to_hex(),
+            target_thread_tags: queue::parse_thread_tags(&original),
+        };
+        let (notice, _, _) = capture_model_not_found_notice(edit.clone(), Some(resolved)).await;
+        notice.verify().unwrap();
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.clone()));
+        assert_eq!(threading.parent_event_id, Some(root));
+        assert!(!notice_references(&notice, &edit.id.to_hex()));
+    }
+
+    /// A top-level edited message gets its notice as a reply to the original.
+    #[tokio::test]
+    async fn failure_notice_for_top_level_edit_replies_to_original() {
+        let original = crate::edit_routing::test_support::message(None);
+        let original_id = original.id.to_hex();
+        let edit = crate::edit_routing::test_support::edit_event(&original_id, &[]);
+        let resolved = queue::ResolvedEdit {
+            target_event_id: original_id.clone(),
+            target_thread_tags: queue::parse_thread_tags(&original),
+        };
+        let (notice, _, _) = capture_model_not_found_notice(edit.clone(), Some(resolved)).await;
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(original_id.clone()));
+        assert_eq!(threading.parent_event_id, Some(original_id));
+        assert!(!notice_references(&notice, &edit.id.to_hex()));
+    }
+
+    /// An original that was unresolved at admission is looked up again for
+    /// the notice. A threaded original then gets the notice in its thread.
+    #[tokio::test]
+    async fn failure_notice_retries_unresolved_edit_lookup() {
+        let root = "aa".repeat(32);
+        let original = crate::edit_routing::test_support::message(Some(&root));
+        let edit = crate::edit_routing::test_support::edit_event(&original.id.to_hex(), &[]);
+        let (notice, _, _) = capture_model_not_found_notice_with_lookup(
+            edit.clone(),
+            None,
+            serde_json::json!([original]),
+        )
+        .await;
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.clone()));
+        assert_eq!(threading.parent_event_id, Some(root));
+        assert!(!notice_references(&notice, &edit.id.to_hex()));
+    }
+
+    /// If the original still cannot be fetched, the notice must not claim the
+    /// edit target as a thread root: the target can itself be a thread reply,
+    /// and the relay rejects a root that does not match its real ancestry.
+    /// The notice posts at channel top level instead.
+    #[tokio::test]
+    async fn failure_notice_for_unresolved_edit_claims_no_root() {
+        let target = "cc".repeat(32);
+        let edit = crate::edit_routing::test_support::edit_event(&target, &[]);
+        let (notice, _, _) = capture_model_not_found_notice(edit.clone(), None).await;
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, None);
+        assert_eq!(threading.parent_event_id, None);
+        assert!(!notice_references(&notice, &target));
+        assert!(!notice_references(&notice, &edit.id.to_hex()));
+    }
+
+    fn notice_references(notice: &nostr::Event, event_id: &str) -> bool {
+        notice.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("e")
+                && values.get(1).map(String::as_str) == Some(event_id)
+        })
     }
 
     /// A non-auth application error (e.g. usage credits) must still follow the
@@ -11240,6 +12150,7 @@ mod error_outcome_emission_tests {
             channel_id,
             scope: scope::SessionScope::Conversation { channel_id },
             events: vec![BatchEvent {
+                edit: None,
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),

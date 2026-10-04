@@ -411,10 +411,7 @@ fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionE
                     .get("category")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
-                display_name: opt
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                display_name: opt.get("name").and_then(|v| v.as_str()).map(str::to_string),
                 current_value: opt
                     .get("value")
                     .or_else(|| opt.get("currentValue"))
@@ -436,10 +433,7 @@ fn parse_option_values(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionVa
             let value = o.get("value").and_then(|v| v.as_str())?.to_string();
             Some(AcpConfigOptionValue {
                 value,
-                display_name: o
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                display_name: o.get("name").and_then(|v| v.as_str()).map(str::to_string),
             })
         })
         .collect()

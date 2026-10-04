@@ -15,6 +15,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import 'media_viewer_hero.dart';
 
 export 'media_viewer_hero.dart';
@@ -643,20 +644,46 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               ),
             ),
-            PositionedDirectional(
-              top: 0,
-              end: Grid.sm,
-              child: Opacity(
-                opacity: chromeOpacity,
-                child: SafeArea(
-                  child: _MediaViewerCloseButton(
-                    key: const ValueKey('message-media-image-viewer-close'),
-                    tooltip: 'Close image viewer',
-                    onPressed: () => unawaited(dismiss()),
+            if (defaultTargetPlatform == TargetPlatform.iOS)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height:
+                    MediaQuery.paddingOf(context).top +
+                    IosNavigationMetrics.of(context).compactHeight,
+                child: Opacity(
+                  opacity: chromeOpacity,
+                  child: Theme(
+                    data: ThemeData.dark(),
+                    child: IosNavigationBar(
+                      title: 'Photo',
+                      actions: [
+                        IosNavigationAction(
+                          label: 'Close image viewer',
+                          symbol: 'xmark',
+                          onPressed: () => unawaited(dismiss()),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+            else
+              PositionedDirectional(
+                top: 0,
+                end: Grid.sm,
+                child: Opacity(
+                  opacity: chromeOpacity,
+                  child: SafeArea(
+                    child: _MediaViewerCloseButton(
+                      key: const ValueKey('message-media-image-viewer-close'),
+                      tooltip: 'Close image viewer',
+                      onPressed: () => unawaited(dismiss()),
+                    ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),

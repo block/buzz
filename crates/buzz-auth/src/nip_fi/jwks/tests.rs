@@ -997,13 +997,13 @@ async fn two_issuer_keys_and_generations_are_isolated() {
 
     let v_pre = FederatedAssertionVerifier::new(registry.clone(), pre);
     v_pre
-        .verify(&sign(PKCS8_A1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_A1, KID_A1, issuer_a, audience), audience)
         .expect("A1 token must verify pre-rotation");
     v_pre
-        .verify(&sign(PKCS8_B1, KID_B1, issuer_b, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_B1, issuer_b, audience), audience)
         .expect("B1 token must verify pre-rotation");
     v_pre
-        .verify(&sign(PKCS8_B1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_A1, issuer_a, audience), audience)
         .expect_err("B1 key must not forge issuer A");
 
     // Post-rotation: fresh source, A rotates A1→A2, B unchanged.
@@ -1041,16 +1041,16 @@ async fn two_issuer_keys_and_generations_are_isolated() {
 
     let v_post = FederatedAssertionVerifier::new(registry, post);
     v_post
-        .verify(&sign(PKCS8_A2, KID_A2, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_A2, KID_A2, issuer_a, audience), audience)
         .expect("A2 token must verify post-rotation");
     v_post
-        .verify(&sign(PKCS8_A1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_A1, KID_A1, issuer_a, audience), audience)
         .expect_err("old A1 token must fail after A2 rotation");
     v_post
-        .verify(&sign(PKCS8_B1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_A1, issuer_a, audience), audience)
         .expect_err("B1 key must not forge issuer A post-rotation");
     v_post
-        .verify(&sign(PKCS8_B1, KID_B1, issuer_b, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_B1, issuer_b, audience), audience)
         .expect("B1 token must still verify post-rotation");
 }
 
@@ -1185,7 +1185,7 @@ async fn shared_arc_source_verifier_observes_rotation() {
 
     // Pre-rotation: A1 token verifies.
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect("A1 token must verify before rotation");
 
     // Advance past the refresh interval so the next get_snapshot triggers a
@@ -1201,10 +1201,10 @@ async fn shared_arc_source_verifier_observes_rotation() {
     // at construction), it would serve the pre-rotation A1 snapshot forever —
     // A2 would fail and A1 would still pass, turning both assertions red.
     verifier
-        .verify(&sign_token(PKCS8_A2, KID_A2, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A2, KID_A2, issuer, audience), audience)
         .expect("A2 token must verify through the shared Arc after rotation");
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect_err("old A1 token must be rejected after rotation (kid no longer in JWKS)");
 }
 
@@ -1582,7 +1582,7 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
 
     // Pre-advancement: A1 verifies.
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect("A1 token must verify before clock advances past its deadline");
 
     // Step 3: advance clock past A1's original hard deadline (no sleep).
@@ -1606,13 +1606,13 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
 
     // Step 5: the SAME unchanged verifier reflects A2 keys.
     verifier
-        .verify(&sign_token(PKCS8_A2, KID_A2, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A2, KID_A2, issuer, audience), audience)
         .expect(
             "A2 token must verify through the unchanged verifier after A1 deadline expired; \
              mutation oracle: use independent Arc -> A2-accept flips red (reliable oracle)",
         );
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect_err("A1 must be rejected after expiry + rotation");
 }
 

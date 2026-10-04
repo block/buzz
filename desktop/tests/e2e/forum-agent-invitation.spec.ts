@@ -430,8 +430,17 @@ for (const stage of ["add", "publish"] as const) {
         await expect(
           page.getByRole("button", { name: "Remove attachment" }),
         ).toBeVisible();
-      if (replacement !== null)
+      if (replacement === "") {
+        // fill("") presses Delete over a DOM selection ProseMirror may not
+        // have synced yet; select through the editor's own keymap instead.
+        await page.getByTestId("message-input").click();
+        await page.keyboard.press("ControlOrMeta+a");
+        await page.keyboard.press("Delete");
+      } else if (replacement !== null) {
         await page.getByTestId("message-input").fill(replacement);
+      }
+      if (replacement !== null)
+        await expect(page.getByTestId("message-input")).toHaveText(replacement);
       await navigate(1);
       await releaseForumGate(page);
       expect(

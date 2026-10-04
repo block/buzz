@@ -1444,8 +1444,8 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
         )
         .await;
 
-    // Wait for the tool call to be in-progress.
-    h.recv_until(|v| {
+    // Approve the tool so this test reaches execution before cancelling it.
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))
@@ -3338,16 +3338,16 @@ async fn handoff_cap_binds_within_a_single_turn() {
     //  req 1: turn 1 complete()            → usage=950 (over threshold=900)
     //  req 2: turn 2 round 0 summarize()   → summary (handoff_attempts: 0→1)
     //  req 3: turn 2 round 0 complete()    → tool_call + usage=950 (re-arms gate)
-    //         [fake-mcp tool executes; steer queued while run is active]
-    //  req 4: turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
+    //         [steer accepted while fake-mcp tool waits for approval]
+    //         turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
     //                                         → WARN, skip (cap exhausted for this turn)
-    //  req 5: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
+    //  req 4: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
     let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
     // Build a tool-call response that also carries usage so the gate re-arms
     // on round 1's preflight (without usage, last_request_input_tokens is None
     // after the handoff clears it, and the byte-fallback won't fire on tiny history).
     let tool_call_with_usage = {
-        let mut v = openai_tool_call("tc-1", "test_tool", json!({}));
+        let mut v = openai_tool_call("tc-1", "cap_test__tool_0", json!({}));
         v["usage"] = json!({
             "prompt_tokens": 950u64,
             "completion_tokens": 5,
@@ -3377,7 +3377,7 @@ async fn handoff_cap_binds_within_a_single_turn() {
     )
     .await;
 
-    // Init with the fake MCP server so test_tool is available.
+    // Init with the fake MCP server so cap_test__tool_0 is available.
     h.send(
         "initialize",
         json!({"protocolVersion":1,"clientCapabilities":{}}),
@@ -3421,76 +3421,59 @@ async fn handoff_cap_binds_within_a_single_turn() {
         )
         .await;
 
-    // Drain until the final response, approving tool-permission requests,
-    // capturing the activeRunId once it is broadcast, sending one steer,
-    // and verifying that it is accepted in the live run.
-    let mut run_id: Option<String> = None;
-    let mut steer_id: i64 = -1;
-    let mut steer_accepted = false;
-    loop {
-        let v = h.recv().await;
+    let update = h
+        .recv_until(|v| v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string())
+        .await;
+    let run_id = update["params"]["update"]["_meta"]["goose"]["activeRunId"]
+        .as_str()
+        .unwrap();
 
-        // Capture the run id from the first session/update that carries it,
-        // then immediately queue a steer.  This must happen before round 1 so
-        // the steer text is present but the cap check still fires — proving
-        // the counter is not reset by the steer path.
-        if run_id.is_none() {
-            if let Some(rid) = v["params"]["update"]["_meta"]["goose"]["activeRunId"].as_str() {
-                run_id = Some(rid.to_owned());
-                steer_id = h
-                    .send(
-                        "_goose/unstable/session/steer",
-                        json!({
-                            "sessionId": sid,
-                            "expectedRunId": rid,
-                            "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
-                        }),
-                    )
-                    .await;
-            }
-        }
-
-        // Steer response: assert it was accepted in the live run.
-        if steer_id >= 0 && v["id"] == json!(steer_id) {
-            assert!(
-                v.get("result").is_some(),
-                "steer must be accepted while the run is active; got: {v}"
-            );
-            assert_eq!(
-                v["result"]["runId"].as_str(),
-                run_id.as_deref(),
-                "steer must reference the live run id"
-            );
-            steer_accepted = true;
-            continue;
-        }
-
-        if v.get("method") == Some(&json!("session/request_permission")) {
-            h.write(approve_permission(&v)).await;
-            continue;
-        }
-        if v["id"] == json!(p2) {
-            assert!(
-                v.get("result").is_some(),
-                "turn 2 must succeed even when cap blocks round-1 handoff; got: {v}"
-            );
-            break;
-        }
-    }
-
+    // Hold tool approval after the first handoff so the steer is accepted
+    // before round 1, regardless of how the agent and test are scheduled.
+    let permission = h
+        .recv_until(|v| v["method"] == "session/request_permission" || v["id"] == json!(p2))
+        .await;
+    assert_eq!(permission["method"], "session/request_permission");
+    let steer_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": run_id,
+                "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
+            }),
+        )
+        .await;
+    let steer = h.recv_until(|v| v["id"] == json!(steer_id)).await;
+    assert_eq!(
+        steer["result"]["runId"].as_str(),
+        Some(run_id),
+        "steer must be accepted in the live run; got: {steer}"
+    );
+    h.write(approve_permission(&permission)).await;
+    let response = h.recv_until(|v| v["id"] == json!(p2)).await;
     assert!(
-        steer_accepted,
-        "steer was never accepted during turn 2; the steer arm is missing coverage"
+        response.get("result").is_some(),
+        "turn 2 must succeed even when cap blocks round-1 handoff; got: {response}"
     );
 
     // 4 LLM requests: seed + summarize + tool-call-with-usage + final-complete.
-    let count = llm.captured.lock().await.len();
+    let requests = llm.captured.lock().await;
+    let count = requests.len();
     assert_eq!(
         count, 4,
         "expected 4 LLM requests (seed + summarize + tool-call + final); got {count}"
     );
 
-    let stderr = h.stderr_text();
+    assert!(
+        requests[3]["messages"].to_string().contains("STEER-CANARY"),
+        "the final request must include the accepted steer"
+    );
+    drop(requests);
+
+    let stderr = h
+        .wait_for_stderr("handoff cap reached", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("handoff cap reached"),
         "expected cap-reached WARN in stderr; got: {stderr}"

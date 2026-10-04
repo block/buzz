@@ -23,7 +23,7 @@
 use nostr::Event;
 use uuid::Uuid;
 
-use crate::queue::parse_thread_tags;
+use crate::queue::{reply_thread, ResolvedEdit};
 
 /// Operator policy controlling how ACP provider sessions are scoped.
 ///
@@ -115,7 +115,7 @@ impl SessionScope {
     ///    tag scopes to that canonical root; a top-level mention (no thread
     ///    tags) opens a new thread rooted at the triggering event id.
     ///
-    /// Thread roots are resolved with [`parse_thread_tags`], i.e. Buzz's shared
+    /// Thread roots are resolved with [`crate::queue::parse_thread_tags`], i.e. Buzz's shared
     /// [`buzz_core::nip10`] canonical-root rules — a malformed marker id is
     /// ignored (treated as top-level), and a lone `root` marker with no `reply`
     /// is top-level, matching relay ingest.
@@ -129,17 +129,30 @@ impl SessionScope {
     /// sessions, affinity, delivery ledgers). `nostr::EventId::to_hex()` is
     /// already lowercase, so the top-level path is unaffected.
     pub fn derive(policy: SessionPolicy, channel_id: Uuid, is_dm: bool, event: &Event) -> Self {
+        Self::derive_routed(policy, channel_id, is_dm, event, None)
+    }
+
+    /// [`derive`](Self::derive) for an event whose reply routing may come from
+    /// an edited original message.
+    ///
+    /// A kind:40003 edit belongs to its original message's thread, never to a
+    /// new thread rooted at the auxiliary edit event: a threaded original
+    /// scopes to its root, and a top-level original (or one that could not be
+    /// fetched) scopes to the thread rooted at the original itself.
+    pub fn derive_routed(
+        policy: SessionPolicy,
+        channel_id: Uuid,
+        is_dm: bool,
+        event: &Event,
+        edit: Option<&ResolvedEdit>,
+    ) -> Self {
         if is_dm || policy == SessionPolicy::Channel {
             return Self::Conversation { channel_id };
         }
 
-        let root_event_id = match parse_thread_tags(event).root_event_id {
-            Some(root) => root,
-            None => event.id.to_hex(),
-        };
         Self::Thread {
             channel_id,
-            root_event_id: root_event_id.to_ascii_lowercase(),
+            root_event_id: reply_thread(event, edit),
         }
     }
 
@@ -306,6 +319,49 @@ mod tests {
         let a = SessionScope::derive(SessionPolicy::Thread, ch, false, &mk_reply());
         let b = SessionScope::derive(SessionPolicy::Thread, ch, false, &mk_reply());
         assert_eq!(a, b, "same-root replies must reuse the same thread scope");
+    }
+
+    fn thread_root(scope: &SessionScope) -> String {
+        match scope {
+            SessionScope::Thread { root_event_id, .. } => root_event_id.clone(),
+            other => panic!("expected thread scope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_scopes_to_original_thread_never_the_edit_event() {
+        use crate::edit_routing::test_support::{edit_event, message};
+        let ch = Uuid::new_v4();
+        let root = "ab".repeat(32);
+
+        // Threaded original: the edit shares the original's thread session.
+        let threaded = message(Some(&root));
+        let edit = edit_event(&threaded.id.to_hex(), &[]);
+        let resolved = ResolvedEdit {
+            target_event_id: threaded.id.to_hex(),
+            target_thread_tags: crate::queue::parse_thread_tags(&threaded),
+        };
+        let scope =
+            SessionScope::derive_routed(SessionPolicy::Thread, ch, false, &edit, Some(&resolved));
+        assert_eq!(thread_root(&scope), root);
+
+        // Top-level original: the thread rooted at the original itself.
+        let top = message(None);
+        let edit = edit_event(&top.id.to_hex(), &[]);
+        let resolved = ResolvedEdit {
+            target_event_id: top.id.to_hex(),
+            target_thread_tags: crate::queue::parse_thread_tags(&top),
+        };
+        let scope =
+            SessionScope::derive_routed(SessionPolicy::Thread, ch, false, &edit, Some(&resolved));
+        assert_eq!(thread_root(&scope), top.id.to_hex());
+
+        // Unresolved original: still the target, never the edit event.
+        let target = "cd".repeat(32);
+        let edit = edit_event(&target, &[]);
+        let scope = SessionScope::derive_routed(SessionPolicy::Thread, ch, false, &edit, None);
+        assert_eq!(thread_root(&scope), target);
+        assert_ne!(thread_root(&scope), edit.id.to_hex());
     }
 
     #[test]

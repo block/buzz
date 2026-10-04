@@ -234,6 +234,34 @@
         "resources": { "type": "object" }
       }
     },
+    "operatorJobs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deletionDrain": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "schedule": { "type": "string", "minLength": 1 },
+            "activeDeadlineSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+            "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "failedJobsHistoryLimit": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
+            "serviceAccountName": { "type": "string" },
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "podAnnotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "resources": { "type": "object" }
+          }
+        }
+      }
+    },
     "minio": {
       "type": "object",
       "additionalProperties": false,

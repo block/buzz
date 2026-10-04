@@ -116,7 +116,6 @@ export function ChannelScreen({
     openChannelManagement: openGlobalChannelManagement,
     followThread,
     unfollowThread,
-    isFollowingThread,
     isNotifiedForThread,
     recordThreadInteraction,
     isThreadMuted,
@@ -876,7 +875,7 @@ export function ChannelScreen({
                   }
                   followThreadById={followThread}
                   unfollowThreadById={unfollowThread}
-                  isFollowingThreadById={isFollowingThread}
+                  isFollowingThreadById={isNotifiedForThread}
                   isMessageUnreadById={isMessageUnread}
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
