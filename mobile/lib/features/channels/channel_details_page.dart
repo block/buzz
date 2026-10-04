@@ -207,6 +207,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
       builder: (_) => MembersSheet(
         channel: resolvedChannel,
         currentPubkey: resolvedCurrentPubkey,
+        onMemberTap: onMemberTap,
       ),
     );
 

@@ -42,6 +42,7 @@ import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
+import 'channel_member_profile_actions.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
@@ -591,6 +592,10 @@ class ChannelDetailPage extends HookConsumerWidget {
           context,
           pubkey,
           names: channelIdentityNamesProvider(resolvedChannel.id),
+          contextualActions: (_) => ChannelMemberProfileActions(
+            channel: resolvedChannel,
+            pubkey: pubkey,
+          ),
         ),
         sectionId: ref
             .read(channelSectionsProvider)

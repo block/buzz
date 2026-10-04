@@ -12,6 +12,7 @@ class AppListCard extends StatelessWidget {
     this.label,
     this.dividerIndent,
     this.verticalPadding = Grid.xxs,
+    this.horizontalPadding = Grid.gutter,
     required this.children,
   });
 
@@ -28,6 +29,9 @@ class AppListCard extends StatelessWidget {
   /// Adjacent cards contribute this padding from both sides. For example,
   /// passing [Grid.twelve] creates a 24dp rhythm between grouped surfaces.
   final double verticalPadding;
+
+  /// Outer horizontal inset; use zero inside an already padded sheet.
+  final double horizontalPadding;
 
   final List<Widget> children;
 
@@ -61,9 +65,9 @@ class AppListCard extends StatelessWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
+        horizontalPadding,
         verticalPadding,
-        Grid.gutter,
+        horizontalPadding,
         verticalPadding,
       ),
       child: Column(

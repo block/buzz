@@ -2449,6 +2449,15 @@ void main() {
       expect(addRow, findsOneWidget);
       expect(memberRow, findsOneWidget);
       expect(seeAllRow, findsNothing);
+      await tester.tap(
+        find.byKey(const ValueKey('channel-details-member-alice')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+      expect(find.text('Make channel admin'), findsOneWidget);
+      expect(find.text('Remove from channel'), findsOneWidget);
+      Navigator.of(tester.element(find.byType(UserProfileSheet))).pop();
+      await tester.pumpAndSettle();
       expect(
         tester.widget<Text>(find.text('Add members')).style,
         Theme.of(tester.element(addRow)).textTheme.bodyLarge,
