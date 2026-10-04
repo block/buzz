@@ -369,6 +369,7 @@ Future<void> showReactionDetailSheet({
       builder: (_) => _AndroidReactionDetailSheet(
         channelId: channelId,
         reactions: reactions,
+        initialEmoji: initialEmoji,
       ),
     );
     return;
@@ -391,10 +392,12 @@ class _AndroidReactionDetailSheet extends HookConsumerWidget {
   const _AndroidReactionDetailSheet({
     required this.channelId,
     required this.reactions,
+    required this.initialEmoji,
   });
 
   final String channelId;
   final List<TimelineReaction> reactions;
+  final String initialEmoji;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -420,6 +423,7 @@ class _AndroidReactionDetailSheet extends HookConsumerWidget {
         48.0 + pubkeys.length * 56.0 + MediaQuery.viewPaddingOf(context).bottom;
     return DefaultTabController(
       length: reactions.length + 1,
+      initialIndex: reactions.indexWhere((r) => r.emoji == initialEmoji) + 1,
       child: SizedBox(
         key: const ValueKey('reaction-details-sheet'),
         height: desiredHeight.clamp(

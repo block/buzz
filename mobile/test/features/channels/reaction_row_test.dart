@@ -373,6 +373,21 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Reactions'), findsNothing);
       expect(find.text('All 2'), findsOneWidget);
+      final controller = DefaultTabController.of(
+        tester.element(find.byType(TabBar)),
+      );
+      expect(controller.index, 2);
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('reaction-filter-all')));
+      await tester.pumpAndSettle();
+      expect(controller.index, 0);
       expect(
         find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
         findsOneWidget,
@@ -383,6 +398,7 @@ void main() {
       );
       await tester.tap(find.byKey(const ValueKey('reaction-filter-$_fire')));
       await tester.pumpAndSettle();
+      expect(controller.index, 1);
       expect(
         find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
         findsNothing,
@@ -393,6 +409,7 @@ void main() {
       );
       await tester.drag(find.byType(TabBarView), const Offset(-500, 0));
       await tester.pumpAndSettle();
+      expect(controller.index, 2);
       expect(
         find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
         findsOneWidget,
