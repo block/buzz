@@ -1,6 +1,47 @@
 part of 'channels_provider_test.dart';
 
 void _unreadReadinessCases() {
+  test(
+    'retired unread completion cannot overwrite destination settlement',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, 'me')],
+        metadata: [_meta(id: _channelA, name: 'Alpha')],
+      )..pauseNextUnreadCatchUpQuery();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await session.nextUnreadCatchUpQueryStarted;
+      final notifier = container.read(channelsProvider.notifier);
+
+      session.memberships = [_membership(_channelB, 'me')];
+      session.metadata = [_meta(id: _channelB, name: 'Bravo')];
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://bravo.example');
+      await container.read(channelsProvider.future);
+      await notifier.waitForUnreadCatchUp();
+
+      // Alpha finishes after Bravo has already settled. Its finally path must
+      // not replace Bravo's generation, even when Alpha's request failed.
+      session.failClaimedUnreadCatchUpQuery = true;
+      session.resumePausedUnreadCatchUpQuery();
+      await _settle();
+      var settled = false;
+      unawaited(notifier.waitForUnreadCatchUp().then((_) => settled = true));
+      await _settle();
+      expect(
+        settled,
+        isTrue,
+        reason: 'Retired history overwrote destination settlement',
+      );
+      expect(
+        container.read(channelsProvider).requireValue.single.id,
+        _channelB,
+      );
+    },
+  );
+
   for (final failure in ['deadline', 'exception', 'read-state unavailable']) {
     test('destination unread $failure permits degraded landing', () async {
       final session = _UnreadFailureSession(failure);

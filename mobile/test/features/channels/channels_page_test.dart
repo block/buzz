@@ -15,6 +15,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -45,6 +48,7 @@ import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/unread_readiness_tests.dart';
 
 void main() {
   setUpAll(() async {
@@ -134,6 +138,8 @@ void main() {
       ),
     );
   }
+
+  _communityUnreadLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
