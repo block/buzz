@@ -144,6 +144,10 @@ class FrostedAppBar extends StatelessWidget {
   /// surrounding scroll scope reports content beneath the controls.
   final bool frosted;
 
+  /// Keeps the Flutter backdrop and divider stable regardless of scroll state.
+  /// Conversation headers use this while their timeline and composer resize.
+  final bool alwaysFrosted;
+
   /// Opacity of the frosted surface above the blurred backdrop.
   final double frostedSurfaceOpacity;
 
@@ -216,6 +220,7 @@ class FrostedAppBar extends StatelessWidget {
     this.iconColor,
     this.gradient,
     this.frosted = true,
+    this.alwaysFrosted = false,
     this.frostedSurfaceOpacity = 0.5,
     this.frostedBlurSigma = 20,
     this.showBottomDivider = true,
@@ -325,7 +330,8 @@ class FrostedAppBar extends StatelessWidget {
     }
     final topPadding = MediaQuery.paddingOf(context).top;
     final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
-    final isScrolledUnder = scrollUnder?.isScrolledUnder ?? false;
+    final isScrolledUnder =
+        alwaysFrosted || (scrollUnder?.isScrolledUnder ?? false);
     final paintsFrost = frosted && isScrolledUnder;
     final paintsBottomDivider = showBottomDivider && isScrolledUnder;
     final canPop = Navigator.canPop(context);

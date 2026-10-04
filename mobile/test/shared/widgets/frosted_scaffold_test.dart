@@ -67,6 +67,75 @@ void main() {
     );
   });
 
+  for (final reverse in [false, true]) {
+    testWidgets(
+      'composer scrolling preserves timeline frost reverse=$reverse',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final timeline = ScrollController(
+          initialScrollOffset: reverse ? 0 : 120,
+        );
+        addTearDown(timeline.dispose);
+        final composer = TextEditingController();
+        addTearDown(composer.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: FrostedScaffold(
+              appBar: const FrostedAppBar(title: Text('Conversation')),
+              body: Column(
+                children: [
+                  Expanded(
+                    child: ListView.builder(
+                      reverse: reverse,
+                      controller: timeline,
+                      itemCount: 40,
+                      itemBuilder: (_, index) =>
+                          SizedBox(height: 48, child: Text('Message $index')),
+                    ),
+                  ),
+                  SizedBox(
+                    height: 100,
+                    child: TextField(
+                      controller: composer,
+                      minLines: 1,
+                      maxLines: 3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsOneWidget);
+        await tester.tap(find.byType(TextField));
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.enterText(
+          find.byType(TextField),
+          'One\nTwo\nThree\nFour\nFive',
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsOneWidget);
+        expect(_appBarBorder(tester)?.bottom.color.a, greaterThan(0));
+        timeline.jumpTo(reverse ? timeline.position.maxScrollExtent : 0);
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsNothing);
+        await tester.enterText(
+          find.byType(TextField),
+          'One\nTwo\nThree\nFour\nFive',
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsNothing);
+      },
+    );
+  }
+
   testWidgets(
     'page frost and divider appear only while content scrolls under header',
     (tester) async {

@@ -132,17 +132,26 @@ class FrostedScaffold extends HookWidget {
       onNotification: (notification) {
         final ScrollMetrics metrics;
         final int depth;
+        final BuildContext? sourceContext;
         if (notification is ScrollNotification) {
           metrics = notification.metrics;
           depth = notification.depth;
+          sourceContext = notification.context;
         } else if (notification is ScrollMetricsNotification) {
           // Initial layout and content-size changes matter even before a drag.
           metrics = notification.metrics;
           depth = notification.depth;
+          sourceContext = notification.context;
         } else {
           return false;
         }
         if (depth != 0 || metrics.axis != Axis.vertical) return false;
+        // EditableText has its own depth-zero scrollable. Composer edits and
+        // caret scrolling must not replace the page's scroll-under state.
+        if (sourceContext?.findAncestorWidgetOfExactType<EditableText>() !=
+            null) {
+          return false;
+        }
         // Reversed chats start at zero at the newest message. Older content
         // behind the top bar is measured by extentAfter, not scroll pixels.
         final topContentDepth = metrics.axisDirection == AxisDirection.up

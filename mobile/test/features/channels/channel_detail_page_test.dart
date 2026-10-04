@@ -70,9 +70,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
-import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/lucide_star_icon.dart';
-import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -707,12 +705,8 @@ void main() {
               label,
             );
             expect(
-              tester
-                  .widget<MaskedAvatarBadge>(
-                    find.byKey(const ValueKey('dm-header-avatar')),
-                  )
-                  .badge,
-              label == 'Unknown' ? isNull : isNotNull,
+              find.byKey(const ValueKey('dm-header-avatar')),
+              findsNothing,
             );
           }
           if (label != 'Offline') expect(find.text('Offline'), findsNothing);
@@ -756,7 +750,7 @@ void main() {
       });
     }
 
-    testWidgets('uses the shared 32px masked presence avatar in DM headers', (
+    testWidgets('centers a tappable DM header without an avatar', (
       tester,
     ) async {
       final dmChannel = Channel(
@@ -785,26 +779,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
-      final avatar = tester.widget<MaskedAvatarBadge>(avatarFinder);
-      expect(tester.getSize(avatarFinder), const Size.square(32));
-      expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
-      expect(avatar.badge, isNotNull);
-      expect(
-        tester
-            .widget<ClipRRect>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(ClipRRect),
-              ),
-            )
-            .borderRadius,
-        BorderRadius.circular(16),
-      );
-      expect(
-        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
       final name = tester.widget<Text>(
         find.byKey(const ValueKey('dm-header-name')),
       );
@@ -812,21 +787,27 @@ void main() {
         find.byKey(const ValueKey('dm-header-presence')),
       );
       expect(name.style?.fontSize, 16);
-      expect(name.style?.fontWeight, FontWeight.w500);
+      expect(name.style?.fontWeight, FontWeight.w600);
       expect(presence.style?.fontSize, 14);
       expect(presence.style?.fontWeight, FontWeight.w400);
-      // Named counterpart: the avatar initial comes from the authored name.
-      expect(_dmHeaderAvatarInitial(tester), 'A');
+      expect(
+        tester.getCenter(find.byKey(const ValueKey('dm-header-text-stack'))).dx,
+        moreOrLessEquals(
+          tester.view.physicalSize.width / tester.view.devicePixelRatio / 2,
+        ),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      Navigator.of(tester.element(find.byType(ChannelDetailsPage))).pop();
+      await tester.pumpAndSettle();
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
     });
 
-    testWidgets('keys unnamed DM header avatars to the hex participant key', (
-      tester,
-    ) async {
-      // A valid unnamed counterpart: the compact-npub label would render `N`
-      // for every unnamed DM, so the header avatar stays keyed to the hex
-      // public key instead.
+    testWidgets('labels unnamed DMs with the participant key', (tester) async {
       const a11ce =
           'a11ce00000000000000000000000000000000000000000000000000000000000';
       final dmChannel = Channel(
@@ -852,19 +833,10 @@ void main() {
         tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
         shortPubkey(a11ce),
       );
-      // The named counterpart in the test above keeps its authored initial
-      // ('A' from 'Alice'); this unnamed one gets the hex-key-derived 'A',
-      // not the `N` its npub label starts with.
-      expect(_dmHeaderAvatarInitial(tester), 'A');
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
     });
 
-    testWidgets('keys DM header fallback avatars to the non-self counterpart', (
-      tester,
-    ) async {
-      // Member order does not guarantee the counterpart is listed first:
-      // the current user (self, from the fake profile) comes FIRST, so an
-      // avatar keyed to the first participant would render the current
-      // user's initial while the header label names the counterpart.
+    testWidgets('labels DMs with the non-self counterpart', (tester) async {
       const b0b =
           'b0b0000000000000000000000000000000000000000000000000000000000000';
       final dmChannel = Channel(
@@ -886,17 +858,14 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Label and avatar agree on the counterpart's key: the compact npub
-      // names the unnamed counterpart, and the avatar initial is keyed to
-      // that same hex key — never the current user's `S`.
       expect(
         tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
         shortPubkey(b0b),
       );
-      expect(_dmHeaderAvatarInitial(tester), 'B');
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
     });
 
-    testWidgets('uses a fallback squircle for bot-role DM participants', (
+    testWidgets('omits the header avatar for bot-role DM participants', (
       tester,
     ) async {
       final dmChannel = Channel(
@@ -923,33 +892,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
-      expect(
-        tester
-            .widget<ClipRRect>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(ClipRRect),
-              ),
-            )
-            .borderRadius,
-        BorderRadius.circular(9.6),
-      );
-      expect(
-        tester
-            .widget<AvatarImageContent>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(AvatarImageContent),
-              ),
-            )
-            .imageUrl,
-        isNull,
-      );
-      expect(
-        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
     });
 
     testWidgets('hides the Huddle action in a one-to-one agent DM', (
@@ -984,18 +927,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
-      expect(
-        tester
-            .widget<ClipRRect>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(ClipRRect),
-              ),
-            )
-            .borderRadius,
-        BorderRadius.circular(9.6),
-      );
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
       expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });
@@ -1862,7 +1794,9 @@ void main() {
       },
     );
 
-    testWidgets('keeps the Members action for group DMs', (tester) async {
+    testWidgets('opens group DM members from the centered title', (
+      tester,
+    ) async {
       final dmChannel = Channel(
         id: _channelId,
         name: 'DM',
@@ -1881,6 +1815,15 @@ void main() {
         _buildTestable(
           messages: const [],
           channel: dmChannel,
+          members: ['self', 'alice', 'bob']
+              .map(
+                (pubkey) => ChannelMember(
+                  pubkey: pubkey,
+                  role: 'member',
+                  joinedAt: DateTime(2025),
+                ),
+              )
+              .toList(),
           knownAgentPubkeys: const {'alice'},
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
@@ -1890,8 +1833,24 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byTooltip('View members'), findsOneWidget);
+      expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('dm-header-presence')))
+            .data,
+        '3 members',
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('channel-details-members-card')),
+        findsOneWidget,
+      );
     });
 
     testWidgets(
@@ -10564,33 +10523,92 @@ void main() {
             return;
           }
 
-          final backRect = platform == TargetPlatform.iOS
-              ? tester.getRect(
-                  find.byKey(const ValueKey('channel-ios-glass-back')),
-                )
-              : tester.getRect(find.byTooltip('Back'));
-          final avatarRect = tester.getRect(
-            find.byKey(const ValueKey('channel-header-avatar')),
-          );
-          final titleSpacing = avatarRect.left - backRect.right;
           final title = tester.renderObject<RenderParagraph>(
             find.byKey(const ValueKey('channel-header-name')),
           );
           final titleDidExceedMaxLines = title.didExceedMaxLines;
-          debugDefaultTargetPlatformOverride = previousPlatform;
-
           expect(
-            titleSpacing,
-            moreOrLessEquals(
-              platform == TargetPlatform.iOS
-                  ? iosGlassChannelHeaderTitleSpacing
-                  : 0,
-            ),
+            tester
+                .getCenter(
+                  find.byKey(const ValueKey('channel-header-text-stack')),
+                )
+                .dx,
+            moreOrLessEquals(160),
           );
+          debugDefaultTargetPlatformOverride = previousPlatform;
           expect(titleDidExceedMaxLines, isTrue);
           expect(tester.takeException(), isNull);
         },
       );
+    }
+
+    for (final isDm in [false, true]) {
+      testWidgets('Android centered title fits large text dm=$isDm', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(320, 700);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final channel = isDm
+            ? Channel(
+                id: _channelId,
+                name: 'DM',
+                channelType: 'dm',
+                visibility: 'private',
+                description: '',
+                createdBy: 'self',
+                createdAt: DateTime(2025),
+                memberCount: 2,
+                participants: const ['Self', 'A very long counterpart name'],
+                participantPubkeys: const ['self', 'alice'],
+                isMember: true,
+              )
+            : _testChannel.copyWith(name: 'a-very-long-channel-name');
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: channel,
+            textScaler: const TextScaler.linear(2),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(channel: channel),
+                    ),
+                  ),
+                  child: const Text('Open conversation'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open conversation'));
+        await tester.pumpAndSettle();
+        final prefix = isDm ? 'dm' : 'channel';
+        final title = tester.getRect(
+          find.byKey(ValueKey('$prefix-header-text-stack')),
+        );
+        expect(title.center.dx, moreOrLessEquals(160));
+        expect(
+          title.left,
+          greaterThanOrEqualTo(tester.getRect(find.byTooltip('Back')).right),
+        );
+        expect(
+          title.right,
+          lessThanOrEqualTo(
+            tester.getRect(find.byTooltip('Start Huddle')).left,
+          ),
+        );
+        expect(tester.takeException(), isNull);
+        await tester.tap(
+          find.byKey(ValueKey('$prefix-header-settings-trigger')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ChannelDetailsPage), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
     }
 
     testWidgets('shows a tappable channel name and collective member count', (
@@ -10613,90 +10631,14 @@ void main() {
 
       expect(find.text('general'), findsOneWidget);
       expect(find.text('5 members'), findsOneWidget);
-      // The hash icon appears in the app bar and in the compose bar toolbar.
-      expect(find.byIcon(LucideIcons.hash), findsAtLeastNWidgets(1));
-      expect(
-        tester.getSize(find.byKey(const ValueKey('channel-header-avatar'))),
-        const Size.square(40),
-      );
-      final channelHeaderAvatarRect = tester.getRect(
-        find.byKey(const ValueKey('channel-header-avatar')),
-      );
-      final channelHeaderTextStackRect = tester.getRect(
-        find.byKey(const ValueKey('channel-header-text-stack')),
-      );
-      expect(channelHeaderTextStackRect.height, 40);
-      expect(
-        channelHeaderTextStackRect.center.dy,
-        moreOrLessEquals(channelHeaderAvatarRect.center.dy),
-      );
+      expect(find.byKey(const ValueKey('channel-header-avatar')), findsNothing);
       expect(
         tester
-            .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
-            .style
-            ?.fontSize,
-        AppTheme.light().textTheme.titleSmall?.fontSize,
-      );
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
-            .style
-            ?.fontWeight,
-        FontWeight.w600,
-      );
-      final channelHeaderAvatar = tester.widget<Container>(
-        find.byKey(const ValueKey('channel-header-avatar')),
-      );
-      expect(
-        (channelHeaderAvatar.decoration as BoxDecoration).color,
-        AppTheme.light().colorScheme.surface,
-      );
-      final channelHeaderAvatarBorder =
-          (channelHeaderAvatar.decoration as BoxDecoration).border! as Border;
-      expect(
-        channelHeaderAvatarBorder.top.color,
-        AppTheme.light().colorScheme.inverseSurface.withValues(alpha: 0.07),
-      );
-      expect(channelHeaderAvatarBorder.top.width, 1);
-      expect(
-        channelHeaderAvatarBorder.top.strokeAlign,
-        BorderSide.strokeAlignOutside,
-      );
-      expect(
-        tester
-            .widget<Icon>(
-              find.descendant(
-                of: find.byKey(const ValueKey('channel-header-avatar')),
-                matching: find.byIcon(LucideIcons.hash),
-              ),
-            )
-            .color,
-        AppTheme.light().colorScheme.primary,
-      );
-      expect(
-        tester.getRect(find.byKey(const ValueKey('channel-header-name'))).left -
-            tester
-                .getRect(find.byKey(const ValueKey('channel-header-avatar')))
-                .right,
-        moreOrLessEquals(Grid.twelve),
-      );
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('channel-header-member-count')),
-            )
-            .style
-            ?.fontSize,
-        AppTheme.light().textTheme.bodySmall?.fontSize,
-      );
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('channel-header-member-count')),
-            )
-            .style
-            ?.color,
-        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.65),
+            .getCenter(find.byKey(const ValueKey('channel-header-text-stack')))
+            .dx,
+        moreOrLessEquals(
+          tester.view.physicalSize.width / tester.view.devicePixelRatio / 2,
+        ),
       );
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Channel actions'), findsNothing);
@@ -16467,16 +16409,6 @@ class _TestNavigatorObserver extends NavigatorObserver {
     pushCount += 1;
     super.didPush(route, previousRoute);
   }
-}
-
-/// Avatar fallback initial in the DM header — asserts at the production
-/// seam (the masked `dm-header-avatar` badge), not the label helper.
-String _dmHeaderAvatarInitial(WidgetTester tester) {
-  final avatar = find.byKey(const ValueKey('dm-header-avatar'));
-  final initial = tester.widget<Text>(
-    find.descendant(of: avatar, matching: find.byType(Text)),
-  );
-  return initial.data!;
 }
 
 /// Avatar fallback initial in the channel-details member preview row keyed
