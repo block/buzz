@@ -427,11 +427,11 @@ class FrostedAppBar extends StatelessWidget {
       key: const ValueKey('frosted-app-bar-background'),
       padding: EdgeInsets.only(top: topPadding),
       decoration: BoxDecoration(
-        color: !paintsFrost
-            ? Colors.transparent
-            : gradient == null
+        color: gradient != null
+            ? null
+            : paintsFrost
             ? context.colors.surface.withValues(alpha: frostedSurfaceOpacity)
-            : null,
+            : Colors.transparent,
         gradient: gradient,
         border: showBottomDivider
             ? Border(
