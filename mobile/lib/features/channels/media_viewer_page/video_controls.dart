@@ -76,6 +76,21 @@ class _VideoTransportBar extends HookConsumerWidget {
         await controller.seekTo(Duration(milliseconds: next.round()));
       } catch (error) {
         debugPrint('[VideoViewer] seek failed: $error');
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Could not seek in this video.'),
+              action: SnackBarAction(
+                label: 'Retry',
+                onPressed: () {
+                  if (!context.mounted) return;
+                  onInteractionStart();
+                  unawaited(finishScrub(next));
+                },
+              ),
+            ),
+          );
+        }
       } finally {
         if (context.mounted) {
           scrubPosition.value = null;
@@ -142,6 +157,7 @@ class _VideoTransportBar extends HookConsumerWidget {
             max: hasDuration ? durationMs.toDouble() : 1,
             onChangeStart: hasDuration
                 ? (next) {
+                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
                     onInteractionStart();
                     scrubPosition.value = next;
                   }

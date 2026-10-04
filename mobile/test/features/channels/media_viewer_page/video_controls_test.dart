@@ -32,6 +32,7 @@ class _Player extends VideoPlayerPlatform {
   double volume = 1;
   double speed = 1;
   int seeks = 0;
+  bool failNextSeek = false;
   int plays = 0;
   int pauses = 0;
 
@@ -83,6 +84,10 @@ class _Player extends VideoPlayerPlatform {
   @override
   Future<void> seekTo(int playerId, Duration position) async {
     seeks++;
+    if (failNextSeek) {
+      failNextSeek = false;
+      throw PlatformException(code: 'seek_failed');
+    }
     this.position = position;
   }
 
@@ -287,6 +292,29 @@ void main() {
       await _disposeVideo(tester);
     },
   );
+
+  testWidgets('failed seeks report an error and retry the requested position', (
+    tester,
+  ) async {
+    final player = await _pumpVideo(tester);
+    player.failNextSeek = true;
+    final rect = tester.getRect(_timeline);
+    await tester.tapAt(Offset(rect.left + rect.width * 0.75, rect.center.dy));
+    await tester.pumpAndSettle();
+    expect(player.seeks, 1);
+    expect(player.position, Duration.zero);
+    expect(find.text('Could not seek in this video.'), findsOneWidget);
+    // Feedback stays actionable even after the transport chrome fades.
+    await tester.pump(const Duration(seconds: 3));
+    expect(_opacity(tester), 0);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(player.seeks, 2);
+    expect(player.position.inSeconds, greaterThan(80));
+    expect(find.text('Could not seek in this video.'), findsNothing);
+    expect(_opacity(tester), 1);
+    await _disposeVideo(tester);
+  });
 
   testWidgets('mute and playback speed work without hiding controls', (
     tester,

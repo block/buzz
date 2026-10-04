@@ -135,6 +135,8 @@ jobs:
         run: swift build -c release --package-path mobile/ios/BuzzPushKit
       - name: Test
         run: swift test --package-path mobile/ios/BuzzPushKit
+      - name: Test native pagination geometry
+        run: /bin/bash scripts/test-mobile-pagination.sh
       - name: Build complete iOS simulator app
         run: cd mobile && flutter build ios --simulator --debug --no-pub
       - name: Build complete unsigned iOS release

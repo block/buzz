@@ -41,6 +41,7 @@ class IosGlassThemePagination extends HookWidget {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
     final nativeChannel = useState<MethodChannel?>(null);
     final onSelectedRef = useRef(onSelected)..value = onSelected;
+    final isRTL = Directionality.of(context) == TextDirection.rtl;
     final brightness = Theme.of(context).brightness.name;
     final activeColorValue = activeColor.toARGB32();
     final inactiveColorValue = inactiveColor.toARGB32();
@@ -63,6 +64,7 @@ class IosGlassThemePagination extends HookWidget {
           unawaited(
             channel.invokeMethod<void>('setState', <String, Object>{
               'accessibilityLabel': semanticLabel,
+              'isRTL': isRTL,
               'containerHeight': containerHeight,
               'count': count,
               'selected': selected,
@@ -78,6 +80,7 @@ class IosGlassThemePagination extends HookWidget {
       [
         nativeChannel.value,
         semanticLabel,
+        isRTL,
         containerHeight,
         count,
         selected,
@@ -93,6 +96,7 @@ class IosGlassThemePagination extends HookWidget {
       hitTestBehavior: PlatformViewHitTestBehavior.opaque,
       creationParams: <String, Object>{
         'accessibilityLabel': semanticLabel,
+        'isRTL': isRTL,
         'containerHeight': containerHeight,
         'count': count,
         'selected': selected,
