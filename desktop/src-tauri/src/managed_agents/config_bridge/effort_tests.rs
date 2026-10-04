@@ -756,3 +756,34 @@ fn explicit_profile_adapter_default_overrides_global_effort() {
     );
     assert_eq!(projected.value.as_deref(), Some("default"));
 }
+
+#[test]
+fn acp_transport_never_shadows_canonical_instance_effort() {
+    for id in ["codex", "claude"] {
+        let runtime = known_acp_runtime_exact(id).unwrap();
+        let mut agent = record();
+        agent.env_vars = env(&[(ACP_KEY, "low")]);
+        agent.effort_level = Some("high".into());
+        let projected = effort_launch_projection(
+            &agent,
+            Some(runtime),
+            &[],
+            None,
+            &env(&[(ACP_KEY, "medium")]),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(projected.value.as_deref(), Some("high"), "{id}");
+        agent.effort_level = None;
+        let projected = effort_launch_projection(
+            &agent,
+            Some(runtime),
+            &[],
+            None,
+            &env(&[(ACP_KEY, "medium")]),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(projected.value.as_deref(), Some("low"), "{id}");
+    }
+}

@@ -12,6 +12,9 @@
 //!   > baked(native)
 //! ```
 //!
+//! For catalog-declared ACP transport, canonical column precedes record native;
+//! profile/global defaults still participate below the instance tiers.
+//!
 //! (The reader adds the live-ACP tier between column and persona and the config
 //! file tier at the bottom; the launch projection has neither — a spawn reads
 //! neither a running session nor the on-disk harness file.)
@@ -40,9 +43,24 @@ use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 /// The retained ACP-startup transport key. Claude, Codex, keyless ACP adapters,
 /// and any unknown/custom runtime route the effective effort through this key
 /// (the harness reads it into `PoolStartup.startup_effort`). It is *transport*,
-/// never a value-authority tier: a user-supplied entry is suppressed and
-/// overwritten by the projected effective value.
+/// below canonical instance effort. Catalog-declared ACP runtimes can read it
+/// from defaults; the projection suppresses aliases and emits one value.
 pub(crate) const ACP_STARTUP_EFFORT_KEY: &str = "BUZZ_ACP_EFFORT_LEVEL";
+
+/// Shared record-tier ordering for the launch projection and config reader.
+/// The ACP key transports defaults but cannot shadow a canonical instance choice.
+/// Real harness-native keys retain their existing precedence over the column.
+pub(super) fn record_effort_tiers<'a>(
+    native_key: Option<&str>,
+    native: Option<&'a str>,
+    canonical: Option<&'a str>,
+) -> [Option<&'a str>; 2] {
+    if native_key == Some(ACP_STARTUP_EFFORT_KEY) {
+        [canonical, native]
+    } else {
+        [native, canonical]
+    }
+}
 
 /// The resolved launch effort for one runtime: the single fact every spawn
 /// path (local, remote, snapshot) consumes.
@@ -418,19 +436,17 @@ fn resolve_effective_effort(
     // malformed/NUL filtering), so the resolved authority matches what launches.
     let record_env = merged_user_env(&BTreeMap::new(), &record.env_vars);
 
-    // 1. record native — only for runtimes with a real native key.
-    if let Some(nk) = native_key {
-        if let Some(raw) = get_ci(&record_env, nk) {
-            if let Some(v) = norm(raw) {
-                return Some(v);
-            }
-        }
-    }
-    // 2. canonical column — normalized (raw passthrough for contract-less).
-    if let Some(raw) = record.effort_level.as_deref() {
-        if let Some(v) = norm(raw) {
-            return Some(v);
-        }
+    let record_native = native_key
+        .and_then(|key| get_ci(&record_env, key))
+        .and_then(|raw| norm(raw));
+    let column = record.effort_level.as_deref().and_then(norm);
+    if let Some(value) =
+        record_effort_tiers(native_key, record_native.as_deref(), column.as_deref())
+            .into_iter()
+            .flatten()
+            .next()
+    {
+        return Some(value.to_owned());
     }
     // 3. record legacy alias — only when the native key differs from it.
     if let Some(nk) = native_key {

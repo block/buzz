@@ -67,3 +67,39 @@ fn record_mixed_case_legacy_effort_consumed_and_hidden_from_advanced_reader() {
         "consumed mixed-case legacy effort key must not appear in advanced; got {advanced_keys:?}"
     );
 }
+
+#[test]
+fn thinking_display_and_launch_agree_on_canonical_and_transport_collision() {
+    for (id, expected) in [("codex", "high"), ("claude", "high"), ("goose", "low")] {
+        let runtime = crate::managed_agents::discovery::known_acp_runtime_exact(id).unwrap();
+        let mut record = test_record();
+        record.effort_level = Some("high".into());
+        record
+            .env_vars
+            .insert(runtime.thinking_env_var.unwrap().into(), "low".into());
+        let field = build_thinking_field(
+            &record,
+            &None,
+            &None,
+            None,
+            runtime.thinking_env_var,
+            runtime.effort_normalization,
+            runtime.effort_accepted_values,
+            true,
+            &no_tiers(),
+        )
+        .unwrap();
+        let launch = crate::managed_agents::config_bridge::effort::effort_launch_projection(
+            &record,
+            Some(runtime),
+            &[],
+            None,
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(field.value.as_deref(), Some(expected), "{id}");
+        assert_eq!(field.value, launch.value, "{id} reader and spawn disagree");
+        assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
+    }
+}
