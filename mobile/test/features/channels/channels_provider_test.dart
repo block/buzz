@@ -7,9 +7,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 
 part 'channels_provider_live_cases.dart';
 part 'channels_provider_terminal_cases.dart';
+part 'channels_provider_readiness_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -24,6 +26,7 @@ part 'channels_provider_terminal_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _unreadReadinessCases();
   const myPk = 'me';
 
   test(

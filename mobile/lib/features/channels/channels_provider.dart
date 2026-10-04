@@ -53,7 +53,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final Map<String, _LiveChunkSubscription> _liveSubscriptionsByChunk = {};
   Future<void> _liveSubscriptionQueue = Future.value();
   Future<void> _unreadCatchUp = Future.value();
-  int? _readyUnreadGeneration;
+  int? _settledUnreadGeneration;
   Completer<void> _unreadReadinessChanged = Completer<void>();
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
@@ -96,10 +96,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   bool get hasLoaded => _hasLoaded;
 
-  /// Waits for the current list's initial unread history to be applied.
+  /// Waits for the current list's initial unread history to settle.
   ///
   /// Presentation transitions can await this without blocking ordinary cached
-  /// channel rendering. Follow a newer refresh if it replaces work we awaited.
+  /// channel rendering. Failure keeps observed unread state and permits landing;
+  /// follow a newer refresh if it replaces work we awaited.
   Future<void> waitForUnreadCatchUp() async {
     while (ref.mounted) {
       final changed = _unreadReadinessChanged.future;
@@ -110,10 +111,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       await unread;
       if (identical(subscriptions, _liveSubscriptionQueue) &&
           identical(unread, _unreadCatchUp) &&
-          _readyUnreadGeneration == _subscriptionVersion) {
+          _settledUnreadGeneration == _subscriptionVersion) {
         return;
       }
-      // A disconnected/skipped generation has no completed destination history.
+      // A disconnected generation has no settled destination history.
       // Wake on reconciliation rather than accepting an older completed future.
       await changed;
     }
@@ -609,42 +610,36 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     int subscriptionGeneration,
   ) async {
     if (!ref.mounted) return;
-    final myPk = ref.read(myPubkeyProvider);
-    if (myPk == null) return;
-
-    final session = ref.read(relaySessionProvider.notifier);
-    final mutedChannelIds = _mutedChannelIds();
-    final ReadStateState readState;
     try {
-      readState = ref.read(readStateProvider);
-    } catch (error) {
-      debugPrint('[ChannelsNotifier] unread catch-up skipped: $error');
-      return;
-    }
-    final activeChannels = [
-      for (final channel in channels)
-        if (channel.isMember && !channel.isArchived) channel,
-    ];
-    final channelById = {
-      for (final channel in activeChannels) channel.id: channel,
-    };
-    final readAtByChannel = {
-      for (final channel in activeChannels)
-        channel.id: readState.effectiveTimestamp(channel.id),
-    };
-    final filters = [
-      for (final channel in activeChannels)
-        NostrFilter(
-          kinds: EventKind.channelMessageEventKinds,
-          tags: {
-            '#h': [channel.id],
-          },
-          since: (readAtByChannel[channel.id] ?? -1) + 1,
-          limit: _unreadCatchUpLimit,
-        ),
-    ];
+      final myPk = ref.read(myPubkeyProvider);
+      if (myPk == null) return;
 
-    try {
+      final session = ref.read(relaySessionProvider.notifier);
+      final mutedChannelIds = _mutedChannelIds();
+      final readState = ref.read(readStateProvider);
+      final activeChannels = [
+        for (final channel in channels)
+          if (channel.isMember && !channel.isArchived) channel,
+      ];
+      final channelById = {
+        for (final channel in activeChannels) channel.id: channel,
+      };
+      final readAtByChannel = {
+        for (final channel in activeChannels)
+          channel.id: readState.effectiveTimestamp(channel.id),
+      };
+      final filters = [
+        for (final channel in activeChannels)
+          NostrFilter(
+            kinds: EventKind.channelMessageEventKinds,
+            tags: {
+              '#h': [channel.id],
+            },
+            since: (readAtByChannel[channel.id] ?? -1) + 1,
+            limit: _unreadCatchUpLimit,
+          ),
+      ];
+
       final events = await _fetchChannelHistoryBatch(
         session,
         filters,
@@ -706,10 +701,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           ],
         );
       }
-      _readyUnreadGeneration = subscriptionGeneration;
     } catch (error) {
       if (!ref.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
+    } finally {
+      // Optional history can terminate without data. Release this destination
+      // with its retained unread state, but never settle a retired request.
+      if (ref.mounted && !_isCatchUpRetired(fence, subscriptionGeneration)) {
+        _settledUnreadGeneration = subscriptionGeneration;
+        _notifyUnreadReadinessChanged();
+      }
     }
   }
 
