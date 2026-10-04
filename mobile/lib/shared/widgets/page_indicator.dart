@@ -46,6 +46,39 @@ class PageIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final native = defaultTargetPlatform == TargetPlatform.iOS;
+    final control = SizedBox(
+      key: controlKey,
+      height: 54,
+      child: Center(
+        child: SizedBox(
+          width: 116,
+          child: native
+              ? IosGlassThemePagination(
+                  containerHeight: containerHeight,
+                  semanticLabel: semanticLabel,
+                  count: count,
+                  selected: selected,
+                  animateChanges: animateChanges,
+                  onSelected: onSelected,
+                  activeColor: context.colors.onSurface,
+                  inactiveColor: context.colors.onSurfaceVariant.withValues(
+                    alpha: 0.32,
+                  ),
+                )
+              : _WindowedPagination(
+                  containerHeight: containerHeight,
+                  dotKeyPrefix: dotKeyPrefix,
+                  count: count,
+                  selected: selected,
+                  animateChanges: animateChanges,
+                  onSelected: onSelected,
+                ),
+        ),
+      ),
+    );
+    // UIKit owns its adjustable element and bridges it through UiKitView.
+    if (native) return control;
     return Semantics(
       label: '$semanticLabel ${selected + 1} of $count',
       slider: true,
@@ -54,41 +87,7 @@ class PageIndicator extends StatelessWidget {
       decreasedValue: selected > 0 ? '$selected' : null,
       onIncrease: selected < count - 1 ? () => onSelected(selected + 1) : null,
       onDecrease: selected > 0 ? () => onSelected(selected - 1) : null,
-      child: SizedBox(
-        key: controlKey,
-        height: 54,
-        child: defaultTargetPlatform == TargetPlatform.iOS
-            ? Center(
-                child: SizedBox(
-                  width: 116.0,
-                  child: IosGlassThemePagination(
-                    containerHeight: containerHeight,
-                    semanticLabel: semanticLabel,
-                    count: count,
-                    selected: selected,
-                    animateChanges: animateChanges,
-                    onSelected: onSelected,
-                    activeColor: context.colors.onSurface,
-                    inactiveColor: context.colors.onSurfaceVariant.withValues(
-                      alpha: 0.32,
-                    ),
-                  ),
-                ),
-              )
-            : Center(
-                child: SizedBox(
-                  width: 116,
-                  child: _WindowedPagination(
-                    containerHeight: containerHeight,
-                    dotKeyPrefix: dotKeyPrefix,
-                    count: count,
-                    selected: selected,
-                    animateChanges: animateChanges,
-                    onSelected: onSelected,
-                  ),
-                ),
-              ),
-      ),
+      child: control,
     );
   }
 }

@@ -70,21 +70,32 @@ class _VideoTransportBar extends HookConsumerWidget {
     final hasDuration = durationMs > 0;
     final scrubPosition = useState<double?>(null);
     final mutedVolume = useRef(1.0);
+    final scrubGeneration = useRef(0);
+
+    void beginScrub(double next) {
+      scrubGeneration.value++;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      onInteractionStart();
+      scrubPosition.value = next;
+    }
 
     Future<void> finishScrub(double next) async {
+      final generation = scrubGeneration.value;
+      bool isCurrent() =>
+          context.mounted && generation == scrubGeneration.value;
       try {
         await controller.seekTo(Duration(milliseconds: next.round()));
       } catch (error) {
         debugPrint('[VideoViewer] seek failed: $error');
-        if (context.mounted) {
+        if (context.mounted && isCurrent()) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text('Could not seek in this video.'),
               action: SnackBarAction(
                 label: 'Retry',
                 onPressed: () {
-                  if (!context.mounted) return;
-                  onInteractionStart();
+                  if (!isCurrent()) return;
+                  beginScrub(next);
                   unawaited(finishScrub(next));
                 },
               ),
@@ -92,7 +103,7 @@ class _VideoTransportBar extends HookConsumerWidget {
           );
         }
       } finally {
-        if (context.mounted) {
+        if (isCurrent()) {
           scrubPosition.value = null;
           onInteractionEnd();
         }
@@ -155,13 +166,7 @@ class _VideoTransportBar extends HookConsumerWidget {
                 : 0,
             min: 0,
             max: hasDuration ? durationMs.toDouble() : 1,
-            onChangeStart: hasDuration
-                ? (next) {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    onInteractionStart();
-                    scrubPosition.value = next;
-                  }
-                : null,
+            onChangeStart: hasDuration ? beginScrub : null,
             onChanged: hasDuration
                 ? (next) {
                     scrubPosition.value = next;

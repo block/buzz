@@ -1,6 +1,8 @@
 import 'package:buzz/shared/widgets/page_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -49,6 +51,104 @@ void main() {
       expect(updates.last['isRTL'], isFalse);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'pagination has a single platform semantics owner',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        final selected = ValueNotifier(1);
+        addTearDown(selected.dispose);
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            child: ValueListenableBuilder<int>(
+              valueListenable: selected,
+              builder: (context, page, _) => PageIndicator(
+                semanticLabel: 'Photo',
+                count: 3,
+                selected: page,
+                animateChanges: false,
+                onSelected: (page) => selected.value = page,
+              ),
+            ),
+          ),
+        );
+        List<SemanticsNode> adjustableNodes() {
+          final nodes = <SemanticsNode>[];
+          void visit(SemanticsNode node) {
+            final data = node.getSemanticsData();
+            if (data.hasAction(SemanticsAction.increase) ||
+                data.hasAction(SemanticsAction.decrease)) {
+              nodes.add(node);
+            }
+            node.visitChildren((child) {
+              visit(child);
+              return true;
+            });
+          }
+
+          visit(
+            tester
+                .renderObject(find.byType(PageIndicator))
+                .owner!
+                .semanticsOwner!
+                .rootSemanticsNode!,
+          );
+          return nodes;
+        }
+
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          // Flutter must preserve the native view bridge without adding a second
+          // adjustable owner. The UIKit regression checks that view's actions.
+          expect(adjustableNodes(), isEmpty);
+          final native = tester.widget<UiKitView>(find.byType(UiKitView));
+          expect((native.creationParams as Map)['accessibilityLabel'], 'Photo');
+          expect((native.creationParams as Map)['selected'], 1);
+          expect((native.creationParams as Map)['count'], 3);
+          expect(
+            find.ancestor(
+              of: find.byType(UiKitView),
+              matching: find.byType(ExcludeSemantics),
+            ),
+            findsNothing,
+          );
+        } else {
+          expect(adjustableNodes(), hasLength(1));
+          var node = adjustableNodes().single;
+          expect(node.label, 'Photo 2 of 3');
+          expect(node.value, '2');
+          tester
+              .renderObject(find.byType(PageIndicator))
+              .owner!
+              .semanticsOwner!
+              .performAction(node.id, SemanticsAction.increase);
+          await tester.pump();
+          expect(selected.value, 2);
+          node = adjustableNodes().single;
+          expect(node.label, 'Photo 3 of 3');
+          expect(node.value, '3');
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.increase),
+            isFalse,
+          );
+          tester
+              .renderObject(find.byType(PageIndicator))
+              .owner!
+              .semanticsOwner!
+              .performAction(node.id, SemanticsAction.decrease);
+          await tester.pump();
+          expect(selected.value, 1);
+          expect(adjustableNodes(), hasLength(1));
+        }
+      } finally {
+        semantics.dispose();
+      }
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
   );
 
   for (final direction in TextDirection.values) {

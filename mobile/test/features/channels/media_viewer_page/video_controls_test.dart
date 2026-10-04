@@ -33,6 +33,8 @@ class _Player extends VideoPlayerPlatform {
   double speed = 1;
   int seeks = 0;
   bool failNextSeek = false;
+  bool deferSeeks = false;
+  final pendingSeeks = <Completer<void>>[];
   int plays = 0;
   int pauses = 0;
 
@@ -87,6 +89,11 @@ class _Player extends VideoPlayerPlatform {
     if (failNextSeek) {
       failNextSeek = false;
       throw PlatformException(code: 'seek_failed');
+    }
+    if (deferSeeks) {
+      final pending = Completer<void>();
+      pendingSeeks.add(pending);
+      await pending.future;
     }
     this.position = position;
   }
@@ -292,6 +299,72 @@ void main() {
       await _disposeVideo(tester);
     },
   );
+
+  for (final oldSeekFails in [false, true]) {
+    for (final releaseNewScrub in [false, true]) {
+      testWidgets(
+        'stale seek cannot end newer scrub: failure=$oldSeekFails, released=$releaseNewScrub',
+        (tester) async {
+          final player = await _pumpVideo(tester);
+          player.deferSeeks = true;
+          final rect = tester.getRect(_timeline);
+          await tester.tapAt(
+            Offset(rect.left + rect.width * 0.25, rect.center.dy),
+          );
+          await tester.pump();
+          expect(player.pendingSeeks, hasLength(1));
+          final newer = await tester.startGesture(rect.center);
+          await newer.moveTo(
+            Offset(rect.left + rect.width * 0.8, rect.center.dy),
+          );
+          await tester.pump();
+          final newPosition = tester.widget<Slider>(_timeline).value;
+          expect(newPosition, greaterThan(60000));
+          if (releaseNewScrub) {
+            await newer.up();
+            await tester.pump();
+            expect(player.pendingSeeks, hasLength(2));
+          }
+          if (oldSeekFails) {
+            player.pendingSeeks.first.completeError(
+              PlatformException(code: 'old_seek_failed'),
+            );
+          } else {
+            player.pendingSeeks.first.complete();
+          }
+          await tester.pump();
+          expect(
+            tester.widget<Slider>(_timeline).value,
+            newPosition,
+            reason: 'Old completion must not clear the newer thumb',
+          );
+          expect(find.text('Could not seek in this video.'), findsNothing);
+          expect(find.text('Retry'), findsNothing);
+          await tester.pump(const Duration(seconds: 4));
+          expect(
+            _opacity(tester),
+            1,
+            reason: 'New scrub still owns the idle hold',
+          );
+          if (!releaseNewScrub) {
+            await newer.up();
+            await tester.pump();
+          }
+          expect(player.pendingSeeks, hasLength(2));
+          player.pendingSeeks.last.complete();
+          await tester.pump();
+          await tester.pump();
+          expect(player.position.inMilliseconds, newPosition.round());
+          await tester.pump(const Duration(seconds: 3));
+          expect(
+            _opacity(tester),
+            0,
+            reason: 'Only current completion resumes idle',
+          );
+        },
+      );
+    }
+  }
 
   testWidgets('failed seeks report an error and retry the requested position', (
     tester,

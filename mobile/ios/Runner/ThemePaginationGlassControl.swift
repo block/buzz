@@ -53,6 +53,7 @@ private final class ThemePaginationControl: UIControl {
 
     backgroundColor = .clear
     isOpaque = false
+    isAccessibilityElement = true
     accessibilityTraits = [.adjustable]
     accessibilityLabel = "Theme"
 

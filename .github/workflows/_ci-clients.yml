@@ -139,6 +139,13 @@ jobs:
         run: /bin/bash scripts/test-mobile-pagination.sh
       - name: Build complete iOS simulator app
         run: cd mobile && flutter build ios --simulator --debug --no-pub
+      - name: Test native pagination accessibility
+        run: |
+          device=$(xcrun simctl create "Pagination accessibility" "iPhone 16")
+          trap 'xcrun simctl shutdown "$device"; xcrun simctl delete "$device"' EXIT
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b
+          /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
       - name: Build complete unsigned iOS release
         run: |
           /bin/bash scripts/test-mobile-gateway-recipes.sh
