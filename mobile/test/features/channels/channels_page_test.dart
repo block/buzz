@@ -1185,6 +1185,16 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final semantics = tester.ensureSemantics();
+      try {
+        await tester.pump();
+        expect(
+          find.bySemanticsLabel(RegExp('Community settings')),
+          findsOneWidget,
+        );
+      } finally {
+        semantics.dispose();
+      }
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
       expect(find.byType(BuzzSheetHeader), findsNothing);

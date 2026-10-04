@@ -137,7 +137,8 @@ class IosNavigationBar extends HookConsumerWidget {
   final VoidCallback? onBack;
   final Color? foregroundColor;
 
-  /// Reports when avatar images and the latest native layout are applied.
+  /// Reports when the latest native configuration and layout are applied.
+  /// Cosmetic avatar downloads do not delay readiness.
   final ValueChanged<bool>? onReadyChanged;
 
   @override
@@ -162,17 +163,17 @@ class IosNavigationBar extends HookConsumerWidget {
       action.avatarInitial,
       action.avatarIsAgent,
     ]);
-    final retainedImages = useRef(<String, ({String key, String data})>{});
+    final avatarImages = useState(<String, ({String key, String data})>{});
     final avatarKey = jsonEncode([
       for (final entry in avatarActions.entries)
         [entry.key, imageKey(entry.value)],
     ]);
-    final avatarFuture = useMemoized(
-      () async {
-        final images = <String, String>{};
-        await Future.wait(
-          avatarActions.entries.map((entry) async {
-            final bytes = await nativeAvatarImage(
+    useEffect(
+      () {
+        var active = true;
+        for (final entry in avatarActions.entries) {
+          unawaited(
+            nativeAvatarImage(
               url: entry.value.imageUrl,
               initial: entry.value.avatarInitial!,
               isAgent: entry.value.avatarIsAgent,
@@ -180,11 +181,24 @@ class IosNavigationBar extends HookConsumerWidget {
               foreground: colors.onPrimaryContainer,
               networkImage: (url) =>
                   MediaImageProvider(url: url, auth: auth, client: client),
-            );
-            if (bytes != null) images[entry.key] = base64Encode(bytes);
-          }),
-        );
-        return images;
+            ).then(
+              (bytes) {
+                if (!active || !context.mounted || bytes == null) return;
+                avatarImages.value = {
+                  ...avatarImages.value,
+                  entry.key: (
+                    key: imageKey(entry.value),
+                    data: base64Encode(bytes),
+                  ),
+                };
+              },
+              onError: (Object _, StackTrace _) {
+                // Keep UIKit's synchronous initial fallback on image failure.
+              },
+            ),
+          );
+        }
+        return () => active = false;
       },
       [
         avatarKey,
@@ -194,13 +208,9 @@ class IosNavigationBar extends HookConsumerWidget {
         colors.onPrimaryContainer,
       ],
     );
-    final avatarSnapshot = useFuture(avatarFuture, preserveState: false);
-    final avatarImages = avatarSnapshot.data;
     Map<String, Object?> encodeAction(IosNavigationAction action, String id) {
       final key = imageKey(action);
-      final image = avatarImages?[id];
-      if (image != null) retainedImages.value[id] = (key: key, data: image);
-      final retained = retainedImages.value[id];
+      final retained = avatarImages.value[id];
       return {
         ...action._encode(id),
         'avatarBackground': colors.primaryContainer.toARGB32(),
@@ -280,41 +290,35 @@ class IosNavigationBar extends HookConsumerWidget {
       return () => current.setMethodCallHandler(null);
     }, [channel.value]);
 
-    useEffect(
-      () {
-        final current = channel.value;
-        var active = true;
-        void report(bool ready) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (active && context.mounted) {
-              latest.value.onReadyChanged?.call(ready);
-            }
-          });
-          WidgetsBinding.instance.ensureVisualUpdate();
-        }
+    useEffect(() {
+      final current = channel.value;
+      var active = true;
+      void report(bool ready) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (active && context.mounted) {
+            latest.value.onReadyChanged?.call(ready);
+          }
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      }
 
-        report(false);
-        if (current != null) {
-          unawaited(() async {
-            try {
-              await current.invokeMethod<void>('configure', payload);
-              if (!active ||
-                  avatarSnapshot.connectionState != ConnectionState.done) {
-                return;
-              }
-              if (latest.value.onReadyChanged != null) {
-                await current.invokeMethod<void>('prepareForReveal');
-              }
-              report(true);
-            } on PlatformException catch (error) {
-              debugPrint('Native navigation configuration failed: $error');
+      report(false);
+      if (current != null) {
+        unawaited(() async {
+          try {
+            await current.invokeMethod<void>('configure', payload);
+            if (!active) return;
+            if (latest.value.onReadyChanged != null) {
+              await current.invokeMethod<void>('prepareForReveal');
             }
-          }());
-        }
-        return () => active = false;
-      },
-      [channel.value, signature, avatarFuture, avatarSnapshot.connectionState],
-    );
+            report(true);
+          } on PlatformException catch (error) {
+            debugPrint('Native navigation configuration failed: $error');
+          }
+        }());
+      }
+      return () => active = false;
+    }, [channel.value, signature]);
 
     useEffect(() {
       void sync() {

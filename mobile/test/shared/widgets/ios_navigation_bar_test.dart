@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'package:buzz/shared/relay/media_image.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
@@ -58,6 +61,115 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  testWidgets('native landing ignores pending profile artwork', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final pending = Completer<http.Response>();
+    var requested = false;
+    final client = MockClient((_) {
+      requested = true;
+      return pending.future;
+    });
+    addTearDown(client.close);
+    const channel = MethodChannel('buzz/ios_navigation_bar/846');
+    final readiness = <bool>[];
+    final calls = <String>[];
+    final createdChannels = <MethodChannel>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (call) async {
+        if (call.method == 'create') {
+          final id = (call.arguments as Map)['id'];
+          final native = MethodChannel('${IosNavigationBar.viewType}/$id');
+          createdChannels.add(native);
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            native,
+            (call) async {
+              calls.add(call.method);
+              return null;
+            },
+          );
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      );
+      for (final native in createdChannels) {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          native,
+          null,
+        );
+      }
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call.method);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+        child: _testApp(
+          home: IosNavigationBar(
+            title: 'Bravo',
+            leading: IosNavigationAction(
+              label: 'Community settings',
+              avatarInitial: 'B',
+              onAvatarBoundsChanged: (_) {},
+            ),
+            actions: const [
+              IosNavigationAction(
+                label: 'Profile',
+                avatarInitial: 'P',
+                imageUrl: 'https://slow.example.com/profile.png',
+              ),
+            ],
+            onReadyChanged: readiness.add,
+          ),
+        ),
+      ),
+    );
+    tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
+      846,
+    );
+    await tester.pumpAndSettle();
+    Map leading() =>
+        (tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                as Map)['leading']
+            as Map;
+    await tester.runAsync(() async {
+      for (
+        var attempt = 0;
+        attempt < 100 && leading()['imageData'] == null;
+        attempt++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(requested, isTrue);
+    expect(pending.isCompleted, isFalse);
+    expect(calls, contains('prepareForReveal'));
+    expect(readiness.last, isTrue);
+    expect(leading()['imageData'], isNotNull);
+    pending.complete(http.Response('offline', 503));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     'native avatar reports global transition bounds and retains a hidden slot',

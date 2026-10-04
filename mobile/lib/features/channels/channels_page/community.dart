@@ -128,7 +128,7 @@ class _CommunityIndicator extends ConsumerWidget {
       behavior: HitTestBehavior.opaque,
       child: Semantics(
         button: true,
-        label: 'Switch Community',
+        label: 'Community settings',
         child: Opacity(
           opacity: hidden ? 0 : 1,
           child: _CommunityAvatar(
