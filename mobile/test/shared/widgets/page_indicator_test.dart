@@ -1,6 +1,5 @@
 import 'package:buzz/shared/widgets/page_indicator.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -15,8 +14,9 @@ void main() {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
         call,
       ) async {
-        if (call.method == 'setState')
+        if (call.method == 'setState') {
           updates.add(call.arguments as Map<Object?, Object?>);
+        }
         return null;
       });
       addTearDown(
