@@ -1,5 +1,10 @@
-import { discoveredEffortValues } from "./discoveredEffort";
-import { EffortSelectField } from "./buzzAgentModelTuningFields";
+import { withEffortValue } from "./discoveredEffort";
+import { PersonaEffortField } from "./PersonaEffortField";
+import {
+  deriveAgentConfigFieldModel,
+  getRenderableEffortField,
+  effortPersistenceKeys,
+} from "../lib/agentConfigCore";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -259,17 +264,17 @@ export function AgentDefinitionDialog({
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
-  // Keep an inherited Create runtime synced with defaults saved in-place.
+  // Keep an inherited runtime synced with defaults saved in-place.
   React.useEffect(() => {
     if (
       !open ||
       !initialValues ||
-      "id" in initialValues ||
-      initialValues.runtime?.trim() ||
       aiConfigurationMode !== "defaults" ||
+      // The initial-values effect hydrates Customize in this same commit.
+      // Only follow defaults after an inherited seed or an explicit Defaults click.
+      !hasSeededForOpenRef.current ||
       runtimesLoading ||
-      defaultRuntime === null ||
-      (runtime.trim().length > 0 && !isRuntimeAutoSeededRef.current)
+      defaultRuntime === null
     ) {
       return;
     }
@@ -388,6 +393,22 @@ export function AgentDefinitionDialog({
   }
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const effortField = getRenderableEffortField(
+    deriveAgentConfigFieldModel({
+      scope: "definition",
+      runtime: selectedRuntime,
+      config: {
+        env_vars: envVars,
+        model,
+        provider,
+        preferred_runtime: runtime,
+      },
+    }),
+  );
+  const acpEffortField =
+    effortField?.optionSource === "acpSession" ? effortField : undefined;
+  const effortKeys = effortPersistenceKeys(effortField);
+
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
@@ -404,16 +425,11 @@ export function AgentDefinitionDialog({
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setHasUserChanges(true);
     setAiConfigurationMode(nextMode);
+    if (nextMode === "custom") isRuntimeAutoSeededRef.current = false;
     if (nextMode === "defaults") {
+      hasSeededForOpenRef.current = true;
       setRuntime(defaultRuntime?.id ?? "");
-      setEnvVars((previous) => {
-        const next = { ...previous };
-        delete next.BUZZ_ACP_EFFORT_LEVEL;
-        delete next.BUZZ_AGENT_THINKING_EFFORT;
-        if (selectedRuntime?.thinkingEnvVar)
-          delete next[selectedRuntime.thinkingEnvVar];
-        return next;
-      });
+      setEnvVars((previous) => withEffortValue(previous, effortKeys));
     }
     setIsCustomProviderEditing(false);
     setIsCustomModelEditing(false);
@@ -532,10 +548,7 @@ export function AgentDefinitionDialog({
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
-    model:
-      selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL"
-        ? model || undefined
-        : undefined,
+    model: acpEffortField !== undefined ? model || undefined : undefined,
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
@@ -733,22 +746,19 @@ export function AgentDefinitionDialog({
   }
 
   function handleModelDropdownChange(nextValue: string) {
-    if (selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL") {
-      setEnvVars((previous) => {
-        const next = { ...previous };
-        delete next.BUZZ_ACP_EFFORT_LEVEL;
-        delete next.BUZZ_AGENT_THINKING_EFFORT;
-        return next;
-      });
-    }
     setHasUserChanges(true);
-    applySelection(
-      selectionOnModelDropdownChange(selection, {
-        nextValue,
-        clearKnownModelOnCustomEntry: true,
-        isModelCustom,
-      }),
-    );
+    const next = selectionOnModelDropdownChange(selection, {
+      nextValue,
+      clearKnownModelOnCustomEntry: true,
+      isModelCustom,
+    });
+    applySelection({
+      ...next,
+      envVars:
+        acpEffortField && next.model !== model
+          ? withEffortValue(next.envVars, effortKeys)
+          : next.envVars,
+    });
   }
 
   const footer = (
@@ -924,12 +934,10 @@ export function AgentDefinitionDialog({
                 onCustomModelChange={(value) => {
                   setHasUserChanges(true);
                   setModel(value);
-                  setEnvVars((previous) => {
-                    const next = { ...previous };
-                    delete next.BUZZ_ACP_EFFORT_LEVEL;
-                    delete next.BUZZ_AGENT_THINKING_EFFORT;
-                    return next;
-                  });
+                  if (acpEffortField && value !== model)
+                    setEnvVars((previous) =>
+                      withEffortValue(previous, effortKeys),
+                    );
                 }}
                 showSharedComputeAutoHint={
                   isRelayMesh && modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE
@@ -941,33 +949,17 @@ export function AgentDefinitionDialog({
             ) : null}
           </AnimatePresence>
 
-          {aiConfigurationMode === "custom" &&
-          selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL" ? (
-            <EffortSelectField
-              currentEffort={
-                envVars.BUZZ_ACP_EFFORT_LEVEL ??
-                envVars.BUZZ_AGENT_THINKING_EFFORT ??
-                ""
-              }
+          {aiConfigurationMode === "custom" && acpEffortField ? (
+            <PersonaEffortField
+              field={acpEffortField}
+              envVars={envVars}
+              globalConfig={globalConfig}
+              option={discoveredEffortOption}
               disabled={isPending || modelDiscoveryLoading}
-              effortDefault={null}
-              effortValid={discoveredEffortValues(discoveredEffortOption)}
-              htmlFor="persona-effort"
-              testId="persona-effort"
-              inheritedEffort={globalConfig.env_vars.BUZZ_ACP_EFFORT_LEVEL}
-              label="Effort"
-              onChange={(value) => {
+              onChange={(next) => {
                 setHasUserChanges(true);
-                setEnvVars((previous) => {
-                  const next = { ...previous };
-                  delete next.BUZZ_AGENT_THINKING_EFFORT;
-                  if (value) next.BUZZ_ACP_EFFORT_LEVEL = value;
-                  else delete next.BUZZ_ACP_EFFORT_LEVEL;
-                  return next;
-                });
+                setEnvVars(next);
               }}
-              showUnavailableOptions={false}
-              useCustomSelect
             />
           ) : null}
 
@@ -1040,9 +1032,12 @@ export function AgentDefinitionDialog({
                   disabled={isPending}
                   envVars={envVars}
                   fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
-                  hiddenEnvKeys={
-                    topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                  }
+                  hiddenEnvKeys={[
+                    ...(topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []),
+                    ...(aiConfigurationMode === "custom" && acpEffortField
+                      ? effortKeys
+                      : []),
+                  ]}
                   inheritedEnvVars={inheritedEnvVarsForAdvanced}
                   model={model}
                   modelTuningRuntimeId={runtime}

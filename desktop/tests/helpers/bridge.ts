@@ -603,6 +603,7 @@ type MockBridgeOptions = {
       description?: string | null;
     }>;
     supportsSwitching: boolean;
+    effortOption?: import("@/shared/api/types").AgentModelsResponse["effortOption"];
     agentDefaultModel?: string | null;
     selectedModel?: string | null;
   };

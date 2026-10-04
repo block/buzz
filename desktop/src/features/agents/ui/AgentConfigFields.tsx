@@ -259,7 +259,8 @@ export function AgentConfigFields({
   // True when the runtime owns its own effort vocabulary (e.g. Goose) and
   // should bypass the buzz-agent provider/model catalog: harnessNative + envVar.
   const isHarnessNativeEffort =
-    effortField?.optionSource === "harnessNative" &&
+    (effortField?.optionSource === "harnessNative" ||
+      effortField?.optionSource === "acpSession") &&
     effortField?.currentPersistence.kind === "envVar";
 
   const numericDescriptors = fieldModel.fields.filter(
@@ -371,7 +372,7 @@ export function AgentConfigFields({
     modelDiscoverySuccessfulEmpty,
   } = usePersonaModelDiscovery({
     model:
-      selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL"
+      effortField?.optionSource === "acpSession"
         ? (config.model ?? undefined)
         : undefined,
     envVars: config.env_vars,
@@ -577,10 +578,7 @@ export function AgentConfigFields({
 
   function handleModelChange(value: string) {
     const env_vars = { ...config.env_vars };
-    if (
-      selectedRuntime?.thinkingEnvVar === "BUZZ_ACP_EFFORT_LEVEL" &&
-      effortPersistenceKey
-    )
+    if (effortField?.optionSource === "acpSession" && effortPersistenceKey)
       delete env_vars[effortPersistenceKey];
     onConfigChange({
       ...config,

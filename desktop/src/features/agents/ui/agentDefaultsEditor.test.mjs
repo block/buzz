@@ -160,14 +160,14 @@ globalThis.__TAURI_INTERNALS__ = {
 dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
 // ── Deferred imports ──────────────────────────────────────────────────────────
-let act, render, screen, cleanup, fireEvent, createElement;
+let act, render, screen, cleanup, fireEvent, createElement, waitFor;
 let AgentDefaultsEditor;
 let DefaultConfigStep;
 let QueryClient, QueryClientProvider;
 let acpRuntimesQueryKey, fromRawAcpRuntimeCatalogEntry;
 
 before(async () => {
-  ({ act, render, screen, cleanup, fireEvent } = await import(
+  ({ act, render, screen, cleanup, fireEvent, waitFor } = await import(
     "@testing-library/react"
   ));
   ({ createElement } = await import("react"));
@@ -266,15 +266,17 @@ async function settle() {
  * `${testId}-option-${value}`.
  */
 async function selectEffortOption(testId, value) {
-  const trigger = screen
-    .getAllByTestId(testId)
-    .find((element) => element.tagName === "BUTTON");
+  const trigger = (await screen.findAllByTestId(testId)).find(
+    (element) => element.tagName === "BUTTON",
+  );
   assert.ok(trigger, `missing button for ${testId}`);
+  await waitFor(() => assert.equal(trigger.disabled, false));
   await act(async () => {
     fireEvent.click(trigger);
   });
   await settle();
-  const option = screen.getByTestId(`${testId}-option-${value}`);
+  const option = await screen.findByTestId(`${testId}-option-${value}`);
+  await waitFor(() => assert.equal(option.disabled, false));
   await act(async () => {
     fireEvent.click(option);
   });
@@ -781,7 +783,7 @@ for (const [runtime, models] of Object.entries(acpModels)) {
       await selectEffortOption("global-agent-thinking-effort-select", "high");
       assert.equal(saveCallCount, 0);
       const save = screen.getByRole("button", { name: /Save defaults/i });
-      assert.equal(save.disabled, false);
+      await waitFor(() => assert.equal(save.disabled, false));
       await act(async () => fireEvent.click(save));
       await settle();
       assert.equal(saveCallCount, 1);

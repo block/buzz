@@ -166,7 +166,10 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     assert_eq!(cmd.as_deref(), Some("codex-acp"));
     assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
 }
-fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
+pub(super) fn persona_with_runtime(
+    id: &str,
+    runtime: Option<&str>,
+) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
         session_policy: Default::default(),
         description: None,
@@ -205,7 +208,7 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 /// Minimal record for `record_agent_command` tests; only resolution inputs vary.
-fn record_with(
+pub(super) fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
     override_cmd: Option<&str>,
@@ -284,15 +287,6 @@ fn record_agent_command_own_runtime_wins_over_persona() {
 fn record_agent_command_override_beats_runtime() {
     let record = record_with(Some("claude"), None, Some("codex-acp"));
     assert_eq!(record_agent_command(&record, &[]), "codex-acp");
-}
-
-#[test]
-fn record_agent_command_legacy_persona_fallback() {
-    // Pre-migration record: persona_id set, no runtime — resolves through
-    // the legacy persona path unchanged.
-    let personas = vec![persona_with_runtime("p1", Some("goose"))];
-    let record = record_with(None, Some("p1"), None);
-    assert_eq!(record_agent_command(&record, &personas), "goose");
 }
 
 #[test]
@@ -1753,46 +1747,5 @@ fn discovery_publish_path_drops_mid_flight_delete() {
     assert!(
         lookup_loaded_harness_by_id("mid-flight-delete").is_none(),
         "discovery's publish must not resurrect a harness deleted mid-discovery"
-    );
-}
-
-#[test]
-fn inherited_global_harness_changes_without_persisting_a_pin() {
-    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
-    let record = record_with(None, Some("p1"), None);
-    let personas = vec![persona_with_runtime("p1", None)];
-    for (runtime, command) in [("codex", "codex-acp"), ("claude", "claude-agent-acp")] {
-        let global = GlobalAgentConfig {
-            preferred_runtime: Some(runtime.into()),
-            ..Default::default()
-        };
-        let resolved = resolve_effective_harness_descriptor(&record, &personas, &global).unwrap();
-        assert_eq!(resolved.command, command);
-        assert!(record.runtime.is_none());
-        assert!(personas[0].runtime.is_none());
-    }
-}
-
-#[test]
-fn explicit_harness_still_wins_over_global_default() {
-    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
-    let global = GlobalAgentConfig {
-        preferred_runtime: Some("claude".into()),
-        ..Default::default()
-    };
-    let personas = vec![persona_with_runtime("p1", Some("codex"))];
-    let record = record_with(None, Some("p1"), None);
-    assert_eq!(
-        resolve_effective_harness_descriptor(&record, &personas, &global)
-            .unwrap()
-            .command,
-        "codex-acp"
-    );
-    let pinned = record_with(None, Some("p1"), Some("goose"));
-    assert_eq!(
-        resolve_effective_harness_descriptor(&pinned, &personas, &global)
-            .unwrap()
-            .command,
-        "goose"
     );
 }

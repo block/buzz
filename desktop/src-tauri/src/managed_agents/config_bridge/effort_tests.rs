@@ -739,3 +739,20 @@ fn acp_defaults_effort_reaches_launch_and_instance_override_wins() {
         }
     }
 }
+
+#[test]
+fn explicit_profile_adapter_default_overrides_global_effort() {
+    let runtime = known_acp_runtime_exact("claude").unwrap();
+    let profiles = [persona("test-profile", env(&[(ACP_KEY, "default")]))];
+    let global = env(&[(ACP_KEY, "high")]);
+    let projected = effort_launch_projection(
+        &record(),
+        Some(runtime),
+        &profiles,
+        Some("test-profile"),
+        &global,
+        None,
+        &BTreeMap::new(),
+    );
+    assert_eq!(projected.value.as_deref(), Some("default"));
+}
