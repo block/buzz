@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -199,44 +200,48 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                             final selected = selectedPubkeys.contains(
                               user.pubkey.toLowerCase(),
                             );
-                            return Semantics(
-                              key: ValueKey(
-                                'add-channel-member-${user.pubkey}',
-                              ),
-                              button: true,
-                              selected: selected,
-                              label: selected
-                                  ? '${labelFor(user)}, selected'
-                                  : labelFor(user),
-                              child: ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                leading: AvatarImage(
-                                  imageUrl: user.avatarUrl,
-                                  radius: 20,
-                                  backgroundColor:
-                                      context.colors.primaryContainer,
-                                  fallback: Text(user.initial),
-                                  isAgent: user.isAgent,
+                            return AppListCardItem(
+                              index: index,
+                              itemCount: availableUsers.length,
+                              dividerIndent: Grid.xs + 40 + Grid.xs,
+                              child: Semantics(
+                                key: ValueKey(
+                                  'add-channel-member-${user.pubkey}',
                                 ),
-                                title: Text(
-                                  labelFor(user),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                                button: true,
+                                selected: selected,
+                                label: selected
+                                    ? '${labelFor(user)}, selected'
+                                    : labelFor(user),
+                                child: ListTile(
+                                  leading: AvatarImage(
+                                    imageUrl: user.avatarUrl,
+                                    radius: 20,
+                                    backgroundColor:
+                                        context.colors.primaryContainer,
+                                    fallback: Text(user.initial),
+                                    isAgent: user.isAgent,
+                                  ),
+                                  title: Text(
+                                    labelFor(user),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    user.secondaryLabel,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  trailing: Icon(
+                                    selected
+                                        ? LucideIcons.circleCheck
+                                        : LucideIcons.plus,
+                                    color: selected
+                                        ? context.colors.primary
+                                        : context.colors.onSurfaceVariant,
+                                  ),
+                                  onTap: () => toggleUser(user),
                                 ),
-                                subtitle: Text(
-                                  user.secondaryLabel,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                trailing: Icon(
-                                  selected
-                                      ? LucideIcons.circleCheck
-                                      : LucideIcons.plus,
-                                  color: selected
-                                      ? context.colors.primary
-                                      : context.colors.onSurfaceVariant,
-                                ),
-                                onTap: () => toggleUser(user),
                               ),
                             );
                           },

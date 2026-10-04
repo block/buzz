@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
@@ -379,7 +380,6 @@ Future<void> showReactionDetailSheet({
     title: 'Reactions',
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) => _ReactionDetailSheet(
       channelId: channelId,
       reactions: reactions,
@@ -595,24 +595,30 @@ class _ReactionDetailSheet extends HookConsumerWidget {
               ),
             ),
           ),
-          const SizedBox(height: Grid.half),
-          const Divider(height: 1),
+
           Flexible(
             child: ListView.builder(
               shrinkWrap: true,
               padding: EdgeInsets.only(
-                top: Grid.half,
+                left: Grid.gutter,
+                right: Grid.gutter,
+                top: Grid.xxs,
                 bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.half,
               ),
               itemCount: rows.length,
               itemBuilder: (context, index) {
                 final row = rows[index];
-                return _ReactorTile(
-                  profile: userCache[row.pubkey.toLowerCase()],
-                  pubkey: row.pubkey,
-                  displayName: identityNames.labelFor(row.pubkey),
-                  reaction: row.reaction,
-                  reactionLabel: dataset.displayName(row.reaction.emoji),
+                return AppListCardItem(
+                  index: index,
+                  itemCount: rows.length,
+                  dividerIndent: Grid.xs + 40 + Grid.xs,
+                  child: _ReactorTile(
+                    profile: userCache[row.pubkey.toLowerCase()],
+                    pubkey: row.pubkey,
+                    displayName: identityNames.labelFor(row.pubkey),
+                    reaction: row.reaction,
+                    reactionLabel: dataset.displayName(row.reaction.emoji),
+                  ),
                 );
               },
             ),

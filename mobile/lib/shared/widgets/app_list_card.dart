@@ -71,6 +71,7 @@ class AppListCard extends StatelessWidget {
         verticalPadding,
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (label != null)
@@ -96,7 +97,10 @@ class AppListCard extends StatelessWidget {
             clipBehavior: Clip.antiAlias,
             child: AppListInset(
               horizontal: _inset,
-              child: Column(children: separated),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: separated,
+              ),
             ),
           ),
         ],

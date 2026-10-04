@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel_identity_names_provider.dart';
@@ -266,8 +267,7 @@ class ForumPostCard extends HookConsumerWidget {
               Grid.gutter,
               Grid.xs,
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            child: SheetActionSection(
               children: [
                 ListTile(
                   leading: const Icon(LucideIcons.copy),

@@ -207,22 +207,29 @@ class _InviteOptionSheet<T> extends StatelessWidget {
             ),
             child: Text(title, style: context.textTheme.titleMedium),
           ),
-          for (final option in options)
-            AppListRow(
-              key: Key('community-invite-option-${_optionKey(option.label)}'),
-              title: option.label,
-              trailing: option.value == value
-                  ? Icon(
-                      LucideIcons.check,
-                      size: 18,
-                      color: context.colors.primary,
-                    )
-                  : null,
-              onTap: () {
-                onSelected(option.value);
-                Navigator.of(context).pop();
-              },
-            ),
+          AppListCard(
+            dividerIndent: Grid.xs,
+            children: [
+              for (final option in options)
+                AppListRow(
+                  key: Key(
+                    'community-invite-option-${_optionKey(option.label)}',
+                  ),
+                  title: option.label,
+                  trailing: option.value == value
+                      ? Icon(
+                          LucideIcons.check,
+                          size: 18,
+                          color: context.colors.primary,
+                        )
+                      : null,
+                  onTap: () {
+                    onSelected(option.value);
+                    Navigator.of(context).pop();
+                  },
+                ),
+            ],
+          ),
           const SizedBox(height: Grid.xxs),
         ],
       ),
