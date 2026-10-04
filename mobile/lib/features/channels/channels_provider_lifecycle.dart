@@ -53,6 +53,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
             );
           }
         });
+    _notifyUnreadReadinessChanged();
     return _liveSubscriptionQueue;
   }
 
@@ -160,7 +161,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     }
 
     fence.ensureCurrent();
-    unawaited(_catchUpUnreadEvents(channels, fence, subscriptionVersion));
+    _unreadCatchUp = _catchUpUnreadEvents(channels, fence, subscriptionVersion);
+    _notifyUnreadReadinessChanged();
+    unawaited(_unreadCatchUp);
 
     _backstopTimer?.cancel();
     _backstopTimer = Timer.periodic(
@@ -237,6 +240,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
 
   void _clearLiveSubscriptions() {
     _subscriptionVersion++;
+    _notifyUnreadReadinessChanged();
     _desiredLiveChannelIds = const {};
     _terminallyClosedLiveChunks.clear();
     _clearRetainedLiveChunks();

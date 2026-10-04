@@ -101,6 +101,10 @@ class PairingPage extends HookConsumerWidget {
                         nativeTitle: identityRecoveryOnly
                             ? 'Send to Desktop'
                             : '',
+                        frosted: false,
+                        showBottomDivider: false,
+                        iconColor: context._onboardingInk,
+
                         title: identityRecoveryOnly
                             ? const Text('Send to Desktop')
                             : null,
@@ -109,6 +113,10 @@ class PairingPage extends HookConsumerWidget {
                   ),
                 )
               : AppBar(
+                  backgroundColor: Colors.transparent,
+                  surfaceTintColor: Colors.transparent,
+                  elevation: 0,
+                  scrolledUnderElevation: 0,
                   foregroundColor: context._onboardingInk,
                   systemOverlayStyle: onboardingSystemOverlayStyle,
                   leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
@@ -132,12 +140,14 @@ class PairingPage extends HookConsumerWidget {
                           tooltip: 'Back',
                           onPressed: () => Navigator.of(context).pop(),
                         ),
-                  title: Text(
-                    identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
-                    style: context.textTheme.titleMedium?.copyWith(
-                      color: context._onboardingInk,
-                    ),
-                  ),
+                  title: identityRecoveryOnly
+                      ? Text(
+                          'Send to Desktop',
+                          style: context.textTheme.titleMedium?.copyWith(
+                            color: context._onboardingInk,
+                          ),
+                        )
+                      : null,
                 )
         : null;
 

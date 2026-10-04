@@ -208,6 +208,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var measuredCategory: UIContentSizeCategory?
   private var measuring = false
   private var metrics: [String: Any]?
+  private weak var trackedAvatar: UIButton?
+  private var reportedAvatarFrame: CGRect?
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -234,6 +236,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     channel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
       case "configure": self?.configure(call.arguments as? [String: Any] ?? [:])
+      case "prepareForReveal":
+        UIView.performWithoutAnimation {
+          self?.container.setNeedsLayout()
+          self?.container.layoutIfNeeded()
+        }
       case "scroll":
         self?.setScrollOffset((call.arguments as? NSNumber)?.doubleValue ?? 0)
       default: result(FlutterMethodNotImplemented); return
@@ -259,6 +266,22 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.layoutIfNeeded()
     measureIfNeeded()
     applyScroll()
+    reportAvatarBounds()
+  }
+
+  private func reportAvatarBounds() {
+    guard let avatar = trackedAvatar, avatar.window != nil, avatar.bounds.width > 0 else { return }
+    avatar.layoutIfNeeded()
+    guard let image = avatar.imageView, image.bounds.width > 0 else { return }
+    let frame = image.convert(image.bounds, to: container)
+    guard frame != reportedAvatarFrame else { return }
+    reportedAvatarFrame = frame
+    DispatchQueue.main.async { [weak self] in
+      self?.channel.invokeMethod("avatarBounds", arguments: [
+        "id": "leading", "x": frame.minX, "y": frame.minY,
+        "width": frame.width, "height": frame.height
+      ])
+    }
   }
 
   private func configure(_ args: [String: Any]) {
@@ -326,6 +349,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       item.titleView = nil
     }
     item.largeTitleDisplayMode = bar.prefersLargeTitles ? .always : .never
+    trackedAvatar = nil
+    reportedAvatarFrame = nil
     if let leading = args["leading"] as? [String: Any] {
       item.leftBarButtonItems = [makeItem(leading)]
     } else if args["back"] as? Bool == true {
@@ -378,6 +403,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     offset = max(0, value)
     material.alpha = min(1, offset / 12)
     applyScroll()
+    reportAvatarBounds()
   }
 
   private func applyScroll() {
@@ -462,6 +488,27 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         UIBezierPath(ovalIn: CGRect(x: 19.5, y: 1.5, width: 7, height: 7)).fill()
       }.withRenderingMode(.alwaysOriginal)
       item.accessibilityValue = data["activityLabel"] as? String
+    }
+    if data["tracksAvatarBounds"] as? Bool == true, data["id"] as? String == "leading",
+       data["avatarInitial"] is String {
+      // An explicit native button gives Flutter a public, measured destination
+      // without depending on UINavigationBar's private view hierarchy.
+      let button = UIButton(type: .custom)
+      // UIKit adds the glass button's own padding around this custom view.
+      // Match the 36-point image on both axes so that glass stays circular.
+      button.frame = CGRect(x: 0, y: 0, width: 36, height: 36)
+      button.widthAnchor.constraint(equalToConstant: 36).isActive = true
+      button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+      button.setImage(item.image?.withAlignmentRectInsets(.zero), for: .normal)
+      button.addAction(action, for: .touchUpInside)
+      button.isEnabled = item.isEnabled
+      button.accessibilityLabel = item.accessibilityLabel
+      button.accessibilityIdentifier = "community-navigation-avatar"
+      let hidden = data["avatarHidden"] as? Bool == true
+      button.alpha = hidden ? 0 : 1
+      button.accessibilityElementsHidden = hidden
+      trackedAvatar = button
+      return UIBarButtonItem(customView: button)
     }
     return item
   }

@@ -20,11 +20,13 @@ import 'channel_management_provider.dart';
 class MembersSheet extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
+  final void Function(BuildContext context, String pubkey)? onMemberTap;
 
   const MembersSheet({
     super.key,
     required this.channel,
     required this.currentPubkey,
+    this.onMemberTap,
   });
 
   @override
@@ -108,6 +110,9 @@ class MembersSheet extends HookConsumerWidget {
                         currentPubkey?.toLowerCase(),
                     channelId: channel.id,
                     userStatus: statusCache[member.pubkey.toLowerCase()],
+                    onActivityTap: onMemberTap == null
+                        ? null
+                        : () => onMemberTap!(context, member.pubkey),
                   ),
               ],
               if (bots.isNotEmpty) ...[

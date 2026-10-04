@@ -9,6 +9,106 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testNativeRemovalConfirmationUsesDestructiveAlertAndCancelsOnce() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    window.rootViewController = parent
+    parent.view.backgroundColor = .systemBackground
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let coordinator = NativeConfirmationDialogCoordinator(messenger: messenger, parentViewController: parent)
+    let arguments: [String: Any] = ["title": "Remove community?",
+      "message": "Are you sure you want to remove “Alpha”? You can pair with it again later.",
+      "confirmLabel": "Remove", "cancelLabel": "Cancel", "dark": false]
+    var replies: [Bool] = []
+    let completed = expectation(description: "Native confirmation dismissed")
+    messenger.invoke("present", arguments: arguments) {
+      if let value = $0 as? Bool { replies.append(value); completed.fulfill() }
+    }
+    let alert = try XCTUnwrap(parent.presentedViewController as? UIAlertController)
+    if let transition = alert.transitionCoordinator {
+      await withCheckedContinuation { continuation in
+        transition.animate(alongsideTransition: nil) { _ in continuation.resume() }
+      }
+    }
+    XCTAssertEqual(alert.preferredStyle, .alert)
+    XCTAssertEqual(alert.title, "Remove community?")
+    XCTAssertEqual(alert.message, arguments["message"] as? String)
+    XCTAssertEqual(alert.actions.map(\.title), ["Cancel", "Remove"])
+    XCTAssertEqual(alert.actions.map(\.style), [.cancel, .destructive])
+    XCTAssertEqual(alert.overrideUserInterfaceStyle, .light)
+    XCTAssertTrue(replies.isEmpty)
+    var duplicate: Bool?
+    messenger.invoke("present", arguments: arguments) { duplicate = $0 as? Bool }
+    XCTAssertEqual(duplicate, false)
+    XCTAssertTrue(parent.presentedViewController === alert)
+    let capture = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+      window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+    }
+    let attachment = XCTAttachment(image: capture)
+    attachment.name = "Native remove community alert"
+    attachment.lifetime = .keepAlways
+    add(attachment)
+    coordinator.cancel()
+    coordinator.cancel()
+    await fulfillment(of: [completed], timeout: 3)
+    XCTAssertNil(parent.presentedViewController)
+    XCTAssertEqual(replies, [false])
+  }
+
+  @MainActor
+  func testCommunityAvatarReportsItsVisibleFrameAndHidesWithoutMoving() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    parent.view.backgroundColor = .systemBackground
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    var leading: [String: Any] = ["id": "leading", "label": "Community settings",
+      "avatarInitial": "A", "enabled": true, "tracksAvatarBounds": true]
+    let bar = factory.create(withFrame: CGRect(x: 0, y: 0, width: 393, height: 160),
+      viewIdentifier: 999991, arguments: ["title": "Alpha", "largeTitle": true, "leading": leading,
+        "actions": [["id": "profile", "label": "Profile", "avatarInitial": "P", "enabled": true]]])
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    func avatar() throws -> UIButton {
+      try XCTUnwrap(navigation.topViewController?.navigationItem.leftBarButtonItems?.first?.customView as? UIButton)
+    }
+    // A rectangular custom view makes UIKit's surrounding glass a pill.
+    let buttonBounds = try avatar().bounds
+    XCTAssertEqual(buttonBounds.width, buttonBounds.height)
+    XCTAssertEqual(buttonBounds.width, 36)
+    let visibleFrame = try XCTUnwrap(messenger.avatarBounds)
+    XCTAssertEqual((visibleFrame["width"] as? NSNumber)?.doubleValue, 36)
+    XCTAssertEqual((visibleFrame["height"] as? NSNumber)?.doubleValue, 36)
+    let image = try XCTUnwrap(avatar().imageView)
+    let imageFrame = image.convert(image.bounds, to: bar.view())
+    XCTAssertEqual((visibleFrame["x"] as? NSNumber)?.doubleValue, imageFrame.minX)
+    XCTAssertEqual((visibleFrame["y"] as? NSNumber)?.doubleValue, imageFrame.minY)
+    try avatar().sendActions(for: .touchUpInside)
+    XCTAssertEqual(messenger.actions, ["leading"])
+    leading["avatarHidden"] = true
+    messenger.configure(["title": "Bravo", "largeTitle": true, "leading": leading])
+    var landingPrepared = false
+    messenger.invoke("prepareForReveal", arguments: [:]) { _ in landingPrepared = true }
+    XCTAssertTrue(landingPrepared)
+    XCTAssertFalse(bar.view().layer.needsLayout())
+    XCTAssertEqual(try avatar().alpha, 0)
+    XCTAssertEqual((messenger.avatarBounds?["x"] as? NSNumber)?.doubleValue, imageFrame.minX)
+    XCTAssertEqual((messenger.avatarBounds?["y"] as? NSNumber)?.doubleValue, imageFrame.minY)
+    leading["avatarHidden"] = false
+    messenger.configure(["title": "Bravo", "largeTitle": true, "leading": leading])
+    XCTAssertEqual(try avatar().alpha, 1)
+  }
+
+  @MainActor
   func testConversationTitleHasWidthBeforePlatformViewLayout() throws {
     let parent = UIViewController()
     let factory = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent)
@@ -244,7 +344,7 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
-  func testCompactMaterialOnlyAppearsAfterScrolling() async throws {
+  func testCompactNavigationMaterialFollowsScrollDepth() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
@@ -260,8 +360,9 @@ class RunnerTests: XCTestCase {
     parent.view.addSubview(bar.view())
     parent.view.layoutIfNeeded()
     let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
-    // At rest and during top-edge overscroll the bar is clear; positive
-    // scroll gradually introduces the backdrop.
+    XCTAssertEqual(material.alpha, 0, "Compact titles must not frost an unscrolled page")
+    // Scrolling, returning to rest, and pull-to-refresh all share the same
+    // treatment as large titles; reconfiguration must preserve that depth.
     for offset in [0.0, 6.0, 52.0, 12.0, 0.0, -20.0, 0.0] {
       messenger.scroll(to: offset)
       bar.view().setNeedsLayout()
@@ -273,7 +374,10 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(locations.first?.doubleValue, 0)
       XCTAssertEqual(locations.last?.doubleValue, 1)
       XCTAssertLessThan(locations[1].doubleValue, 1, "Compact material needs a soft lower edge")
-      XCTAssertEqual(material.alpha, min(1, max(0, offset) / 12), accuracy: 0.01)
+      XCTAssertEqual(material.alpha, min(1, max(0, offset) / 12), accuracy: 0.001)
+      messenger.configure(["title": "general", "subtitle": "37 members"])
+      XCTAssertEqual(material.alpha, min(1, max(0, offset) / 12), accuracy: 0.001,
+                     "Updating a compact title must not restore blur at rest")
       XCTAssertEqual(material.frame, bar.view().bounds)
       if #available(iOS 26.0, *) {
         let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
@@ -1637,11 +1741,13 @@ private actor NativeEmojiDownloadProbe {
 
 private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
   var metrics: [String: Any]?
+  var avatarBounds: [String: Any]?
   var actions: [String] = []
   func send(onChannel channel: String, message: Data?) {
     guard let message else { return }
     let call = FlutterStandardMethodCodec.sharedInstance().decodeMethodCall(message)
     if call.method == "metrics" { metrics = call.arguments as? [String: Any] }
+    if call.method == "avatarBounds" { avatarBounds = call.arguments as? [String: Any] }
     if call.method == "action", let action = call.arguments as? String { actions.append(action) }
   }
   func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
@@ -1660,6 +1766,12 @@ private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
 
   func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) {
     handler = nil
+  }
+
+  func invoke(_ method: String, arguments: [String: Any], reply: @escaping (Any?) -> Void) {
+    let codec = FlutterStandardMethodCodec.sharedInstance()
+    let message = codec.encode(FlutterMethodCall(methodName: method, arguments: arguments))
+    handler?(message) { data in reply(data.flatMap { codec.decodeEnvelope($0) }) }
   }
 
   func configure(_ arguments: [String: Any]) {

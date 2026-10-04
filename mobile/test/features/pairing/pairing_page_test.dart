@@ -285,13 +285,20 @@ void main() {
       expect(notifier.denied, isTrue);
     });
 
-    testWidgets('keeps the add-community header outside SAS', (tester) async {
+    testWidgets('keeps only Back on the clear add-community header', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(child: const PairingPage(addingCommunity: true)),
       );
 
       expect(find.byType(AppBar), findsOneWidget);
-      expect(find.text('Add Community'), findsOneWidget);
+      expect(find.text('Add Community'), findsNothing);
+      final appBar = tester.widget<AppBar>(find.byType(AppBar));
+      expect(appBar.backgroundColor, Colors.transparent);
+      expect(appBar.surfaceTintColor, Colors.transparent);
+      expect(appBar.elevation, 0);
+      expect(appBar.scrolledUnderElevation, 0);
       expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
     });
 

@@ -67,43 +67,47 @@ void main() {
     );
   });
 
-  testWidgets('page divider appears only after content scrolls under header', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.light(),
-        home: FrostedScaffold(
-          appBar: const FrostedAppBar(title: Text('Theme')),
-          body: ListView.builder(
-            key: const ValueKey('page-scroll-view'),
-            padding: const EdgeInsets.only(top: 57),
-            itemCount: 40,
-            itemBuilder: (_, index) =>
-                SizedBox(height: 48, child: Text('Theme option $index')),
+  testWidgets(
+    'page frost and divider appear only while content scrolls under header',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: FrostedScaffold(
+            appBar: const FrostedAppBar(title: Text('Theme')),
+            body: ListView.builder(
+              key: const ValueKey('page-scroll-view'),
+              padding: const EdgeInsets.only(top: 57),
+              itemCount: 40,
+              itemBuilder: (_, index) =>
+                  SizedBox(height: 48, child: Text('Theme option $index')),
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    expect(_appBarBorder(tester)?.bottom.color.a, 0);
+      expect(_appBarBorder(tester)?.bottom.color.a, 0);
+      expect(find.byType(BackdropFilter), findsNothing);
 
-    await tester.drag(
-      find.byKey(const ValueKey('page-scroll-view')),
-      const Offset(0, -120),
-    );
-    await tester.pumpAndSettle();
+      await tester.drag(
+        find.byKey(const ValueKey('page-scroll-view')),
+        const Offset(0, -120),
+      );
+      await tester.pumpAndSettle();
 
-    final border = _appBarBorder(tester);
-    expect(border, isNotNull);
-    expect(border!.bottom.color.a, greaterThan(0));
+      final border = _appBarBorder(tester);
+      expect(border, isNotNull);
+      expect(border!.bottom.color.a, greaterThan(0));
+      expect(find.byType(BackdropFilter), findsOneWidget);
 
-    await tester.drag(
-      find.byKey(const ValueKey('page-scroll-view')),
-      const Offset(0, 500),
-    );
-    await tester.pumpAndSettle();
+      await tester.drag(
+        find.byKey(const ValueKey('page-scroll-view')),
+        const Offset(0, 500),
+      );
+      await tester.pumpAndSettle();
 
-    expect(_appBarBorder(tester)?.bottom.color.a, 0);
-  });
+      expect(_appBarBorder(tester)?.bottom.color.a, 0);
+      expect(find.byType(BackdropFilter), findsNothing);
+    },
+  );
 }

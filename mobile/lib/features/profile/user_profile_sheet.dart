@@ -34,12 +34,17 @@ void showUserProfileSheet(
   BuildContext context,
   String pubkey, {
   ProviderListenable<IdentityNames>? names,
+  WidgetBuilder? contextualActions,
 }) {
   showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) => UserProfileSheet(pubkey: pubkey, names: names),
+    builder: (_) => UserProfileSheet(
+      pubkey: pubkey,
+      names: names,
+      contextualActions: contextualActions,
+    ),
   ).then((channel) {
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
@@ -58,7 +63,15 @@ class UserProfileSheet extends HookConsumerWidget {
   /// owns the context, so this sheet depends on no other feature's state.
   final ProviderListenable<IdentityNames>? names;
 
-  const UserProfileSheet({super.key, required this.pubkey, this.names});
+  /// Optional actions supplied by the opening surface, below the profile tiles.
+  final WidgetBuilder? contextualActions;
+
+  const UserProfileSheet({
+    super.key,
+    required this.pubkey,
+    this.names,
+    this.contextualActions,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -285,6 +298,8 @@ class UserProfileSheet extends HookConsumerWidget {
                       ],
                     ),
                     const SizedBox(height: Grid.xs),
+                    if (contextualActions != null)
+                      Builder(builder: contextualActions!),
                   ],
                 ),
               ),
