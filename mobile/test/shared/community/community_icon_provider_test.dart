@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:buzz/shared/community/community_icon_cache.dart';
+import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,11 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   const relay = 'wss://relay.example.com';
   const key = 'https://relay.example.com/';
-  final artwork = Uri.dataFromString(
-    '<svg xmlns="http://www.w3.org/2000/svg"><text>🐝</text></svg>',
-    mimeType: 'image/svg+xml',
-    encoding: utf8,
-  ).toString();
+  final artwork = emojiAvatarDataUrl('🐝', 0xFFFFCC00);
   late SharedPreferences prefs;
 
   setUp(() async {
@@ -50,7 +47,7 @@ void main() {
     });
     expect(await container.read(communityIconProvider(relay).future), artwork);
     expect(container.read(communityIconCacheProvider)[key], artwork);
-    expect(prefs.getString('buzz.community-icons.v2'), contains('image/svg'));
+    expect(prefs.getString('buzz.community-icons.v3'), contains('image/svg'));
   });
 
   test(
@@ -135,10 +132,7 @@ void main() {
       final subscription = container.listen(presentation, (_, _) {});
       addTearDown(subscription.close);
       await container.read(provider.future);
-      final newArtwork = Uri.dataFromString(
-        '<svg/>',
-        mimeType: 'image/svg+xml',
-      ).toString();
+      final newArtwork = emojiAvatarDataUrl('🥳', 0xFFFF8652);
       document = jsonEncode({'icon': newArtwork});
       container.invalidate(provider);
       expect(container.read(presentation), artwork);
@@ -172,7 +166,7 @@ void main() {
   });
 
   test('ignores corrupt persistence and bounds cache entries', () async {
-    await prefs.setString('buzz.community-icons.v2', '{bad json');
+    await prefs.setString('buzz.community-icons.v3', '{bad json');
     final container = containerFor((_) async => http.Response('{}', 200));
     expect(container.read(communityIconCacheProvider), isEmpty);
     final cache = container.read(communityIconCacheProvider.notifier);
@@ -297,7 +291,7 @@ void main() {
       });
       expect(await container.read(communityIconProvider(relay).future), isNull);
       expect(container.read(communityIconCacheProvider), isEmpty);
-      expect(prefs.getString('buzz.community-icons.v2'), isNull);
+      expect(prefs.getString('buzz.community-icons.v3'), isNull);
       final restarted = containerFor(
         (_) async => http.Response('offline', 503),
       );
@@ -324,6 +318,108 @@ void main() {
       expect(container.read(communityIconCacheProvider), isEmpty);
     },
   );
+
+  for (final remote in [false, true]) {
+    test('rejects SVG-wrapped oversized raster, remote=$remote', () async {
+      final bytes = await File(
+        'test/fixtures/community_icons/compressed-8192.png',
+      ).readAsBytes();
+      expect(await _dimensions(bytes), (8192, 8192));
+      final svg =
+          '<svg xmlns="http://www.w3.org/2000/svg">'
+          '<image href="data:image/png;base64,${base64Encode(bytes)}"/>'
+          '</svg>';
+      expect(utf8.encode(svg).length, lessThan(256 * 1024));
+      final wrapped = Uri.dataFromString(
+        svg,
+        mimeType: 'image/svg+xml',
+        encoding: utf8,
+      ).toString();
+      final container = containerFor((request) async {
+        if (request.url.path == '/icon.svg') {
+          return http.Response(
+            svg,
+            200,
+            headers: {'content-type': 'image/svg+xml'},
+          );
+        }
+        return http.Response(
+          jsonEncode({'icon': remote ? '${key}icon.svg' : wrapped}),
+          200,
+        );
+      });
+      expect(await container.read(communityIconProvider(relay).future), isNull);
+      expect(container.read(communityIconCacheProvider), isEmpty);
+      expect(prefs.getString('buzz.community-icons.v3'), isNull);
+
+      // Even an entry persisted by the previous version must not render.
+      await prefs.setString(
+        'buzz.community-icons.v2',
+        jsonEncode({key: wrapped}),
+      );
+      final restarted = containerFor(
+        (_) async => http.Response('offline', 503),
+      );
+      expect(restarted.read(communityIconPresentationProvider(relay)), isNull);
+      expect(restarted.read(communityIconCacheProvider), isEmpty);
+    });
+  }
+
+  for (final radius in ['', ' rx="112"', ' rx="256"']) {
+    test('retains desktop emoji artwork with radius $radius', () async {
+      final svg = UriData.parse(
+        artwork,
+      ).contentAsString(encoding: utf8).replaceFirst(' rx="256"', radius);
+      final container = containerFor(
+        (_) async => http.Response(
+          jsonEncode({
+            'icon': Uri.dataFromString(
+              svg,
+              mimeType: 'image/svg+xml',
+              encoding: utf8,
+            ).toString(),
+          }),
+          200,
+        ),
+      );
+      expect(
+        await container.read(communityIconProvider(relay).future),
+        artwork,
+      );
+    });
+  }
+
+  for (final extra in [
+    '<image href="https://relay.example.com/huge.png"/>',
+    '<image href="data:image/png;base64,AAAA"/>',
+    '<style>text { fill: url(https://relay.example.com/resource); }</style>',
+  ]) {
+    test('rejects resource added to otherwise valid emoji: $extra', () async {
+      final svg = UriData.parse(
+        artwork,
+      ).contentAsString(encoding: utf8).replaceFirst('</svg>', '$extra</svg>');
+      final container = containerFor(
+        (_) async => http.Response(
+          jsonEncode({
+            'icon': Uri.dataFromString(
+              svg,
+              mimeType: 'image/svg+xml',
+              encoding: utf8,
+            ).toString(),
+          }),
+          200,
+        ),
+      );
+      await container
+          .read(communityIconCacheProvider.notifier)
+          .remember(key, artwork);
+      expect(
+        await container.read(communityIconProvider(relay).future),
+        artwork,
+      );
+      expect(container.read(communityIconCacheProvider)[key], artwork);
+    });
+  }
 
   test(
     'cached raster is bounded before rendering and after offline restart',
