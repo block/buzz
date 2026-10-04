@@ -128,10 +128,28 @@ class FrostedScaffold extends HookWidget {
       });
     }
 
-    final observedBody = NotificationListener<ScrollNotification>(
+    final observedBody = NotificationListener<Notification>(
       onNotification: (notification) {
+        final ScrollMetrics metrics;
+        final int depth;
+        if (notification is ScrollNotification) {
+          metrics = notification.metrics;
+          depth = notification.depth;
+        } else if (notification is ScrollMetricsNotification) {
+          // Initial layout and content-size changes matter even before a drag.
+          metrics = notification.metrics;
+          depth = notification.depth;
+        } else {
+          return false;
+        }
+        if (depth != 0 || metrics.axis != Axis.vertical) return false;
+        // Reversed chats start at zero at the newest message. Older content
+        // behind the top bar is measured by extentAfter, not scroll pixels.
+        final topContentDepth = metrics.axisDirection == AxisDirection.up
+            ? metrics.extentAfter
+            : metrics.extentBefore;
         if (nativePinned &&
-            notification.metrics.axis == Axis.vertical &&
+            metrics.axis == Axis.vertical &&
             pinnedController.hasClients) {
           final inner = pinnedKey.currentState?.innerController;
           scrollOffset.value =
@@ -139,23 +157,15 @@ class FrostedScaffold extends HookWidget {
                       (inner != null && inner.hasClients ? inner.offset : 0))
                   .clamp(0.0, double.infinity);
         }
-        if (!nativePinned &&
-            notification.depth == 0 &&
-            notification.metrics.axis == Axis.vertical) {
+        if (!nativePinned && depth == 0 && metrics.axis == Axis.vertical) {
           // Keep real depth so a later UIKit metrics update (Dynamic Type or
           // rotation) can apply its new collapse range without another scroll.
-          final next = notification.metrics.pixels.clamp(0.0, double.infinity);
+          final next = topContentDepth.clamp(0.0, double.infinity);
           if ((scrollOffset.value - next).abs() > 0.1) {
             scrollOffset.value = next;
           }
         }
-        if (notification.depth != 0 ||
-            notification.metrics.axis != Axis.vertical ||
-            (notification is! ScrollUpdateNotification &&
-                notification is! OverscrollNotification)) {
-          return false;
-        }
-        final next = notification.metrics.extentBefore > 0.5;
+        final next = topContentDepth > 0.5;
         if (next != isScrolledUnder.value) updateScrollUnder(next);
         return false;
       },

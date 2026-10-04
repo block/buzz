@@ -202,8 +202,20 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ),
                     ),
-                    // Match Settings: status is quiet, centered copy directly
-                    // below the profile name rather than a separate information row.
+                    if (about.trim().isNotEmpty) ...[
+                      const SizedBox(height: Grid.xxs),
+                      SizedBox(
+                        width: double.infinity,
+                        child: Text(
+                          about,
+                          textAlign: TextAlign.center,
+                          style: context.textTheme.bodyMedium?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                    // Keep the current status centered beneath the profile identity.
                     if (userStatus != null && !userStatus.isEmpty)
                       SizedBox(
                         width: double.infinity,
@@ -273,31 +285,6 @@ class UserProfileSheet extends HookConsumerWidget {
                       ],
                     ),
                     const SizedBox(height: Grid.xs),
-
-                    // About / bio section
-                    if (about.isNotEmpty) ...[
-                      const SizedBox(height: Grid.xxs),
-                      Divider(
-                        color: context.colors.outlineVariant.withValues(
-                          alpha: 0.3,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.xxs),
-                      Text(
-                        'About',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.half),
-                      Text(
-                        about,
-                        style: context.textTheme.bodyMedium?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
                   ],
                 ),
               ),

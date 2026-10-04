@@ -305,7 +305,7 @@ void main() {
 
       final nativeBar = tester.widget<UiKitView>(find.byType(UiKitView));
       expect(nativeBar.viewType, 'buzz/ios_navigation_bar');
-      expect(nativeBar.creationParams, containsPair('title', 'Add Community'));
+      expect(nativeBar.creationParams, containsPair('title', ''));
       debugDefaultTargetPlatformOverride = null;
     });
 

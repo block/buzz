@@ -7,6 +7,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import 'dm_channel_labels.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';

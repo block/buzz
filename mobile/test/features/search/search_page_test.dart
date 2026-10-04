@@ -20,6 +20,84 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  for (final reducedMotion in [false, true]) {
+    testWidgets(
+      'iOS search field rises above tappable chips, reduced motion=$reducedMotion',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            overrides: [
+              searchProvider.overrideWith(
+                () => _FakeSearchNotifier(const SearchState.initial()),
+              ),
+              recentSearchesProvider.overrideWith(
+                () => _FakeRecentSearchesNotifier(const []),
+              ),
+              profileProvider.overrideWith(() => _FakeProfileNotifier()),
+            ],
+            child: MediaQuery(
+              data: MediaQueryData(
+                disableAnimations: reducedMotion,
+                textScaler: TextScaler.linear(reducedMotion ? 2 : 1),
+                padding: const EdgeInsets.only(top: 59),
+              ),
+              child: const SearchPage(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final field = find.byKey(const Key('search-field-container'));
+        final idle = tester.getRect(field);
+        final input = tester.element(find.byType(TextField));
+        await tester.tap(find.byKey(const Key('search-field')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+        final middle = tester.getRect(field);
+        await tester.pumpAndSettle();
+        final active = tester.getRect(field);
+        final cancel = find.byKey(const Key('search-ios-cancel'));
+        final cancelRect = tester.getRect(cancel);
+        expect(cancel.hitTestable(), findsOneWidget);
+        expect(cancelRect.left - active.right, closeTo(Grid.xxs, 0.01));
+        expect(
+          tester.getRect(find.byType(FrostedAppBar)).right - cancelRect.right,
+          closeTo(Grid.gutter, 0.01),
+        );
+        expect(active.top, lessThan(idle.top));
+        expect(active.width, lessThan(idle.width));
+        expect(active.top, greaterThanOrEqualTo(59));
+        if (!reducedMotion) {
+          expect(middle.top, greaterThan(active.top));
+          expect(middle.top, lessThan(idle.top));
+        }
+        expect(tester.element(find.byType(TextField)), same(input));
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+          isTrue,
+        );
+        final filters = tester.getRect(
+          find.byKey(const Key('search-header-filters')),
+        );
+        expect(filters.top - active.bottom, closeTo(Grid.xxs, 0.01));
+        expect(
+          tester.getRect(find.byType(FrostedAppBar)).bottom,
+          greaterThanOrEqualTo(filters.bottom),
+        );
+        for (final label in ['All', 'Messages', 'Channels', 'People']) {
+          expect(find.text(label).hitTestable(), findsOneWidget);
+        }
+        await tester.enterText(find.byType(TextField), 'design');
+        await tester.tap(cancel);
+        await tester.pumpAndSettle();
+        expect(tester.getRect(field).top, closeTo(idle.top, 0.01));
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
   testWidgets('iOS recent rows move once through title collapse', (
     tester,
   ) async {

@@ -100,12 +100,10 @@ class PairingPage extends HookConsumerWidget {
                       FrostedAppBar(
                         nativeTitle: identityRecoveryOnly
                             ? 'Send to Desktop'
-                            : 'Add Community',
-                        title: Text(
-                          identityRecoveryOnly
-                              ? 'Send to Desktop'
-                              : 'Add Community',
-                        ),
+                            : '',
+                        title: identityRecoveryOnly
+                            ? const Text('Send to Desktop')
+                            : null,
                       ),
                     ],
                   ),

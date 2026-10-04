@@ -26,6 +26,7 @@ class IosNavigationAction {
     this.onPressed,
     this.children = const [],
     this.selected = false,
+    this.plain = false,
   });
 
   final String label;
@@ -40,6 +41,9 @@ class IosNavigationAction {
   final List<IosNavigationAction> children;
   final bool selected;
 
+  /// Omits the shared Liquid Glass background for a text-only action.
+  final bool plain;
+
   Map<String, Object?> _encode(String id) => {
     'id': id,
     'label': label,
@@ -51,6 +55,7 @@ class IosNavigationAction {
     'imageUrl': imageUrl,
     'enabled': onPressed != null || children.isNotEmpty,
     'selected': selected,
+    'plain': plain,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -201,6 +206,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'actions': [
         for (var i = 0; i < actions.length; i++) encodeAction(actions[i], '$i'),
       ],
+      'background': colors.surface.toARGB32(),
       'dark': Theme.of(context).brightness == Brightness.dark,
       'foreground': (foregroundColor ?? Theme.of(context).colorScheme.onSurface)
           .toARGB32(),

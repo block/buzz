@@ -68,7 +68,6 @@ class SettingsPage extends HookConsumerWidget {
     final packageInfo = useFuture(packageInfoFuture);
     final topSectionHeight = frostedAppBarHeight(
       context,
-      nativeLargeTitle: true,
       bottomHeight: Grid.xxs,
     );
 
@@ -76,7 +75,6 @@ class SettingsPage extends HookConsumerWidget {
       useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
         nativeTitle: 'Settings',
-        nativeLargeTitle: true,
         nativeLeading: IosNavigationAction(
           label: 'Close settings',
           symbol: 'xmark',

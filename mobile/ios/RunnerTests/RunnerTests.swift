@@ -9,6 +9,64 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testConversationTitleHasWidthBeforePlatformViewLayout() throws {
+    let parent = UIViewController()
+    let factory = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent)
+    let bar = factory.create(withFrame: .zero, viewIdentifier: 999991,
+      arguments: ["title": "Alice, Bob", "subtitle": "3 members", "titleEnabled": true])
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView)
+    XCTAssertGreaterThan(title.frame.width, 0)
+    XCTAssertGreaterThan(title.intrinsicContentSize.width, 0)
+    XCTAssertLessThanOrEqual(title.intrinsicContentSize.width, 240)
+    _ = bar.view()
+  }
+
+  @MainActor
+  func testLongGroupTitleIsCappedAndTruncates() {
+    let title = NavigationTitleView(title: String(repeating: "Long participant name, ", count: 12), subtitle: "12 members", color: .label)
+    title.maximumWidth = 180
+    XCTAssertEqual(title.intrinsicContentSize.width, 180)
+    title.frame = CGRect(origin: .zero, size: title.intrinsicContentSize)
+    title.layoutIfNeeded()
+    for label in title.subviews.compactMap({ $0 as? UILabel }) {
+      XCTAssertEqual(label.lineBreakMode, .byTruncatingTail)
+      XCTAssertTrue(title.bounds.contains(label.frame))
+    }
+  }
+
+  @MainActor
+  func testPresenceDotSitsBesideCenteredSubtitle() throws {
+    let title = NavigationTitleView(title: "Alice", subtitle: "Offline", color: .label)
+    title.setSubtitlePresence(.gray)
+    title.frame = CGRect(x: 0, y: 0, width: 180, height: 44)
+    title.layoutIfNeeded()
+    let dot = try XCTUnwrap(title.subviews.first { $0.accessibilityIdentifier == "dm-navigation-status-dot" })
+    let label = try XCTUnwrap(title.subviews.compactMap { $0 as? UILabel }.first { $0.text == "Offline" })
+    XCTAssertEqual(label.frame.minX - dot.frame.maxX, 6, accuracy: 0.1)
+    XCTAssertEqual(label.frame.midY, dot.frame.midY, accuracy: 0.1)
+    XCTAssertEqual((dot.frame.minX + label.frame.maxX) / 2, title.bounds.midX, accuracy: 0.1)
+  }
+
+  @MainActor
+  func testTitleTapIgnoresUIKitControlWrapperButPreservesDisclosure() {
+    let wrapper = UIControl()
+    let title = NavigationTitleView(title: "general", subtitle: "36 members", color: .label)
+    wrapper.addSubview(title)
+    let label = UILabel()
+    title.addSubview(label)
+    XCTAssertTrue(title.acceptsTitleTouch(in: label))
+    XCTAssertTrue(title.acceptsTitleTouch(in: title))
+    let disclosure = UIButton(type: .custom)
+    title.addSubview(disclosure)
+    XCTAssertFalse(title.acceptsTitleTouch(in: disclosure))
+    var activated = false
+    title.onActivate = { activated = true }
+    XCTAssertTrue(title.accessibilityActivate())
+    XCTAssertTrue(activated)
+  }
+
+  @MainActor
   func testCompactConversationLabelsFitAccessibilityXXXL() async throws {
     guard #available(iOS 17.0, *) else { return }
     for subtitle in ["36 members", "Online"] {
@@ -186,7 +244,7 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
-  func testCompactChannelMaterialPersistsAtTimelineBottom() async throws {
+  func testCompactMaterialOnlyAppearsAfterScrolling() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
@@ -202,9 +260,9 @@ class RunnerTests: XCTestCase {
     parent.view.addSubview(bar.view())
     parent.view.layoutIfNeeded()
     let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
-    // Reversed timelines reach their newest message at zero, then overscroll
-    // into negative offsets. Neither state should clear the compact material.
-    for offset in [0.0, 52.0, 12.0, 0.0, -20.0, 0.0] {
+    // At rest and during top-edge overscroll the bar is clear; positive
+    // scroll gradually introduces the backdrop.
+    for offset in [0.0, 6.0, 52.0, 12.0, 0.0, -20.0, 0.0] {
       messenger.scroll(to: offset)
       bar.view().setNeedsLayout()
       bar.view().layoutIfNeeded()
@@ -215,7 +273,7 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(locations.first?.doubleValue, 0)
       XCTAssertEqual(locations.last?.doubleValue, 1)
       XCTAssertLessThan(locations[1].doubleValue, 1, "Compact material needs a soft lower edge")
-      XCTAssertEqual(material.alpha, 1, "Channel material cleared at offset \(offset)")
+      XCTAssertEqual(material.alpha, min(1, max(0, offset) / 12), accuracy: 0.01)
       XCTAssertEqual(material.frame, bar.view().bounds)
       if #available(iOS 26.0, *) {
         let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
