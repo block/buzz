@@ -53,6 +53,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final Map<String, _LiveChunkSubscription> _liveSubscriptionsByChunk = {};
   Future<void> _liveSubscriptionQueue = Future.value();
   Future<void> _unreadCatchUp = Future.value();
+  int? _readyUnreadGeneration;
+  Completer<void> _unreadReadinessChanged = Completer<void>();
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
   int _nextLiveChunkGeneration = 0;
@@ -100,16 +102,27 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// channel rendering. Follow a newer refresh if it replaces work we awaited.
   Future<void> waitForUnreadCatchUp() async {
     while (ref.mounted) {
+      final changed = _unreadReadinessChanged.future;
       final subscriptions = _liveSubscriptionQueue;
       await subscriptions;
       if (!ref.mounted) return;
       final unread = _unreadCatchUp;
       await unread;
       if (identical(subscriptions, _liveSubscriptionQueue) &&
-          identical(unread, _unreadCatchUp)) {
+          identical(unread, _unreadCatchUp) &&
+          _readyUnreadGeneration == _subscriptionVersion) {
         return;
       }
+      // A disconnected/skipped generation has no completed destination history.
+      // Wake on reconciliation rather than accepting an older completed future.
+      await changed;
     }
+  }
+
+  void _notifyUnreadReadinessChanged() {
+    final previous = _unreadReadinessChanged;
+    _unreadReadinessChanged = Completer<void>();
+    previous.complete();
   }
 
   Map<String, Map<String, ObservedUnreadEvent>>
@@ -693,6 +706,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           ],
         );
       }
+      _readyUnreadGeneration = subscriptionGeneration;
     } catch (error) {
       if (!ref.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');

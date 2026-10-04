@@ -922,6 +922,72 @@ void main() {
     },
   );
 
+  test(
+    'landing waits for destination unread generation after disconnect',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'Alpha')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+
+      session.memberships = [_membership(_channelB, myPk)];
+      session.metadata = [_meta(id: _channelB, name: 'Bravo')];
+      session.pauseNextSubscribe();
+      final subscribing = session.nextSubscribeStarted;
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://bravo.example');
+      expect(
+        (await container.read(channelsProvider.future)).single.id,
+        _channelB,
+      );
+      await subscribing;
+      var ready = false;
+      final landing = notifier.waitForUnreadCatchUp().then((_) => ready = true);
+      session.setStatus(SessionStatus.disconnected);
+      session.resumePausedSubscribe();
+      await _settle();
+      expect(
+        ready,
+        isFalse,
+        reason: 'Alpha history cannot satisfy Bravo readiness',
+      );
+
+      session.recentMessages = const [
+        NostrEvent(
+          id: 'bravo-mention',
+          pubkey: 'alice',
+          createdAt: 50,
+          kind: 9,
+          tags: [
+            ['h', _channelB],
+            ['p', myPk],
+          ],
+          content: 'Bravo mention',
+          sig: 'sig',
+        ),
+      ];
+      session.pauseNextUnreadCatchUpQuery();
+      final catchingUp = session.nextUnreadCatchUpQueryStarted;
+      session.setStatus(SessionStatus.connected);
+      await catchingUp;
+      await _settle();
+      expect(ready, isFalse);
+      session.resumePausedUnreadCatchUpQuery();
+      await landing;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelB],
+        contains('bravo-mention'),
+      );
+      expect(ready, isTrue);
+    },
+  );
+
   test('community switch discards a parked unread catch-up', () async {
     final session = _FakeRelaySession(
       memberships: const [],
