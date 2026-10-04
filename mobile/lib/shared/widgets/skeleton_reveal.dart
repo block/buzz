@@ -11,11 +11,15 @@ class SkeletonReveal extends HookWidget {
   final Widget content;
   final bool shimmerEnabled;
 
+  /// Reports when loaded content has finished its reveal and layout frame.
+  final ValueChanged<bool>? onReadyChanged;
+
   const SkeletonReveal({
     required this.loading,
     required this.skeleton,
     required this.content,
     this.shimmerEnabled = true,
+    this.onReadyChanged,
     super.key,
   });
 
@@ -43,6 +47,24 @@ class SkeletonReveal extends HookWidget {
       }
       return null;
     }, [loading, reducedMotion]);
+
+    useEffect(() {
+      var active = true;
+      void report([AnimationStatus? _]) {
+        final ready = !loading && reveal.isCompleted;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (active) onReadyChanged?.call(ready);
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      }
+
+      reveal.addStatusListener(report);
+      report();
+      return () {
+        active = false;
+        reveal.removeStatusListener(report);
+      };
+    }, [loading, reveal, onReadyChanged]);
 
     return AnimatedBuilder(
       animation: reveal,

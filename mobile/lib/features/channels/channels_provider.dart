@@ -52,6 +52,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   final Map<String, _LiveChunkSubscription> _liveSubscriptionsByChunk = {};
   Future<void> _liveSubscriptionQueue = Future.value();
+  Future<void> _unreadCatchUp = Future.value();
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
   int _nextLiveChunkGeneration = 0;
@@ -92,6 +93,24 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> get hiddenDmIds => Set.unmodifiable(_hiddenDmIds);
 
   bool get hasLoaded => _hasLoaded;
+
+  /// Waits for the current list's initial unread history to be applied.
+  ///
+  /// Presentation transitions can await this without blocking ordinary cached
+  /// channel rendering. Follow a newer refresh if it replaces work we awaited.
+  Future<void> waitForUnreadCatchUp() async {
+    while (ref.mounted) {
+      final subscriptions = _liveSubscriptionQueue;
+      await subscriptions;
+      if (!ref.mounted) return;
+      final unread = _unreadCatchUp;
+      await unread;
+      if (identical(subscriptions, _liveSubscriptionQueue) &&
+          identical(unread, _unreadCatchUp)) {
+        return;
+      }
+    }
+  }
 
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel =>

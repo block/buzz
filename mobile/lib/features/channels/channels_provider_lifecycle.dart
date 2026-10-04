@@ -160,7 +160,8 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     }
 
     fence.ensureCurrent();
-    unawaited(_catchUpUnreadEvents(channels, fence, subscriptionVersion));
+    _unreadCatchUp = _catchUpUnreadEvents(channels, fence, subscriptionVersion);
+    unawaited(_unreadCatchUp);
 
     _backstopTimer?.cancel();
     _backstopTimer = Timer.periodic(

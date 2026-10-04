@@ -142,7 +142,7 @@ class _FigmaHomeScreen extends ConsumerWidget {
     final relayUrl = community?.relayUrl;
     final communityIcon = relayUrl == null
         ? null
-        : ref.watch(communityIconProvider(relayUrl)).value;
+        : ref.watch(communityIconPresentationProvider(relayUrl));
     final suppliedGradient = context.appColors.topSectionGradient;
     final backgroundGradient =
         suppliedGradient ??

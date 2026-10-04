@@ -6,6 +6,7 @@ class _ChannelsBody extends StatelessWidget {
   final bool showError;
   final SessionStatus sessionStatus;
   final bool showConnectionSkeleton;
+  final ValueChanged<bool> onReadyChanged;
   final String? currentPubkey;
   final double topSectionHeight;
   final bool usesPinnedGradient;
@@ -19,6 +20,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.showError,
     required this.sessionStatus,
     required this.showConnectionSkeleton,
+    required this.onReadyChanged,
     required this.currentPubkey,
     required this.topSectionHeight,
     required this.usesPinnedGradient,
@@ -76,6 +78,7 @@ class _ChannelsBody extends StatelessWidget {
           );
 
     return SkeletonReveal(
+      onReadyChanged: onReadyChanged,
       loading: loading,
       shimmerEnabled: sessionStatus != SessionStatus.disconnected,
       skeleton: _ChannelsSkeleton(

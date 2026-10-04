@@ -140,8 +140,8 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Whether to apply the translucent blur treatment behind the app bar.
   ///
-  /// A page can leave its painted backdrop exposed at rest, then turn this on
-  /// when scrolling moves content beneath the controls.
+  /// The backdrop stays clear at rest. This enables the treatment when the
+  /// surrounding scroll scope reports content beneath the controls.
   final bool frosted;
 
   /// Opacity of the frosted surface above the blurred backdrop.
@@ -179,6 +179,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Native replacements for composite Flutter actions, including menus.
   final List<IosNavigationAction>? nativeActions;
 
+  /// Reports when native header images and layout are ready to reveal.
+  final ValueChanged<bool>? onNativeReadyChanged;
+
   /// Uses a composable Flutter header while a backdrop covers the native view.
   final ValueListenable<bool>? nativeViewSuppressed;
 
@@ -193,6 +196,7 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeLargeTitle = false,
     this.nativeLeading,
     this.nativeActions,
+    this.onNativeReadyChanged,
     this.nativeViewSuppressed,
     this.leading,
     this.automaticallyImplyLeading = true,
@@ -252,6 +256,7 @@ class FrostedAppBar extends StatelessWidget {
               SizedBox(
                 height: barHeight,
                 child: IosNavigationBar(
+                  onReadyChanged: onNativeReadyChanged,
                   title:
                       nativeTitle ??
                       (title is Text ? (title as Text).data ?? '' : ''),
@@ -301,8 +306,9 @@ class FrostedAppBar extends StatelessWidget {
     }
     final topPadding = MediaQuery.paddingOf(context).top;
     final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
-    final paintsBottomDivider =
-        showBottomDivider && (scrollUnder?.isScrolledUnder ?? true);
+    final isScrolledUnder = scrollUnder?.isScrolledUnder ?? false;
+    final paintsFrost = frosted && isScrolledUnder;
+    final paintsBottomDivider = showBottomDivider && isScrolledUnder;
     final canPop = Navigator.canPop(context);
     final effectiveTitleStyle = _effectiveTitleStyle(context, titleStyle);
     final barContentHeight = _barContentHeight(
@@ -421,7 +427,7 @@ class FrostedAppBar extends StatelessWidget {
       key: const ValueKey('frosted-app-bar-background'),
       padding: EdgeInsets.only(top: topPadding),
       decoration: BoxDecoration(
-        color: !frosted
+        color: !paintsFrost
             ? Colors.transparent
             : gradient == null
             ? context.colors.surface.withValues(alpha: frostedSurfaceOpacity)
@@ -442,7 +448,7 @@ class FrostedAppBar extends StatelessWidget {
     );
 
     final child = ClipRect(
-      child: frosted
+      child: paintsFrost
           ? BackdropFilter(
               filter: ImageFilter.blur(
                 sigmaX: frostedBlurSigma,

@@ -1094,6 +1094,13 @@ void main() {
         await tester.pump();
 
         expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+        final spinner = find.byType(BuzzLoadingIndicator);
+        expect(tester.getSize(spinner), const Size.square(18));
+        expect(
+          tester.widget<BuzzLoadingIndicator>(spinner).color,
+          tester.element(spinner).colors.onSecondaryContainer,
+        );
+
         expect(find.byType(CircularProgressIndicator), findsNothing);
         expect(
           find.bySemanticsLabel('Cancel voice note loading'),

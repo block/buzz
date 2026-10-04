@@ -26,6 +26,8 @@ class IosNavigationAction {
     this.onPressed,
     this.children = const [],
     this.selected = false,
+    this.onAvatarBoundsChanged,
+    this.avatarHidden = false,
   });
 
   final String label;
@@ -40,6 +42,12 @@ class IosNavigationAction {
   final List<IosNavigationAction> children;
   final bool selected;
 
+  /// Reports the avatar's global bounds for a transition into this bar item.
+  final ValueChanged<Rect>? onAvatarBoundsChanged;
+
+  /// Hides a transition's destination avatar while retaining its layout slot.
+  final bool avatarHidden;
+
   Map<String, Object?> _encode(String id) => {
     'id': id,
     'label': label,
@@ -51,6 +59,8 @@ class IosNavigationAction {
     'imageUrl': imageUrl,
     'enabled': onPressed != null || children.isNotEmpty,
     'selected': selected,
+    'tracksAvatarBounds': onAvatarBoundsChanged != null,
+    'avatarHidden': avatarHidden,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -103,6 +113,7 @@ class IosNavigationBar extends HookConsumerWidget {
     this.actions = const [],
     this.onBack,
     this.foregroundColor,
+    this.onReadyChanged,
   });
 
   static const viewType = 'buzz/ios_navigation_bar';
@@ -119,9 +130,13 @@ class IosNavigationBar extends HookConsumerWidget {
   final VoidCallback? onBack;
   final Color? foregroundColor;
 
+  /// Reports when avatar images and the latest native layout are applied.
+  final ValueChanged<bool>? onReadyChanged;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final channel = useState<MethodChannel?>(null);
+    final viewKey = useMemoized(GlobalKey.new);
     final latest = useRef(this)..value = this;
     final offset = IosNavigationScrollScope.maybeOf(context);
     final collapseRange = IosNavigationMetrics.of(context).largeTitleHeight;
@@ -172,7 +187,8 @@ class IosNavigationBar extends HookConsumerWidget {
         colors.onPrimaryContainer,
       ],
     );
-    final avatarImages = useFuture(avatarFuture, preserveState: false).data;
+    final avatarSnapshot = useFuture(avatarFuture, preserveState: false);
+    final avatarImages = avatarSnapshot.data;
     Map<String, Object?> encodeAction(IosNavigationAction action, String id) {
       final key = imageKey(action);
       final image = avatarImages?[id];
@@ -211,6 +227,20 @@ class IosNavigationBar extends HookConsumerWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'avatarBounds') {
+          final values = call.arguments as Map<Object?, Object?>;
+          final box = viewKey.currentContext?.findRenderObject();
+          if (box is RenderBox && values['id'] == 'leading') {
+            final x = (values['x'] as num).toDouble();
+            final y = (values['y'] as num).toDouble();
+            final width = (values['width'] as num).toDouble();
+            final height = (values['height'] as num).toDouble();
+            latest.value.leading?.onAvatarBoundsChanged?.call(
+              box.localToGlobal(Offset(x, y)) & Size(width, height),
+            );
+          }
+          return;
+        }
         if (call.method == 'metrics') {
           if (context.mounted) {
             IosNavigationMetrics.update(
@@ -242,12 +272,41 @@ class IosNavigationBar extends HookConsumerWidget {
       return () => current.setMethodCallHandler(null);
     }, [channel.value]);
 
-    useEffect(() {
-      final current = channel.value;
-      if (current == null) return null;
-      unawaited(current.invokeMethod<void>('configure', payload));
-      return null;
-    }, [channel.value, signature]);
+    useEffect(
+      () {
+        final current = channel.value;
+        var active = true;
+        void report(bool ready) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (active && context.mounted) {
+              latest.value.onReadyChanged?.call(ready);
+            }
+          });
+          WidgetsBinding.instance.ensureVisualUpdate();
+        }
+
+        report(false);
+        if (current != null) {
+          unawaited(() async {
+            try {
+              await current.invokeMethod<void>('configure', payload);
+              if (!active ||
+                  avatarSnapshot.connectionState != ConnectionState.done) {
+                return;
+              }
+              if (latest.value.onReadyChanged != null) {
+                await current.invokeMethod<void>('prepareForReveal');
+              }
+              report(true);
+            } on PlatformException catch (error) {
+              debugPrint('Native navigation configuration failed: $error');
+            }
+          }());
+        }
+        return () => active = false;
+      },
+      [channel.value, signature, avatarFuture, avatarSnapshot.connectionState],
+    );
 
     useEffect(() {
       void sync() {
@@ -268,6 +327,7 @@ class IosNavigationBar extends HookConsumerWidget {
     }, [channel.value, offset, collapseRange]);
 
     return UiKitView(
+      key: viewKey,
       viewType: viewType,
       creationParams: payload,
       creationParamsCodec: const StandardMessageCodec(),

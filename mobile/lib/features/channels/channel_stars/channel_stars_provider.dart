@@ -24,11 +24,13 @@ class ChannelStarsState {
 
 class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
   ChannelStarsManager? _manager;
+  bool _isInitialized = false;
 
   @override
   ChannelStarsState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
+    _isInitialized = false;
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
@@ -85,6 +87,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     Future.microtask(() async {
       await manager.initialize();
       if (_manager != manager) return;
+      _isInitialized = true;
       _emitManagerState(manager);
     });
 
@@ -98,7 +101,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
   void _emitManagerState(ChannelStarsManager manager) {
     if (_manager != manager) return;
     state = ChannelStarsState(
-      isReady: true,
+      isReady: _isInitialized,
       store: manager.store,
       version: state.version + 1,
     );

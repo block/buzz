@@ -877,6 +877,51 @@ void main() {
     );
   });
 
+  test(
+    'presentation waits for unread catch-up without delaying the channel list',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: const [
+          NostrEvent(
+            id: 'initial-mention',
+            pubkey: 'alice',
+            createdAt: 50,
+            kind: 9,
+            tags: [
+              ['h', _channelA],
+              ['p', myPk],
+            ],
+            content: 'hello',
+            sig: 'sig',
+          ),
+        ],
+      )..pauseNextUnreadCatchUpQuery();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final channels = await container.read(channelsProvider.future);
+      expect(channels.single.name, 'general');
+      final notifier = container.read(channelsProvider.notifier);
+      var ready = false;
+      final presentation = notifier.waitForUnreadCatchUp().then(
+        (_) => ready = true,
+      );
+      await session.nextUnreadCatchUpQueryStarted;
+      await _settle();
+      expect(ready, isFalse);
+      expect(notifier.observedUnreadEventsByChannel, isEmpty);
+
+      session.resumePausedUnreadCatchUpQuery();
+      await presentation;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA],
+        contains('initial-mention'),
+      );
+      expect(ready, isTrue);
+    },
+  );
+
   test('community switch discards a parked unread catch-up', () async {
     final session = _FakeRelaySession(
       memberships: const [],

@@ -29,6 +29,7 @@ void main() {
   Widget buildRevealTestable({
     required ValueNotifier<bool> loading,
     bool disableAnimations = false,
+    ValueChanged<bool>? onReadyChanged,
   }) {
     return MaterialApp(
       theme: AppTheme.light(),
@@ -43,6 +44,7 @@ void main() {
           valueListenable: loading,
           builder: (context, isLoading, _) => SkeletonReveal(
             loading: isLoading,
+            onReadyChanged: onReadyChanged,
             skeleton: const SkeletonBar(width: 120, height: 16),
             content: const Text('Loaded content'),
           ),
@@ -50,6 +52,28 @@ void main() {
       ),
     );
   }
+
+  testWidgets('reports ready only after the loaded reveal finishes', (
+    tester,
+  ) async {
+    final loading = ValueNotifier(true);
+    addTearDown(loading.dispose);
+    final readiness = <bool>[];
+    await tester.pumpWidget(
+      buildRevealTestable(loading: loading, onReadyChanged: readiness.add),
+    );
+    expect(readiness.last, false);
+    loading.value = false;
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(readiness.last, false);
+    await tester.pump(const Duration(milliseconds: 220));
+    expect(readiness.last, true);
+    loading.value = true;
+    await tester.pump();
+    expect(readiness.last, false);
+  });
 
   double layerOpacity(WidgetTester tester, String key) =>
       tester.widget<Opacity>(find.byKey(Key(key))).opacity;
