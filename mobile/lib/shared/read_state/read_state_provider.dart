@@ -180,6 +180,16 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _refreshForcedState();
   }
 
+  /// Clear a forced-unread flag without moving any read marker. Reading to
+  /// the bottom of a channel the reader marked unread uses this: it ends the
+  /// manual unread but must not read mentions or replies the reader has not
+  /// seen.
+  void clearForcedUnread(String contextId) {
+    if (_forcedUnreadContexts.remove(contextId) != null) {
+      _refreshForcedState();
+    }
+  }
+
   void _refreshForcedState() {
     final manager = _manager;
     if (manager == null) return;

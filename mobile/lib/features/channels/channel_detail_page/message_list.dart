@@ -573,6 +573,7 @@ class _MessageList extends HookConsumerWidget {
         visible.addAll(group.map((entry) => entry.message));
       }
       final latest = entries.last.message;
+      final atBottom = latestIsAtBoundary();
       final marks = readingMarks(
         readState: readState,
         channelId: channelId,
@@ -580,9 +581,13 @@ class _MessageList extends HookConsumerWidget {
         currentPubkey: currentPubkey,
         loaded: allMessages,
         visible: visible,
-        bottom: latestIsAtBoundary() ? latest : null,
+        bottom: atBottom ? latest : null,
       );
       final notifier = ref.read(readStateProvider.notifier);
+      // Reading to the bottom ends a manual "mark unread" on the channel.
+      if (atBottom && readState.isForcedUnread(channelId)) {
+        notifier.clearForcedUnread(channelId);
+      }
       for (final mark in marks.entries) {
         notifier.markContextRead(mark.key, mark.value);
       }

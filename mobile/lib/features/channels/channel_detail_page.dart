@@ -207,6 +207,23 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
   }
 }
 
+/// The time that opening [channel] reads it through, or null when opening it
+/// reads nothing. Forums read through their last activity. DMs read through
+/// the newest loaded message, including replies, or the last activity before
+/// messages load.
+int? _openReadTimestamp({
+  required Channel channel,
+  required AsyncValue<List<NostrEvent>> messagesState,
+}) {
+  if (channel.isForum) return dateTimeToUnixSeconds(channel.lastMessageAt);
+  if (!channel.isDm) return null;
+  var latest = 0;
+  for (final event in messagesState.value ?? const <NostrEvent>[]) {
+    if (event.createdAt > latest) latest = event.createdAt;
+  }
+  return latest > 0 ? latest : dateTimeToUnixSeconds(channel.lastMessageAt);
+}
+
 bool _isOneToOneAgentDm(Channel channel, Set<String> agentPubkeys) {
   final participants = channel.participantPubkeys
       .map((pubkey) => pubkey.trim().toLowerCase())
@@ -488,12 +505,14 @@ class ChannelDetailPage extends HookConsumerWidget {
         !messagesNotifier.hasLoadedMessages;
     final appBarTitleContentHeight = _twoLineAppBarTitleContentHeight(context);
 
-    // A forum has no timeline to read row by row, so opening it reads the
-    // channel. Message timelines write their read marks while the reader
-    // looks at rows; see `readingMarks`.
-    final forumReadTimestamp = resolvedChannel.isForum
-        ? dateTimeToUnixSeconds(resolvedChannel.lastMessageAt)
-        : null;
+    // Opening a forum or a DM reads the whole channel: a forum has no
+    // timeline to read row by row, and a DM is all for the reader. Other
+    // timelines write their read marks while the reader looks at rows; see
+    // `readingMarks`.
+    final openReadTimestamp = _openReadTimestamp(
+      channel: resolvedChannel,
+      messagesState: messagesState,
+    );
 
     useEffect(() {
       final session = ref.read(relaySessionProvider.notifier);
@@ -524,18 +543,18 @@ class ChannelDetailPage extends HookConsumerWidget {
     );
 
     useEffect(() {
-      if (!readState.isReady || forumReadTimestamp == null) {
+      if (!readState.isReady || openReadTimestamp == null) {
         return null;
       }
       return deferReadStateUpdate(context, () {
         ref
             .read(readStateProvider.notifier)
-            .markContextRead(channel.id, forumReadTimestamp);
+            .markContextRead(channel.id, openReadTimestamp);
         ref
             .read(channelsProvider.notifier)
-            .clearObservedUnreadCoveredByRead(channel.id, forumReadTimestamp);
+            .clearObservedUnreadCoveredByRead(channel.id, openReadTimestamp);
       });
-    }, [channel.id, readState.isReady, forumReadTimestamp]);
+    }, [channel.id, readState.isReady, openReadTimestamp]);
 
     final dmHeader = resolvedChannel.isDm
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)

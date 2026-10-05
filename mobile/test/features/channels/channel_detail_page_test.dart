@@ -2137,6 +2137,101 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('reading the bottom ends a manual channel unread only', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+          forcedUnreadContexts: {_channelId: _channelId, 'msg:old': _channelId},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Latest',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      expect(readState.clearedForcedContexts, isEmpty);
+
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.clearedForcedContexts, [_channelId]);
+      // The channel mark does not move, and a message the reader marked
+      // unread stays unread.
+      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.state.isForcedUnread('msg:old'), isTrue);
+    });
+
+    testWidgets('opening a DM reads the whole DM', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'First',
+              createdAt: 1100,
+            ),
+            _textMsg(
+              id: 'reply1',
+              pubkey: 'alice',
+              content: 'Newest reply',
+              createdAt: 1300,
+              extraTags: const [
+                ['e', 'msg1', '', 'reply'],
+              ],
+            ),
+          ],
+          channel: dmChannel,
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+
+      // No dwell needed: opening the DM reads through its newest message,
+      // replies included.
+      expect(readState.markedContexts[_channelId], 1300);
+    });
+
     testWidgets('reading away from the bottom marks only visible rows', (
       tester,
     ) async {
@@ -16016,6 +16111,23 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  final List<String> clearedForcedContexts = [];
+
+  @override
+  void clearForcedUnread(String contextId) {
+    clearedForcedContexts.add(contextId);
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: {
+        for (final entry in state.forcedUnreadContexts.entries)
+          if (entry.key != contextId) entry.key: entry.value,
+      },
+    );
   }
 }
 
