@@ -81,7 +81,6 @@
       "type": "object",
       "required": [
         "enabled",
-        "apnsEgressCidrs",
         "postgresEgressCidrs",
         "dns"
       ],
@@ -90,8 +89,7 @@
           "type": "boolean"
         },
         "apnsEgressCidrs": {
-          "type": "array",
-          "minItems": 1
+          "type": "array"
         },
         "postgresEgressCidrs": {
           "type": "array",
@@ -180,8 +178,14 @@
             "properties": {
               "externalPolicyName": {
                 "maxLength": 0
+              },
+              "apnsEgressCidrs": {
+                "minItems": 1
               }
-            }
+            },
+            "required": [
+              "apnsEgressCidrs"
+            ]
           }
         }
       ]
@@ -375,7 +379,8 @@
     "profiles",
     "httpRoute",
     "image",
-    "migration"
+    "migration",
+    "terminationGracePeriodSeconds"
   ],
   "allOf": [
     {

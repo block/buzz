@@ -62,3 +62,14 @@ raise 'external mode must retain only migration policy' unless policies.map { |r
 RUBY
 reject --set podMonitor.enabled=true
 reject --set podMonitor.enabled=true --set networkPolicy.monitoring.enabled=true
+
+# External ownership replaces runtime egress only; migration still needs DB/DNS.
+helm template push "$chart" --set networkPolicy.enabled=false \
+  --set networkPolicy.externalPolicyName=platform-runtime \
+  --set-json 'networkPolicy.apnsEgressCidrs=[]' >/dev/null
+reject --set-json 'networkPolicy.apnsEgressCidrs=[]'
+reject --set networkPolicy.enabled=false --set networkPolicy.externalPolicyName=platform-runtime \
+  --set-json 'networkPolicy.postgresEgressCidrs=[]'
+reject --set networkPolicy.enabled=false --set networkPolicy.externalPolicyName=platform-runtime \
+  --set networkPolicy.dns=null
+reject --set terminationGracePeriodSeconds=null
