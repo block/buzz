@@ -1026,18 +1026,28 @@ impl EventQueue {
     /// [`ReplyRoute::accepts_steer`]; possible whenever one session spans
     /// several reply destinations: the channel session policy, or a DM) must
     /// not be steered natively; the cancel+merge path re-dispatches it with
-    /// its own full `<context>`. Until the prompt task records how it
-    /// classified the channel, the answer is `false`.
-    pub fn in_flight_accepts_steer(&self, scope: &SessionScope, incoming: &ReplyRoute) -> bool {
-        self.in_flight_reply_routes
-            .get(scope)
-            .and_then(|running| {
-                running
-                    .prompt_is_dm
-                    .get()
-                    .map(|is_dm| running.route.accepts_steer(incoming, is_dm))
-            })
-            .unwrap_or(false)
+    /// its own full `<context>`.
+    ///
+    /// The rule follows how the running turn's prompt classified the channel
+    /// (see [`PromptDmClassification`]). Until the prompt task records that,
+    /// `channel_is_dm` is the listener's own classification, where unresolved
+    /// metadata counts as a DM. A channel the listener knows is not a DM also
+    /// renders as one in the prompt, so the channel rule applies at once.
+    /// Otherwise the prompt may render either way, and the answer is `false`.
+    pub fn in_flight_accepts_steer(
+        &self,
+        scope: &SessionScope,
+        incoming: &ReplyRoute,
+        channel_is_dm: bool,
+    ) -> bool {
+        let Some(running) = self.in_flight_reply_routes.get(scope) else {
+            return false;
+        };
+        match running.prompt_is_dm.get() {
+            Some(is_dm) => running.route.accepts_steer(incoming, is_dm),
+            None if !channel_is_dm => running.route.accepts_steer(incoming, false),
+            None => false,
+        }
     }
 
     /// The cell in which the prompt task for `scope`'s in-flight turn records

@@ -2530,6 +2530,21 @@ pub async fn run_prompt_task(
         },
         PromptSource::Heartbeat => None,
     };
+    // Whether this turn's prompt renders the channel as a DM. `format_prompt`
+    // derives the same value from `resolved_channel_info`, which is fixed
+    // from here on, so the main loop's native-steer guard can rely on it now
+    // rather than after the session setup below. A follow-up steered before
+    // this turn's own prompt starts waits in the steer mailbox, so it must
+    // not be admitted while an `initial_message` setup prompt (which reads the
+    // same mailbox) is still to come; that case records after the setup turn.
+    let prompt_is_dm = resolved_channel_info
+        .as_ref()
+        .is_some_and(|info| info.channel_type == "dm");
+    let initial_message_pending = ctx.initial_message.is_some()
+        && matches!(&source, PromptSource::Channel(scope) if !agent.state.sessions.contains_key(scope));
+    if !initial_message_pending {
+        prompt_dm.record(prompt_is_dm);
+    }
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -2987,6 +3002,8 @@ pub async fn run_prompt_task(
             }
         }
     }
+    // Any `initial_message` setup turn is done; see `prompt_is_dm`.
+    prompt_dm.record(prompt_is_dm);
 
     // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
     // `slash_command` holds the bare command. It is sent as the FIRST prompt
@@ -3029,13 +3046,7 @@ pub async fn run_prompt_task(
         // reuse that exact typed result for prompt formatting.
         let channel_info = resolved_channel_info.clone();
 
-        let is_dm = channel_info
-            .as_ref()
-            .map(|info| info.channel_type == "dm")
-            .unwrap_or(false);
-        // `format_prompt` derives the same value from `channel_info`; the
-        // main loop's native-steer guard reads it from here.
-        prompt_dm.record(is_dm);
+        let is_dm = prompt_is_dm;
         let context_target = resolve_context_target(b, is_dm);
         let hydrated_thread_root = match &context_target {
             ContextTarget::Thread(root) => Some(root),
