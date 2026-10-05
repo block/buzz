@@ -1331,7 +1331,10 @@ fn unadmitted_event_write_transaction_openers(sources: &[(String, String)]) -> V
 /// around it. Truncating at the first `#[cfg(test)]` would hide production
 /// functions that follow a test-only item. Tracks brace depth: the item ends
 /// on the first line that leaves depth at or below zero and ends with `;` or
-/// `}`. A column-0 `}` line (rustfmt's top-level close) always ends it.
+/// `}`, ignoring a trailing `//` comment. A column-0 `}` line (rustfmt's
+/// top-level close) always ends it. Braces inside string or char literals are
+/// still counted, so a test-only item with unbalanced literal braces (for
+/// example `"{"`) runs on to the next column-0 `}`; no such item exists today.
 fn strip_cfg_test_items(source: &str) -> String {
     let mut kept = String::with_capacity(source.len());
     let mut lines = source.lines();
@@ -1344,8 +1347,12 @@ fn strip_cfg_test_items(source: &str) -> String {
         let mut depth = 0_isize;
         for line in lines.by_ref().skip_while(|line| line.starts_with("#[")) {
             depth += line.matches('{').count() as isize - line.matches('}').count() as isize;
-            let trimmed = line.trim_end();
-            let item_end = depth <= 0 && (trimmed.ends_with(';') || trimmed.ends_with('}'));
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            let item_end = depth <= 0
+                && [line, code].iter().any(|text| {
+                    let text = text.trim_end();
+                    text.ends_with(';') || text.ends_with('}')
+                });
             if item_end || line == "}" || line == "};" {
                 break;
             }
@@ -1401,9 +1408,7 @@ pub fn after_module() {}\n";
         );
     }
 
-    let raw_opener_after_test_item = "#[cfg(test)]\n\
-struct X;\n\
-pub async fn raw_opener(pool: &sqlx::PgPool) {\n\
+    let raw_opener = "pub async fn raw_opener(pool: &sqlx::PgPool) {\n\
     let mut tx = pool.begin().await.expect(\"tx\");\n\
     insert_row_in_transaction(&mut tx).await;\n\
 }\n\
@@ -1413,15 +1418,24 @@ pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sql
         .await\n\
         .expect(\"write\");\n\
 }\n";
-    let violations = unadmitted_event_write_transaction_openers(&[(
-        "fixture".to_owned(),
-        strip_cfg_test_items(raw_opener_after_test_item),
-    )]);
-    assert_eq!(
-        violations,
-        ["fixture: pub async fn raw_opener(pool: &sqlx::PgPool) {"],
-        "a raw opener after a test-only item must still be scanned"
-    );
+    for (test_item, hidden) in [
+        ("struct X;", "struct X"),
+        ("fn helper() {} // test helper", "fn helper"),
+        ("const BRACES: &str = \"{}\"; // fixture", "BRACES"),
+    ] {
+        let production = strip_cfg_test_items(&format!("#[cfg(test)]\n{test_item}\n{raw_opener}"));
+        assert!(
+            !production.contains(hidden),
+            "`{test_item}` is test-only and must be skipped: {production}"
+        );
+        let violations =
+            unadmitted_event_write_transaction_openers(&[("fixture".to_owned(), production)]);
+        assert_eq!(
+            violations,
+            ["fixture: pub async fn raw_opener(pool: &sqlx::PgPool) {"],
+            "a raw opener after `{test_item}` must still be scanned"
+        );
+    }
 }
 
 #[test]

@@ -397,6 +397,11 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # buzz-db source-policy tests: infra-free scans of the crate sources
+        # that enforce the event-write admission chokepoint, metric/provenance
+        # contracts, and their fixtures. They live in an integration-test
+        # binary, so `--lib` above does not run them.
+        cargo nextest run -p buzz-db --test observability_source
         # Storage accounting crosses three crates whose focused regression
         # suites are otherwise absent from the infra-free unit lane.
         cargo nextest run -p buzz-media --lib \

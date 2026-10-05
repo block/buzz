@@ -123,6 +123,8 @@ run_unit_tests() {
   # separate isolated-DB gate, so --lib keeps this step infra-free.
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
+  run_test_step "buzz-db source-policy tests" \
+    cargo test -p buzz-db --test observability_source -- --nocapture
 
   run_test_step "buzz-media storage snapshot serialization test" \
     cargo test -p buzz-media --lib bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys -- --exact --nocapture
