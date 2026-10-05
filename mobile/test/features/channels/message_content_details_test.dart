@@ -15,22 +15,28 @@ const _board = '''Fleet work status
 :::
 Footer''';
 
-Widget _app(ValueNotifier<String> content, {String? messageId = 'event-1'}) =>
-    ProviderScope(
-      overrides: [customEmojiListProvider.overrideWith((ref) => const [])],
-      child: MaterialApp(
-        theme: AppTheme.light(),
-        home: AppMarkdownTheme(
-          child: Scaffold(
-            body: ValueListenableBuilder<String>(
-              valueListenable: content,
-              builder: (_, value, _) =>
-                  MessageContent(content: value, messageId: messageId),
-            ),
+Widget _app(
+  ValueNotifier<String> content, {
+  String? messageId = 'event-1',
+  Map<String, String> mentionNames = const {},
+}) => ProviderScope(
+  overrides: [customEmojiListProvider.overrideWith((ref) => const [])],
+  child: MaterialApp(
+    theme: AppTheme.light(),
+    home: AppMarkdownTheme(
+      child: Scaffold(
+        body: ValueListenableBuilder<String>(
+          valueListenable: content,
+          builder: (_, value, _) => MessageContent(
+            content: value,
+            messageId: messageId,
+            mentionNames: mentionNames,
           ),
         ),
       ),
-    );
+    ),
+  ),
+);
 
 /// Taps the section toggle; the title text itself is inert by design.
 Future<void> _tapTitle(WidgetTester tester, String title) => tester.tap(
@@ -150,5 +156,38 @@ void main() {
       findsWidgets,
     );
     handle.dispose();
+  });
+
+  testWidgets('titles never build media, links or mention chips', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        ValueNotifier(
+          ':::details ![lock](https://x/a_((b)).png) @Alice '
+          '[docs](https://x/a_((b)))\nbody\n:::',
+        ),
+        mentionNames: {'a' * 64: 'Alice'},
+      ),
+    );
+    final toggle = find.byType(InkWell).first;
+    expect(
+      find.descendant(of: toggle, matching: find.byType(Image)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: toggle,
+        matching: find.textContaining(
+          RegExp('@alice', caseSensitive: false),
+          findRichText: true,
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(RegExp('alice', caseSensitive: false)),
+      findsOneWidget,
+    );
   });
 }

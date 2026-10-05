@@ -83,7 +83,11 @@ List<DetailsSegment> splitDetailsBlocks(String content, {int depth = 0}) {
     final heading = _headingRe.firstMatch(raw);
     if (heading != null) raw = raw.substring(heading.end);
     if (raw.length > maxDetailsTitleLength) {
-      raw = raw.substring(0, maxDetailsTitleLength);
+      // Never cut a surrogate pair in half.
+      final end = _isHighSurrogate(raw.codeUnitAt(maxDetailsTitleLength - 1))
+          ? maxDetailsTitleLength - 1
+          : maxDetailsTitleLength;
+      raw = raw.substring(0, end);
     }
     final title = plainDetailsTitle(raw);
     final titleMarkdown = title == detailsFallbackTitle
@@ -178,6 +182,8 @@ String plainDetailsTitle(String markdown) {
       .trim();
   return title.isEmpty ? detailsFallbackTitle : title;
 }
+
+bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
 
 String _stripCr(String line) =>
     line.endsWith('\r') ? line.substring(0, line.length - 1) : line;

@@ -333,24 +333,30 @@ class MessageContent extends HookConsumerWidget {
       autolink: false,
       codeBuilder: (context, name, code, closed) =>
           _MessageCodeBlock(name: name, code: code),
-      linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-        context,
-        ref,
-        linkText,
-        url,
-        imetaByUrl[url],
-        linkStyle,
-        style,
-        resolvedChannelTap,
-        resolvedChannelNames,
-      ),
-      imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-        context,
-        imageUrl,
-        imetaByUrl[imageUrl],
-        onReply: onMediaReply == null ? null : mediaReply,
-        onMore: onMediaMore == null ? null : mediaMore,
-      ),
+      // Plain markdown (section titles) never builds links or media, even
+      // for a construct the title sanitizer did not flatten.
+      linkBuilder: plain
+          ? (context, linkText, _, _) => Text.rich(linkText)
+          : (context, linkText, url, linkStyle) => _buildLink(
+              context,
+              ref,
+              linkText,
+              url,
+              imetaByUrl[url],
+              linkStyle,
+              style,
+              resolvedChannelTap,
+              resolvedChannelNames,
+            ),
+      imageBuilder: plain
+          ? (context, _, _, _) => const SizedBox.shrink()
+          : (context, imageUrl, _, _) => _buildMedia(
+              context,
+              imageUrl,
+              imetaByUrl[imageUrl],
+              onReply: onMediaReply == null ? null : mediaReply,
+              onMore: onMediaMore == null ? null : mediaMore,
+            ),
       textAlign: textAlign,
       maxLines: maxLines,
       inlineComponents: plain ? null : inlineComponents,

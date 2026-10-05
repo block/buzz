@@ -165,12 +165,30 @@ void main() {
   });
 
   test('long constructs in titles still flatten', () {
-    final url = 'https://media.example/${'a' * 600}?sig=${'b' * 200}';
-    expect(plainDetailsTitle('![lock]($url)'), 'lock');
+    final url = 'https://media.example/${'a' * 400}?sig=${'b' * 100}';
+    final block = splitDetailsBlocks(
+      ':::details [docs]($url) **${'c' * 200}**\nx\n:::',
+    ).whereType<DetailsBlock>().single;
+    expect(block.title, 'docs ${'c' * 200}');
+    expect(block.titleMarkdown, 'docs **${'c' * 200}**');
+    expect(block.key, '0:docs ${'c' * 200}');
     expect(
-      plainDetailsTitle('[docs]($url) **${'c' * 400}**'),
-      'docs ${'c' * 400}',
+      splitDetailsBlocks(
+        ':::details ![lock]($url)\nx\n:::',
+      ).whereType<DetailsBlock>().single.title,
+      'lock',
     );
+  });
+
+  test('titles over the limit are cut, never inside a surrogate pair', () {
+    final long = splitDetailsBlocks(
+      ':::details ${'a' * (maxDetailsTitleLength + 50)}\nx\n:::',
+    ).whereType<DetailsBlock>().single;
+    expect(long.title.length, maxDetailsTitleLength);
+    final emoji = splitDetailsBlocks(
+      ':::details ${'a' * (maxDetailsTitleLength - 1)}😀 tail\nx\n:::',
+    ).whereType<DetailsBlock>().single;
+    expect(emoji.title, 'a' * (maxDetailsTitleLength - 1));
   });
 
   test('a message full of hostile titles stays bounded', () {
