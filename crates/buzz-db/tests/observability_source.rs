@@ -1329,8 +1329,9 @@ fn unadmitted_event_write_transaction_openers(sources: &[(String, String)]) -> V
 
 /// Remove each top-level `#[cfg(test)]` item and keep the production code
 /// around it. Truncating at the first `#[cfg(test)]` would hide production
-/// functions that follow a test-only item. Relies on rustfmt layout: a
-/// top-level item closes on a column-0 `}` line, or ends on its first line.
+/// functions that follow a test-only item. Tracks brace depth: the item ends
+/// on the first line that leaves depth at or below zero and ends with `;` or
+/// `}`. A column-0 `}` line (rustfmt's top-level close) always ends it.
 fn strip_cfg_test_items(source: &str) -> String {
     let mut kept = String::with_capacity(source.len());
     let mut lines = source.lines();
@@ -1340,17 +1341,12 @@ fn strip_cfg_test_items(source: &str) -> String {
             kept.push('\n');
             continue;
         }
-        let mut opened = false;
-        for (index, line) in lines
-            .by_ref()
-            .skip_while(|line| line.starts_with("#["))
-            .enumerate()
-        {
-            let opens = line.matches('{').count();
-            opened |= opens > 0;
-            let single_line_block = index == 0 && opens > 0 && opens == line.matches('}').count();
-            let statement_end = !opened && line.trim_end().ends_with(';');
-            if single_line_block || statement_end || line == "}" || line == "};" {
+        let mut depth = 0_isize;
+        for line in lines.by_ref().skip_while(|line| line.starts_with("#[")) {
+            depth += line.matches('{').count() as isize - line.matches('}').count() as isize;
+            let trimmed = line.trim_end();
+            let item_end = depth <= 0 && (trimmed.ends_with(';') || trimmed.ends_with('}'));
+            if item_end || line == "}" || line == "};" {
                 break;
             }
         }
@@ -1369,6 +1365,10 @@ static LOCK: std::sync::Mutex<()> =\n\
     std::sync::Mutex::new(());\n\
 pub fn after_static() {}\n\
 #[cfg(test)]\n\
+static S: [u8; 1] =\n\
+    [const { 0 }; 1];\n\
+pub fn after_const_block() {}\n\
+#[cfg(test)]\n\
 #[derive(Debug)]\n\
 struct Fields {\n\
     value: u8,\n\
@@ -1385,6 +1385,7 @@ pub fn after_module() {}\n";
         "before",
         "after_struct",
         "after_static",
+        "after_const_block",
         "after_fields",
         "after_module",
     ] {
@@ -1393,7 +1394,7 @@ pub fn after_module() {}\n";
             "{name} is production code and must stay visible: {production}"
         );
     }
-    for hidden in ["Marker", "LOCK", "value: u8", "fn hidden"] {
+    for hidden in ["Marker", "LOCK", "static S", "value: u8", "fn hidden"] {
         assert!(
             !production.contains(hidden),
             "{hidden} is test-only and must be skipped: {production}"
