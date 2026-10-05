@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/identity_archive/archived_identities_provider.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
@@ -98,6 +99,8 @@ final mentionCandidatesProvider = Provider.family
       final searchResults =
           ref.watch(mentionUserSearchProvider(args.query)).asData?.value ??
           const <UserProfile>[];
+      final archivedPubkeys =
+          ref.watch(archivedIdentitiesProvider).asData?.value ?? const {};
 
       final sharedChannelIds = {
         for (final channel in channels)
@@ -112,6 +115,7 @@ final mentionCandidatesProvider = Provider.family
         ownerByAgentPubkey: owners,
         searchResults: searchResults,
         currentPubkey: currentPubkey,
+        archivedPubkeys: archivedPubkeys,
       );
 
       final names = mentionPickerNames(
