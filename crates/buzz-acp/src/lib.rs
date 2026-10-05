@@ -10196,6 +10196,151 @@ mod edit_native_steer_tests {
         );
     }
 
+    /// The DM steer rule depends on the running prompt's own classification,
+    /// which travels from the queue turn through `dispatch_pending` into
+    /// `run_prompt_task`, where formatting the prompt records it. Drive that
+    /// production handoff with DM channel metadata, then the real listener
+    /// admission: a top-level follow-up must be steered natively.
+    #[tokio::test]
+    async fn dispatched_dm_turn_records_classification_for_native_steer() {
+        let channel_id = Uuid::new_v4();
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-dm-steer-handoff-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        // Record each request and never answer: the prompt stays in flight.
+        let script = format!(
+            r#"while IFS= read -r line; do printf '%s\n' "$line" >> '{quoted_capture}'; done"#
+        );
+        let acp = acp::AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn holding ACP");
+        let ingress = |event: nostr::Event| NormalListenerIngress {
+            buzz_event: relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id,
+                event,
+            },
+            effective_author: "author".into(),
+            prompt_tag: "@mention".into(),
+            edit: None,
+        };
+        let running = ingress(message(None));
+        let scope = running.session_scope(scope::SessionPolicy::Channel, true);
+        let mut agent = pool::OwnedAgent {
+            index: 0,
+            acp,
+            state: pool::SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "dm-steer-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(scope.clone(), "live-session".into());
+        // The relay has no newer metadata, project, or history: every query
+        // returns no events, so the prompt keeps the startup DM metadata.
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay fixture");
+        let base_url = format!("http://{}", relay.local_addr().unwrap());
+        let relay = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut socket, _) = relay.accept().await.expect("accept relay query");
+                tokio::spawn(async move {
+                    let mut request = [0; 16384];
+                    let _ = socket.read(&mut request).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                        )
+                        .await;
+                });
+            }
+        });
+        let mut ctx = pool::tests::make_prompt_context_no_owner();
+        ctx.rest_client.base_url = base_url;
+        ctx.channel_info = pool::ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                relay::ChannelInfo {
+                    name: "dm".into(),
+                    channel_type: "dm".into(),
+                    description: None,
+                },
+            )]),
+            ctx.rest_client.clone(),
+        );
+        let ctx = Arc::new(ctx);
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        running.push(&mut queue, scope.clone());
+        let mut last_activity = tokio::time::Instant::now();
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, None);
+        assert_eq!(dispatched.len(), 1, "the DM turn is dispatched");
+
+        // The prompt reaches the agent only after `run_prompt_task` has
+        // formatted it, so its classification is settled by then.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let prompted = std::fs::read_to_string(&capture)
+                    .unwrap_or_default()
+                    .contains("\"session/prompt\"");
+                if prompted {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dispatched DM prompt reaches the agent");
+
+        // Observe the listener's decision through the running task's own
+        // steer and control channels.
+        let (control_tx, mut control_rx) = tokio::sync::oneshot::channel();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let meta = pool
+            .task_map_mut()
+            .values_mut()
+            .find(|meta| meta.scope.as_ref() == Some(&scope))
+            .expect("running DM task");
+        meta.control_tx = Some(control_tx);
+        meta.steer_tx = Some(steer_tx);
+
+        let (ack_tx, _ack_rx) = mpsc::unbounded_channel();
+        ingress(message(None))
+            .push(&mut queue, scope.clone())
+            .steer_or_interrupt(
+                MultipleEventHandling::Steer,
+                None,
+                &mut pool,
+                &mut queue,
+                &ack_tx,
+            );
+        let steer = steer_rx.try_recv().ok();
+        let control = control_rx.try_recv().ok();
+
+        pool.join_set.abort_all();
+        while pool.join_set.join_next().await.is_some() {}
+        relay.abort();
+        let _ = std::fs::remove_file(&capture);
+
+        assert!(steer.is_some(), "DM follow-up is sent as a native steer");
+        assert_eq!(
+            control, None,
+            "native steer must not cancel the running turn"
+        );
+    }
+
     /// A DM thread reply needs a `--reply-to` the running top-level turn's
     /// `<context>` does not carry, so it takes the cancel+merge path.
     #[tokio::test]
