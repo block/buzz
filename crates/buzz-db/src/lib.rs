@@ -66,7 +66,7 @@ pub(crate) use runtime::{
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, channel,
-    channel_members, community, deletion, dm, entity_deletion, event, feed, git_repo, moderation,
+    channel_members, community, deletion, dm, entity_deletion, event, feed, git_repo, live_authorization, moderation,
     nip_fi_binding, operator_listener, partition, personal_read, product_feedback, push, reaction,
     read_state, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
     replaceable, storage_accounting, thread, thread_window, usage, user, user_deletion,
@@ -83,6 +83,7 @@ pub use community::{
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use live_authorization::{LiveAuthorizationState, LiveAuthorizationTarget};
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
