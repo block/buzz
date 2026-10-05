@@ -492,23 +492,38 @@ Future<void> _shareImage(
   }
 }
 
-/// Whether `activity:<channel>` reads `message`. Unknown channels and an
-/// unknown reader count as not read, because a DM or mention needs its own
-/// marker.
-bool _readByChannelCatchUp(
+/// Whether the actions menu should offer **Mark read** for `message`.
+///
+/// This is the one decision every menu presentation (sheet, popover, native)
+/// uses. Mentions are classified with the signing key, not the optional
+/// profile, so a user without a published profile sees the same read state
+/// as the badge and the channel list. `activity:<channel>` reads only
+/// ordinary top-level messages in a known non-DM channel; an unknown channel
+/// or reader counts as not read, because a DM or mention needs its own mark.
+bool messageActionShowsUnread(
   WidgetRef ref,
-  String channelId,
-  TimelineMessage message,
-  String? currentPubkey,
-) {
-  if (currentPubkey == null) return false;
+  ReadStateState readState, {
+  required String channelId,
+  required TimelineMessage message,
+}) {
+  final readerPubkey = ref.read(myPubkeyProvider);
   final channels = ref.read(channelsProvider).asData?.value;
   final channel = channels?.where((c) => c.id == channelId).firstOrNull;
-  if (channel == null) return false;
-  return readByChannelCatchUp(
-    isDm: channel.isDm,
-    isReply: message.parentId != null,
-    highPriority: isHighPriorityEvent(message.tags, currentPubkey),
+  final channelCatchUp =
+      readerPubkey != null &&
+      channel != null &&
+      readByChannelCatchUp(
+        isDm: channel.isDm,
+        isReply: message.parentId != null,
+        highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+      );
+  return isMessageUnread(
+    readState,
+    channelId: channelId,
+    messageId: message.id,
+    createdAt: message.createdAt,
+    threadRootId: message.rootId,
+    channelCatchUp: channelCatchUp,
   );
 }
 
@@ -541,18 +556,11 @@ class _MarkReadUnreadTile extends ConsumerWidget {
     final readState = ref.watch(readStateProvider);
     if (!readState.isReady) return const SizedBox.shrink();
 
-    final unread = isMessageUnread(
+    final unread = messageActionShowsUnread(
+      ref,
       readState,
       channelId: channelId,
-      messageId: message.id,
-      createdAt: message.createdAt,
-      threadRootId: message.rootId,
-      channelCatchUp: _readByChannelCatchUp(
-        ref,
-        channelId,
-        message,
-        currentPubkey,
-      ),
+      message: message,
     );
 
     return ListTile(

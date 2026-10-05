@@ -3472,6 +3472,75 @@ void main() {
     );
   });
 
+  for (final (label, events, bold) in [
+    (
+      'catch-up marks read ordinary messages and thread replies',
+      [
+        _observed(id: 'msg-1', createdAt: 20),
+        _observed(
+          id: 'reply-1',
+          createdAt: 30,
+          rootId: 'root',
+          isThreadedReply: true,
+        ),
+      ],
+      false,
+    ),
+    (
+      'channel catch-up does not read a mention',
+      [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      true,
+    ),
+  ]) {
+    testWidgets(label, (tester) async {
+      final channels = [
+        Channel(
+          id: '1',
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'General discussion',
+          createdBy: 'abc',
+          createdAt: DateTime(2025),
+          memberCount: 10,
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+            30 * 1000,
+            isUtc: true,
+          ),
+          isMember: true,
+        ),
+      ];
+      final readState = _FakeReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'pk',
+          contexts: {'1': 10, 'activity:1': 25, 'thread-activity:root': 30},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                channels,
+                observedEventsByChannel: {'1': events},
+              ),
+            ),
+            readStateProvider.overrideWith(() => readState),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Text>(find.text('general')).style?.fontWeight,
+        bold ? FontWeight.w700 : FontWeight.w400,
+      );
+    });
+  }
+
   testWidgets('seeds first loaded channels as read', (tester) async {
     final channels = [
       Channel(
