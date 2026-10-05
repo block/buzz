@@ -527,6 +527,16 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(lease_stats.contains("WriterOperation::Maintenance"));
     assert!(lease_stats.contains("fetch_one(&mut *connection)"));
+    // Lease seams that delegate to the bounded helper inherit its attribution.
+    let bounded_lease_sql = deletion
+        .split_once("async fn bounded_serving_lease_sql<T>(")
+        .expect("deletion store must expose the bounded serving-lease helper")
+        .1
+        .split_once("/// Acquire a durable, expiring lease")
+        .expect("bounded serving-lease helper must precede lease acquisition")
+        .0;
+    assert!(bounded_lease_sql.contains("WriterOperation::EventWrite"));
+    assert!(!bounded_lease_sql.contains("self.pool.begin().await"));
     for (start, end) in [
         (
             "pub async fn acquire_serving_write_lease",
@@ -557,7 +567,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             .unwrap_or_else(|| panic!("serving-write seam {start} must precede {end}"))
             .0;
         assert!(
-            function.contains("WriterOperation::EventWrite"),
+            function.contains("WriterOperation::EventWrite")
+                || function.contains("self.bounded_serving_lease_sql("),
             "serving-write seam {start} must be event-write attributed"
         );
         assert!(!function.contains("self.pool.begin().await"));
