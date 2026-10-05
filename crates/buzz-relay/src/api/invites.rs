@@ -31,6 +31,7 @@ use buzz_core::invite::{
     MIN_INVITE_TTL_SECS, V2_PREFIX,
 };
 
+use crate::config::InvitePolicy;
 use crate::invite_token;
 use crate::state::AppState;
 
@@ -61,8 +62,12 @@ pub struct MintInviteRequest {
     pub max_uses: Option<i32>,
 }
 
+/// Validate a mint request against protocol bounds, then clamp it to the
+/// operator's [`InvitePolicy`]. Out-of-bounds input is rejected; in-bounds
+/// input above a cap is lowered to the cap.
 fn validate_mint_request(
     request: &MintInviteRequest,
+    policy: InvitePolicy,
 ) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
     let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
     if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
@@ -84,7 +89,14 @@ fn validate_mint_request(
         }
     }
 
-    Ok((ttl, request.max_uses))
+    let ttl = policy.max_ttl_secs.map_or(ttl, |cap| ttl.min(cap));
+    let max_uses = match (request.max_uses, policy.max_uses) {
+        (Some(requested), Some(cap)) => Some(requested.min(cap)),
+        (None, cap) => cap,
+        (requested, None) => requested,
+    };
+
+    Ok((ttl, max_uses))
 }
 
 /// Body for `POST /api/invites/claim`.
@@ -380,7 +392,7 @@ async fn mint_invite_inner(
         })?
     };
 
-    let (ttl, max_uses) = validate_mint_request(&request)?;
+    let (ttl, max_uses) = validate_mint_request(&request, state.config.invite_policy)?;
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
@@ -611,7 +623,10 @@ mod postgres_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT, MAX_INVITE_USES, MIN_INVITE_TTL_SECS};
+    use super::{
+        claim_key_rate_limited, InvitePolicy, CLAIM_RATE_LIMIT, DEFAULT_INVITE_TTL_SECS,
+        MAX_INVITE_USES, MIN_INVITE_TTL_SECS,
+    };
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -881,7 +896,7 @@ mod postgres_tests {
             ),
         ] {
             assert_eq!(
-                validate_mint_request(&request).expect("valid request"),
+                validate_mint_request(&request, InvitePolicy::default()).expect("valid request"),
                 expected
             );
         }
@@ -909,12 +924,51 @@ mod postgres_tests {
             },
         ] {
             assert_eq!(
-                validate_mint_request(&request)
+                validate_mint_request(&request, InvitePolicy::default())
                     .expect_err("invalid request")
                     .0,
                 StatusCode::BAD_REQUEST
             );
         }
+    }
+
+    #[test]
+    fn mint_request_is_clamped_to_operator_policy() {
+        use super::validate_mint_request;
+
+        let policy = InvitePolicy {
+            max_ttl_secs: Some(86_400),
+            max_uses: Some(1),
+        };
+        for (ttl_secs, max_uses, expected) in [
+            // Desktop's default body: 72 h, unlimited uses.
+            (Some(DEFAULT_INVITE_TTL_SECS), None, (86_400, Some(1))),
+            (None, None, (86_400, Some(1))),
+            (Some(3_600), Some(10), (3_600, Some(1))),
+            (
+                Some(MIN_INVITE_TTL_SECS),
+                Some(1),
+                (MIN_INVITE_TTL_SECS, Some(1)),
+            ),
+        ] {
+            let request = super::MintInviteRequest { ttl_secs, max_uses };
+            assert_eq!(
+                validate_mint_request(&request, policy).expect("valid request"),
+                expected
+            );
+        }
+
+        // Protocol bounds still reject before any clamping.
+        let request = super::MintInviteRequest {
+            ttl_secs: Some(MAX_INVITE_TTL_SECS + 1),
+            max_uses: None,
+        };
+        assert_eq!(
+            validate_mint_request(&request, policy)
+                .expect_err("invalid request")
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

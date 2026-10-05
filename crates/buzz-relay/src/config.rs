@@ -293,6 +293,10 @@ pub struct Config {
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
 
+    /// Operator caps applied to every minted invite. Both unset by default,
+    /// which preserves the client-chosen TTL and use count.
+    pub invite_policy: InvitePolicy,
+
     /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
@@ -404,6 +408,58 @@ fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
             "{name} must be valid Unicode"
         ))),
     }
+}
+
+/// Operator caps on `POST /api/invites`.
+///
+/// Mint requests are clamped to these caps rather than rejected, so clients
+/// that send their own defaults (Desktop: 72 h, unlimited uses) still mint a
+/// compliant invite. The mint response reports the effective values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InvitePolicy {
+    /// Longest lifetime an invite may have. Set via
+    /// `BUZZ_INVITE_MAX_TTL_SECS`; must be within the protocol TTL bounds.
+    pub max_ttl_secs: Option<u64>,
+    /// Most uses an invite may allow; also the use count applied when the
+    /// request omits `max_uses`. Set via `BUZZ_INVITE_MAX_USES`.
+    pub max_uses: Option<i32>,
+}
+
+fn invite_policy_from_env() -> Result<InvitePolicy, ConfigError> {
+    use buzz_core::invite::{MAX_INVITE_TTL_SECS, MAX_INVITE_USES, MIN_INVITE_TTL_SECS};
+
+    fn bounded<T: std::str::FromStr + PartialOrd + std::fmt::Display>(
+        name: &str,
+        min: T,
+        max: T,
+    ) -> Result<Option<T>, ConfigError> {
+        match std::env::var(name) {
+            Ok(raw) => raw
+                .trim()
+                .parse::<T>()
+                .ok()
+                .filter(|value| *value >= min && *value <= max)
+                .map(Some)
+                .ok_or_else(|| {
+                    ConfigError::InvalidValue(format!(
+                        "{name} must be an integer from {min} through {max}"
+                    ))
+                }),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
+                "{name} must be valid Unicode"
+            ))),
+        }
+    }
+
+    Ok(InvitePolicy {
+        max_ttl_secs: bounded(
+            "BUZZ_INVITE_MAX_TTL_SECS",
+            MIN_INVITE_TTL_SECS,
+            MAX_INVITE_TTL_SECS,
+        )?,
+        max_uses: bounded("BUZZ_INVITE_MAX_USES", 1, MAX_INVITE_USES)?,
+    })
 }
 
 fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigError> {
@@ -776,6 +832,8 @@ impl Config {
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+
+        let invite_policy = invite_policy_from_env()?;
 
         let klipy = std::env::var("BUZZ_KLIPY_API_KEY")
             .ok()
@@ -1368,6 +1426,7 @@ impl Config {
             relay_operator_pubkeys,
             operator_listener_delivery_urls,
             allow_nip_oa_auth,
+            invite_policy,
             klipy,
             media,
             media_max_concurrent_uploads,
