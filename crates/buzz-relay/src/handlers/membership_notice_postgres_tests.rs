@@ -158,7 +158,15 @@ async fn read_tags(
 ) -> Vec<String> {
     let (conn, mut rx) = test_conn(tenant, reader);
     let filters: Vec<nostr::Filter> = serde_json::from_value(json!([filter])).unwrap();
-    crate::handlers::req::handle_req("read".into(), filters, vec![None], conn, state.clone()).await;
+    crate::handlers::req::handle_req(
+        "read".into(),
+        filters,
+        vec![None],
+        Vec::new(),
+        conn,
+        state.clone(),
+    )
+    .await;
     let mut values = Vec::new();
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {

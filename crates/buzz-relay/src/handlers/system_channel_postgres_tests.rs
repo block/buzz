@@ -87,7 +87,15 @@ async fn req_all(f: &Fixture, reader: &Keys, filters: Value) -> Vec<String> {
     let (conn, mut rx) = test_conn(&f.tenant, reader);
     let filters: Vec<nostr::Filter> = serde_json::from_value(filters).expect("filters");
     let before = vec![None; filters.len()];
-    crate::handlers::req::handle_req("s".into(), filters, before, conn, f.state.clone()).await;
+    crate::handlers::req::handle_req(
+        "s".into(),
+        filters,
+        before,
+        Vec::new(),
+        conn,
+        f.state.clone(),
+    )
+    .await;
     let mut ids = Vec::new();
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {

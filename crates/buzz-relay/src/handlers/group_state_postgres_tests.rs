@@ -666,8 +666,15 @@ pub(crate) async fn req_event_ids(
 ) -> Vec<String> {
     let (conn, mut send_rx) = test_conn(tenant, reader);
     let filter: nostr::Filter = serde_json::from_value(filter).expect("filter");
-    crate::handlers::req::handle_req("g".into(), vec![filter], vec![None], conn, state.clone())
-        .await;
+    crate::handlers::req::handle_req(
+        "g".into(),
+        vec![filter],
+        vec![None],
+        Vec::new(),
+        conn,
+        state.clone(),
+    )
+    .await;
     let mut ids = Vec::new();
     while let Ok(frame) = send_rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {

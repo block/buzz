@@ -138,7 +138,9 @@ pub struct SearchHit {
 /// Result of a search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Hits on this page, in the query's `sort` order.
+    /// Hits on this page, in the query's `sort` order. For `kinds == [0]`
+    /// queries there is at most one hit per pubkey: its current head (the
+    /// newest live row), and only when that head itself matches.
     pub hits: Vec<SearchHit>,
     /// 1-indexed page returned.
     pub page: u32,
@@ -225,6 +227,15 @@ fn push_tsquery(
         }
     }
 }
+
+fn push_authors(qb: &mut QueryBuilder<sqlx::Postgres>, authors: Option<&[Vec<u8>]>) {
+    if let Some(authors) = authors.filter(|authors| !authors.is_empty()) {
+        qb.push(" AND pubkey = ANY(");
+        qb.push_bind(authors.to_vec());
+        qb.push(")");
+    }
+}
+
 fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
     if trimmed.is_empty() {
@@ -258,13 +269,30 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
 ///   AND search_tsv @@ $q
-///   [+ channel scope, kinds, authors, since, until]
+///   [+ artifact head check, channel scope, kinds, authors, since, until]
 /// ORDER BY rank DESC, created_at DESC, id   -- SearchSort::Newest: created_at DESC, id
 /// LIMIT $per_page OFFSET (($page - 1) * $per_page)
 /// ```
 ///
-/// `community_id = $ctx` is the first predicate and is non-negotiable. There
-/// is no code path through this function that omits it.
+/// For `kinds == [0]` the row source is each pubkey's current kind-0 head,
+/// resolved before any search predicate runs, and under relevance sort the
+/// select list and ORDER BY gain a name-match term:
+/// ```sql
+/// SELECT ..., <profile name fields as tsvector> @@ $q AS name_match
+/// FROM (SELECT DISTINCT ON (pubkey) id, kind, pubkey, channel_id, created_at, content, search_tsv
+///       FROM events
+///       WHERE community_id = $ctx AND deleted_at IS NULL AND kind = 0 [AND authors]
+///       ORDER BY pubkey, created_at DESC, id) AS events
+/// WHERE search_tsv @@ $q
+///   [+ channel scope, since, until]
+/// ORDER BY name_match DESC,
+///          [search_tsv @@ websearch_to_tsquery('simple', $text) DESC,]  -- prefix mode, ≤ 2 chars
+///          rank DESC, created_at DESC, id    -- SearchSort::Newest: created_at DESC, id
+/// LIMIT $per_page OFFSET (($page - 1) * $per_page)
+/// ```
+///
+/// `community_id = $ctx` is the first predicate on the `events` scan and is
+/// non-negotiable. There is no code path through this function that omits it.
 #[datastore_span(name = "search", system = "postgresql")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
     let profile_only = query.kinds.as_deref() == Some(&[0][..]);
@@ -292,6 +320,13 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         && query.mode == SearchMode::Prefix
         && profile_only
         && search_text.chars().count() <= 2;
+    // Profile lookups search the whole kind-0 JSON, so `about` text or an
+    // inline avatar's base64 can match the query on many rows that are not the
+    // person being looked for. Keep the same result set and pagination
+    // contract, but order rows whose name fields match ahead of body-only
+    // matches. Gated on kinds and relevance sort, not mode, so the WebSocket
+    // full-text path benefits as well as the prefix typeahead.
+    let order_by_name_match = query.sort == SearchSort::Relevance && profile_only;
     // Profiles are few, so profile typeahead keeps ranking every match.
     let rank_window =
         (query.sort == SearchSort::Relevance && query.mode == SearchMode::Prefix && !profile_only)
@@ -319,18 +354,60 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
          ts_rank_cd(search_tsv, ",
     );
     qb.push_bind(&tsquery);
-    qb.push("::tsquery) AS rank FROM ");
-    if rank_window.is_some() {
-        qb.push("(SELECT id, kind, pubkey, channel_id, created_at, search_tsv FROM ");
+    qb.push("::tsquery) AS rank");
+    if order_by_name_match {
+        // `name_match` applies the same tsquery as the WHERE clause to the
+        // name fields only, so both sides normalize identically. `CASE` skips
+        // the `THEN` arm when the guard is false, so rows that predate
+        // ingest-side JSON validation never raise on `::jsonb`; a non-object
+        // document yields NULL from `->>`, an empty vector, and `false`.
+        // `pg_input_is_valid` needs PostgreSQL 16 or later.
+        qb.push(
+            ", CASE WHEN pg_input_is_valid(content, 'jsonb') \
+             THEN to_tsvector('simple', concat_ws(' ', \
+               content::jsonb ->> 'name', \
+               content::jsonb ->> 'display_name', \
+               content::jsonb ->> 'displayName')) @@ ",
+        );
+        qb.push_bind(&tsquery);
+        qb.push("::tsquery ELSE false END AS name_match");
     }
-    qb.push("events WHERE community_id = ");
-    qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ ");
+    qb.push(" FROM ");
+    if profile_only {
+        // Kind 0 is replaceable, but earlier bugs may have left more than one
+        // live row per pubkey and nothing in the schema forbids it. Resolve
+        // each pubkey's current head, in the replaceable store's own NIP-16
+        // order, before the search predicate sees any row: matching first
+        // would let a superseded row that still matches stand in for a current
+        // one that does not, resurfacing a name its owner has since changed.
+        // The fences below then apply to the head alone, as they would on a
+        // store that held one row per person, and page slots count people.
+        qb.push(
+            "(SELECT DISTINCT ON (pubkey) \
+               id, kind, pubkey, channel_id, created_at, content, search_tsv \
+             FROM events WHERE community_id = ",
+        );
+        qb.push_bind(*query.community.as_uuid());
+        qb.push(" AND deleted_at IS NULL AND kind = 0");
+        push_authors(&mut qb, query.authors.as_deref());
+        qb.push(" ORDER BY pubkey, created_at DESC, id) AS events WHERE ");
+    } else {
+        if rank_window.is_some() {
+            qb.push("(SELECT id, kind, pubkey, channel_id, created_at, search_tsv FROM ");
+        }
+        qb.push("events WHERE community_id = ");
+        qb.push_bind(*query.community.as_uuid());
+        qb.push(" AND deleted_at IS NULL AND ");
+    }
+    qb.push("search_tsv @@ ");
     qb.push_bind(&tsquery);
     qb.push("::tsquery");
 
-    // Search is a current-state surface; old artifact snapshots cannot match.
-    qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND NOT ah.deleted))");
+    if !profile_only {
+        // Search is a current-state surface; old artifact snapshots cannot
+        // match. The kind-0 head subquery pins `kind = 0`, so it never needs this.
+        qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND NOT ah.deleted))");
+    }
 
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the
@@ -355,20 +432,16 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         }
     }
 
-    if let Some(ref kinds) = query.kinds {
-        if !kinds.is_empty() {
-            qb.push(" AND kind = ANY(");
-            qb.push_bind(kinds.clone());
-            qb.push(")");
+    // The kind-0 head subquery already carries both of these.
+    if !profile_only {
+        if let Some(ref kinds) = query.kinds {
+            if !kinds.is_empty() {
+                qb.push(" AND kind = ANY(");
+                qb.push_bind(kinds.clone());
+                qb.push(")");
+            }
         }
-    }
-
-    if let Some(ref authors) = query.authors {
-        if !authors.is_empty() {
-            qb.push(" AND pubkey = ANY(");
-            qb.push_bind(authors.clone());
-            qb.push(")");
-        }
+        push_authors(&mut qb, query.authors.as_deref());
     }
 
     if let Some(since) = query.since {
@@ -393,12 +466,17 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
 
     if query.sort == SearchSort::Newest {
         qb.push(" ORDER BY created_at DESC, id LIMIT ");
-    } else if prioritize_exact_profile_lexeme {
-        qb.push(" ORDER BY search_tsv @@ websearch_to_tsquery('simple', ");
-        qb.push_bind(&search_text);
-        qb.push(") DESC, rank DESC, created_at DESC, id LIMIT ");
     } else {
-        qb.push(" ORDER BY rank DESC, created_at DESC, id LIMIT ");
+        qb.push(" ORDER BY ");
+        if order_by_name_match {
+            qb.push("name_match DESC, ");
+        }
+        if prioritize_exact_profile_lexeme {
+            qb.push("search_tsv @@ websearch_to_tsquery('simple', ");
+            qb.push_bind(&search_text);
+            qb.push(") DESC, ");
+        }
+        qb.push("rank DESC, created_at DESC, id LIMIT ");
     }
     qb.push_bind(per_page_actual as i64);
     qb.push(" OFFSET ");

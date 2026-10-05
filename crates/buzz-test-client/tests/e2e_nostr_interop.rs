@@ -396,6 +396,94 @@ async fn test_nip50_search_mixed_filters_rejected() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// Send one message, then issue the same NIP-50 REQ twice: once with the
+/// `search_mode: "prefix"` filter extension and once without it.
+/// Verify: `pro` matches `project` only in prefix mode, proving the WebSocket
+/// path reads the extension the HTTP bridge already honours instead of forcing
+/// full-text semantics.
+#[tokio::test]
+#[ignore]
+async fn ws_search_prefix_mode_matches_partial_token() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    let unique_token = format!("prefixtoken_{}", uuid::Uuid::new_v4().simple());
+    let content = format!("{unique_token} project kickoff");
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let ok = client
+        .send_text_message(&keys, &channel, &content, 9)
+        .await
+        .expect("send message");
+    assert!(ok.accepted, "relay rejected message: {}", ok.message);
+
+    // Small delay to allow indexing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // `Filter` has no field for the extension, so build the REQ by hand.
+    let prefix_sid = sub_id("nip50-prefix");
+    client
+        .send_raw(&serde_json::json!([
+            "REQ",
+            prefix_sid,
+            {
+                "kinds": [9],
+                "#h": [channel],
+                "search": "pro",
+                "search_mode": "prefix",
+            }
+        ]))
+        .await
+        .expect("send prefix REQ");
+
+    let prefix_events = client
+        .collect_until_eose(&prefix_sid, Duration::from_secs(10))
+        .await
+        .expect("collect prefix results until EOSE");
+
+    assert!(
+        prefix_events
+            .iter()
+            .any(|e| e.content.contains(&unique_token)),
+        "prefix-mode search for `pro` did not return the `project` message. events: {:?}",
+        prefix_events.iter().map(|e| &e.content).collect::<Vec<_>>()
+    );
+
+    // Same REQ without the extension: full text wants the whole lexeme.
+    let full_text_sid = sub_id("nip50-full-text");
+    client
+        .send_raw(&serde_json::json!([
+            "REQ",
+            full_text_sid,
+            {
+                "kinds": [9],
+                "#h": [channel],
+                "search": "pro",
+            }
+        ]))
+        .await
+        .expect("send full-text REQ");
+
+    let full_text_events = client
+        .collect_until_eose(&full_text_sid, Duration::from_secs(10))
+        .await
+        .expect("collect full-text results until EOSE");
+
+    assert!(
+        full_text_events.is_empty(),
+        "full-text search for `pro` must not match `project`, got {} events: {:?}",
+        full_text_events.len(),
+        full_text_events
+            .iter()
+            .map(|e| &e.content)
+            .collect::<Vec<_>>()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
 /// Subscribe with a search filter that matches nothing.
 /// Verify: EOSE received with no events.
 #[tokio::test]

@@ -533,6 +533,7 @@ async fn ordinary_req(f: &Fixture, conn: &Arc<ConnectionState>, filters: Vec<Val
         "s".into(),
         filters,
         before_ids,
+        Vec::new(),
         Arc::clone(conn),
         Arc::clone(&f.state),
     )
@@ -656,7 +657,7 @@ async fn a_replaced_req_sends_nothing_under_a_sync_that_took_its_id() {
             let before_ids = vec![None; filters.len()];
             SEND_PAUSE.scope(
                 Arc::clone(&pause),
-                super::req::handle_req("s".into(), filters, before_ids, f_conn, state),
+                super::req::handle_req("s".into(), filters, before_ids, Vec::new(), f_conn, state),
             )
         });
         tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())

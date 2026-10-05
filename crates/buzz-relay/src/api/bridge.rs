@@ -22,6 +22,7 @@ use buzz_core::TenantContext;
 use crate::access::{AccessSlot, AuthResult};
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
+use crate::protocol::extract_search_mode;
 use crate::state::AppState;
 
 use super::{
@@ -855,17 +856,6 @@ fn extract_feed_types(raw: &Value) -> Option<Vec<String>> {
         None
     } else {
         Some(types)
-    }
-}
-
-fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
-    match raw
-        .get("search_mode")
-        .or_else(|| raw.get("searchMode"))
-        .and_then(Value::as_str)
-    {
-        Some("prefix") => buzz_search::SearchMode::Prefix,
-        _ => buzz_search::SearchMode::FullText,
     }
 }
 
@@ -10433,7 +10423,14 @@ pub(crate) mod postgres_tests {
                 serde_json::from_value(self.search_filter()).expect("filter");
             let state = self.state.clone();
             self.ws(|conn| {
-                crate::handlers::req::handle_req("s".into(), vec![filter], vec![None], conn, state)
+                crate::handlers::req::handle_req(
+                    "s".into(),
+                    vec![filter],
+                    vec![None],
+                    vec![buzz_search::SearchMode::FullText],
+                    conn,
+                    state,
+                )
             })
             .await
         }
@@ -10657,6 +10654,7 @@ pub(crate) mod postgres_tests {
             "p".into(),
             vec![filter],
             vec![None],
+            vec![buzz_search::SearchMode::FullText],
             conn,
             fx.state.clone(),
         )
@@ -10697,6 +10695,7 @@ pub(crate) mod postgres_tests {
             "x".into(),
             vec![live],
             vec![None],
+            vec![buzz_search::SearchMode::FullText],
             conn.clone(),
             fx.state.clone(),
         )
@@ -10727,6 +10726,7 @@ pub(crate) mod postgres_tests {
             "x".into(),
             vec![search],
             vec![None],
+            vec![buzz_search::SearchMode::FullText],
             conn.clone(),
             fx.state.clone(),
         ));
@@ -10806,6 +10806,7 @@ pub(crate) mod postgres_tests {
                     sub.into(),
                     vec![req()],
                     vec![None],
+                    vec![buzz_search::SearchMode::FullText],
                     conn.clone(),
                     state.clone(),
                 )
@@ -10880,6 +10881,7 @@ pub(crate) mod postgres_tests {
             "h".into(),
             vec![req()],
             vec![None],
+            vec![buzz_search::SearchMode::FullText],
             conn.clone(),
             fx.state.clone(),
         )
