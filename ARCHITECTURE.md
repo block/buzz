@@ -736,10 +736,51 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 | POST | `/hooks/{id}` | Workflow webhook trigger (secret-authenticated) |
 | PUT | `/media/upload` | Upload media blob (Blossom, 50 MB limit) |
 | GET/HEAD | `/media/{sha256_ext}` | Retrieve/probe media blob |
+| POST | `/api/invites` | Mint a durable, use-limited v2 invite (NIP-98 owner/admin) |
+| POST | `/api/invites/claim` | Claim a durable v2 invite or a still-valid legacy v1 invite (NIP-98) |
 | GET | `/git/{owner}/{repo}/info/refs` | Git smart HTTP advertisement |
 | POST | `/git/{owner}/{repo}/git-upload-pack` | Git smart HTTP fetch |
 | POST | `/git/{owner}/{repo}/git-receive-pack` | Git smart HTTP push |
 | POST | `/internal/git/policy` | Internal git hook policy check |
+
+Durable v2 invite codes are tenant-bound database records. V2 mint and claim,
+plus community-ban mutations, serialize on a tenant-scoped transaction lock. A
+ban permanently revokes still-live v2 invites from that principal, its verified
+NIP-OA owner, and agents currently recorded under that owner. Unbanning does
+not restore a v2 invite; a fresh invite must be minted after restrictions are
+lifted. V2 claim checks the issuer and claimant's authoritative ban state in the
+admission transaction and fails closed when that lookup fails. Claimants need
+not already be community members, preserving invite-based onboarding.
+
+Stateless v1 HMAC invite codes remain redeemable until their signed expiry;
+they do not retain issuer identity, so a later issuer ban cannot revoke them.
+Claim-time checks still reject a banned claimant or verified NIP-OA owner, and
+database lookup failures reject the claim. Production minting issues only v2
+codes. V2 invites retain issuer identity and a ban permanently revokes its
+outstanding invites, even if that principal is later unbanned.
+
+The shared invite lifetime defaults to 72 hours and is capped at 30 days. Track
+the v1 drain from the last possible v1 issuance across every serving and
+rollback-capable relay version, not from merge or initial rollout. Do not
+consider that drain complete until the maximum lifetime has elapsed after that
+last possible issuance. The deployment cutoff is not selected here. Operators
+may set `BUZZ_V1_INVITES_INVALID_AFTER` to an absolute RFC3339 instant with an
+explicit UTC offset; v1 claims are rejected at or after it, while each code's
+own earlier expiry still applies. Leave it unset to let valid v1 links expire
+naturally. Use the same instant on every pod and keep relay clocks synchronized
+so the boundary is consistent. Rolling back to a relay version without this
+check can make still-valid v1 links redeemable again; a rollback-capable version
+that can mint v1 also restarts the drain clock if it serves traffic.
+
+For the first rollout, pause invite claims and ban changes while relay versions
+that do not participate in the community admission lock are serving. Apply the
+migration and bring the updated lock-aware fleet up before resuming those
+operations; mixed versions can bypass the ordering guarantee. The migration
+also backfills v2 revocation from active bans and retained community/deployment
+ban audit rows; an older ban that was lifted without any retained audit record
+cannot be reconstructed from current state alone. Because legacy v1 tokens lack
+issuer identity, the related security finding remains open until the drain is
+complete or its scope is explicitly revised.
 
 **Constants:**
 

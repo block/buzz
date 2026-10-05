@@ -374,6 +374,11 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
+    /// Optional RFC3339 cutoff at or after which stateless v1 invite codes are
+    /// rejected (`BUZZ_V1_INVITES_INVALID_AFTER`). Unset leaves each v1 code's
+    /// signed expiry as its only time limit.
+    pub v1_invites_invalid_after: Option<chrono::DateTime<chrono::Utc>>,
+
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
 
@@ -410,6 +415,37 @@ fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid Unicode"
+        ))),
+    }
+}
+
+fn parse_rfc3339_utc_timestamp(
+    name: &str,
+    raw: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, ConfigError> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(ConfigError::InvalidValue(format!(
+            "{name} must be an RFC3339 timestamp with an explicit UTC offset, for example 2030-01-01T00:00:00Z"
+        )));
+    }
+
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+        .map_err(|error| {
+            ConfigError::InvalidValue(format!(
+                "{name} must be an RFC3339 timestamp with an explicit UTC offset, for example 2030-01-01T00:00:00Z: {error}"
+            ))
+        })
+}
+
+fn v1_invites_invalid_after_from_env() -> Result<Option<chrono::DateTime<chrono::Utc>>, ConfigError>
+{
+    match std::env::var("BUZZ_V1_INVITES_INVALID_AFTER") {
+        Ok(raw) => parse_rfc3339_utc_timestamp("BUZZ_V1_INVITES_INVALID_AFTER", &raw).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "BUZZ_V1_INVITES_INVALID_AFTER must be valid UTF-8: {error}"
         ))),
     }
 }
@@ -677,6 +713,8 @@ impl Config {
                 .min(MAX_DRAIN_JITTER_MS),
             Err(_) => 0,
         };
+
+        let v1_invites_invalid_after = v1_invites_invalid_after_from_env()?;
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
@@ -1424,6 +1462,7 @@ impl Config {
             push_gateway_timeout,
             operator_listener_timeout,
             join_policy,
+            v1_invites_invalid_after,
             admin,
             web_dir,
             serve_git_web_gui,
@@ -2364,6 +2403,47 @@ mod tests {
             "an empty value is treated as unset — a kill switch, not a crashloop"
         );
         assert_eq!(blank, 0, "a whitespace-only value is treated as unset");
+    }
+
+    #[test]
+    fn v1_invite_cutoff_is_optional_and_invalid_values_fail_startup() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_V1_INVITES_INVALID_AFTER");
+
+        std::env::remove_var("BUZZ_V1_INVITES_INVALID_AFTER");
+        let unset = Config::from_env()
+            .expect("unset cutoff is valid")
+            .v1_invites_invalid_after;
+
+        std::env::set_var("BUZZ_V1_INVITES_INVALID_AFTER", "2030-01-01T02:00:00+02:00");
+        let configured = Config::from_env()
+            .expect("RFC3339 cutoff is valid")
+            .v1_invites_invalid_after;
+
+        std::env::set_var("BUZZ_V1_INVITES_INVALID_AFTER", "2030-02-30T00:00:00Z");
+        let malformed = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_V1_INVITES_INVALID_AFTER", value);
+        } else {
+            std::env::remove_var("BUZZ_V1_INVITES_INVALID_AFTER");
+        }
+
+        assert_eq!(unset, None);
+        assert_eq!(
+            configured,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+                    .expect("valid timestamp")
+                    .with_timezone(&chrono::Utc)
+            ),
+            "offset timestamps normalize to the same absolute UTC instant"
+        );
+        assert!(matches!(
+            malformed,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_V1_INVITES_INVALID_AFTER")
+        ));
     }
 
     #[test]

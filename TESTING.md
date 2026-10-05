@@ -190,7 +190,7 @@ relay key for authoritative replacement:
 
 ```bash
 export PATH="$PWD/target/release:$PATH"
-export DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz_roster_e2e"
+export DATABASE_URL="${BUZZ_TEST_DATABASE_URL:?set this to an isolated local Postgres URI}"
 export BUZZ_RELAY_URL="http://localhost:3030"  # match the relay from step 3
 export RELAY_URL="ws://localhost:3030"
 export BUZZ_RELAY_PRIVATE_KEY="<same key used by buzz-relay>"
@@ -331,11 +331,12 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
-| `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
+| `DATABASE_URL`                    | local `.env` value          | |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
 | `BUZZ_DRAIN_JITTER_MS`          | `0` (off)                   | Per-connection upper bound, in ms, for the random delay before each live WebSocket gets its `1012 Service Restart` close on graceful shutdown. `0` closes every socket at once (the previous behavior). A positive value spreads closes uniformly over `[1, value]` ms to avoid a reconnect thundering herd on rolling deploys. Values above `20000` are capped to `20000` (`MAX_DRAIN_JITTER_MS`) to leave close-frame delivery headroom under the relay's 30s hard-drain timeout. Empty or whitespace-only is treated as unset (off); a non-integer fails startup loudly. |
+| `BUZZ_V1_INVITES_INVALID_AFTER` | unset                       | Optional RFC3339 instant with an explicit UTC offset. Rejects stateless v1 invite claims at or after this instant; each link's earlier signed expiry still applies. Invalid values fail startup. The setting is ignored by durable v2 invites. Keep the same instant on every relay pod and synchronize pod clocks; rolling back to a version without this check can make still-valid v1 links redeemable again. |
 | `BUZZ_AUDIT_ENABLED`            | `true`                      | Tamper-evident event/media audit log. Set `false`/`0`/`off` to skip its DB pool and writes. Does not disable the separate moderation audit trail. |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |

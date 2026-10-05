@@ -1,4 +1,4 @@
-//! Relay invite HTTP API — mint and claim stateless invite codes.
+//! Relay invite HTTP API — mint and claim durable invite codes.
 //!
 //! Routes (both NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -6,8 +6,8 @@
 //!   or `admin` role in the tenant community (mirrors the kind:9030 authz).
 //! - `POST /api/invites/claim` — claim an invite code. Deliberately **exempt
 //!   from the relay-membership gate**: the whole point is that the caller is
-//!   not a member yet. NIP-98 proves control of the joining pubkey; the HMAC
-//!   on the code proves an admin authorized the join.
+//!   not a member yet. NIP-98 proves control of the joining pubkey; the
+//!   tenant-scoped v2 row or a valid legacy v1 signature authorizes the join.
 //!
 //! Token format, key derivation, and security trade-offs live in
 //! [`crate::invite_token`].
@@ -233,7 +233,7 @@ async fn authenticate(
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
-) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
+) -> Result<(buzz_core::TenantContext, nostr::PublicKey, Option<u64>), (StatusCode, Json<Value>)> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -251,11 +251,12 @@ async fn authenticate(
     let bridge::VerifiedBridgeAuth {
         pubkey,
         event_id_bytes,
+        signed_created_at,
         ..
     } = bridge::verify_nip98_exempt_invite_claim(headers, "POST", &url, Some(body))?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
-    Ok((tenant, pubkey))
+    Ok((tenant, pubkey, signed_created_at))
 }
 
 fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
@@ -323,6 +324,11 @@ async fn mint_invite_checked(
     };
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
+    let owner = super::relay_members::extract_nip_oa_owner(
+        pubkey.as_bytes(),
+        super::relay_members::extract_auth_tag_header(&headers),
+        signed_created_at,
+    );
 
     // Replay detection runs after NIP-98+assertion admission (both proofs verified).
     if let Err(e) = bridge::check_nip98_replay(&state, &tenant, event_id_bytes).await {
@@ -342,7 +348,7 @@ async fn mint_invite_checked(
         return e.into_response();
     }
 
-    match mint_invite_inner(&state, body, tenant, pubkey).await {
+    match mint_invite_inner(&state, body, tenant, pubkey, owner).await {
         Ok(json) => json.into_response(),
         Err(e) => e.into_response(),
     }
@@ -353,6 +359,7 @@ async fn mint_invite_inner(
     body: axum::body::Bytes,
     tenant: buzz_core::TenantContext,
     pubkey: nostr::PublicKey,
+    owner_pubkey: Option<nostr::PublicKey>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
@@ -385,9 +392,26 @@ async fn mint_invite_inner(
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .mint_relay_invite_with_owner(
+            tenant.community(),
+            &sender_hex,
+            owner_pubkey
+                .as_ref()
+                .map(|owner| owner.as_bytes().as_slice()),
+            ttl,
+            max_uses,
+        )
         .await
         .map_err(map_mint_error)?;
+    let invite = match invite {
+        buzz_db::relay_invite::MintOutcome::Minted(invite) => invite,
+        buzz_db::relay_invite::MintOutcome::Restricted => {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "blocked: you are banned from this community",
+            ));
+        }
+    };
 
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.
@@ -421,15 +445,17 @@ async fn mint_invite_inner(
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
 /// *joining* pubkey. Exempt from the relay-membership gate by design.
 ///
-/// Routing is by exact prefix: `v2.` codes go to the database-backed
-/// redemption path; every other code goes to the v1 HMAC verifier. A `v2.`
-/// code is never fallen back to v1 verification.
+/// Durable `v2.` codes use stored invite state. Valid unexpired stateless v1
+/// codes remain redeemable until their signed expiry or a configured v1
+/// cutoff, but cannot be revoked by issuer identity because v1 does not carry
+/// one.
 pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/claim", &body).await?;
+    let (tenant, pubkey, signed_created_at) =
+        authenticate(&state, &headers, "/api/invites/claim", &body).await?;
 
     if claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(
@@ -442,141 +468,145 @@ pub async fn claim_invite(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
 
     let claimer_hex = pubkey.to_hex();
-    let key = invite_token::derive_invite_key(&state.relay_keypair);
+    let claimer_owner = super::relay_members::extract_nip_oa_owner(
+        pubkey.as_bytes(),
+        super::relay_members::extract_auth_tag_header(&headers),
+        signed_created_at,
+    );
 
-    // --- v2 database-backed path ---
-    //
-    // Route by exact prefix: v2. codes use the durable invite table. No
-    // fallback to v1 HMAC verification for malformed v2 input.
-    if request.code.starts_with(V2_PREFIX) {
+    let is_v2 = request.code.starts_with(V2_PREFIX);
+    let legacy_claim = if is_v2 {
+        // A malformed v2 code never falls back to the legacy HMAC verifier.
         validate_v2_code(&request.code)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_invalid"))?;
-
-        // Join-policy receipt verification, same mechanism as v1: the receipt
-        // is bound to the code string by SHA-256, so it works for v2 codes.
-        if let Some(policy) = &state.config.join_policy {
-            let receipt = request
-                .policy_receipt
-                .as_deref()
-                .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
-            invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
-                .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
-        }
-
-        let token_hash = hash_v2_code(&request.code);
-        let outcome = state
-            .db
-            .claim_relay_invite(
-                tenant.community(),
-                &token_hash,
-                &claimer_hex,
-                state
-                    .config
-                    .join_policy
-                    .as_ref()
-                    .map(|policy| policy.version.as_str()),
-            )
-            .await
-            .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
-
-        return match outcome {
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
-                tracing::info!(
-                    community = %tenant.community(),
-                    member = %claimer_hex,
-                    "relay member added via v2 invite"
-                );
-                // NIP-43 side effects only on Joined, never on other outcomes.
-                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-                    tracing::warn!(
-                        "failed to publish NIP-43 member-added delta after v2 claim: {e}"
-                    );
-                }
-                if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
-                    tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
-                }
-                Ok(Json(serde_json::json!({
-                    "status": "joined",
-                    "community_id": tenant.community().to_string(),
-                    "host": tenant.host(),
-                    "role": "member",
-                })))
-            }
-            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
-                Ok(Json(serde_json::json!({
-                    "status": "already_member",
-                    "community_id": tenant.community().to_string(),
-                    "host": tenant.host(),
-                    "role": "member",
-                })))
-            }
-            buzz_db::relay_invite::ClaimOutcome::Expired => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_expired"))
-            }
-            buzz_db::relay_invite::ClaimOutcome::Exhausted => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
-            }
-            buzz_db::relay_invite::ClaimOutcome::Invalid => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
-            }
-        };
-    }
-
-    // --- v1 HMAC path (stateless tokens, drain window) ---
-    let payload = invite_token::verify_invite(&key, tenant.community(), &request.code).map_err(
-        |e| match e {
-            // Expired is post-MAC: revealing it helps the UX without helping a forger.
+        None
+    } else {
+        // V1 verification rejects malformed codes and enforces the configured
+        // deployment cutoff before any database work.
+        let invalid_after = state.config.v1_invites_invalid_after;
+        let key = invite_token::derive_invite_key(&state.relay_keypair);
+        let payload = invite_token::verify_invite_at(
+            &key,
+            tenant.community(),
+            &request.code,
+            chrono::Utc::now(),
+            invalid_after,
+        )
+        .map_err(|error| match error {
+            // Expiry is post-MAC: revealing it helps the UX without helping a forger.
             invite_token::InviteError::Expired => {
                 api_error(StatusCode::FORBIDDEN, "invite_expired")
             }
-            // Everything else stays coarse so the endpoint is a poor oracle.
             _ => api_error(StatusCode::FORBIDDEN, "invite_invalid"),
-        },
-    )?;
+        })?;
+        Some((payload.e, invalid_after))
+    };
 
+    // Join-policy receipts are bound to the exact code string for both formats.
     if let Some(policy) = &state.config.join_policy {
         let receipt = request
             .policy_receipt
             .as_deref()
             .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        let key = invite_token::derive_invite_key(&state.relay_keypair);
         invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
     }
 
-    let was_inserted = state
-        .db
-        .claim_relay_membership(
-            tenant.community(),
-            &claimer_hex,
-            &payload.r,
-            state
-                .config
-                .join_policy
-                .as_ref()
-                .map(|policy| policy.version.as_str()),
-        )
-        .await
-        .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
+    let policy_version = state
+        .config
+        .join_policy
+        .as_ref()
+        .map(|policy| policy.version.as_str());
+    let claimer_owner_pubkey = claimer_owner
+        .as_ref()
+        .map(|owner| owner.as_bytes().as_slice());
+    let joined = if is_v2 {
+        let token_hash = hash_v2_code(&request.code);
+        let outcome = state
+            .db
+            .claim_relay_invite_with_owner(
+                tenant.community(),
+                &token_hash,
+                &claimer_hex,
+                claimer_owner_pubkey,
+                policy_version,
+            )
+            .await
+            .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
 
-    if was_inserted {
+        match outcome {
+            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => true,
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => false,
+            buzz_db::relay_invite::ClaimOutcome::Expired => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_expired"));
+            }
+            buzz_db::relay_invite::ClaimOutcome::Exhausted => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"));
+            }
+            buzz_db::relay_invite::ClaimOutcome::Invalid => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+            }
+            buzz_db::relay_invite::ClaimOutcome::Restricted => {
+                return Err(api_error(
+                    StatusCode::FORBIDDEN,
+                    "blocked: you are banned from this community",
+                ));
+            }
+        }
+    } else if let Some((expires_at, invalid_after)) = legacy_claim {
+        let outcome = state
+            .db
+            .claim_legacy_relay_membership_with_owner(
+                tenant.community(),
+                &claimer_hex,
+                claimer_owner_pubkey,
+                expires_at,
+                invalid_after,
+                policy_version,
+            )
+            .await
+            .map_err(|e| internal_error(&format!("legacy invite claim: {e}")))?;
+        match outcome {
+            buzz_db::relay_invite::LegacyClaimOutcome::Joined => true,
+            buzz_db::relay_invite::LegacyClaimOutcome::AlreadyMember => false,
+            buzz_db::relay_invite::LegacyClaimOutcome::Expired => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_expired"));
+            }
+            buzz_db::relay_invite::LegacyClaimOutcome::Restricted => {
+                return Err(api_error(
+                    StatusCode::FORBIDDEN,
+                    "blocked: you are banned from this community",
+                ));
+            }
+        }
+    } else {
+        return Err(internal_error(
+            "legacy invite expiry missing after verification",
+        ));
+    };
+
+    if joined {
         tracing::info!(
             community = %tenant.community(),
             member = %claimer_hex,
+            invite_version = if is_v2 { "v2" } else { "v1" },
             "relay member added via invite"
         );
+        // NIP-43 side effects only on Joined, never on other outcomes.
         if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-            tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
+            tracing::warn!("failed to publish NIP-43 member-added delta after invite claim: {e}");
         }
         if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
-            tracing::warn!("failed to publish NIP-43 membership list after claim: {e}");
+            tracing::warn!("failed to publish NIP-43 membership list after invite claim: {e}");
         }
     }
 
     Ok(Json(serde_json::json!({
-        "status": if was_inserted { "joined" } else { "already_member" },
+        "status": if joined { "joined" } else { "already_member" },
         "community_id": tenant.community().to_string(),
         "host": tenant.host(),
-        "role": payload.r,
+        "role": "member",
     })))
 }
 
@@ -611,13 +641,14 @@ mod postgres_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT, MAX_INVITE_USES, MIN_INVITE_TTL_SECS};
+    use super::{
+        claim_key_rate_limited, CLAIM_RATE_LIMIT, MAX_INVITE_USES, MIN_INVITE_TTL_SECS, V2_PREFIX,
+    };
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    use hmac::{Hmac, KeyInit, Mac};
     use nostr::{EventBuilder, EventId, Keys, Kind, Tag};
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -625,7 +656,7 @@ mod postgres_tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::invite_token::{derive_invite_key, InvitePayload, MAX_INVITE_TTL_SECS};
+    use crate::invite_token::MAX_INVITE_TTL_SECS;
 
     use crate::router::build_router;
     use crate::state::AppState;
@@ -730,6 +761,19 @@ mod postgres_tests {
     /// Build a closed-relay (`require_relay_membership = true`) test state with
     /// a fresh community on `host`; returns `None` when Postgres is unavailable.
     async fn invite_test_state(host: &str) -> Option<Arc<AppState>> {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
+        let db = buzz_db::Db::from_pool(pool.clone());
+        invite_test_state_with_db(host, db, pool).await
+    }
+
+    async fn invite_test_state_with_db(
+        host: &str,
+        db: buzz_db::Db,
+        pool: sqlx::PgPool,
+    ) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -741,8 +785,6 @@ mod postgres_tests {
         // that is the entire point of an invite.
         config.require_relay_membership = true;
 
-        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
-        let db = buzz_db::Db::from_pool(pool.clone());
         db.ensure_configured_community(host).await.ok()?;
 
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -801,6 +843,32 @@ mod postgres_tests {
             .expect("response")
     }
 
+    async fn post_json_with_auth_tag(
+        state: Arc<AppState>,
+        host: &str,
+        path: &str,
+        keys: &Keys,
+        auth_tag: &str,
+        body: String,
+    ) -> axum::response::Response {
+        let url = format!("https://{host}{path}");
+        let auth = nip98_auth_header(keys, &url, body.as_bytes());
+        build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::HOST, host)
+                    .header(header::AUTHORIZATION, auth)
+                    .header("x-auth-tag", auth_tag)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
     async fn read_json(response: axum::response::Response) -> Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -829,6 +897,19 @@ mod postgres_tests {
             })
             .await
             .expect("count side-effect events")
+    }
+
+    fn forge_expired_legacy_invite_code(
+        state: &AppState,
+        community: buzz_core::CommunityId,
+    ) -> String {
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs()
+            .saturating_sub(10);
+        crate::invite_token::mint_invite_with_expiry(&key, community, expires_at)
     }
 
     #[test]
@@ -1176,9 +1257,18 @@ mod postgres_tests {
         let host = format!("invites-{}.example", Uuid::new_v4().simple());
         let owner = Keys::generate();
         let joiner = Keys::generate();
-        let Some(state) = invite_test_state(&host).await else {
+        let Some(mut state) = invite_test_state(&host).await else {
             return;
         };
+        let app_state =
+            Arc::get_mut(&mut state).expect("test state has a single owner before requests");
+        Arc::get_mut(&mut app_state.config)
+            .expect("test state owns its configuration")
+            .v1_invites_invalid_after = Some(
+            chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+                .expect("valid test cutoff")
+                .with_timezone(&chrono::Utc),
+        );
         let community = state
             .db
             .lookup_community_by_host(&host)
@@ -1205,6 +1295,10 @@ mod postgres_tests {
         let json = read_json(response).await;
         let code = json.get("code").and_then(Value::as_str).expect("code");
         let url = json.get("url").and_then(Value::as_str).expect("url");
+        assert!(
+            code.starts_with(V2_PREFIX),
+            "production minting must use durable v2 invites"
+        );
         assert!(url.contains("/invite/"), "unexpected url: {url}");
 
         // Claim on a closed relay by a pubkey that is not yet a member.
@@ -1238,6 +1332,209 @@ mod postgres_tests {
             json.get("status").and_then(Value::as_str),
             Some("already_member")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn issuer_ban_permanently_revokes_existing_invites_but_allows_reissue_after_unban() {
+        let host = format!("invites-ban-lifecycle-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let old_code = mint_code(state.clone(), &host, &owner, serde_json::json!({})).await;
+        let token_hash = buzz_core::invite::hash_v2_code(&old_code);
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB");
+
+        state
+            .db
+            .ban_community_member(
+                community.id,
+                owner.public_key().to_bytes().as_slice(),
+                owner.public_key().to_bytes().as_slice(),
+                None,
+                None,
+            )
+            .await
+            .expect("ban issuer");
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT revoked_at IS NOT NULL FROM relay_invites \
+             WHERE community_id = $1 AND token_hash = $2",
+        )
+        .bind(community.id.as_uuid())
+        .bind(token_hash.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read revocation marker");
+        assert!(revoked, "ban must persist invite invalidation");
+
+        let blocked_mint = post_json(
+            state.clone(),
+            &host,
+            "/api/invites",
+            &owner,
+            "{}".to_string(),
+        )
+        .await;
+        assert_eq!(blocked_mint.status(), StatusCode::FORBIDDEN);
+
+        let claim_body = serde_json::json!({ "code": old_code }).to_string();
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_invalid")
+        );
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
+        let use_count: i32 = sqlx::query_scalar(
+            "SELECT use_count FROM relay_invites \
+             WHERE community_id = $1 AND token_hash = $2",
+        )
+        .bind(community.id.as_uuid())
+        .bind(token_hash.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read use count");
+        assert_eq!(use_count, 0);
+
+        assert!(state
+            .db
+            .unban_community_member(
+                community.id,
+                owner.public_key().to_bytes().as_slice(),
+                owner.public_key().to_bytes().as_slice(),
+            )
+            .await
+            .expect("unban issuer"));
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_invalid"),
+            "unban must not restore an invite that was already revoked",
+        );
+
+        let fresh_code = mint_code(state.clone(), &host, &owner, serde_json::json!({})).await;
+        let response = post_json(
+            state,
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": fresh_code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined"),
+            "an unrestricted user can claim a freshly issued code without prior membership",
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_banned_nip_oa_owner_without_requiring_agent_membership() {
+        let host = format!("invites-owner-ban-{}.example", Uuid::new_v4().simple());
+        let issuer = Keys::generate();
+        let banned_owner = Keys::generate();
+        let agent = Keys::generate();
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &issuer.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed issuer");
+        let code = mint_code(state.clone(), &host, &issuer, serde_json::json!({})).await;
+        state
+            .db
+            .ban_community_member(
+                community.id,
+                banned_owner.public_key().to_bytes().as_slice(),
+                issuer.public_key().to_bytes().as_slice(),
+                None,
+                None,
+            )
+            .await
+            .expect("ban delegated owner");
+
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&banned_owner, &agent.public_key(), "")
+            .expect("create NIP-OA proof");
+        let response = post_json_with_auth_tag(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &agent,
+            &auth_tag,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("blocked: you are banned from this community")
+        );
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &agent.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
     }
 
     #[tokio::test]
@@ -1512,6 +1809,247 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn claim_redeems_unexpired_legacy_v1_code_even_after_issuer_ban() {
+        let host = format!("invites-v1-drain-{}.example", Uuid::new_v4().simple());
+        let issuer = Keys::generate();
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let (legacy_code, _) = crate::invite_token::mint_invite(&key, community.id, 3600);
+        assert!(!legacy_code.starts_with(V2_PREFIX));
+
+        state
+            .db
+            .ban_community_member(
+                community.id,
+                issuer.public_key().as_bytes(),
+                issuer.public_key().as_bytes(),
+                None,
+                None,
+            )
+            .await
+            .expect("ban legacy invite issuer");
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": legacy_code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined"),
+            "legacy v1 does not identify its issuer, so an unexpired code remains usable"
+        );
+        assert!(state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_banned_legacy_claimant_and_attested_owner() {
+        let host = format!("invites-v1-claim-ban-{}.example", Uuid::new_v4().simple());
+        let issuer = Keys::generate();
+        let direct_banned = Keys::generate();
+        let banned_owner = Keys::generate();
+        let agent = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let (legacy_code, _) = crate::invite_token::mint_invite(&key, community.id, 3600);
+        let body = serde_json::json!({ "code": legacy_code }).to_string();
+        let actor = issuer.public_key().to_bytes();
+
+        for banned in [&direct_banned, &banned_owner] {
+            state
+                .db
+                .ban_community_member(
+                    community.id,
+                    banned.public_key().as_bytes(),
+                    actor.as_slice(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("ban claimant or attested owner");
+        }
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &direct_banned,
+            body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("blocked: you are banned from this community")
+        );
+
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&banned_owner, &agent.public_key(), "")
+            .expect("create NIP-OA proof");
+        let response = post_json_with_auth_tag(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &agent,
+            &auth_tag,
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("blocked: you are banned from this community")
+        );
+
+        for claimant in [&direct_banned, &agent] {
+            assert!(!state
+                .db
+                .is_relay_member(community.id, &claimant.public_key().to_hex())
+                .await
+                .expect("membership lookup"));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn v2_claim_restriction_lookup_error_fails_closed_without_consuming_invite() {
+        let host = format!(
+            "invites-ban-lookup-error-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let issuer = Keys::generate();
+        let joiner = Keys::generate();
+        let (failing_db, admin, schema) =
+            crate::test_support::restriction_lookup_failing_db().await;
+        let normal_db = buzz_db::Db::from_pool(admin.clone());
+        let community = normal_db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let invite = normal_db
+            .mint_relay_invite(community, &issuer.public_key().to_hex(), 3600, Some(1))
+            .await
+            .expect("seed invite");
+        let token_hash = buzz_core::invite::hash_v2_code(&invite.code);
+        let state = invite_test_state_with_db(&host, failing_db.clone(), admin.clone())
+            .await
+            .expect("build relay test state");
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": invite.code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!normal_db
+            .is_relay_member(community, &joiner.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
+        let use_count: i32 = sqlx::query_scalar(
+            "SELECT use_count FROM relay_invites \
+             WHERE community_id = $1 AND token_hash = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(token_hash.as_slice())
+        .fetch_one(&admin)
+        .await
+        .expect("read use count");
+        assert_eq!(use_count, 0);
+
+        drop(state);
+        drop(failing_db);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .expect("drop restriction lookup fixture");
+        admin.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_claim_restriction_lookup_error_fails_closed_without_membership() {
+        let host = format!(
+            "invites-v1-ban-lookup-error-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let joiner = Keys::generate();
+        let (failing_db, admin, schema) =
+            crate::test_support::restriction_lookup_failing_db().await;
+        let normal_db = buzz_db::Db::from_pool(admin.clone());
+        let community = normal_db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let state = invite_test_state_with_db(&host, failing_db.clone(), admin.clone())
+            .await
+            .expect("build relay test state");
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let (legacy_code, _) = crate::invite_token::mint_invite(&key, community, 3600);
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": legacy_code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!normal_db
+            .is_relay_member(community, &joiner.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
+
+        drop(state);
+        drop(failing_db);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .expect("drop restriction lookup fixture");
+        admin.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn code_minted_for_one_community_fails_on_another() {
         let host_a = format!("invites-a-{}.example", Uuid::new_v4().simple());
         let host_b = format!("invites-b-{}.example", Uuid::new_v4().simple());
@@ -1555,41 +2093,8 @@ mod postgres_tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-    /// Forge an already-expired invite payload signed with the relay's derived
-    /// invite key. `mint_invite` clamps ttl to 60s minimum, so the only way to
-    /// produce an expired code is to build the payload by hand at the token
-    /// layer.
-    fn forge_expired_invite_code(
-        state: &AppState,
-        community: buzz_core::CommunityId,
-        seconds_ago: u64,
-    ) -> String {
-        let key = derive_invite_key(&state.relay_keypair);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_secs();
-        let payload = InvitePayload {
-            c: community.as_uuid().to_string(),
-            r: "member".to_string(),
-            e: now.saturating_sub(seconds_ago),
-            n: "test-nonce".to_string(),
-        };
-        let payload_bytes = serde_json::to_vec(&payload).expect("payload serializes");
-        let mut mac =
-            <Hmac<Sha256> as KeyInit>::new_from_slice(&key).expect("HMAC accepts any key size");
-        mac.update(&payload_bytes);
-        let mac_bytes = mac.finalize().into_bytes();
-        format!(
-            "{}.{}",
-            URL_SAFE_NO_PAD.encode(&payload_bytes),
-            URL_SAFE_NO_PAD.encode(mac_bytes),
-        )
-    }
-
-    /// Endpoint-level proof that expired codes (with a valid MAC) are
-    /// rejected by `/api/invites/claim` with the distinguishable
-    /// `invite_expired` body, and do not admit the caller.
+    /// Endpoint-level proof that an expired durable code is rejected with the
+    /// distinguishable `invite_expired` body and does not admit the caller.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn claim_rejects_expired_code() {
@@ -1604,15 +2109,34 @@ mod postgres_tests {
             .await
             .expect("lookup")
             .expect("community exists");
-        let code = forge_expired_invite_code(&state, community.id, 10);
+        let invite = state
+            .db
+            .mint_relay_invite(community.id, "owner", 3600, Some(1))
+            .await
+            .expect("mint v2 invite");
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB");
+        sqlx::query(
+            "UPDATE relay_invites SET expires_at = now() - interval '1 second' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.id.as_uuid())
+        .bind(invite.invite_id)
+        .execute(&pool)
+        .await
+        .expect("expire test invite");
+        pool.close().await;
 
-        let body = serde_json::json!({ "code": code }).to_string();
+        let body = serde_json::json!({ "code": invite.code }).to_string();
         let response = post_json(state.clone(), &host, "/api/invites/claim", &joiner, body).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let json = read_json(response).await;
-        // The expired branch is deliberately distinguishable from the generic
-        // `invite_invalid` so the UX can prompt the user for a fresh link
-        // without becoming a MAC oracle.
+        // The expired branch remains distinguishable so the UX can prompt the
+        // user for a fresh link without becoming a token-forgery oracle.
         assert_eq!(
             json.get("error").and_then(Value::as_str),
             Some("invite_expired"),
@@ -1625,6 +2149,95 @@ mod postgres_tests {
             .await
             .expect("member check");
         assert!(!is_member, "expired code must not admit anyone");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_claim_rejects_expired_v1_code() {
+        let host = format!("invites-v1-expired-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let code = forge_expired_legacy_invite_code(&state, community.id);
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_expired")
+        );
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_claim_rejects_v1_code_at_configured_cutoff() {
+        let host = format!("invites-v1-cutoff-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let mut state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let app_state =
+            Arc::get_mut(&mut state).expect("test state has a single owner before requests");
+        Arc::get_mut(&mut app_state.config)
+            .expect("test state owns its configuration")
+            .v1_invites_invalid_after = Some(
+            chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+                .expect("valid test cutoff")
+                .with_timezone(&chrono::Utc),
+        );
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let (code, _) = crate::invite_token::mint_invite(&key, community.id, 3600);
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_expired")
+        );
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("membership lookup"));
     }
 
     /// NIP-98 replay guard that returns `Ok(true)` the first time a given
@@ -1894,11 +2507,14 @@ mod postgres_tests {
     const NIP_FI_TEST_ISSUER: &str = "https://issuer.example";
     const NIP_FI_TEST_AUDIENCE: &str = "https://relay.example";
     const NIP_FI_TEST_KID: &str = "test-key-1";
-    const NIP_FI_TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-        WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-        zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-        -----END PRIVATE KEY-----\n";
+    // This published test-only key signs deterministic NIP-FI assertions.
+    const NIP_FI_TEST_EC_PKCS8_PEM: &str = concat!(
+        "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- public test fixture only
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+        "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+        "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+        "-----END PRIVATE KEY-----\n",
+    );
 
     /// Clone `base` into an Enforce-mode state. With `with_verifier`, a real
     /// ES256 verifier over the static test key is injected so a signed

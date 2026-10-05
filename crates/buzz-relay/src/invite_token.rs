@@ -1,9 +1,8 @@
-//! Stateless relay invite tokens.
+//! Legacy stateless relay invite token format and policy receipts.
 //!
-//! An invite code is a compact, URL-safe, HMAC-signed blob minted by a relay
-//! admin/owner and later presented by a joining user. The relay verifies the
-//! signature and expiry, then inserts the presenter into `relay_members` —
-//! no server-side invite storage is required.
+//! The v1 invite format remains redeemable for valid, unexpired legacy links.
+//! The production mint endpoint issues only durable v2 rows in
+//! `buzz_db::relay_invite`; v1 support exists only for the compatibility drain.
 //!
 //! ## Format
 //!
@@ -26,20 +25,21 @@
 //!
 //! ## Security properties (and non-properties)
 //!
-//! - Codes are **multi-use until expiry** — there is no server-side "used"
-//!   bit. Default expiry is deliberately short ([`DEFAULT_INVITE_TTL_SECS`]).
+//! - V1 codes are **multi-use until expiry** — there is no server-side "used"
+//!   bit. Valid unexpired legacy codes remain redeemable during the drain.
 //! - Codes are **community-scoped**: a code minted for community A fails
 //!   verification when presented to community B, even on the same deployment.
 //! - Codes are **role-capped at `member`** at mint time (enforced by the mint
 //!   route, and re-checked here on verify so a hand-crafted payload with an
 //!   elevated role is rejected even if it carries a valid MAC from a future
 //!   buggy caller).
-//! - Revocation is coarse: rotate the relay keypair, or remove the member
-//!   after the fact. Per-code revocation requires the future `relay_invites`
-//!   table increment.
+//! - V1 codes have no per-code or issuer-based revocation. Claim-time checks
+//!   still deny banned claimants and their verified NIP-OA owners, but issuer
+//!   bans cannot invalidate v1 codes.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -123,13 +123,23 @@ fn sign_payload(key: &[u8; 32], payload_bytes: &[u8]) -> Vec<u8> {
 
 /// Mint a legacy v1 invite code for compatibility tests.
 ///
-/// Production minting uses database-backed v2 codes. Remove this helper with
-/// v1 claim verification after the compatibility drain window.
+/// Production minting uses database-backed v2 codes; v1 claim support remains
+/// available only for the compatibility drain.
 #[cfg(test)]
 pub fn mint_invite(key: &[u8; 32], community: CommunityId, ttl_secs: u64) -> (String, u64) {
     let ttl = ttl_secs.clamp(60, MAX_INVITE_TTL_SECS);
     let expires_at = now_unix() + ttl;
 
+    (
+        mint_invite_with_expiry(key, community, expires_at),
+        expires_at,
+    )
+}
+
+/// Mint a signed v1 token with a fixed expiry for deterministic compatibility
+/// tests. This helper is not available in production builds.
+#[cfg(test)]
+pub fn mint_invite_with_expiry(key: &[u8; 32], community: CommunityId, expires_at: u64) -> String {
     let nonce: [u8; 16] = rand::random();
     let payload = InvitePayload {
         c: community.as_uuid().to_string(),
@@ -145,7 +155,7 @@ pub fn mint_invite(key: &[u8; 32], community: CommunityId, ttl_secs: u64) -> (St
         URL_SAFE_NO_PAD.encode(&payload_bytes),
         URL_SAFE_NO_PAD.encode(mac)
     );
-    (code, expires_at)
+    code
 }
 
 /// Verify an invite code presented to `community`.
@@ -157,6 +167,18 @@ pub fn verify_invite(
     key: &[u8; 32],
     community: CommunityId,
     code: &str,
+) -> Result<InvitePayload, InviteError> {
+    verify_invite_at(key, community, code, Utc::now(), None)
+}
+
+/// Verify a legacy code at a supplied time, optionally enforcing a deployment
+/// cutoff. The cutoff is inclusive: a code is rejected when `now >= invalid_after`.
+pub(crate) fn verify_invite_at(
+    key: &[u8; 32],
+    community: CommunityId,
+    code: &str,
+    now: DateTime<Utc>,
+    invalid_after: Option<DateTime<Utc>>,
 ) -> Result<InvitePayload, InviteError> {
     if code.len() > MAX_CODE_LEN {
         return Err(InviteError::Malformed);
@@ -178,7 +200,7 @@ pub fn verify_invite(
     let payload: InvitePayload =
         serde_json::from_slice(&payload_bytes).map_err(|_| InviteError::Malformed)?;
 
-    if payload.e < now_unix() {
+    if payload.e < now.timestamp().max(0) as u64 {
         return Err(InviteError::Expired);
     }
     if payload.c != community.as_uuid().to_string() {
@@ -186,6 +208,9 @@ pub fn verify_invite(
     }
     if payload.r != "member" {
         return Err(InviteError::InvalidRole);
+    }
+    if invalid_after.is_some_and(|cutoff| now >= cutoff) {
+        return Err(InviteError::Expired);
     }
     Ok(payload)
 }
@@ -210,6 +235,10 @@ mod tests {
         CommunityId::from_uuid(Uuid::new_v4())
     }
 
+    fn timestamp(seconds: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(seconds, 0).expect("valid timestamp")
+    }
+
     #[test]
     fn mint_then_verify_roundtrip() {
         let key = test_key();
@@ -219,6 +248,39 @@ mod tests {
         assert_eq!(payload.c, c.as_uuid().to_string());
         assert_eq!(payload.r, "member");
         assert_eq!(payload.e, expires_at);
+    }
+
+    #[test]
+    fn v1_cutoff_is_inclusive_and_unset_preserves_natural_expiry() {
+        let key = test_key();
+        let community = community();
+        let code = mint_invite_with_expiry(&key, community, 2_000);
+        let cutoff = timestamp(1_500);
+
+        assert!(verify_invite_at(&key, community, &code, timestamp(1_000), None).is_ok());
+        assert!(verify_invite_at(&key, community, &code, timestamp(1_499), Some(cutoff),).is_ok());
+        assert_eq!(
+            verify_invite_at(&key, community, &code, cutoff, Some(cutoff)),
+            Err(InviteError::Expired),
+            "the configured cutoff is inclusive"
+        );
+        assert_eq!(
+            verify_invite_at(&key, community, &code, timestamp(1_501), Some(cutoff)),
+            Err(InviteError::Expired)
+        );
+
+        let naturally_expired = mint_invite_with_expiry(&key, community, 1_200);
+        assert_eq!(
+            verify_invite_at(
+                &key,
+                community,
+                &naturally_expired,
+                timestamp(1_201),
+                Some(cutoff),
+            ),
+            Err(InviteError::Expired),
+            "a token's own expiry still applies before the deployment cutoff"
+        );
     }
 
     #[test]

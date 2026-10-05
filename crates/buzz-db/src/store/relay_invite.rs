@@ -1,13 +1,18 @@
 //! Use-limited relay invite persistence (v2 opaque tokens).
 //!
-//! Unlike the stateless v1 HMAC invite tokens in `buzz-relay::invite_token`,
-//! v2 invites are backed by durable rows in `relay_invites`. The table stores
+//! V2 invites are backed by durable rows in `relay_invites`. The table stores
 //! only `SHA-256(code)` — never the reusable bearer secret — so a leaked
-//! database does not immediately yield valid invite codes.
+//! database does not immediately yield valid invite codes. Valid, unexpired
+//! stateless v1 codes remain redeemable during the compatibility drain through
+//! a separate transaction that checks the claimant's current restrictions.
 //!
 //! Every lookup binds both `(community_id, token_hash)` to prevent cross-tenant
 //! authorization seams: a code minted on tenant A presented to tenant B returns
 //! `Invalid`, not a membership.
+//!
+//! V1 codes have no issuer identity. Their issuer cannot be checked against
+//! later bans; claimant and verified NIP-OA owner bans are checked under the
+//! same community admission lock used by ban writes.
 //!
 //! ## Atomic redemption
 //!
@@ -23,7 +28,7 @@ use buzz_core::invite::{
 };
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgConnection, PgPool, Row as _};
 
 use crate::error::Result;
 use crate::{CommunityId, Db};
@@ -54,6 +59,30 @@ pub enum ClaimOutcome {
     Exhausted,
     /// No invite row matches `(community_id, token_hash)`.
     Invalid,
+    /// The claimant, its recorded owner, or its attested owner is banned.
+    Restricted,
+}
+
+/// Outcome of admitting a verified stateless v1 invite claim.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LegacyClaimOutcome {
+    /// A new relay member was inserted.
+    Joined,
+    /// The claimant was already a member.
+    AlreadyMember,
+    /// The signed expiry or configured deployment cutoff passed before admission.
+    Expired,
+    /// The claimant or its verified NIP-OA owner is currently banned.
+    Restricted,
+}
+
+/// Outcome of an invite mint guarded by the principal's current restrictions.
+#[derive(Debug)]
+pub enum MintOutcome {
+    /// A v2 invite was persisted and can be shared once.
+    Minted(MintedInvite),
+    /// The issuer or its delegated owner is currently banned.
+    Restricted,
 }
 
 /// A freshly minted v2 invite, including the plaintext code and metadata.
@@ -103,7 +132,34 @@ pub async fn mint_relay_invite(
     ttl_secs: u64,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
+    match mint_relay_invite_with_owner(pool, community, created_by, None, ttl_secs, max_uses)
+        .await?
+    {
+        MintOutcome::Minted(invite) => Ok(invite),
+        MintOutcome::Restricted => Err(crate::error::DbError::AccessDenied(
+            "a banned principal cannot mint relay invites".into(),
+        )),
+    }
+}
+
+/// Mint a v2 invite while atomically checking the issuer and optional NIP-OA owner.
+///
+/// `owner_pubkey` must be a previously verified owner credential from the
+/// request's NIP-98 event. Restriction lookup failures propagate and roll back.
+pub async fn mint_relay_invite_with_owner(
+    pool: &PgPool,
+    community: CommunityId,
+    created_by: &str,
+    owner_pubkey: Option<&[u8]>,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+) -> Result<MintOutcome> {
     validate_mint_inputs(ttl_secs, max_uses)?;
+    if owner_pubkey.is_some_and(|pubkey| pubkey.len() != 32) {
+        return Err(crate::error::DbError::InvalidData(
+            "owner_pubkey must be 32 bytes".into(),
+        ));
+    }
 
     // Generate 32 random bytes and encode as base64url — this is the secret.
     let secret: [u8; V2_SECRET_LEN] = rand::random();
@@ -125,9 +181,33 @@ pub async fn mint_relay_invite(
     crate::deletion::DeletionStore::new(pool.clone())
         .guard_transaction(&mut tx, community)
         .await?;
+    lock_community_invite_admission(&mut tx, community).await?;
+
+    if let Some(issuer_pubkey) = decode_pubkey(created_by) {
+        let restriction = crate::moderation::restriction_state_with_connection(
+            &mut tx,
+            community,
+            &issuer_pubkey,
+        )
+        .await?;
+        if restriction.banned {
+            tx.rollback().await?;
+            return Ok(MintOutcome::Restricted);
+        }
+    }
+    if let Some(owner_pubkey) = owner_pubkey {
+        let restriction =
+            crate::moderation::restriction_state_with_connection(&mut tx, community, owner_pubkey)
+                .await?;
+        if restriction.banned {
+            tx.rollback().await?;
+            return Ok(MintOutcome::Restricted);
+        }
+    }
+
     let row = sqlx::query(
-        "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by, created_by_owner) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
          RETURNING id",
     )
     .bind(community.as_uuid())
@@ -135,19 +215,62 @@ pub async fn mint_relay_invite(
     .bind(max_uses)
     .bind(expires_at)
     .bind(created_by)
+    .bind(owner_pubkey)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
 
     let invite_id: uuid::Uuid = row.try_get("id")?;
 
-    Ok(MintedInvite {
+    Ok(MintOutcome::Minted(MintedInvite {
         code,
         expires_at,
         max_uses,
         uses_remaining: max_uses,
         invite_id,
-    })
+    }))
+}
+
+fn decode_pubkey(pubkey: &str) -> Option<[u8; 32]> {
+    let mut bytes = [0; 32];
+    hex::decode_to_slice(pubkey, &mut bytes).ok()?;
+    Some(bytes)
+}
+
+async fn lock_community_invite_admission(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+) -> Result<()> {
+    sqlx::query("SELECT lock_community_invite_admission($1)")
+        .bind(community.as_uuid())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn principal_is_banned(
+    connection: &mut PgConnection,
+    community: CommunityId,
+    pubkey: &[u8],
+    attested_owner_pubkey: Option<&[u8]>,
+) -> Result<bool> {
+    if crate::moderation::restriction_state_with_connection(connection, community, pubkey)
+        .await?
+        .banned
+    {
+        return Ok(true);
+    }
+
+    if let Some(owner_pubkey) = attested_owner_pubkey {
+        if crate::moderation::restriction_state_with_connection(connection, community, owner_pubkey)
+            .await?
+            .banned
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn log_claim_outcome(
@@ -226,6 +349,33 @@ pub async fn claim_relay_invite(
     claimer_pubkey: &str,
     policy_version: Option<&str>,
 ) -> Result<ClaimOutcome> {
+    claim_relay_invite_with_owner(
+        pool,
+        community,
+        token_hash,
+        claimer_pubkey,
+        None,
+        policy_version,
+    )
+    .await
+}
+
+/// Atomically claim a v2 invite after checking the claimant and optional
+/// verified NIP-OA owner in the same transaction as admission.
+pub async fn claim_relay_invite_with_owner(
+    pool: &PgPool,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    claimer_owner_pubkey: Option<&[u8]>,
+    policy_version: Option<&str>,
+) -> Result<ClaimOutcome> {
+    if claimer_owner_pubkey.is_some_and(|pubkey| pubkey.len() != 32) {
+        return Err(crate::error::DbError::InvalidData(
+            "claimer_owner_pubkey must be 32 bytes".into(),
+        ));
+    }
+
     let connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
@@ -233,9 +383,23 @@ pub async fn claim_relay_invite(
     .await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
+    // Ban mutations take this same community-scoped transaction lock before
+    // changing authoritative state. This orders a committed ban against every
+    // v2 invite admission, even when the invite rows themselves differ.
+    lock_community_invite_admission(&mut tx, community).await?;
+
+    let claimer_bytes = decode_pubkey(claimer_pubkey).ok_or_else(|| {
+        crate::error::DbError::InvalidData("claimer_pubkey must be 32-byte hex".into())
+    })?;
+    if principal_is_banned(&mut tx, community, &claimer_bytes, claimer_owner_pubkey).await? {
+        tx.rollback().await?;
+        log_claim_outcome(community, None, "restricted", None, None);
+        return Ok(ClaimOutcome::Restricted);
+    }
+
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
     let row = sqlx::query(
-        "SELECT id, max_uses, use_count, expires_at \
+        "SELECT id, max_uses, use_count, expires_at, revoked_at, created_by, created_by_owner \
          FROM relay_invites \
          WHERE community_id = $1 AND token_hash = $2 \
          FOR UPDATE",
@@ -256,6 +420,42 @@ pub async fn claim_relay_invite(
     let max_uses: Option<i32> = invite.try_get("max_uses")?;
     let use_count: i32 = invite.try_get("use_count")?;
     let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
+    let revoked_at: Option<DateTime<Utc>> = invite.try_get("revoked_at")?;
+    let created_by: String = invite.try_get("created_by")?;
+    let created_by_owner: Option<Vec<u8>> = invite.try_get("created_by_owner")?;
+
+    if revoked_at.is_some() {
+        tx.rollback().await?;
+        log_claim_outcome(
+            community,
+            Some(invite_id),
+            "invalid",
+            max_uses,
+            Some(use_count),
+        );
+        return Ok(ClaimOutcome::Invalid);
+    }
+
+    if let Some(issuer_pubkey) = decode_pubkey(&created_by) {
+        if principal_is_banned(
+            &mut tx,
+            community,
+            &issuer_pubkey,
+            created_by_owner.as_deref(),
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            log_claim_outcome(
+                community,
+                Some(invite_id),
+                "invalid",
+                max_uses,
+                Some(use_count),
+            );
+            return Ok(ClaimOutcome::Invalid);
+        }
+    }
 
     // Expiry is checked before membership deliberately. An expired bearer must
     // not authorize fresh policy-acceptance evidence, even for an existing
@@ -396,6 +596,99 @@ pub async fn claim_relay_invite(
     })
 }
 
+/// Admit a verified stateless v1 invite in the same transaction as restriction
+/// checks and join-policy evidence.
+///
+/// V1 tokens have no issuer identity, so this can only enforce restrictions on
+/// the authenticated claimant and its verified NIP-OA owner. Callers must
+/// verify the token signature, community, and role before using this method.
+/// Its signed expiry and optional deployment cutoff are rechecked after taking
+/// the community admission lock. Ban writes and this admission share that lock,
+/// so an admission cannot commit after an authoritative ban.
+pub async fn claim_legacy_relay_membership_with_owner(
+    pool: &PgPool,
+    community: CommunityId,
+    claimer_pubkey: &str,
+    claimer_owner_pubkey: Option<&[u8]>,
+    expires_at: u64,
+    invalid_after: Option<DateTime<Utc>>,
+    policy_version: Option<&str>,
+) -> Result<LegacyClaimOutcome> {
+    if claimer_owner_pubkey.is_some_and(|pubkey| pubkey.len() != 32) {
+        return Err(crate::error::DbError::InvalidData(
+            "claimer_owner_pubkey must be 32 bytes".into(),
+        ));
+    }
+    let claimer_bytes = decode_pubkey(claimer_pubkey).ok_or_else(|| {
+        crate::error::DbError::InvalidData("claimer_pubkey must be 32-byte hex".into())
+    })?;
+
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    lock_community_invite_admission(&mut tx, community).await?;
+    if principal_is_banned(&mut tx, community, &claimer_bytes, claimer_owner_pubkey).await? {
+        tx.rollback().await?;
+        log_claim_outcome(community, None, "restricted", None, None);
+        return Ok(LegacyClaimOutcome::Restricted);
+    }
+    let now = Utc::now();
+    if expires_at < now.timestamp().max(0) as u64
+        || invalid_after.is_some_and(|cutoff| now >= cutoff)
+    {
+        tx.rollback().await?;
+        log_claim_outcome(community, None, "expired_v1", None, None);
+        return Ok(LegacyClaimOutcome::Expired);
+    }
+
+    let inserted = sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, 'member', 'invite') \
+         ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(claimer_pubkey)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+
+    if let Some(version) = policy_version {
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(claimer_pubkey)
+        .bind(version)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    let outcome = if inserted {
+        LegacyClaimOutcome::Joined
+    } else {
+        LegacyClaimOutcome::AlreadyMember
+    };
+    log_claim_outcome(
+        community,
+        None,
+        if inserted {
+            "joined_v1"
+        } else {
+            "already_member_v1"
+        },
+        None,
+        None,
+    );
+    Ok(outcome)
+}
+
 impl Db {
     /// Mints a v2 use-limited relay invite. The plaintext code is returned
     /// exactly once; only its SHA-256 hash is persisted.
@@ -411,6 +704,28 @@ impl Db {
         max_uses: Option<i32>,
     ) -> Result<MintedInvite> {
         mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+    }
+
+    /// Mints an invite after atomically checking the issuer and optional
+    /// verified NIP-OA owner against current community bans.
+    #[datastore_span(name = "mint_relay_invite_with_owner", system = "postgresql")]
+    pub async fn mint_relay_invite_with_owner(
+        &self,
+        community: CommunityId,
+        created_by: &str,
+        owner_pubkey: Option<&[u8]>,
+        ttl_secs: u64,
+        max_uses: Option<i32>,
+    ) -> Result<MintOutcome> {
+        mint_relay_invite_with_owner(
+            &self.pool,
+            community,
+            created_by,
+            owner_pubkey,
+            ttl_secs,
+            max_uses,
+        )
+        .await
     }
 
     /// Delete one bounded batch of invites expired before `cutoff`.
@@ -441,6 +756,55 @@ impl Db {
         )
         .await
     }
+
+    /// Claims a v2 invite after checking the claimant and optional verified
+    /// NIP-OA owner in the admission transaction.
+    #[datastore_span(name = "claim_relay_invite_with_owner", system = "postgresql")]
+    pub async fn claim_relay_invite_with_owner(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        claimer_owner_pubkey: Option<&[u8]>,
+        policy_version: Option<&str>,
+    ) -> Result<ClaimOutcome> {
+        claim_relay_invite_with_owner(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            claimer_owner_pubkey,
+            policy_version,
+        )
+        .await
+    }
+
+    /// Claims a previously verified stateless v1 invite while checking the
+    /// claimant and optional verified NIP-OA owner in the admission transaction.
+    #[datastore_span(
+        name = "claim_legacy_relay_membership_with_owner",
+        system = "postgresql"
+    )]
+    pub async fn claim_legacy_relay_membership_with_owner(
+        &self,
+        community: CommunityId,
+        claimer_pubkey: &str,
+        claimer_owner_pubkey: Option<&[u8]>,
+        expires_at: u64,
+        invalid_after: Option<DateTime<Utc>>,
+        policy_version: Option<&str>,
+    ) -> Result<LegacyClaimOutcome> {
+        claim_legacy_relay_membership_with_owner(
+            &self.pool,
+            community,
+            claimer_pubkey,
+            claimer_owner_pubkey,
+            expires_at,
+            invalid_after,
+            policy_version,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -448,7 +812,9 @@ mod postgres_tests {
     use super::*;
     use crate::relay_members::is_relay_member;
     use sha2::Digest;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::PgPool;
+    use std::str::FromStr;
     use uuid::Uuid;
 
     async fn setup_pool() -> PgPool {
@@ -509,6 +875,16 @@ mod postgres_tests {
             .execute(&mut *tx)
             .await
             .expect("delete test members");
+        sqlx::query("DELETE FROM community_bans WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test bans");
+        sqlx::query("DELETE FROM users WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test users");
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community.as_uuid())
             .execute(&mut *tx)
@@ -920,6 +1296,397 @@ mod postgres_tests {
                 .expect("claim after rollback"),
             ClaimOutcome::Joined { use_count: 1, .. }
         ));
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bans_permanently_revoke_only_the_issuer_tenant_invites() {
+        let pool = setup_pool().await;
+        let community_a = make_test_community(&pool).await;
+        let community_b = make_test_community(&pool).await;
+        let issuer = test_pubkey();
+        let issuer_bytes = hex::decode(&issuer).expect("issuer hex");
+        let actor = [42; 32];
+
+        let invite_a = mint_relay_invite(&pool, community_a, &issuer, 3600, Some(1))
+            .await
+            .expect("mint tenant A invite");
+        let invite_b = mint_relay_invite(&pool, community_b, &issuer, 3600, Some(1))
+            .await
+            .expect("mint tenant B invite");
+        let hash_a = hash_v2_code(&invite_a.code);
+        let hash_b = hash_v2_code(&invite_b.code);
+
+        crate::moderation::ban_member(&pool, community_a, &issuer_bytes, &actor, None, None)
+            .await
+            .expect("ban invite issuer in tenant A");
+
+        assert!(matches!(
+            mint_relay_invite_with_owner(&pool, community_a, &issuer, None, 3600, Some(1))
+                .await
+                .expect("banned mint outcome"),
+            MintOutcome::Restricted
+        ));
+        assert_eq!(
+            claim_relay_invite(&pool, community_a, &hash_a, &test_pubkey(), None,)
+                .await
+                .expect("revoked invite claim"),
+            ClaimOutcome::Invalid
+        );
+        assert_eq!(
+            claim_relay_invite(&pool, community_b, &hash_b, &test_pubkey(), None,)
+                .await
+                .expect("other tenant invite claim"),
+            ClaimOutcome::Joined {
+                use_count: 1,
+                uses_remaining: Some(0),
+            }
+        );
+
+        assert!(
+            crate::moderation::unban_member(&pool, community_a, &issuer_bytes, &actor)
+                .await
+                .expect("unban issuer")
+        );
+        assert_eq!(
+            claim_relay_invite(&pool, community_a, &hash_a, &test_pubkey(), None,)
+                .await
+                .expect("claim after unban"),
+            ClaimOutcome::Invalid,
+            "unban must not restore the old invitation"
+        );
+
+        let replacement = mint_relay_invite(&pool, community_a, &issuer, 3600, Some(1))
+            .await
+            .expect("mint replacement after unban");
+        assert!(matches!(
+            claim_relay_invite(
+                &pool,
+                community_a,
+                &hash_v2_code(&replacement.code),
+                &test_pubkey(),
+                None,
+            )
+            .await
+            .expect("claim replacement"),
+            ClaimOutcome::Joined { use_count: 1, .. }
+        ));
+
+        delete_test_community(&pool, community_a).await;
+        delete_test_community(&pool, community_b).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_claim_rechecks_configured_cutoff_after_admission_lock() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let claimer = test_pubkey();
+        let cutoff = DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+            .expect("valid cutoff")
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            claim_legacy_relay_membership_with_owner(
+                &pool,
+                community,
+                &claimer,
+                None,
+                u64::MAX,
+                Some(cutoff),
+                None,
+            )
+            .await
+            .expect("claim outcome"),
+            LegacyClaimOutcome::Expired,
+            "a preverified legacy claim is still fenced by the transaction check"
+        );
+        assert!(!is_relay_member(&pool, community, &claimer)
+            .await
+            .expect("membership lookup"));
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bans_cover_stored_and_attested_owners_and_reject_restricted_claimants() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let owner_bytes = hex::decode(&owner).expect("owner hex");
+        let agent = test_pubkey();
+        let claimant = test_pubkey();
+        let direct_banned = test_pubkey();
+        let issuer = test_pubkey();
+        let actor = [43; 32];
+
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&owner_bytes)
+            .execute(&pool)
+            .await
+            .expect("insert owner user");
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(hex::decode(&agent).expect("agent hex"))
+        .bind(&owner_bytes)
+        .execute(&pool)
+        .await
+        .expect("insert agent owner relation");
+
+        let agent_invite = match mint_relay_invite_with_owner(
+            &pool,
+            community,
+            &agent,
+            Some(&owner_bytes),
+            3600,
+            Some(1),
+        )
+        .await
+        .expect("mint agent invite")
+        {
+            MintOutcome::Minted(invite) => invite,
+            MintOutcome::Restricted => panic!("unrestricted agent should mint"),
+        };
+        let unrelated_invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
+            .await
+            .expect("mint unrelated invite");
+        let agent_hash = hash_v2_code(&agent_invite.code);
+        let unrelated_hash = hash_v2_code(&unrelated_invite.code);
+
+        crate::moderation::ban_member(&pool, community, &owner_bytes, &actor, None, None)
+            .await
+            .expect("ban recorded NIP-OA owner");
+
+        assert_eq!(
+            claim_relay_invite(&pool, community, &agent_hash, &claimant, None,)
+                .await
+                .expect("claim agent-issued code"),
+            ClaimOutcome::Invalid,
+            "a ban permanently revokes codes issued by an attested owner"
+        );
+        assert_eq!(
+            claim_relay_invite(&pool, community, &unrelated_hash, &agent, None,)
+                .await
+                .expect("claim with stored owner relation"),
+            ClaimOutcome::Restricted
+        );
+        assert_eq!(
+            claim_relay_invite_with_owner(
+                &pool,
+                community,
+                &unrelated_hash,
+                &claimant,
+                Some(&owner_bytes),
+                None,
+            )
+            .await
+            .expect("claim with verified owner"),
+            ClaimOutcome::Restricted
+        );
+
+        let direct_bytes = hex::decode(&direct_banned).expect("claimant hex");
+        crate::moderation::ban_member(&pool, community, &direct_bytes, &actor, None, None)
+            .await
+            .expect("ban direct claimant");
+        assert_eq!(
+            claim_relay_invite(&pool, community, &unrelated_hash, &direct_banned, None,)
+                .await
+                .expect("claim by directly banned principal"),
+            ClaimOutcome::Restricted
+        );
+
+        assert!(!is_relay_member(&pool, community, &agent)
+            .await
+            .expect("agent membership check"));
+        assert!(!is_relay_member(&pool, community, &claimant)
+            .await
+            .expect("claimant membership check"));
+        assert_eq!(
+            use_count(&pool, community, unrelated_invite.invite_id).await,
+            0
+        );
+        assert!(matches!(
+            mint_relay_invite_with_owner(
+                &pool,
+                community,
+                &agent,
+                Some(&owner_bytes),
+                3600,
+                Some(1),
+            )
+            .await
+            .expect("banned owner mint outcome"),
+            MintOutcome::Restricted
+        ));
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_commit_waits_for_claim_admission_lock_and_revokes_before_later_claim() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let issuer = test_pubkey();
+        let issuer_bytes = hex::decode(&issuer).expect("issuer hex");
+        let actor = [44_u8; 32];
+        let claimer = test_pubkey();
+        let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
+            .await
+            .expect("mint race invite");
+        let token_hash = hash_v2_code(&invite.code);
+
+        let mut ban_tx = pool.begin().await.expect("begin ban transaction");
+        sqlx::query(
+            "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+             VALUES ($1, $2, true, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&issuer_bytes)
+        .bind(actor.as_slice())
+        .execute(&mut *ban_tx)
+        .await
+        .expect("write ban and acquire admission lock");
+
+        let application_name = format!("invite_ban_race_{}", Uuid::new_v4().simple());
+        let options = PgConnectOptions::from_str(&crate::test_support::database_url())
+            .expect("parse test database URL")
+            .application_name(&application_name);
+        let claim_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect claim contender");
+        let contender_pool = claim_pool.clone();
+        let contender_claimer = claimer.clone();
+        let claim = tokio::spawn(async move {
+            claim_relay_invite(
+                &contender_pool,
+                community,
+                &token_hash,
+                &contender_claimer,
+                None,
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE application_name = $1 AND wait_event_type = 'Lock' \
+                       AND wait_event = 'advisory' \
+                       AND query ILIKE '%lock_community_invite_admission%')",
+                )
+                .bind(&application_name)
+                .fetch_one(&pool)
+                .await
+                .expect("observe invite claim lock wait");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("claim reaches the held ban admission lock");
+
+        ban_tx.commit().await.expect("commit issuer ban");
+        assert_eq!(
+            claim.await.expect("claim task").expect("claim outcome"),
+            ClaimOutcome::Invalid
+        );
+        assert!(!is_relay_member(&pool, community, &claimer)
+            .await
+            .expect("membership after ban"));
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 0);
+
+        claim_pool.close().await;
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_commit_waits_for_legacy_claim_admission_lock_and_blocks_later_claim() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let claimer = test_pubkey();
+        let claimer_bytes = hex::decode(&claimer).expect("claimer hex");
+        let actor = [45_u8; 32];
+
+        let mut ban_tx = pool.begin().await.expect("begin ban transaction");
+        sqlx::query(
+            "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+             VALUES ($1, $2, true, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&claimer_bytes)
+        .bind(actor.as_slice())
+        .execute(&mut *ban_tx)
+        .await
+        .expect("write ban and acquire admission lock");
+
+        let application_name = format!("legacy_invite_ban_race_{}", Uuid::new_v4().simple());
+        let options = PgConnectOptions::from_str(&crate::test_support::database_url())
+            .expect("parse test database URL")
+            .application_name(&application_name);
+        let claim_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect claim contender");
+        let contender_pool = claim_pool.clone();
+        let contender_claimer = claimer.clone();
+        let claim = tokio::spawn(async move {
+            claim_legacy_relay_membership_with_owner(
+                &contender_pool,
+                community,
+                &contender_claimer,
+                None,
+                u64::MAX,
+                None,
+                None,
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE application_name = $1 AND wait_event_type = 'Lock' \
+                       AND wait_event = 'advisory' \
+                       AND query ILIKE '%lock_community_invite_admission%')",
+                )
+                .bind(&application_name)
+                .fetch_one(&pool)
+                .await
+                .expect("observe legacy invite claim lock wait");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("legacy claim reaches the held ban admission lock");
+
+        ban_tx.commit().await.expect("commit claimant ban");
+        assert_eq!(
+            claim.await.expect("claim task").expect("claim outcome"),
+            LegacyClaimOutcome::Restricted
+        );
+        assert!(!is_relay_member(&pool, community, &claimer)
+            .await
+            .expect("membership after ban"));
+
+        claim_pool.close().await;
         delete_test_community(&pool, community).await;
     }
 }

@@ -705,7 +705,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 57);
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -718,6 +718,7 @@ mod postgres_tests {
         assert_eq!(migrations[52].version, 53);
         assert_eq!(migrations[53].version, 54);
         assert_eq!(migrations[54].version, 55);
+        assert_eq!(migrations[56].version, 57);
         assert!(migrations[48]
             .sql
             .as_str()
@@ -2708,6 +2709,163 @@ mod postgres_tests {
         run_migrations(&pool).await.expect("run migrations");
 
         crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0057_backfills_owner_and_keeps_invite_revocation_permanent() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 55)
+            .await
+            .expect("run migrations through v55");
+
+        let community = uuid::Uuid::new_v4();
+        let owner = [81_u8; 32];
+        let agent = [82_u8; 32];
+        let later_banned_issuer = [83_u8; 32];
+        let actor = [84_u8; 32];
+        let host = format!("invite-migration-{}.example", community.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(host)
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community)
+            .bind(owner.as_slice())
+            .execute(&pool)
+            .await
+            .expect("insert owner");
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community)
+        .bind(agent.as_slice())
+        .bind(owner.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert agent-owner relation");
+
+        let now = chrono::Utc::now();
+        let created_at = now - chrono::Duration::minutes(5);
+        let expires_at = now + chrono::Duration::days(1);
+        let agent_hash = [85_u8; 32];
+        let later_issuer_hash = [86_u8; 32];
+        let agent_invite: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO relay_invites \
+                 (community_id, token_hash, expires_at, created_by, created_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             RETURNING id",
+        )
+        .bind(community)
+        .bind(agent_hash.as_slice())
+        .bind(expires_at)
+        .bind(hex::encode(agent))
+        .bind(created_at)
+        .fetch_one(&pool)
+        .await
+        .expect("insert pre-migration agent invite");
+        let later_issuer_invite: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO relay_invites \
+                 (community_id, token_hash, expires_at, created_by, created_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             RETURNING id",
+        )
+        .bind(community)
+        .bind(later_issuer_hash.as_slice())
+        .bind(expires_at)
+        .bind(hex::encode(later_banned_issuer))
+        .bind(created_at)
+        .fetch_one(&pool)
+        .await
+        .expect("insert pre-migration invite for later ban trigger");
+
+        sqlx::query(
+            "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+             VALUES ($1, $2, true, $3)",
+        )
+        .bind(community)
+        .bind(owner.as_slice())
+        .bind(actor.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert pre-migration owner ban");
+
+        run_migrations_through(&pool, 56)
+            .await
+            .expect("apply invite revocation migration");
+
+        let (recorded_owner, revoked_at): (Option<Vec<u8>>, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT created_by_owner, revoked_at FROM relay_invites \
+             WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community)
+            .bind(agent_invite)
+            .fetch_one(&pool)
+            .await
+            .expect("read backfilled invite");
+        assert_eq!(recorded_owner, Some(owner.to_vec()));
+        assert!(
+            revoked_at.is_some(),
+            "the active owner ban revokes old invites"
+        );
+
+        let before_later_ban: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT revoked_at FROM relay_invites WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community)
+        .bind(later_issuer_invite)
+        .fetch_one(&pool)
+        .await
+        .expect("read invite before later ban");
+        assert!(before_later_ban.is_none());
+
+        sqlx::query(
+            "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+             VALUES ($1, $2, true, $3)",
+        )
+        .bind(community)
+        .bind(later_banned_issuer.as_slice())
+        .bind(actor.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert post-migration issuer ban");
+        let after_later_ban: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT revoked_at FROM relay_invites WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community)
+        .bind(later_issuer_invite)
+        .fetch_one(&pool)
+        .await
+        .expect("read invite after later ban");
+        assert!(
+            after_later_ban.is_some(),
+            "the ban trigger revokes live invites"
+        );
+
+        sqlx::query(
+            "UPDATE community_bans SET banned = false \
+             WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community)
+        .bind(later_banned_issuer.as_slice())
+        .execute(&pool)
+        .await
+        .expect("unban issuer");
+        let clear_revocation = sqlx::query(
+            "UPDATE relay_invites SET revoked_at = NULL \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community)
+        .bind(later_issuer_invite)
+        .execute(&pool)
+        .await;
+        assert!(clear_revocation.is_err(), "invite revocation is permanent");
     }
 
     #[tokio::test]
