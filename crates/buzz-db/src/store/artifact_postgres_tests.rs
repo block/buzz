@@ -381,3 +381,50 @@ async fn concurrent_artifacts_on_ttl_channel_commit() {
     .unwrap();
     assert!(live);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn quiescing_community_rejects_artifact_at_admission_before_coordinate_lock() {
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", f.a, None, &f.owner, vec![]);
+    let env = artifact::validate(&create).unwrap();
+    crate::test_support::quiesce_community_for_tests(&f.db.pool, f.community).await;
+
+    // Hold the artifact coordinate lock. Admission must reject before
+    // `accept_artifact` reaches it, so the write cannot queue behind it.
+    let mut holder = f.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("artifact:{}:{}", f.community.as_uuid(), env.id))
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.db.accept_artifact(f.community, &create, &env, None, &f.relay),
+    )
+    .await
+    .expect("admission must reject before waiting on the coordinate lock")
+    .expect_err("a quiescing community must reject artifact writes");
+    holder.rollback().await.unwrap();
+    assert!(
+        crate::test_support::is_admission_rejection(&error),
+        "expected entry admission rejection, got: {error:#}"
+    );
+
+    let persisted: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM events WHERE community_id=$1 AND id=$2), \
+                (SELECT count(*) FROM artifact_heads WHERE community_id=$1 AND artifact_id=$3)",
+    )
+    .bind(f.community.as_uuid())
+    .bind(create.id.as_bytes().as_slice())
+    .bind(env.id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted,
+        (0, 0),
+        "a rejected artifact must persist nothing"
+    );
+}

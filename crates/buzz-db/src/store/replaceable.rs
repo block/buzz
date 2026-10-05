@@ -1151,7 +1151,7 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let result = db
@@ -1222,7 +1222,7 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin replacement tx");
         let outcome = db
@@ -1258,7 +1258,7 @@ mod postgres_tests {
         assert_eq!(live_id, old.id.as_bytes().to_vec());
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin stale revision tx");
         let mismatch = db
@@ -1292,7 +1292,7 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign missing project");
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin missing revision tx");
         let missing_result = db
@@ -1370,7 +1370,7 @@ mod postgres_tests {
         .expect("install failure injection");
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let error = db
@@ -1451,7 +1451,7 @@ mod postgres_tests {
             .expect("soft-delete duplicate row");
 
         let mut seed_tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin seed transaction");
         let (_, was_inserted) =
@@ -1462,7 +1462,7 @@ mod postgres_tests {
         seed_tx.commit().await.expect("commit older live head");
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let result = db

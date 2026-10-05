@@ -21,16 +21,11 @@ use buzz_core::{CommunityId, StoredEvent};
 
 /// Extract p-tag mentions from an event and insert into the `event_mentions` table.
 ///
-/// This pool-owning wrapper is a transitional, syntactic route only: it
-/// propagates failures to its caller, but opens a raw writer transaction and
-/// does not provide application-admission provenance. Supported serving writes
-/// should call `begin_community_event_write_transaction` and then
-/// `insert_mentions_in_transaction` so event storage and mention indexing commit
-/// or roll back together.
-///
-/// While this path remains, commit-time trigger fencing in Postgres is still
-/// authoritative; the community-write fence remains the authoritative safety
-/// backstop.
+/// This pool-owning wrapper indexes mentions in its own admitted transaction,
+/// after the event has already committed. Writes that need event storage and
+/// mention indexing to commit or roll back together should open
+/// `begin_community_event_write_transaction` and call
+/// `insert_mentions_in_transaction` instead.
 ///
 /// Duplicate inserts are silently skipped with `INSERT ... ON CONFLICT DO
 /// NOTHING`.
@@ -40,9 +35,12 @@ pub async fn insert_mentions(
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    let connection =
-        observability::acquire_writer(pool, observability::WriterOperation::EventWrite).await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    let mut tx = begin_community_event_write_transaction(
+        pool,
+        community_id,
+        observability::WriterOperation::EventWrite,
+    )
+    .await?;
     insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
     tx.commit().await?;
     Ok(())
@@ -1286,26 +1284,17 @@ impl Db {
         })
     }
 
-    /// Begin a database transaction for atomic multi-statement operations.
+    /// Begin an event-write transaction admitted for `community`.
+    ///
+    /// This is the only public way to open an event-write transaction. It takes
+    /// the shared community admission lock before returning, so callers cannot
+    /// take domain or row locks ahead of tenant admission, and a quiescing
+    /// community rejects the write at entry rather than at its first fenced
+    /// statement. Commit-time database fences remain the authoritative backstop.
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
     /// The transaction holds an owned pool handle, not a borrow.
     pub async fn begin_event_write_transaction(
-        &self,
-    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        let connection = observability::acquire_writer_with_legacy_metrics(
-            &self.pool,
-            observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        sqlx::Transaction::begin(connection, None)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Begin an event-write transaction and guard its community against
-    /// concurrent deletion.
-    pub async fn begin_community_write_transaction(
         &self,
         community: CommunityId,
     ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
@@ -1315,32 +1304,6 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await
-    }
-
-    /// Begin an event-write transaction that takes the shared replica-floor
-    /// advisory lock.
-    ///
-    /// This is a lock-ordering foundation only. Floor correctness remains
-    /// authoritative at commit time via the existing trigger/GUC contract.
-    pub async fn begin_replica_floor_locked_event_write_transaction(
-        &self,
-    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        let mut tx = self.begin_event_write_transaction().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(replica_fence::REPLICA_FLOOR_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
-        Ok(tx)
-    }
-
-    /// Begin an event-write transaction through the pre-operation API name.
-    ///
-    /// New callers should use [`Self::begin_event_write_transaction`] so the
-    /// semantic intent is explicit. This alias preserves the crate's public
-    /// API while emitting the same operation-aware and compatibility metrics.
-    #[deprecated(note = "use Db::begin_event_write_transaction")]
-    pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-        self.begin_event_write_transaction().await
     }
 
     /// Insert an event while holding and validating an admitted serving-write

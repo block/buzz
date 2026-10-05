@@ -78,7 +78,7 @@ async fn setup_db() -> Db {
 }
 
 #[tokio::test]
-async fn begin_transaction_compatibility_alias_is_preserved() {
+async fn event_write_transaction_preserves_legacy_acquisition_metrics() {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -90,8 +90,9 @@ async fn begin_transaction_compatibility_alias_is_preserved() {
     let snapshotter = recorder.snapshotter();
     let _guard = metrics::set_default_local_recorder(&recorder);
 
-    #[allow(deprecated)]
-    let result = db.begin_transaction().await;
+    let result = db
+        .begin_event_write_transaction(CommunityId::from_uuid(Uuid::new_v4()))
+        .await;
     assert!(matches!(
         result,
         Err(DbError::Sqlx(sqlx::Error::PoolClosed))
@@ -199,7 +200,7 @@ async fn community_write_transaction_compatibility_metrics_are_limited_to_legacy
         "typed-only tenant-local chokepoint must not emit legacy compatibility metrics"
     );
 
-    let legacy = db.begin_community_write_transaction(community).await;
+    let legacy = db.begin_event_write_transaction(community).await;
     assert!(matches!(
         legacy,
         Err(DbError::Sqlx(sqlx::Error::PoolClosed))
@@ -207,7 +208,7 @@ async fn community_write_transaction_compatibility_metrics_are_limited_to_legacy
     assert_eq!(
         legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
         1,
-        "Db::begin_community_write_transaction must preserve the legacy compatibility population"
+        "Db::begin_event_write_transaction must preserve the legacy compatibility population"
     );
 }
 
@@ -3181,6 +3182,22 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
     db.pool.close().await;
 }
 
+/// A writer transaction holding the shared replica-floor advisory lock, the
+/// shape a floor-compliant writer takes before the exclusive probe can run.
+async fn begin_replica_floor_locked_writer(db: &Db) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = db
+        .pool
+        .begin()
+        .await
+        .expect("begin floor-guarded writer tx");
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(crate::replica_fence::REPLICA_FLOOR_LOCK_KEY)
+        .execute(&mut *tx)
+        .await
+        .expect("take shared replica-floor lock");
+    tx
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn replica_floor_writer_transaction_holds_shared_lock() {
@@ -3200,10 +3217,7 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
     .await
     .expect("connect armed Db");
 
-    let writer = db
-        .begin_replica_floor_locked_event_write_transaction()
-        .await
-        .expect("open compliant floor-guarded writer tx");
+    let writer = begin_replica_floor_locked_writer(&db).await;
 
     let mut shared_contender = db.pool.begin().await.expect("begin shared contender");
     let shared_taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
@@ -3264,10 +3278,7 @@ async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release()
         .await
         .expect("read token before probe");
 
-    let writer = db
-        .begin_replica_floor_locked_event_write_transaction()
-        .await
-        .expect("open compliant floor-guarded writer tx");
+    let writer = begin_replica_floor_locked_writer(&db).await;
 
     let probe_pool = db.pool.clone();
     let probe_fence = std::sync::Arc::clone(db.fence());

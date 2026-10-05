@@ -34,7 +34,7 @@ impl Db {
         d_tag: &str,
         deletion_created_at_secs: i64,
     ) -> Result<WorkflowDeletionOutcome> {
-        let mut tx = self.begin_event_write_transaction().await?;
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
         let outcome = delete_workflow_in_transaction(
             &mut tx,
             community_id,
@@ -60,7 +60,7 @@ impl Db {
         owner_pubkey: &[u8],
         d_tag: &str,
     ) -> Result<(StoredEvent, bool, Option<Uuid>)> {
-        let mut tx = self.begin_event_write_transaction().await?;
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
         let (stored, inserted) =
             crate::event::insert_event_in_transaction(&mut tx, community_id, event, None).await?;
         if inserted {

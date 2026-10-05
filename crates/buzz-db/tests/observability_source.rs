@@ -129,12 +129,12 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(routed_reader.contains("acquire_reader_with_legacy_metrics(read_pool, operation)"));
     let event_write_transaction = runtime
         .split_once("pub async fn begin_event_write_transaction(")
-        .expect("runtime must expose the legacy event-write transaction seam")
+        .expect("runtime must expose the public event-write transaction seam")
         .1
         .split_once("pub async fn insert_event_with_serving_write_guard(")
-        .expect("legacy event-write transaction must precede guarded writes")
+        .expect("public event-write transaction must precede guarded writes")
         .0;
-    assert!(event_write_transaction.contains("acquire_writer_with_legacy_metrics("));
+    assert!(event_write_transaction.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER));
 
     let migration = include_str!("../src/runtime/migration.rs");
     let migration_lock = migration
@@ -628,15 +628,18 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 }
 
 #[test]
-fn insert_mentions_docs_describe_syntactic_scope_and_db_backstop() {
+fn pool_level_insert_mentions_opens_the_tenant_local_chokepoint() {
     let runtime = include_str!("../src/runtime/mod.rs");
+    let insert_mentions = runtime
+        .split_once("pub async fn insert_mentions(\n")
+        .expect("runtime must expose pool-level insert_mentions")
+        .1
+        .split_once("pub(crate) async fn insert_mentions_in_transaction(")
+        .expect("pool-level insert_mentions must precede its transaction seam")
+        .0;
     assert!(
-        runtime.contains("does not provide application-admission provenance"),
-        "runtime::insert_mentions docs must describe syntactic-only routing scope"
-    );
-    assert!(
-        runtime.contains("community-write fence remains the authoritative safety"),
-        "runtime::insert_mentions docs must name database fencing as the safety backstop"
+        insert_mentions.contains(COMMUNITY_CHOKEPOINT_MARKER),
+        "post-commit mention indexing must be admitted like any other event-table write"
     );
 }
 
@@ -770,15 +773,15 @@ fn legacy_compatibility_metrics_remain_pinned_to_the_preexisting_event_write_ent
     );
 
     let legacy_db_wrapper = runtime
-        .split_once("pub async fn begin_community_write_transaction(\n")
-        .expect("Db must expose the legacy community write entrypoint")
+        .split_once("pub async fn begin_event_write_transaction(\n")
+        .expect("Db must expose the public event-write entrypoint")
         .1
-        .split_once("/// Begin an event-write transaction that takes the shared replica-floor")
-        .expect("legacy Db wrapper must precede the replica-floor entrypoint")
+        .split_once("/// Insert an event while holding and validating an admitted serving-write")
+        .expect("public Db entrypoint must precede the serving-lease writer")
         .0;
     assert!(
         legacy_db_wrapper.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
-        "Db::begin_community_write_transaction must preserve the legacy compatibility population"
+        "Db::begin_event_write_transaction must preserve the legacy compatibility population"
     );
 
     let replaceable = include_str!("../src/store/replaceable.rs");
@@ -1191,5 +1194,189 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
     assert!(
         checked_guarded_files > 0,
         "guarded-table scan must exercise at least one file that writes a fenced table"
+    );
+}
+
+/// Transaction-provenance backstop for the routing check above.
+///
+/// That check accepts any function that takes a caller-owned transaction, so
+/// it cannot see who opened the transaction. This one walks one hop up: any
+/// production function in `buzz-db` or `buzz-relay` that calls a
+/// transaction-taking event-write helper without itself taking a transaction
+/// opened that transaction, so it must have admitted it. Database fences remain
+/// the authoritative backstop; this only keeps admission at entry.
+const TRANSACTION_ADMISSION_MARKERS: [&str; 5] = [
+    COMMUNITY_CHOKEPOINT_MARKER,
+    COMMUNITY_CHOKEPOINT_LEGACY_MARKER,
+    ".begin_event_write_transaction(",
+    ".guard_transaction(",
+    ".guard_transaction_with_serving_lease(",
+];
+
+fn function_name(function_source: &str) -> Option<&str> {
+    let header = function_header(function_source);
+    let after_fn = header.split_once("fn ")?.1;
+    let end = after_fn
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(after_fn.len());
+    Some(&after_fn[..end])
+}
+
+fn function_body(function_source: &str) -> &str {
+    function_source.split_once('{').map_or("", |(_, body)| body)
+}
+
+fn called_helpers<'a>(body: &str, helpers: &'a std::collections::BTreeSet<String>) -> Vec<&'a str> {
+    helpers
+        .iter()
+        .filter(|helper| {
+            body.match_indices(helper.as_str()).any(|(index, _)| {
+                let preceded_by_identifier = body[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                let rest = &body[index + helper.len()..];
+                !preceded_by_identifier && (rest.starts_with('(') || rest.starts_with("::<"))
+            })
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// Production functions that open a transaction for an event-write helper
+/// without admitting it. `sources` holds `(label, production_source)` pairs;
+/// helpers are discovered from them, so the rule follows new helpers.
+fn unadmitted_event_write_transaction_openers(sources: &[(String, String)]) -> Vec<String> {
+    let functions: Vec<(&str, &str, &str)> = sources
+        .iter()
+        .flat_map(|(label, production)| {
+            function_slices(production)
+                .into_iter()
+                .map(move |function| (label.as_str(), production.as_str(), function))
+        })
+        .collect();
+
+    // Transaction-taking functions that write a fenced table, closed over
+    // transaction-taking functions that call one of them.
+    let mut helpers: std::collections::BTreeSet<String> = functions
+        .iter()
+        .filter(|(_, _, function)| {
+            function_accepts_guarded_transaction_or_connection(function)
+                && production_contains_guarded_write(function)
+        })
+        .filter_map(|(_, _, function)| function_name(function).map(str::to_owned))
+        .collect();
+    loop {
+        let discovered: Vec<String> = functions
+            .iter()
+            .filter(|(_, _, function)| function_accepts_guarded_transaction_or_connection(function))
+            .filter_map(|(_, _, function)| function_name(function).map(|name| (name, function)))
+            .filter(|(name, function)| {
+                !helpers.contains(*name)
+                    && !called_helpers(function_body(function), &helpers).is_empty()
+            })
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        if discovered.is_empty() {
+            break;
+        }
+        helpers.extend(discovered);
+    }
+
+    functions
+        .iter()
+        .filter(|(_, production, function)| {
+            let header = function_header(function);
+            let admitted = TRANSACTION_ADMISSION_MARKERS
+                .iter()
+                .any(|marker| function.contains(marker))
+                || (function_uses_guarded_tx_adapter_state(function)
+                    && adapter_constructor_is_chokepoint_pinned(production, header));
+            !function_accepts_guarded_transaction_or_connection(function)
+                && !function_is_guarded_write_exception(header)
+                && !called_helpers(function_body(function), &helpers).is_empty()
+                && !admitted
+        })
+        .map(|(label, _, function)| format!("{label}: {}", function_header(function)))
+        .collect()
+}
+
+#[test]
+fn event_write_provenance_rejects_unadmitted_transaction_openers() {
+    let source = r#"
+pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+pub(crate) async fn forward_in_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
+    insert_row_in_transaction(tx).await;
+}
+pub async fn admitted_opener(db: &Db, community: CommunityId) {
+    let mut tx = db.begin_event_write_transaction(community).await.expect("tx");
+    forward_in_transaction(&mut tx).await;
+}
+pub async fn raw_opener(pool: &sqlx::PgPool) {
+    let mut tx = pool.begin().await.expect("tx");
+    crate::store::forward_in_transaction(&mut tx).await;
+}
+"#;
+    let violations =
+        unadmitted_event_write_transaction_openers(&[("fixture".to_owned(), source.to_owned())]);
+    assert_eq!(
+        violations,
+        ["fixture: pub async fn raw_opener(pool: &sqlx::PgPool) {"],
+        "an opener that hands an unadmitted transaction to an event-write helper, even through \
+         a pass-through helper, must be rejected; an admitted opener must not"
+    );
+}
+
+#[test]
+fn event_write_transactions_are_admitted_where_they_are_opened() {
+    use std::path::{Path, PathBuf};
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let path = entry.expect("read directory entry").path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if should_scan_guarded_write_source_file(&path) {
+                out.push(path);
+            }
+        }
+    }
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    for (crate_name, src_root) in [
+        ("buzz-db", manifest.join("src")),
+        ("buzz-relay", manifest.join("../buzz-relay/src")),
+    ] {
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(!files.is_empty(), "{crate_name} source must be scanned");
+        for path in files {
+            let relative = path
+                .strip_prefix(&src_root)
+                .expect("file is under src root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(&path).expect("read source file");
+            let production = source
+                .split("\n#[cfg(test)]")
+                .next()
+                .unwrap_or(&source)
+                .to_owned();
+            sources.push((format!("{crate_name}/src/{relative}"), production));
+        }
+    }
+
+    let violations = unadmitted_event_write_transaction_openers(&sources);
+    assert!(
+        violations.is_empty(),
+        "these functions open a transaction for an event-write helper without community \
+         admission; open it with Db::begin_event_write_transaction(community) or \
+         begin_community_event_write_transaction before any domain lock: {violations:?}"
     );
 }

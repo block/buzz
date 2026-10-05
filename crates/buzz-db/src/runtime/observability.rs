@@ -1479,14 +1479,9 @@ mod tests {
         let _ = writer_db
             .query_events_routed("pool_operation_matrix_writer", &query)
             .await;
-        let write_tx = writer_db
-            .begin_event_write_transaction()
-            .await
-            .expect("event-write semantic entry point begins a real transaction");
-        write_tx
-            .rollback()
-            .await
-            .expect("rollback operation-label fixture");
+        // The scope is not a live community, so admission rejects it after the
+        // writer acquisition has been attributed to `event_write`.
+        let _ = writer_db.begin_event_write_transaction(test_scope).await;
         let _ = writer_db
             .is_community_active_for_maintenance(test_scope)
             .await;
