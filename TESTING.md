@@ -31,6 +31,84 @@ combination space (PR #6807). Scope Playwright locators — unscoped
 `getByText` in a required smoke test is a strict-mode flake (PR #6980).
 (PRs #6807, #6980, #6996, #7013)
 
+### Community-ban route coverage
+
+`crates/buzz-test-client/tests/fixtures/community-ban-route-inventory.tsv`
+classifies the relay's production Axum routes by listener, method, path,
+authentication plane, membership behavior, and community-restriction behavior.
+The inventory guard finds direct `.route(...)` calls in production functions
+named `router` or `*_router`, resolves literal or declared `&str` paths, and
+applies direct literal `.nest(...)` prefixes from the relay router. It fails
+when one of those registrations is missing from the table or a stale row
+remains. Run it directly with:
+
+```bash
+python3 scripts/check-community-ban-route-inventory.py
+```
+
+`just test-unit` and `just test` run the guard; CI also runs the ignored HTTP
+and root-WebSocket behavior matrix in the Relay E2E lane:
+
+```bash
+cargo test -p buzz-test-client --test community_ban_routes -- --ignored --nocapture
+```
+
+Use a fresh disposable local relay, PostgreSQL, Redis, and MinIO stack for that
+command, and set `DATABASE_URL` or `BUZZ_TEST_DATABASE_URL` to the disposable
+PostgreSQL database. The matrix creates unique tenant hosts and identities; GIF
+requests stop at malformed local input, and Git/workflow requests use absent resources.
+Do not point these tests at a shared, development, or hosted database or relay.
+
+The inventory keeps membership separate from restriction policy. Public NIP-11,
+NIP-05, policy documents, and health probes have no authenticated community
+principal. Anonymous policy-receipt acceptance is pre-membership and has no
+principal to restrict. Invite claim is also pre-membership, but it carries a
+verified NIP-98 principal and remains restriction-enforced: it is the sole
+row marked pending in the inventory until BUZZ-268 qualifies the updated
+v1/v2 lifecycle:
+retain valid unexpired v1 codes, mint only v2, reject banned claimants and
+owners transactionally, permanently invalidate v2 on issuer ban, and honor the
+optional absolute invalid-after boundary for v1. Legacy v1 codes have no issuer
+identity, so issuer-specific revocation remains limited until a verified fleet
+drain or security approval. Relay-operator APIs, deployment-admin APIs,
+NIP-FI commands, the localhost Git hook, and the gated mesh test endpoint use
+separate auth planes; their exemption reason is recorded on each route row.
+Workflow webhooks also use a secret-authenticated caller with no user principal.
+Before creating a run, the handler separately checks the saved workflow owner's
+channel membership and role, but it does not check that owner's community-ban
+state. The inventory's `not_applicable:webhook_secret_auth` entry is a
+provisional caller-auth classification, not proof that an owner ban is
+irrelevant. Whether the owner's ban should gate webhook trigger and run
+creation remains an explicit policy question.
+
+Root and huddle admission, final-admission races, fail-closed reads, owner-to-
+agent restriction, timeout behavior, and tenant-scoped eviction point to their
+existing regression tests in `community-ban-regressions.tsv`. The local socket
+eviction tests establish pod-local closure. Delivery to sessions on other pods
+depends on the Redis pub/sub path and is not inferred from those local tests.
+The moderation-read matrix also checks a moderator-privileged agent against a
+fresh signed owner proof and a stored owner link; the bridge harness verifies
+that the ban denial uses the NIP-98 signed creation time, with a clear-owner
+control that reaches the queue.
+
+This scanner is a source-level guard, not a Rust router interpreter. It reads
+direct `.route(...)` calls inside production functions named `router` or ending
+in `_router`; a `.route(...)` elsewhere is a scanner error. It resolves a
+`.nest(...)` prefix only when the relay's `build_router` passes a literal
+prefix and a direct call to another recognized router function. It does not
+expand macros, discover `.route_service(...)` or `.nest_service(...)`, resolve
+dynamic path/prefix expressions, or interpret inline nested routers and
+conditional/opaque router composition. It also does not derive auth or
+restriction policy from handler code, or prove that the named regression
+function contains the expected assertions or is selected by CI. If production
+routes use an unrecognized registration shape, extend the scanner and bind
+that shape to the inventory before treating the table as complete.
+
+The method column records explicitly declared methods. Axum's `get(...)` helper
+also serves `HEAD` through the GET handler unless an explicit `.head(...)`
+handler is attached; the scanner does not add that implicit `HEAD` behavior as a
+separate inventory row or exercise it separately.
+
 ---
 
 ## Live Local Relay
@@ -190,7 +268,7 @@ relay key for authoritative replacement:
 
 ```bash
 export PATH="$PWD/target/release:$PATH"
-export DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz_roster_e2e"
+export DATABASE_URL="${BUZZ_TEST_DATABASE_URL:?set this to the disposable roster database}"
 export BUZZ_RELAY_URL="http://localhost:3030"  # match the relay from step 3
 export RELAY_URL="ws://localhost:3030"
 export BUZZ_RELAY_PRIVATE_KEY="<same key used by buzz-relay>"
@@ -331,7 +409,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
-| `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
+| `DATABASE_URL`                    | local PostgreSQL URL from `.env.example` | |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
