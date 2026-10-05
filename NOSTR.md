@@ -328,6 +328,45 @@ but only admins/owners can set it. Full spec:
    `run.sh` serialization is the guard against parallel adds (e.g. `xargs -P`). When adding
    multiple members in a loop, add `sleep 1` between invocations.
 
+### Invites
+
+Invites let a non-member join without an operator running `add-member`. Both routes are
+NIP-98 signed HTTP:
+
+| Route | Caller | Notes |
+|-------|--------|-------|
+| `POST /api/invites` | relay `owner` or `admin` | Body `{"ttl_secs": <u64>, "max_uses": <i32>}`, both optional |
+| `POST /api/invites/claim` | the joining pubkey | Exempt from the membership gate; rate-limited to 10 attempts per pubkey per minute |
+
+- `ttl_secs` must be between 60 and 2,592,000 (30 days); it defaults to 259,200 (72 h).
+- `max_uses` must be between 1 and 10,000; omitted or `null` means unlimited.
+- The mint response returns `code`, `url`, `expires_at` (unix seconds), `max_uses` and
+  `uses_remaining`. Only a SHA-256 hash of the code is stored.
+- A claim runs in one transaction that locks the invite row, so concurrent claims cannot
+  exceed `max_uses`. A claim by an existing member succeeds as `already_member` and does
+  not consume a use. An expired, used-up or unknown code returns 403 with
+  `invite_expired`, `invite_exhausted` or `invite_invalid`.
+- There is no revoke. An invite stays valid until it expires or runs out of uses.
+
+**Operator caps.** Two optional settings bound every minted invite, whatever the client
+asks for:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `BUZZ_INVITE_MAX_TTL_SECS` | unset | Lowers any longer `ttl_secs` to this value. Must be 60 to 2,592,000. |
+| `BUZZ_INVITE_MAX_USES` | unset | Lowers any larger `max_uses` to this value, and applies it when `max_uses` is omitted. Must be 1 to 10,000. |
+
+Requests above a cap are clamped, not rejected, so existing clients keep working. Values
+outside the protocol bounds above are still rejected with 400, and an invalid setting fails
+relay startup. The response always carries the effective `expires_at` and `max_uses`;
+Desktop and mobile currently display the values the user selected, not the clamped ones.
+For single-use invites that expire within a day:
+
+```bash
+BUZZ_INVITE_MAX_TTL_SECS=86400
+BUZZ_INVITE_MAX_USES=1
+```
+
 ---
 
 ## Relay Environment Variables (NIP-29 relevant)
