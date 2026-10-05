@@ -10166,7 +10166,9 @@ void main() {
     });
 
     for (final dm in [false, true]) {
-      testWidgets('native temporary title omits clock dm=$dm', (tester) async {
+      testWidgets('native temporary title updates retention text dm=$dm', (
+        tester,
+      ) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
         Channel conversation({int? ttlSeconds, DateTime? deadline}) => Channel(
@@ -10202,7 +10204,11 @@ void main() {
           ),
         );
         Map payload = view.creationParams! as Map;
-        expect(payload['ephemeralLabel'], isNull);
+        expect(
+          payload['ephemeralLabel'],
+          contains('after 1 hour of inactivity'),
+        );
+        expect(payload['subtitle'], startsWith('Temporary · 1h TTL'));
         const bridge = MethodChannel('buzz/ios_navigation_bar/297');
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
@@ -10224,11 +10230,13 @@ void main() {
         );
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
-        expect(payload['ephemeralLabel'], isNull);
+        expect(payload['ephemeralLabel'], contains('Cleanup is due now'));
+        expect(payload['subtitle'], startsWith('Temporary · Cleanup due'));
         current = conversation();
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
         expect(payload['ephemeralLabel'], isNull);
+        expect(payload['subtitle'], isNot(contains('Temporary')));
         await tester.pumpWidget(const SizedBox());
         debugDefaultTargetPlatformOverride = null;
       });

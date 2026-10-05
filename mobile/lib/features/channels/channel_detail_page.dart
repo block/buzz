@@ -595,6 +595,11 @@ class ChannelDetailPage extends HookConsumerWidget {
       }
     }
 
+    final retention = ephemeralChannelDisplay(resolvedChannel);
+    final nativeHeaderSubtitle = isOneToOneDm
+        ? dmHeader?.presenceLabel
+        : headerMemberLabel;
+
     return FrostedScaffold(
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
@@ -607,9 +612,16 @@ class ChannelDetailPage extends HookConsumerWidget {
               resolvedChannel,
               currentPubkey: currentPubkey,
             ),
-        nativeSubtitle: isOneToOneDm
-            ? dmHeader?.presenceLabel
-            : headerMemberLabel,
+        nativeSubtitle: retention == null
+            ? nativeHeaderSubtitle
+            : [
+                'Temporary',
+                if (retention.detailLabel != null) retention.detailLabel!,
+                if (nativeHeaderSubtitle != null &&
+                    nativeHeaderSubtitle.isNotEmpty)
+                  nativeHeaderSubtitle,
+              ].join(' · '),
+        nativeEphemeralLabel: retention?.tooltipLabel,
         nativeTitlePresenceColor: switch (isOneToOneDm
             ? dmHeader?.presence
             : null) {

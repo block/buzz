@@ -27,13 +27,11 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     didSet { if maximumWidth != oldValue { invalidateIntrinsicContentSize() } }
   }
   var onActivate: (() -> Void)?
-  var onExpiryPressed: ((String) -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
   private var avatarView: UIImageView?
   private var presenceView: UIView?
   private var subtitlePresenceView: UIView?
-  private var expiryView: UIButton?
 
   init(title: String?, subtitle: String, color: UIColor) {
     if #available(iOS 26.0, *) {
@@ -96,16 +94,8 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   func setEphemeralStatus(_ label: String) {
-    let clock = UIButton(type: .custom)
-    clock.setImage(UIImage(systemName: "clock"), for: .normal)
-    clock.tintColor = .secondaryLabel
-    clock.addAction(UIAction { [weak self] _ in self?.onExpiryPressed?(label) }, for: .touchUpInside)
-    clock.accessibilityIdentifier = "navigation-ephemeral-status"
-    // The title is one accessibility element; include the full retention
-    // explanation there so the clock is never announced without its meaning.
-    clock.isAccessibilityElement = false
-    contentView.addSubview(clock)
-    expiryView = clock
+    // The subtitle carries the visible temporary/expiry text. Keep the full
+    // retention explanation on the title's single VoiceOver element too.
     accessibilityLabel = [accessibilityLabel, label].compactMap { $0 }.joined(separator: ", ")
   }
 
@@ -114,7 +104,7 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   // UIKit can wrap titleView in a UIControl. Only controls inside our title
-  // (such as the retention disclosure) should consume the title tap.
+  // should consume the title tap.
   func acceptsTitleTouch(in touchedView: UIView?) -> Bool {
     var touched = touchedView
     while let view = touched, view !== self {
@@ -135,7 +125,7 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: min(maximumWidth, max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width + (subtitlePresenceView == nil ? 0 : 12)) + 24 + (avatarView == nil ? 0 : 40) + (expiryView == nil ? 0 : 44)),
+    CGSize(width: min(maximumWidth, max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width + (subtitlePresenceView == nil ? 0 : 12)) + 24 + (avatarView == nil ? 0 : 40)),
            height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
   }
 
@@ -155,11 +145,8 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     let top = (bounds.height - titleHeight - subtitleHeight) / 2
     let hasAvatar = avatarView != nil
     let rtl = effectiveUserInterfaceLayoutDirection == .rightToLeft
-    let statusWidth: CGFloat = expiryView == nil ? 0 : 44
-    let textX: CGFloat = (hasAvatar && !rtl ? 52 : 12) + (rtl ? statusWidth : 0)
-    let textWidth = max(0, bounds.width - 24 - (hasAvatar ? 40 : 0) - statusWidth)
-    expiryView?.frame = CGRect(x: rtl ? 12 : bounds.width - 56,
-                              y: 0, width: 44, height: bounds.height)
+    let textX: CGFloat = hasAvatar && !rtl ? 52 : 12
+    let textWidth = max(0, bounds.width - 24 - (hasAvatar ? 40 : 0))
     titleLabel.frame = CGRect(x: textX, y: top, width: textWidth, height: titleHeight)
     subtitleLabel.frame = CGRect(x: textX, y: top + titleHeight, width: textWidth, height: subtitleHeight)
     if let dot = subtitlePresenceView {
@@ -290,11 +277,19 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.layoutIfNeeded()
     measureIfNeeded()
     applyScroll()
-    // Conversation controls already have their own glass. Keep the broad
-    // backdrop above them, behind the system status indicators, with only a
-    // short fade below the safe area. Recompute after rotation/inset changes.
+    // Glass-backed conversations need only a short status-area fade.
+    // Recompute the material bounds after rotation and inset changes.
     let statusHeight = navigation.view.safeAreaInsets.top
-    let statusOnly = alwaysFrosted && !navigation.navigationBar.prefersLargeTitles
+    // Before iOS 26 the actions have no glass, and subtitle-less thread
+    // titles remain plain UIKit labels even on iOS 26. They need material
+    // beneath the entire control area, not just the status indicators.
+    let glassBackedControls: Bool
+    if #available(iOS 26.0, *) {
+      glassBackedControls = content.navigationItem.titleView is NavigationTitleView
+    } else {
+      glassBackedControls = false
+    }
+    let statusOnly = alwaysFrosted && !navigation.navigationBar.prefersLargeTitles && glassBackedControls
     let height = statusOnly
       ? min(container.bounds.height, statusHeight > 0 ? statusHeight + 6 : 0)
       : container.bounds.height
@@ -381,15 +376,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         ? "Open settings for \(item.title ?? ""), \(subtitle)"
         : "\(item.title ?? ""), \(subtitle)"
       button.accessibilityTraits = enabled ? .button : .header
-      button.isUserInteractionEnabled = enabled || args["ephemeralLabel"] is String
+      button.isUserInteractionEnabled = enabled
       if enabled {
         button.onActivate = { [weak self] in self?.channel.invokeMethod("action", arguments: "title") }
-      }
-      button.onExpiryPressed = { [weak self] label in
-        guard let self, self.content.presentedViewController == nil else { return }
-        let disclosure = UIAlertController(title: "Temporary conversation", message: label, preferredStyle: .alert)
-        disclosure.addAction(UIAlertAction(title: "OK", style: .default))
-        self.content.present(disclosure, animated: true)
       }
       if let avatar = args["titleAvatar"] as? [String: Any] {
         button.setAvatar(makeItem(avatar).image,
