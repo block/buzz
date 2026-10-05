@@ -2419,7 +2419,7 @@ mod postgres_tests {
         let active_cancel = CancellationToken::new();
         let active_control = CommunityConnectionControl::new(active_cancel.clone());
         let active_reason = active_control.disconnect_reason();
-        let _active_guard =
+        let active_guard =
             state
                 .community_connections
                 .register(Uuid::new_v4(), community, active_control);
@@ -2454,6 +2454,50 @@ mod postgres_tests {
         assert_eq!(
             *active_reason.borrow(),
             Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        // Fenced deletion: this is the state `buzz-deletion` publishes the bare
+        // command from, so it must close with the deletion reason even though
+        // the row is also archived.
+        drop(active_guard);
+        let deleted_cancel = CancellationToken::new();
+        let deleted_control = CommunityConnectionControl::new(deleted_cancel.clone());
+        let deleted_reason = deleted_control.disconnect_reason();
+        let _deleted_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, deleted_control);
+        let mut tx = state
+            .db
+            .pool()
+            .begin()
+            .await
+            .expect("begin deletion fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+             set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(community.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("enter deletion executor scope");
+        sqlx::query("UPDATE communities SET deletion_state = 'fenced' WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("fence community deletion");
+        tx.commit().await.expect("commit deletion fixture");
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            Some(1)
+        );
+        assert!(deleted_cancel.is_cancelled());
+        assert_eq!(
+            *deleted_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
         );
     }
 

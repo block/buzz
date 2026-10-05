@@ -1344,7 +1344,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                                     community = %scoped.community_id,
                                     ?archived_at,
                                     %error,
-                                    "could not verify community disconnect; retaining sockets until lifecycle revalidation"
+                                    "could not verify archive disconnect; retaining sockets until lifecycle revalidation"
                                 ),
                             }
                         }

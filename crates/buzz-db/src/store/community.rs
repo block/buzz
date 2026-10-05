@@ -1240,6 +1240,60 @@ mod postgres_tests {
             .expect("restored community state"));
     }
 
+    /// Foreign-key child inserts hold `FOR KEY SHARE` on the community row for
+    /// their whole transaction. The lifecycle fences must not queue behind
+    /// them, or a busy community stalls revalidation and conn-control on every
+    /// pod. `FOR UPDATE` would block here; `FOR NO KEY UPDATE` must not.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lifecycle_fences_do_not_wait_on_foreign_key_share_locks() {
+        let db = setup_db().await;
+        let host = format!("fence-key-share-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let CreateCommunityWithOwnerResult::Created(created) = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community")
+        else {
+            panic!("expected new community");
+        };
+        let archived = db
+            .archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+
+        let mut child_writer = db.pool.begin().await.expect("begin child writer");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR KEY SHARE")
+            .bind(created.id.as_uuid())
+            .execute(&mut *child_writer)
+            .await
+            .expect("hold the lock a child-row insert takes");
+
+        let wait = std::time::Duration::from_secs(5);
+        assert_eq!(
+            tokio::time::timeout(
+                wait,
+                db.with_inactive_community_fence(created.id, |_| "inactive")
+            )
+            .await
+            .expect("inactive fence must not wait on FOR KEY SHARE")
+            .expect("inactive fence"),
+            Some("inactive")
+        );
+        assert_eq!(
+            tokio::time::timeout(
+                wait,
+                db.with_community_archive_fence(created.id, archived.archived_at, || "archived")
+            )
+            .await
+            .expect("archive fence must not wait on FOR KEY SHARE")
+            .expect("archive fence"),
+            Some("archived")
+        );
+        child_writer.rollback().await.expect("release child writer");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn create_community_with_owner_enforces_per_owner_limit() {

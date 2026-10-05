@@ -2008,6 +2008,11 @@ impl AppState {
     ///   predates the transition timestamp) closes only while the row is
     ///   inactive, with the close reason taken from the row itself.
     ///
+    /// The two forms fail in opposite directions when the fence cannot be
+    /// evaluated. `Some` is only ever a reversible archive, so it retains the
+    /// sockets for lifecycle revalidation and returns the error. `None` may be
+    /// a permanent deletion, so it fails closed with `community deleted`.
+    ///
     /// Returns `None` when the fence found nothing to close.
     pub async fn apply_community_disconnect(
         &self,
@@ -2023,7 +2028,20 @@ impl AppState {
                     })
                     .await
             }
-            None => self.disconnect_if_inactive(community_id).await,
+            None => match self.disconnect_if_inactive(community_id).await {
+                Ok(disconnected) => Ok(disconnected),
+                Err(error) => {
+                    tracing::warn!(
+                        community = %community_id,
+                        %error,
+                        "could not verify bare community disconnect; failing closed as a deletion"
+                    );
+                    Ok(Some(
+                        self.community_connections
+                            .disconnect_deleted_community(community_id),
+                    ))
+                }
+            },
         }
     }
 
@@ -3657,6 +3675,51 @@ pub(crate) mod tests {
         assert_eq!(closed, 1);
         assert!(failures.is_empty());
         assert!(cancel.is_cancelled());
+    }
+
+    /// A bare `DisconnectCommunity` may be a permanent deletion, so when the
+    /// lifecycle fence cannot be evaluated it must fail closed as deletion did
+    /// before the fence existed. The timestamped form is only ever a reversible
+    /// archive, so it retains sockets for lifecycle revalidation instead.
+    #[tokio::test]
+    async fn bare_community_disconnect_fails_closed_when_the_fence_is_unavailable() {
+        let state = test_state_with_database_url(
+            "postgres://unused:unused@127.0.0.1:1/unused", // sadscan:disable np.postgres.1
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason = control.disconnect_reason();
+        let _guard = state
+            .community_connections
+            .register(Uuid::new_v4(), community, control);
+
+        state
+            .apply_community_disconnect(community, Some(Utc::now()))
+            .await
+            .expect_err("an unreachable fence must surface for the archive form");
+        assert!(
+            !cancel.is_cancelled(),
+            "a timestamped archive disconnect must retain sockets when its fence fails"
+        );
+        assert_eq!(*reason.borrow(), None);
+
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("a bare disconnect fails closed instead of erroring"),
+            Some(1)
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "a bare disconnect must close sockets when its fence fails"
+        );
+        assert_eq!(
+            *reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
     }
 
     #[test]

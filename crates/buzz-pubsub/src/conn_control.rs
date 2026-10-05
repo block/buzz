@@ -113,7 +113,9 @@ pub enum ConnControl {
     /// Archive callers include the durable archive-transition timestamp. Each
     /// receiver checks it under a row lock before disconnecting, so a delayed
     /// command cannot disconnect a subsequently restored community. `None`
-    /// preserves the unconditional command used by permanent deletion.
+    /// (permanent deletion, or archive from a relay predating the timestamp)
+    /// closes only while the row is inactive, and fails closed as a deletion
+    /// when the receiver cannot evaluate that fence.
     DisconnectCommunity {
         /// Exact archive transition this command belongs to, when reversible.
         #[serde(default, skip_serializing_if = "Option::is_none")]

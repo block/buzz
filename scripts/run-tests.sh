@@ -247,6 +247,9 @@ run_unit_tests() {
   run_test_step "buzz-relay archive revalidation fence test" \
     cargo test -p buzz-relay --lib state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback -- --exact --nocapture
 
+  run_test_step "buzz-relay bare disconnect fail-closed test" \
+    cargo test -p buzz-relay --lib state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable -- --exact --nocapture
+
   run_test_step "buzz-relay archived close-reason test" \
     cargo test -p buzz-relay --lib connection::tests::send_loop_sends_policy_close_when_community_is_archived -- --exact --nocapture
 
