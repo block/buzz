@@ -30,6 +30,62 @@ bool readByChannelCatchUp({
   required bool highPriority,
 }) => !isDm && !isReply && !highPriority;
 
+/// The plaintext budget for one published read-state slot. The web app
+/// (`buzz-app`) uses the same limit, well under NIP-44's 64 KiB maximum.
+const readStatePlaintextBytes = 40 * 1024;
+
+/// Whether this device republishes a mark it merged from another device's
+/// slot. Message marks are not republished: each covers one message, and the
+/// web app prunes them once a catch-up mark reads the message. Broad marks
+/// are republished so they outlive the fetch horizon of the slot that wrote
+/// them.
+bool republishesMergedContext(String contextId) =>
+    !contextId.startsWith(msgContextPrefix);
+
+/// Keep order for a slot that is over budget, following `buzz-app`'s
+/// retention: channel marks and the web app's override keys first, then
+/// thread marks, then catch-up marks, then message marks.
+int _retentionScope(String key) {
+  if (!key.contains(':') || key.startsWith('ov_') || key.startsWith('esc:')) {
+    return 0;
+  }
+  if (key.startsWith(threadContextPrefix)) return 1;
+  if (key.startsWith('activity:') || key.startsWith('thread-activity:')) {
+    return 2;
+  }
+  return 3;
+}
+
+/// The marks from [contexts] that fit one published slot for [clientId]
+/// within [maxBytes] of plaintext. Broader marks are kept first, and within
+/// each kind the newest. A slot over NIP-44's limit cannot be encrypted, so
+/// without this cap sync would stop. Dropped marks stay in local state.
+Map<String, int> retainPublishedContexts(
+  Map<String, int> contexts, {
+  required String clientId,
+  int maxBytes = readStatePlaintextBytes,
+}) {
+  int bytesOf(Object? value) => utf8.encode(jsonEncode(value)).length;
+  var used = bytesOf(ReadStateBlob(clientId: clientId, contexts: {}).toJson());
+  int keepOrder(MapEntry<String, int> a, MapEntry<String, int> b) {
+    final byScope = _retentionScope(a.key).compareTo(_retentionScope(b.key));
+    if (byScope != 0) return byScope;
+    final byTime = b.value.compareTo(a.value);
+    return byTime != 0 ? byTime : a.key.compareTo(b.key);
+  }
+
+  final ordered = contexts.entries.toList()..sort(keepOrder);
+  final retained = <String, int>{};
+  for (final entry in ordered) {
+    // A key, its colon, its value and one separating comma.
+    final cost = bytesOf(entry.key) + 2 + '${entry.value}'.length;
+    if (used + cost > maxBytes || retained.length >= _maxContexts) break;
+    used += cost;
+    retained[entry.key] = entry.value;
+  }
+  return retained;
+}
+
 int? maxReadAt(Iterable<int?> markers) {
   int? latest;
   for (final marker in markers) {

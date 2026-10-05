@@ -250,7 +250,9 @@ class ReadStateManager {
         );
         if (result == _ApplyRemoteContextResult.advanced) {
           _pendingSyncedAdvances.add(entry.key);
-          _publishableContextIds.add(entry.key);
+          if (republishesMergedContext(entry.key)) {
+            _publishableContextIds.add(entry.key);
+          }
         }
       }
 
@@ -324,7 +326,9 @@ class ReadStateManager {
         _pendingSyncedAdvances.add(entry.key);
         changed = true;
       }
-      if (_publishableContextIds.add(entry.key)) {
+      if ((decoded.blob.clientId == _clientId ||
+              republishesMergedContext(entry.key)) &&
+          _publishableContextIds.add(entry.key)) {
         changed = true;
       }
     }
@@ -502,7 +506,7 @@ class ReadStateManager {
         contexts[entry.key] = entry.value;
       }
     }
-    return contexts;
+    return retainPublishedContexts(contexts, clientId: _clientId);
   }
 
   void _hydrateFromLocalStorage() {

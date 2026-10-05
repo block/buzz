@@ -107,7 +107,7 @@ void main() {
     },
   );
 
-  test('disables remote sync after an oversized local blob', () async {
+  test('caps a large slot instead of disabling sync', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final keychain = nostr.Keys.generate();
@@ -126,20 +126,76 @@ void main() {
       onChanged: () {},
     );
 
+    // About 100 KiB of message marks, more than NIP-44 can encrypt.
     for (var index = 0; index < 1400; index++) {
       manager.markContextRead(
-        'channel-${index.toString().padLeft(4, '0')}-${'x' * 48}',
+        'msg:${index.toString().padLeft(64, '0')}',
         index + 1,
       );
     }
+    manager.markContextRead('channel-1', 5);
     await manager.flush();
 
-    manager.markContextRead('channel-new', 2000);
+    manager.markContextRead('msg:new', 2000);
     await manager.flush();
 
-    expect(relay.submitCount, 0);
-    expect(manager.getEffectiveTimestamp('channel-0000-${'x' * 48}'), 1);
-    expect(manager.getEffectiveTimestamp('channel-new'), 2000);
+    expect(relay.submitCount, 2);
+    final plaintext = crypto.decrypt(relay.contents.last);
+    expect(utf8.encode(plaintext).length, lessThan(readStatePlaintextBytes));
+    final published = decodeReadStateBlob(plaintext)!.contexts;
+    // Broad marks come first, then the newest message marks.
+    expect(published['channel-1'], 5);
+    expect(published['msg:new'], 2000);
+    expect(published, isNot(contains('msg:${'0' * 64}')));
+    // Marks left out of the slot stay in local state.
+    expect(manager.getEffectiveTimestamp('msg:${'0' * 64}'), 1);
+  });
+
+  test('republishes merged broad marks but not message marks', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final session = _FakeRelaySession();
+    final relay = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    session.historyEvents = [
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'web-client',
+        slotId: 'web-slot',
+        contexts: {'channel-1': 100, 'activity:channel-1': 120, 'msg:a': 110},
+        createdAt: 100,
+      ),
+    ];
+
+    await manager.initialize();
+    manager.markContextRead('msg:mine', 130);
+    await manager.flush();
+
+    // The web app may prune `msg:a` once `activity:` reads it, so this
+    // device must not bring it back. It still reads it locally.
+    expect(manager.getEffectiveTimestamp('msg:a'), 110);
+    final published = decodeReadStateBlob(
+      crypto.decrypt(relay.contents.last),
+    )!.contexts;
+    expect(published, {
+      'channel-1': 100,
+      'activity:channel-1': 120,
+      'msg:mine': 130,
+    });
   });
 
   test('remote read-state rollback is ignored', () async {
@@ -206,6 +262,7 @@ NostrEvent _stubAckEvent() => const NostrEvent(
 
 class _FakeSignedEventRelay implements SignedEventRelay {
   final Completer<_SubmittedEvent> submitted = Completer<_SubmittedEvent>();
+  final List<String> contents = [];
   int submitCount = 0;
 
   @override
@@ -220,7 +277,10 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     void Function(NostrEvent event)? onSigned,
   }) async {
     submitCount++;
-    submitted.complete(_SubmittedEvent(kind: kind, tags: tags));
+    contents.add(content);
+    if (!submitted.isCompleted) {
+      submitted.complete(_SubmittedEvent(kind: kind, tags: tags));
+    }
     return _stubAckEvent();
   }
 }
