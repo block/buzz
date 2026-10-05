@@ -258,6 +258,83 @@ A `CancellationToken` coordinates shutdown across all three loops.
 
 Slow clients: `ConnectionState::send()` uses `try_send` — if the send buffer is full, a grace counter increments. After `SLOW_CLIENT_GRACE_LIMIT` (3) consecutive full-buffer events, the connection is cancelled. A successful send resets the counter.
 
+### Live Community Authorization Revalidation
+
+Authenticated root and huddle/audio sockets retain their server-resolved
+community, principal, admission-captured owner, admission route, whether that
+owner was a relay member at admission, and whether closed-relay membership was
+granted through that owner. A relay-local worker checks
+these records against batched writer-authoritative snapshots every 5 seconds. It
+keeps the immediate local disconnect and Redis fan-out paths; this scan is the
+durable backstop when a pod misses fan-out.
+
+The maximum authorization-staleness budget is 30 seconds. A database failure
+may preserve the last successful decision for 10 seconds, measured from the
+start of that session's last successful authoritative check; repeated failures
+never extend the grace. The worker handles up to 500 distinct
+`(community, principal, captured owner)`
+targets per query, runs at most 4 queries at a time, gives each query 1 second,
+and starts one shared 5-second lookup deadline before it snapshots and groups
+the live-session registry. No database batch starts after that deadline;
+unresolved targets are treated as lookup failures. Closing decisions are then applied in one
+bounded sweep over the connection snapshot. At the default 10,000-connection
+limit, the in-memory regression harness processed a full 10,000-session scan in
+70 ms in the latest measured workstation run. A disposable PostgreSQL run
+fetched all 10,000 authorization targets in 129 ms through the same 500-row,
+four-query batching shape. Database lookups are bounded by the shared 5-second
+deadline. The conservative staleness bound is 10 seconds of database grace, one
+5-second cadence, two 5-second scan windows, and one 1-second query deadline:
+26 seconds, below the 30-second budget. The relay's shared
+`BUZZ_MAX_CONNECTIONS` semaphore caps root and audio sockets together at
+10,000 by default; that is at most 20 batches and five query waves. The worker
+creates no per-socket timers or per-connection revalidation queries. A scan
+that exceeds its deadline treats unreturned targets as lookup failures and
+closes their sessions when their existing grace has expired. If a result batch
+is incomplete or malformed, every target in
+that batch is treated as a lookup failure; no partial rows refresh
+authorization.
+
+Membership is required only when `require_relay_membership` is enabled. An
+open-relay nonmember remains allowed unless directly or through its current
+recorded owner it has an active community ban. An owner-derived member remains
+allowed only while the relay, owner-delegation setting, and current owner
+membership still permit that path. Removal of the admission-captured owner
+revokes its session even if the agent's stored owner changed; captured-owner
+membership never grants access to a directly admitted principal. The first
+stored owner link also invalidates sessions admitted without one, matching the
+existing reconnect path when NIP-OA materializes ownership; the durable check
+detects that transition if its disconnect fan-out is missed. A directly
+admitted member with a stable owner link still relies on its own membership,
+and a change between already-recorded owners alone does not create a new
+membership requirement for that principal. An active ban on the captured owner
+also revokes that session. On open relays, an owner who was already a nonmember
+at admission does not become a membership requirement. Moderation timeouts are
+not read by this worker because they restrict writes, not an established
+socket. All membership, ownership, and ban predicates include the bound
+community. Admission reads the captured owner's membership from the writer
+when the delegation check did not already establish it; that bounded point
+lookup records the baseline needed to distinguish a later membership removal
+from pre-existing open-relay nonmembership.
+
+Each batch snapshot is the revalidation ordering point. A removal or ban
+committed before that snapshot closes the session; a re-add or unban committed
+before it keeps the session authorized. A later concurrent change is observed
+on the next scan, and a close based on an earlier snapshot can be recovered by
+reconnecting against current state. Admission binds the authenticated identity
+before its final writer read and only publishes an admitted live record after
+that check, so admission racing a removal is either cancelled by the immediate
+path or rejected by the final read / next durable scan.
+
+If the writer remains unavailable past the grace, the relay fails closed and
+cancels the socket. NIP-FI root and audio sockets receive their existing
+route-specific `authorization_denied` or `authorization_unavailable` terminal
+response; other sockets receive the normal access-revoked or unavailable close
+reason. This trades connection availability during a prolonged database
+outage for a bounded authorization window. Reconnecting after the database
+recovers performs the ordinary admission checks. The worker shares graceful
+shutdown cancellation and has no migration or rollout flag; all relay pods
+must run this code for the bound to hold deployment-wide.
+
 ### Step 5: Cleanup
 
 On disconnect (any cause):

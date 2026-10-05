@@ -9,9 +9,11 @@ use std::time::Instant;
 use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, Utf8Bytes as WsUtf8Bytes};
 use dashmap::DashMap;
-use futures_util::future::join_all;
+use futures_util::future::{join_all, BoxFuture};
+use futures_util::stream::{self, StreamExt};
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -74,6 +76,39 @@ impl CommunityDisconnectReason {
     }
 }
 
+/// Maximum time between authoritative rechecks for live member authorization.
+pub const LIVE_AUTHORIZATION_REVALIDATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5);
+/// A short database outage may preserve the most recent decision for this long.
+pub(crate) const LIVE_AUTHORIZATION_DB_FAILURE_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(10);
+/// A live session must not keep a stale authorization decision beyond this budget.
+pub(crate) const LIVE_AUTHORIZATION_MAX_STALENESS: std::time::Duration =
+    std::time::Duration::from_secs(30);
+const LIVE_AUTHORIZATION_BATCH_SIZE: usize = 500;
+const LIVE_AUTHORIZATION_QUERY_CONCURRENCY: usize = 4;
+const LIVE_AUTHORIZATION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const LIVE_AUTHORIZATION_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+// Conservative schedule: allow the grace plus a full current/next scan, the
+// cadence, and one query deadline. Keep the documented session budget above it.
+const LIVE_AUTHORIZATION_WORST_CASE_STALENESS_SECS: u64 = LIVE_AUTHORIZATION_DB_FAILURE_GRACE
+    .as_secs()
+    + LIVE_AUTHORIZATION_REVALIDATION_INTERVAL.as_secs()
+    + 2 * LIVE_AUTHORIZATION_SCAN_TIMEOUT.as_secs()
+    + LIVE_AUTHORIZATION_QUERY_TIMEOUT.as_secs();
+const _: () = assert!(
+    LIVE_AUTHORIZATION_WORST_CASE_STALENESS_SECS <= LIVE_AUTHORIZATION_MAX_STALENESS.as_secs()
+);
+#[derive(Clone)]
+struct LiveAuthorizationRecord {
+    pubkey: [u8; 32],
+    owner_pubkey: Option<[u8; 32]>,
+    owner_was_relay_member_at_admission: bool,
+    membership_via_owner: bool,
+    route: crate::nip_fi_session::NipFiWsRoute,
+    last_checked_at: TokioInstant,
+}
+
 /// NIP-42-proven key and the NIP-FI issuer a socket was admitted under.
 #[derive(Clone)]
 struct ProvenIdentity {
@@ -103,6 +138,8 @@ pub(crate) struct CommunityConnectionControl {
     pubkey: Arc<std::sync::OnceLock<[u8; 32]>>,
     /// Owner of an admitted agent; revoking the owner closes this socket.
     owner: Arc<std::sync::OnceLock<[u8; 32]>>,
+    /// Authoritative policy facts for durable per-member revalidation.
+    live_authorization: Arc<std::sync::Mutex<Option<LiveAuthorizationRecord>>>,
     /// Shadow-mode observation of this socket; no enforce path reads it.
     nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
 }
@@ -117,6 +154,7 @@ impl CommunityConnectionControl {
             terminal_frame_tx: Arc::new(std::sync::Mutex::new(None)),
             pubkey: Arc::default(),
             owner: Arc::default(),
+            live_authorization: Arc::default(),
             nip_fi_shadow: Arc::default(),
         }
     }
@@ -148,6 +186,50 @@ impl CommunityConnectionControl {
     /// socket without a database lookup.
     pub(crate) fn bind_owner(&self, owner: [u8; 32]) {
         let _ = self.owner.set(owner);
+    }
+
+    /// Mark the socket admitted after its final authoritative policy check.
+    pub(crate) fn mark_live_authorized(
+        &self,
+        pubkey: [u8; 32],
+        owner_pubkey: Option<[u8; 32]>,
+        owner_was_relay_member_at_admission: bool,
+        membership_via_owner: bool,
+        route: crate::nip_fi_session::NipFiWsRoute,
+        checked_at: TokioInstant,
+    ) {
+        let mut slot = self
+            .live_authorization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(LiveAuthorizationRecord {
+            pubkey,
+            owner_pubkey,
+            owner_was_relay_member_at_admission,
+            membership_via_owner,
+            route,
+            last_checked_at: checked_at,
+        });
+    }
+
+    fn live_authorization(&self) -> Option<LiveAuthorizationRecord> {
+        self.live_authorization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record_live_authorization_check(&self, checked_at: TokioInstant) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        let mut slot = self
+            .live_authorization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(record) = slot.as_mut() {
+            record.last_checked_at = checked_at;
+        }
     }
 
     fn matches_revocation(&self, pubkey: &[u8], unowned_only: bool) -> bool {
@@ -205,13 +287,27 @@ impl CommunityConnectionControl {
         route: crate::nip_fi_session::NipFiWsRoute,
         frame_tx: Option<&mpsc::Sender<WsMessage>>,
     ) {
+        self.publish_nip_fi_denial(route, buzz_auth::DenialClass::AuthorizationDenied, frame_tx);
+    }
+
+    fn publish_nip_fi_denial(
+        &self,
+        route: crate::nip_fi_session::NipFiWsRoute,
+        class: buzz_auth::DenialClass,
+        frame_tx: Option<&mpsc::Sender<WsMessage>>,
+    ) {
         let slot = self
             .terminal_frame_tx
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reason = if class == buzz_auth::DenialClass::AuthorizationUnavailable {
+            CommunityDisconnectReason::AuthorizationUnavailable
+        } else {
+            CommunityDisconnectReason::AuthorizationDenied
+        };
         let won = self.reason_tx.send_if_modified(|current| match current {
             None => {
-                *current = Some(CommunityDisconnectReason::AuthorizationDenied);
+                *current = Some(reason);
                 true
             }
             Some(_) => false,
@@ -220,10 +316,7 @@ impl CommunityConnectionControl {
             return;
         }
         if let Some(tx) = frame_tx.or(slot.as_ref()) {
-            let _ = tx.try_send(crate::nip_fi_session::denial_frame(
-                route,
-                buzz_auth::DenialClass::AuthorizationDenied,
-            ));
+            let _ = tx.try_send(crate::nip_fi_session::denial_frame(route, class));
         }
     }
 
@@ -243,8 +336,20 @@ impl CommunityConnectionControl {
     /// transition on the root connection's `terminal_ctrl_tx` (drained first
     /// by `send_loop` on cancel), then cancels.
     pub(crate) fn manager_disconnect_nip_fi(&self, frame_tx: &mpsc::Sender<WsMessage>) {
-        self.publish_authorization_denied(
+        self.manager_disconnect_nip_fi_with_class(
+            frame_tx,
+            buzz_auth::DenialClass::AuthorizationDenied,
+        );
+    }
+
+    fn manager_disconnect_nip_fi_with_class(
+        &self,
+        frame_tx: &mpsc::Sender<WsMessage>,
+        class: buzz_auth::DenialClass,
+    ) {
+        self.publish_nip_fi_denial(
             crate::nip_fi_session::NipFiWsRoute::Root,
+            class,
             Some(frame_tx),
         );
         self.cancel.cancel();
@@ -267,22 +372,38 @@ impl CommunityConnectionControl {
     /// `authorization_denied` transition, so its client sees the same denial
     /// as any other NIP-FI refusal; an Off-mode socket closes `AccessRevoked`.
     /// Neither overwrites a terminal response already chosen.
-    fn revoke_access(&self) {
+    fn disconnect_live_authorization(
+        &self,
+        route: crate::nip_fi_session::NipFiWsRoute,
+        class: buzz_auth::DenialClass,
+    ) {
         let nip_fi = self
             .proven_identity
             .read()
             .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi_issuer.is_some()));
         if nip_fi {
-            self.publish_authorization_denied(crate::nip_fi_session::NipFiWsRoute::Audio, None);
+            self.publish_nip_fi_denial(route, class, None);
         } else {
+            let reason = if class == buzz_auth::DenialClass::AuthorizationUnavailable {
+                CommunityDisconnectReason::AuthorizationUnavailable
+            } else {
+                CommunityDisconnectReason::AccessRevoked
+            };
             self.reason_tx.send_if_modified(|current| {
                 current.is_none() && {
-                    *current = Some(CommunityDisconnectReason::AccessRevoked);
+                    *current = Some(reason);
                     true
                 }
             });
         }
         self.cancel.cancel();
+    }
+
+    fn revoke_access(&self) {
+        self.disconnect_live_authorization(
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            buzz_auth::DenialClass::AuthorizationDenied,
+        );
     }
 }
 
@@ -448,6 +569,66 @@ impl CommunityConnectionRegistry {
             .iter()
             .map(|entry| entry.value().0)
             .collect()
+    }
+
+    fn live_authorization_sessions(&self) -> Vec<LiveAuthorizationSession> {
+        self.connections
+            .iter()
+            .filter_map(|entry| {
+                let (community_id, control) = entry.value();
+                if control.cancel.is_cancelled() {
+                    return None;
+                }
+                let record = control.live_authorization()?;
+                Some(LiveAuthorizationSession {
+                    connection_id: *entry.key(),
+                    community_id: *community_id,
+                    route: record.route,
+                    pubkey: record.pubkey,
+                    owner_pubkey: record.owner_pubkey,
+                    owner_was_relay_member_at_admission: record.owner_was_relay_member_at_admission,
+                    membership_via_owner: record.membership_via_owner,
+                    last_checked_at: record.last_checked_at,
+                })
+            })
+            .collect()
+    }
+
+    fn record_live_authorization_check(
+        &self,
+        community_id: CommunityId,
+        connection_id: Uuid,
+        checked_at: TokioInstant,
+    ) {
+        if let Some(entry) = self.connections.get(&connection_id) {
+            let (registered_community, control) = entry.value();
+            if *registered_community == community_id {
+                control.record_live_authorization_check(checked_at);
+            }
+        }
+    }
+
+    fn disconnect_live_authorization(
+        &self,
+        community_id: CommunityId,
+        connection_id: Uuid,
+        class: buzz_auth::DenialClass,
+    ) -> bool {
+        let Some(entry) = self.connections.get(&connection_id) else {
+            return false;
+        };
+        let (registered_community, control) = entry.value();
+        if *registered_community != community_id || control.cancel.is_cancelled() {
+            return false;
+        }
+        let Some(record) = control.live_authorization() else {
+            return false;
+        };
+        if record.route != crate::nip_fi_session::NipFiWsRoute::Audio {
+            return false;
+        }
+        control.disconnect_live_authorization(record.route, class);
+        true
     }
 }
 
@@ -660,6 +841,338 @@ where
         }
     }
     (closed, failures)
+}
+
+type LiveAuthorizationBatchLookup = Arc<
+    dyn Fn(
+            Vec<buzz_db::LiveAuthorizationTarget>,
+        ) -> BoxFuture<'static, buzz_db::Result<Vec<buzz_db::LiveAuthorizationState>>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Debug, Clone, Copy)]
+enum LiveAuthorizationFailure {
+    Database,
+    QueryTimeout,
+    IncompleteResult,
+    ScanTimeout,
+}
+
+impl LiveAuthorizationFailure {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Database => "database_error",
+            Self::QueryTimeout => "query_timeout",
+            Self::IncompleteResult => "incomplete_result",
+            Self::ScanTimeout => "scan_timeout",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct LiveAuthorizationRevalidationReport {
+    checked_targets: usize,
+    failed_targets: usize,
+    closed_sessions: usize,
+    closed_for_db_failure: usize,
+    scan_timed_out: bool,
+}
+
+async fn revalidate_live_authorization_sessions(
+    registry: &CommunityConnectionRegistry,
+    conn_manager: &ConnectionManager,
+    require_relay_membership: bool,
+    allow_nip_oa_auth: bool,
+    cancel: &CancellationToken,
+    lookup: LiveAuthorizationBatchLookup,
+) -> LiveAuthorizationRevalidationReport {
+    let started_at = TokioInstant::now();
+    let scan_deadline = started_at + LIVE_AUTHORIZATION_SCAN_TIMEOUT;
+    let sessions = registry.live_authorization_sessions();
+    metrics::gauge!("buzz_live_authorization_sessions").set(sessions.len() as f64);
+    if sessions.is_empty() {
+        return LiveAuthorizationRevalidationReport::default();
+    }
+
+    let mut sessions_by_target: HashMap<_, Vec<_>> = HashMap::new();
+    for session in sessions {
+        sessions_by_target
+            .entry(buzz_db::LiveAuthorizationTarget {
+                community_id: session.community_id,
+                pubkey: session.pubkey,
+                session_owner_pubkey: session.owner_pubkey,
+            })
+            .or_default()
+            .push(session);
+    }
+    let mut targets = sessions_by_target.keys().copied().collect::<Vec<_>>();
+    targets.sort_by_key(|target| {
+        (
+            target.community_id,
+            target.pubkey,
+            target.session_owner_pubkey,
+        )
+    });
+    let batches = targets
+        .chunks(LIVE_AUTHORIZATION_BATCH_SIZE)
+        .map(|batch| batch.to_vec())
+        .collect::<Vec<_>>();
+
+    let mut outcomes = HashMap::with_capacity(targets.len());
+    let mut checked_at_by_target = HashMap::with_capacity(targets.len());
+    let batch_queries = stream::iter(batches.into_iter().map(|batch| {
+        let lookup = Arc::clone(&lookup);
+        async move {
+            let checked_at = TokioInstant::now();
+            let query = lookup(batch.clone());
+            let result = tokio::time::timeout(LIVE_AUTHORIZATION_QUERY_TIMEOUT, query).await;
+            (batch, checked_at, result)
+        }
+    }))
+    .buffer_unordered(LIVE_AUTHORIZATION_QUERY_CONCURRENCY);
+    tokio::pin!(batch_queries);
+
+    let scan_result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return LiveAuthorizationRevalidationReport::default(),
+        result = tokio::time::timeout_at(scan_deadline, async {
+            while let Some((batch, checked_at, result)) = batch_queries.next().await {
+                for target in &batch {
+                    checked_at_by_target.insert(*target, checked_at);
+                }
+                match result {
+                    Err(_) => {
+                        metrics::counter!(
+                            "buzz_live_authorization_batches_total",
+                            "outcome" => "query_timeout",
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            batch_size = batch.len(),
+                            query_timeout_ms = LIVE_AUTHORIZATION_QUERY_TIMEOUT.as_millis() as u64,
+                            "live authorization revalidation database lookup timed out"
+                        );
+                        for target in batch {
+                            outcomes.insert(target, Err(LiveAuthorizationFailure::QueryTimeout));
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        let class = live_authorization_db_error_class(&error);
+                        metrics::counter!(
+                            "buzz_live_authorization_batches_total",
+                            "outcome" => class,
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            batch_size = batch.len(),
+                            error_class = class,
+                            "live authorization revalidation database lookup failed"
+                        );
+                        for target in batch {
+                            outcomes.insert(target, Err(LiveAuthorizationFailure::Database));
+                        }
+                    }
+                    Ok(Ok(rows)) => {
+                        let requested = batch.iter().copied().collect::<HashSet<_>>();
+                        let mut states = HashMap::with_capacity(rows.len());
+                        let mut malformed = false;
+                        for row in rows {
+                            let target = buzz_db::LiveAuthorizationTarget {
+                                community_id: row.community_id,
+                                pubkey: row.pubkey,
+                                session_owner_pubkey: row.session_owner_pubkey,
+                            };
+                            if !requested.contains(&target)
+                                || states.insert(target, row).is_some()
+                            {
+                                malformed = true;
+                                break;
+                            }
+                        }
+                        let complete = !malformed && states.len() == requested.len();
+                        for target in batch {
+                            let outcome = if complete {
+                                states
+                                    .remove(&target)
+                                    .map(Ok)
+                                    .unwrap_or(Err(LiveAuthorizationFailure::IncompleteResult))
+                            } else {
+                                Err(LiveAuthorizationFailure::IncompleteResult)
+                            };
+                            outcomes.insert(target, outcome);
+                        }
+                        if !complete {
+                            metrics::counter!(
+                                "buzz_live_authorization_batches_total",
+                                "outcome" => "incomplete_result",
+                            )
+                            .increment(1);
+                            tracing::error!(
+                                batch_size = requested.len(),
+                                "live authorization revalidation returned an incomplete or invalid batch"
+                            );
+                        }
+                    }
+                }
+            }
+        }) => result,
+    };
+
+    let mut report = LiveAuthorizationRevalidationReport {
+        scan_timed_out: scan_result.is_err(),
+        ..LiveAuthorizationRevalidationReport::default()
+    };
+    if report.scan_timed_out {
+        metrics::counter!(
+            "buzz_live_authorization_batches_total",
+            "outcome" => "scan_timeout",
+        )
+        .increment(1);
+        tracing::warn!(
+            target_count = targets.len(),
+            scan_budget_ms = LIVE_AUTHORIZATION_SCAN_TIMEOUT.as_millis() as u64,
+            "live authorization revalidation exceeded its scan budget"
+        );
+    }
+    for target in targets {
+        let Some(sessions) = sessions_by_target.get(&target) else {
+            continue;
+        };
+        match outcomes
+            .remove(&target)
+            .unwrap_or(Err(LiveAuthorizationFailure::ScanTimeout))
+        {
+            Ok(access) => {
+                report.checked_targets += 1;
+                let checked_at = checked_at_by_target
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(started_at);
+                let mut target_revoked = false;
+                for session in sessions {
+                    if live_authorization_allowed(
+                        session,
+                        &access,
+                        require_relay_membership,
+                        allow_nip_oa_auth,
+                    ) {
+                        registry.record_live_authorization_check(
+                            session.community_id,
+                            session.connection_id,
+                            checked_at,
+                        );
+                    } else {
+                        let closed = disconnect_live_authorization_session(
+                            registry,
+                            conn_manager,
+                            session,
+                            buzz_auth::DenialClass::AuthorizationDenied,
+                        );
+                        report.closed_sessions += usize::from(closed);
+                        target_revoked |= closed;
+                    }
+                }
+                metrics::counter!(
+                    "buzz_live_authorization_targets_total",
+                    "outcome" => if target_revoked { "revoked" } else { "allowed" },
+                )
+                .increment(1);
+            }
+            Err(failure) => {
+                report.failed_targets += 1;
+                metrics::counter!(
+                    "buzz_live_authorization_targets_total",
+                    "outcome" => failure.label(),
+                )
+                .increment(1);
+                let now = TokioInstant::now();
+                for session in sessions {
+                    if now.saturating_duration_since(session.last_checked_at)
+                        < LIVE_AUTHORIZATION_DB_FAILURE_GRACE
+                    {
+                        continue;
+                    }
+                    let closed = disconnect_live_authorization_session(
+                        registry,
+                        conn_manager,
+                        session,
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                    );
+                    report.closed_sessions += usize::from(closed);
+                    report.closed_for_db_failure += usize::from(closed);
+                }
+            }
+        }
+    }
+    metrics::histogram!("buzz_live_authorization_scan_duration_seconds")
+        .record(started_at.elapsed().as_secs_f64());
+    if report.closed_for_db_failure > 0 {
+        metrics::counter!("buzz_live_authorization_fail_closed_sessions_total")
+            .increment(report.closed_for_db_failure as u64);
+    }
+    report
+}
+
+fn live_authorization_allowed(
+    session: &LiveAuthorizationSession,
+    access: &buzz_db::LiveAuthorizationState,
+    require_relay_membership: bool,
+    allow_nip_oa_auth: bool,
+) -> bool {
+    // A direct member stays authorized through its own membership. The
+    // captured owner's prior membership is only a revocation signal for a
+    // later roster removal, never a source of membership for the principal.
+    // The first stored owner link also invalidates sockets admitted before
+    // that link existed, matching materialize_nip_oa_owner's immediate
+    // ownerless-session disconnect when a pod misses its fan-out.
+    if session.community_id != access.community_id
+        || session.pubkey != access.pubkey
+        || session.owner_pubkey != access.session_owner_pubkey
+        || (session.owner_pubkey.is_none() && access.agent_owner_pubkey.is_some())
+        || (session.membership_via_owner && session.owner_pubkey != access.agent_owner_pubkey)
+        || access.banned
+        || (session.owner_was_relay_member_at_admission && !access.session_owner_is_relay_member)
+    {
+        return false;
+    }
+    if !require_relay_membership || access.relay_member {
+        return true;
+    }
+    session.membership_via_owner
+        && allow_nip_oa_auth
+        && session.owner_pubkey.is_some()
+        && access.owner_is_relay_member
+}
+
+fn disconnect_live_authorization_session(
+    registry: &CommunityConnectionRegistry,
+    conn_manager: &ConnectionManager,
+    session: &LiveAuthorizationSession,
+    class: buzz_auth::DenialClass,
+) -> bool {
+    match session.route {
+        crate::nip_fi_session::NipFiWsRoute::Root => conn_manager.disconnect_live_authorization(
+            session.community_id,
+            session.connection_id,
+            class,
+        ),
+        crate::nip_fi_session::NipFiWsRoute::Audio => registry.disconnect_live_authorization(
+            session.community_id,
+            session.connection_id,
+            class,
+        ),
+    }
+}
+
+fn live_authorization_db_error_class(error: &buzz_db::DbError) -> &'static str {
+    match error {
+        buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut) => "pool_timeout",
+        buzz_db::DbError::Sqlx(sqlx::Error::PoolClosed) => "pool_closed",
+        buzz_db::DbError::Sqlx(sqlx::Error::Io(_)) => "io_error",
+        error if error.is_statement_cancelled() => "statement_cancelled",
+        _ => "database_error",
+    }
 }
 
 /// Tracks active Nostr WebSocket connections and provides message routing by connection ID.
@@ -891,6 +1404,35 @@ impl ConnectionManager {
             closed += 1;
         }
         closed
+    }
+
+    fn disconnect_live_authorization(
+        &self,
+        community: CommunityId,
+        conn_id: Uuid,
+        class: buzz_auth::DenialClass,
+    ) -> bool {
+        let Some(entry) = self.connections.get(&conn_id) else {
+            return false;
+        };
+        if entry.community_id != community || entry.cancel.is_cancelled() {
+            return false;
+        }
+
+        let nip_fi = entry
+            .nip_fi_issuer
+            .read()
+            .is_ok_and(|issuer| issuer.is_some());
+        if nip_fi {
+            entry
+                .community_control
+                .manager_disconnect_nip_fi_with_class(&entry.terminal_ctrl_tx, class);
+        } else {
+            entry
+                .community_control
+                .disconnect_live_authorization(crate::nip_fi_session::NipFiWsRoute::Root, class);
+        }
+        true
     }
 
     /// Close all live connections admitted under NIP-FI `issuer` whose proven
@@ -1191,7 +1733,7 @@ pub struct AppState {
     pub conn_manager: Arc<ConnectionManager>,
     /// Lifecycle cancellation for every long-lived socket, including huddle audio.
     pub community_connections: Arc<CommunityConnectionRegistry>,
-    /// Stops only the periodic lifecycle revalidator during graceful shutdown.
+    /// Stops periodic community and live-authorization revalidation at shutdown.
     pub community_revalidator_cancel: CancellationToken,
     /// Cancels push claims and in-flight delivery on process shutdown.
     pub push_cancel: CancellationToken,
@@ -2232,6 +2774,38 @@ impl AppState {
             tracing::warn!(%community_id, %error, "community lifecycle revalidation failed; retaining its sockets until next tick");
         }
         closed
+    }
+
+    /// Revalidate every authenticated root and audio socket against current
+    /// community membership, agent ownership, and ban state.
+    ///
+    /// The loop bounds a scan to four concurrent writer queries, 500
+    /// authorization targets per query, and five seconds total. It fails closed
+    /// when an authoritative answer remains unavailable for ten seconds.
+    pub async fn revalidate_live_authorizations(&self) -> usize {
+        let db = self.db.clone();
+        let lookup: LiveAuthorizationBatchLookup = Arc::new(move |targets| {
+            let db = db.clone();
+            Box::pin(async move { db.live_authorization_state_batch(&targets).await })
+        });
+        let report = revalidate_live_authorization_sessions(
+            &self.community_connections,
+            &self.conn_manager,
+            self.config.require_relay_membership,
+            self.config.allow_nip_oa_auth,
+            &self.community_revalidator_cancel,
+            lookup,
+        )
+        .await;
+        if report.closed_sessions > 0 {
+            tracing::info!(
+                closed = report.closed_sessions,
+                checked_targets = report.checked_targets,
+                failed_targets = report.failed_targets,
+                "closed live sessions whose current authorization could not be retained"
+            );
+        }
+        report.closed_sessions
     }
 
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
@@ -4448,6 +5022,1340 @@ pub(crate) mod tests {
                 assert_eq!(close.reason.as_str(), "relay restarting");
             }
             other => panic!("expected a restart close frame, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_authorization_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{Barrier, Mutex};
+
+    const TEST_ISSUER: &str = "https://issuer.example";
+
+    struct LiveConnectionFixture {
+        cancel: CancellationToken,
+        terminal_rx: mpsc::Receiver<WsMessage>,
+        reason_rx: watch::Receiver<Option<CommunityDisconnectReason>>,
+        _guard: CommunityConnectionGuard,
+    }
+
+    fn community(value: u128) -> CommunityId {
+        CommunityId::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn access_state(
+        target: buzz_db::LiveAuthorizationTarget,
+        owner: Option<[u8; 32]>,
+        relay_member: bool,
+        owner_is_relay_member: bool,
+        banned: bool,
+    ) -> buzz_db::LiveAuthorizationState {
+        buzz_db::LiveAuthorizationState {
+            community_id: target.community_id,
+            pubkey: target.pubkey,
+            session_owner_pubkey: target.session_owner_pubkey,
+            session_owner_is_relay_member: target.session_owner_pubkey == owner
+                && owner_is_relay_member,
+            agent_owner_pubkey: owner,
+            relay_member,
+            owner_is_relay_member,
+            banned,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors the distinct socket admission facts.
+    fn register_live_connection(
+        registry: &CommunityConnectionRegistry,
+        conn_manager: &ConnectionManager,
+        community_id: CommunityId,
+        pubkey: [u8; 32],
+        owner_pubkey: Option<[u8; 32]>,
+        membership_via_owner: bool,
+        route: crate::nip_fi_session::NipFiWsRoute,
+        nip_fi: bool,
+    ) -> LiveConnectionFixture {
+        register_live_connection_with_owner_membership(
+            registry,
+            conn_manager,
+            community_id,
+            pubkey,
+            owner_pubkey,
+            membership_via_owner,
+            membership_via_owner,
+            route,
+            nip_fi,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors the distinct socket admission facts.
+    fn register_live_connection_with_owner_membership(
+        registry: &CommunityConnectionRegistry,
+        conn_manager: &ConnectionManager,
+        community_id: CommunityId,
+        pubkey: [u8; 32],
+        owner_pubkey: Option<[u8; 32]>,
+        owner_was_relay_member_at_admission: bool,
+        membership_via_owner: bool,
+        route: crate::nip_fi_session::NipFiWsRoute,
+        nip_fi: bool,
+    ) -> LiveConnectionFixture {
+        let connection_id = Uuid::new_v4();
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        control.bind_pubkey(pubkey);
+        if let Some(owner) = owner_pubkey {
+            control.bind_owner(owner);
+        }
+        let reason_rx = control.disconnect_reason();
+        let (terminal_tx, terminal_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+
+        if route == crate::nip_fi_session::NipFiWsRoute::Audio {
+            control.set_proven_identity(pubkey.to_vec(), nip_fi.then(|| TEST_ISSUER.to_owned()));
+            control.set_terminal_frame_sender(terminal_tx.clone());
+        }
+        control.mark_live_authorized(
+            pubkey,
+            owner_pubkey,
+            owner_was_relay_member_at_admission,
+            membership_via_owner,
+            route,
+            TokioInstant::now(),
+        );
+        let guard = registry.register(connection_id, community_id, control.clone());
+
+        if route == crate::nip_fi_session::NipFiWsRoute::Root {
+            let (tx, _rx) = mpsc::channel(8);
+            conn_manager.register(
+                connection_id,
+                tx,
+                ctrl_tx,
+                terminal_tx,
+                None,
+                cancel.clone(),
+                community_id,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+                control,
+            );
+            conn_manager.set_authenticated_identity(
+                connection_id,
+                pubkey.to_vec(),
+                nip_fi.then(|| TEST_ISSUER.to_owned()),
+            );
+            if let Some(owner) = owner_pubkey {
+                conn_manager.set_admitted_owner(connection_id, owner);
+            }
+            conn_manager.mark_admitted(connection_id);
+        } else {
+            drop(ctrl_tx);
+        }
+
+        LiveConnectionFixture {
+            cancel,
+            terminal_rx,
+            reason_rx,
+            _guard: guard,
+        }
+    }
+
+    fn database_failure_lookup() -> LiveAuthorizationBatchLookup {
+        Arc::new(|_| Box::pin(async { Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolClosed)) }))
+    }
+
+    #[test]
+    fn poisoned_authorization_record_remains_visible_to_the_revalidator() {
+        let registry = CommunityConnectionRegistry::new();
+        let tenant = community(0x270f);
+        let control = CommunityConnectionControl::new(CancellationToken::new());
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = control.live_authorization.lock().expect("initial lock");
+            panic!("simulate a panic while the authorization record is locked");
+        }));
+        assert!(poison.is_err());
+
+        control.mark_live_authorized(
+            [0x10; 32],
+            None,
+            false,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            TokioInstant::now(),
+        );
+        let _guard = registry.register(Uuid::new_v4(), tenant, control);
+        assert_eq!(registry.live_authorization_sessions().len(), 1);
+    }
+
+    #[test]
+    fn policy_preserves_direct_access_and_fences_delegation_or_stale_owner_links() {
+        let tenant = community(0x2710);
+        let principal = [0x11; 32];
+        let old_owner = [0x22; 32];
+        let new_owner = [0x33; 32];
+        let target = buzz_db::LiveAuthorizationTarget {
+            community_id: tenant,
+            pubkey: principal,
+            session_owner_pubkey: Some(old_owner),
+        };
+        let direct = LiveAuthorizationSession {
+            connection_id: Uuid::new_v4(),
+            community_id: tenant,
+            route: crate::nip_fi_session::NipFiWsRoute::Root,
+            pubkey: principal,
+            owner_pubkey: Some(old_owner),
+            owner_was_relay_member_at_admission: false,
+            membership_via_owner: false,
+            last_checked_at: TokioInstant::now(),
+        };
+        let owner_derived = LiveAuthorizationSession {
+            membership_via_owner: true,
+            ..direct.clone()
+        };
+
+        let direct_member = access_state(target, Some(old_owner), true, false, false);
+        assert!(live_authorization_allowed(
+            &direct,
+            &direct_member,
+            true,
+            true,
+        ));
+        assert!(!live_authorization_allowed(
+            &owner_derived,
+            &access_state(target, Some(new_owner), true, false, false),
+            true,
+            true,
+        ));
+
+        let ownerless_at_admission = LiveAuthorizationSession {
+            owner_pubkey: None,
+            owner_was_relay_member_at_admission: false,
+            membership_via_owner: false,
+            ..direct.clone()
+        };
+        assert!(!live_authorization_allowed(
+            &ownerless_at_admission,
+            &access_state(
+                buzz_db::LiveAuthorizationTarget {
+                    session_owner_pubkey: None,
+                    ..target
+                },
+                Some(new_owner),
+                true,
+                false,
+                false,
+            ),
+            true,
+            true,
+        ));
+
+        let open_nonmember = access_state(
+            buzz_db::LiveAuthorizationTarget {
+                session_owner_pubkey: None,
+                ..target
+            },
+            None,
+            false,
+            false,
+            false,
+        );
+        assert!(live_authorization_allowed(
+            &ownerless_at_admission,
+            &open_nonmember,
+            false,
+            false,
+        ));
+        assert!(!live_authorization_allowed(
+            &owner_derived,
+            &access_state(target, Some(old_owner), false, true, true),
+            true,
+            true,
+        ));
+    }
+
+    #[tokio::test]
+    async fn owner_derived_sessions_revalidate_owner_membership_and_identity() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2717);
+        let old_owner = [0x81; 32];
+        let new_owner = [0x82; 32];
+        let lost_owner_member = [0x71; 32];
+        let changed_owner = [0x72; 32];
+        let direct_member = [0x73; 32];
+        let owner_root = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            lost_owner_member,
+            Some(old_owner),
+            true,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            false,
+        );
+        let owner_audio = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            lost_owner_member,
+            Some(old_owner),
+            true,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let changed_owner_audio = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            changed_owner,
+            Some(old_owner),
+            true,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let _direct_member = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            direct_member,
+            Some(old_owner),
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            false,
+        );
+
+        let lookup: LiveAuthorizationBatchLookup = Arc::new(move |targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| match target.pubkey {
+                        key if key == lost_owner_member => {
+                            access_state(target, Some(old_owner), false, false, false)
+                        }
+                        key if key == changed_owner => {
+                            access_state(target, Some(new_owner), false, false, false)
+                        }
+                        _ => access_state(target, Some(new_owner), true, false, false),
+                    })
+                    .collect())
+            })
+        });
+        let report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            lookup,
+        )
+        .await;
+
+        assert_eq!(report.checked_targets, 3);
+        assert_eq!(report.closed_sessions, 3);
+        assert!(owner_root.cancel.is_cancelled());
+        assert!(owner_audio.cancel.is_cancelled());
+        assert!(changed_owner_audio.cancel.is_cancelled());
+        assert!(!_direct_member.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn captured_owner_removal_and_ban_revoke_only_the_owned_sessions() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2719);
+        let old_owner = [0x91; 32];
+        let new_owner = [0x92; 32];
+        let removed_agent = [0x93; 32];
+        let banned_agent = [0x94; 32];
+
+        let removed_session = register_live_connection_with_owner_membership(
+            &registry,
+            &manager,
+            tenant,
+            removed_agent,
+            Some(old_owner),
+            true,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            false,
+        );
+        let removed_agent_direct = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            removed_agent,
+            Some(new_owner),
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let banned_session = register_live_connection_with_owner_membership(
+            &registry,
+            &manager,
+            tenant,
+            banned_agent,
+            Some(old_owner),
+            true,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let banned_agent_direct = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            banned_agent,
+            Some(new_owner),
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            false,
+        );
+
+        let lookup: LiveAuthorizationBatchLookup = Arc::new(move |targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| {
+                        access_state(
+                            target,
+                            Some(new_owner),
+                            true,
+                            false,
+                            target.pubkey == banned_agent
+                                && target.session_owner_pubkey == Some(old_owner),
+                        )
+                    })
+                    .collect())
+            })
+        });
+        let report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            lookup,
+        )
+        .await;
+
+        assert_eq!(report.closed_sessions, 2);
+        assert!(removed_session.cancel.is_cancelled());
+        assert!(banned_session.cancel.is_cancelled());
+        assert!(
+            !removed_agent_direct.cancel.is_cancelled(),
+            "the directly admitted principal remains a member after owner removal"
+        );
+        assert!(
+            !banned_agent_direct.cancel.is_cancelled(),
+            "an owner ban does not ban the direct principal"
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidation_is_tenant_scoped_for_root_and_audio_sessions() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let community_a = community(0x2711);
+        let community_b = community(0x2712);
+        let pubkey = [0x44; 32];
+        let removed_root = register_live_connection(
+            &registry,
+            &manager,
+            community_a,
+            pubkey,
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            false,
+        );
+        let _member_audio = register_live_connection(
+            &registry,
+            &manager,
+            community_b,
+            pubkey,
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+
+        let lookup: LiveAuthorizationBatchLookup = Arc::new(move |targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| {
+                        access_state(
+                            target,
+                            None,
+                            target.community_id == community_b,
+                            false,
+                            false,
+                        )
+                    })
+                    .collect())
+            })
+        });
+        let report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            lookup,
+        )
+        .await;
+
+        assert_eq!(report.checked_targets, 2);
+        assert_eq!(report.closed_sessions, 1);
+        assert!(removed_root.cancel.is_cancelled());
+        assert_eq!(
+            *removed_root.reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        assert_eq!(
+            *_member_audio.reason_rx.borrow(),
+            None,
+            "same key remains authorized in its own community"
+        );
+
+        let ban_lookup: LiveAuthorizationBatchLookup = Arc::new(move |targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| {
+                        access_state(
+                            target,
+                            None,
+                            true,
+                            false,
+                            target.community_id == community_b,
+                        )
+                    })
+                    .collect())
+            })
+        });
+        let report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            ban_lookup,
+        )
+        .await;
+        assert_eq!(report.closed_sessions, 1);
+        assert!(
+            _member_audio.cancel.is_cancelled(),
+            "a community ban applies only in community B"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn incomplete_batch_does_not_refresh_any_target_authorization() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2720);
+        let first = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            [0x45; 32],
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            false,
+        );
+        let second = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            [0x46; 32],
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let partial_lookup: LiveAuthorizationBatchLookup = Arc::new(|mut targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .drain(..1)
+                    .map(|target| access_state(target, None, true, false, false))
+                    .collect())
+            })
+        });
+
+        let grace = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            Arc::clone(&partial_lookup),
+        )
+        .await;
+        assert_eq!(grace.checked_targets, 0);
+        assert_eq!(grace.failed_targets, 2);
+        assert_eq!(grace.closed_sessions, 0);
+        assert!(!first.cancel.is_cancelled());
+        assert!(!second.cancel.is_cancelled());
+
+        tokio::time::advance(LIVE_AUTHORIZATION_DB_FAILURE_GRACE).await;
+        let expired = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            partial_lookup,
+        )
+        .await;
+        assert_eq!(expired.closed_for_db_failure, 2);
+        assert!(first.cancel.is_cancelled());
+        assert!(second.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn revalidation_preserves_denial_semantics_for_root_audio_and_nip_fi() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2713);
+        let cases = [
+            (crate::nip_fi_session::NipFiWsRoute::Root, false),
+            (crate::nip_fi_session::NipFiWsRoute::Root, true),
+            (crate::nip_fi_session::NipFiWsRoute::Audio, false),
+            (crate::nip_fi_session::NipFiWsRoute::Audio, true),
+        ];
+        let mut sessions = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (route, nip_fi))| {
+                register_live_connection(
+                    &registry,
+                    &manager,
+                    tenant,
+                    [index as u8 + 1; 32],
+                    None,
+                    false,
+                    *route,
+                    *nip_fi,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let lookup: LiveAuthorizationBatchLookup = Arc::new(|targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| access_state(target, None, false, false, false))
+                    .collect())
+            })
+        });
+        let report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            false,
+            &CancellationToken::new(),
+            lookup,
+        )
+        .await;
+
+        assert_eq!(report.closed_sessions, 4);
+        for session in &sessions {
+            assert!(session.cancel.is_cancelled());
+        }
+        assert_eq!(
+            *sessions[0].reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        let root_fi = sessions[1]
+            .terminal_rx
+            .try_recv()
+            .expect("NIP-FI root terminal denial");
+        let WsMessage::Text(root_fi) = root_fi else {
+            panic!("expected NIP-FI root denial frame");
+        };
+        assert!(root_fi.contains("authorization denied"));
+        assert_eq!(
+            *sessions[2].reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        let audio_fi = sessions[3]
+            .terminal_rx
+            .try_recv()
+            .expect("NIP-FI audio terminal denial");
+        let WsMessage::Text(audio_fi) = audio_fi else {
+            panic!("expected NIP-FI audio denial frame");
+        };
+        assert!(audio_fi.contains("authorization denied"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn database_failure_grace_is_bounded_and_success_resets_it() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2714);
+        let pubkey = [0x55; 32];
+        let mut sessions = [
+            register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                pubkey,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                false,
+            ),
+            register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                pubkey,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                true,
+            ),
+            register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                pubkey,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                false,
+            ),
+            register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                pubkey,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                true,
+            ),
+        ];
+        let failure = database_failure_lookup();
+        let first = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            Arc::clone(&failure),
+        )
+        .await;
+        assert_eq!(first.closed_sessions, 0);
+        assert_eq!(first.failed_targets, 1);
+
+        tokio::time::advance(
+            LIVE_AUTHORIZATION_DB_FAILURE_GRACE - std::time::Duration::from_secs(1),
+        )
+        .await;
+        let recovered: LiveAuthorizationBatchLookup = Arc::new(|targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| access_state(target, None, true, false, false))
+                    .collect())
+            })
+        });
+        let success = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            recovered,
+        )
+        .await;
+        assert_eq!(success.checked_targets, 1);
+        assert!(sessions
+            .iter()
+            .all(|session| !session.cancel.is_cancelled()));
+
+        tokio::time::advance(std::time::Duration::from_secs(9)).await;
+        let repeated_failure = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            Arc::clone(&failure),
+        )
+        .await;
+        assert_eq!(repeated_failure.closed_sessions, 0);
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let expired_grace = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            failure,
+        )
+        .await;
+        assert_eq!(expired_grace.closed_for_db_failure, 4);
+        assert!(sessions.iter().all(|session| session.cancel.is_cancelled()));
+
+        assert_eq!(
+            *sessions[0].reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AuthorizationUnavailable)
+        );
+        for index in [1, 3] {
+            let frame = sessions[index]
+                .terminal_rx
+                .try_recv()
+                .expect("NIP-FI unavailable terminal frame");
+            let WsMessage::Text(frame) = frame else {
+                panic!("expected NIP-FI unavailable frame");
+            };
+            assert!(frame.contains("authorization unavailable"));
+        }
+        assert_eq!(
+            *sessions[2].reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AuthorizationUnavailable)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn query_timeout_does_not_extend_the_authorization_grace() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let session = register_live_connection(
+            &registry,
+            &manager,
+            community(0x2718),
+            [0x56; 32],
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let timeout_lookup: LiveAuthorizationBatchLookup = Arc::new(|_| {
+            Box::pin(async {
+                std::future::pending::<buzz_db::Result<Vec<buzz_db::LiveAuthorizationState>>>()
+                    .await
+            })
+        });
+
+        let first = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            Arc::clone(&timeout_lookup),
+        )
+        .await;
+        assert_eq!(first.failed_targets, 1);
+        assert_eq!(first.closed_sessions, 0);
+        tokio::time::advance(
+            LIVE_AUTHORIZATION_DB_FAILURE_GRACE
+                - LIVE_AUTHORIZATION_QUERY_TIMEOUT.saturating_mul(2),
+        )
+        .await;
+        let expired = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            timeout_lookup,
+        )
+        .await;
+
+        assert_eq!(expired.closed_for_db_failure, 1);
+        assert_eq!(
+            *session.reason_rx.borrow(),
+            Some(CommunityDisconnectReason::AuthorizationUnavailable)
+        );
+        assert!(session.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn admission_added_during_a_scan_is_checked_on_the_next_scan() {
+        let registry = Arc::new(CommunityConnectionRegistry::new());
+        let manager = Arc::new(ConnectionManager::new());
+        let tenant = community(0x2715);
+        let _first = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            [0x61; 32],
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let lookup: LiveAuthorizationBatchLookup = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |targets| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.wait().await;
+                    release.wait().await;
+                    Ok(targets
+                        .into_iter()
+                        .map(|target| access_state(target, None, true, false, false))
+                        .collect())
+                })
+            }
+        });
+        let scan_registry = Arc::clone(&registry);
+        let scan_manager = Arc::clone(&manager);
+        let scan = tokio::spawn(async move {
+            revalidate_live_authorization_sessions(
+                &scan_registry,
+                &scan_manager,
+                true,
+                true,
+                &CancellationToken::new(),
+                lookup,
+            )
+            .await
+        });
+
+        started.wait().await;
+        let admitted_during_scan = register_live_connection(
+            &registry,
+            &manager,
+            tenant,
+            [0x62; 32],
+            None,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            false,
+        );
+        release.wait().await;
+        let first_report = scan.await.expect("first revalidation task");
+        assert_eq!(first_report.checked_targets, 1);
+        assert!(!admitted_during_scan.cancel.is_cancelled());
+
+        let next_lookup: LiveAuthorizationBatchLookup = Arc::new(|targets| {
+            Box::pin(async move {
+                Ok(targets
+                    .into_iter()
+                    .map(|target| {
+                        access_state(target, None, target.pubkey == [0x61; 32], false, false)
+                    })
+                    .collect())
+            })
+        });
+        let next_report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            true,
+            true,
+            &CancellationToken::new(),
+            next_lookup,
+        )
+        .await;
+        assert_eq!(next_report.closed_sessions, 1);
+        assert!(admitted_during_scan.cancel.is_cancelled());
+    }
+
+    struct InFlightQuery(Arc<AtomicUsize>);
+
+    impl Drop for InFlightQuery {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn ten_thousand_sessions_use_bounded_batches_and_query_concurrency() {
+        const PRINCIPALS: usize = 10_000;
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2716);
+        let mut guards = Vec::with_capacity(PRINCIPALS);
+        for index in 0..PRINCIPALS {
+            let mut pubkey = [0; 32];
+            pubkey[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            let cancel = CancellationToken::new();
+            let control = CommunityConnectionControl::new(cancel.clone());
+            control.mark_live_authorized(
+                pubkey,
+                None,
+                false,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                TokioInstant::now(),
+            );
+            guards.push(registry.register(Uuid::new_v4(), tenant, control));
+        }
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let max_batch = Arc::new(AtomicUsize::new(0));
+        let total_targets = Arc::new(AtomicUsize::new(0));
+        let lookup: LiveAuthorizationBatchLookup = Arc::new({
+            let in_flight = Arc::clone(&in_flight);
+            let max_in_flight = Arc::clone(&max_in_flight);
+            let max_batch = Arc::clone(&max_batch);
+            let total_targets = Arc::clone(&total_targets);
+            move |targets| {
+                let in_flight = Arc::clone(&in_flight);
+                let max_in_flight = Arc::clone(&max_in_flight);
+                let max_batch = Arc::clone(&max_batch);
+                let total_targets = Arc::clone(&total_targets);
+                Box::pin(async move {
+                    let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(active, Ordering::SeqCst);
+                    max_batch.fetch_max(targets.len(), Ordering::SeqCst);
+                    total_targets.fetch_add(targets.len(), Ordering::SeqCst);
+                    let _in_flight = InFlightQuery(in_flight);
+                    tokio::task::yield_now().await;
+                    Ok(targets
+                        .into_iter()
+                        .map(|target| access_state(target, None, false, false, false))
+                        .collect())
+                })
+            }
+        });
+
+        let started_at = std::time::Instant::now();
+        let report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            false,
+            false,
+            &CancellationToken::new(),
+            lookup,
+        )
+        .await;
+        let elapsed = started_at.elapsed();
+
+        assert_eq!(report.checked_targets, PRINCIPALS);
+        assert_eq!(report.closed_sessions, 0);
+        assert_eq!(
+            max_batch.load(Ordering::SeqCst),
+            LIVE_AUTHORIZATION_BATCH_SIZE
+        );
+        assert_eq!(total_targets.load(Ordering::SeqCst), PRINCIPALS);
+        assert!(max_in_flight.load(Ordering::SeqCst) <= LIVE_AUTHORIZATION_QUERY_CONCURRENCY);
+        assert!(max_in_flight.load(Ordering::SeqCst) > 1);
+        eprintln!(
+            "10k-session scan: {PRINCIPALS} targets, batch {}, max {} concurrent lookups, {} ms",
+            max_batch.load(Ordering::SeqCst),
+            max_in_flight.load(Ordering::SeqCst),
+            elapsed.as_millis(),
+        );
+        drop(guards);
+    }
+
+    #[cfg(test)]
+    mod postgres_tests {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn missed_member_owner_ban_and_first_owner_link_revoke_root_audio_sessions() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to disposable PostgreSQL test database");
+            let db = Db::from_pool(pool);
+            let host = format!("live-authorization-{}.example", Uuid::new_v4().simple());
+            let tenant = db
+                .ensure_configured_community(&host)
+                .await
+                .expect("create test community")
+                .id;
+            let direct_member = nostr::Keys::generate().public_key().to_bytes();
+            let removed_agent = nostr::Keys::generate().public_key().to_bytes();
+            let banned_agent = nostr::Keys::generate().public_key().to_bytes();
+            let removed_owner = nostr::Keys::generate().public_key().to_bytes();
+            let banned_owner = nostr::Keys::generate().public_key().to_bytes();
+            let current_owner = nostr::Keys::generate().public_key().to_bytes();
+            let late_link_agent = nostr::Keys::generate().public_key().to_bytes();
+            let stable_agent = nostr::Keys::generate().public_key().to_bytes();
+            let actor = nostr::Keys::generate().public_key().to_bytes();
+            for key in [
+                direct_member,
+                removed_agent,
+                banned_agent,
+                removed_owner,
+                banned_owner,
+                current_owner,
+                late_link_agent,
+                stable_agent,
+                actor,
+            ] {
+                db.ensure_user_for_authorization(tenant, &key)
+                    .await
+                    .expect("create disposable authorization user");
+            }
+            for key in [
+                direct_member,
+                removed_agent,
+                banned_agent,
+                removed_owner,
+                banned_owner,
+                current_owner,
+                late_link_agent,
+                stable_agent,
+            ] {
+                assert!(db
+                    .add_relay_member(tenant, &hex::encode(key), "member", None)
+                    .await
+                    .expect("add disposable roster member"));
+            }
+            db.set_agent_owner_for_authorization(tenant, &removed_agent, &removed_owner)
+                .await
+                .expect("record removed agent owner before admission");
+            db.set_agent_owner_for_authorization(tenant, &banned_agent, &banned_owner)
+                .await
+                .expect("record banned agent owner before admission");
+
+            let registry = CommunityConnectionRegistry::new();
+            let manager = ConnectionManager::new();
+            let root = register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                direct_member,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                false,
+            );
+            let audio = register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                direct_member,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                false,
+            );
+            let removed_owner_root = register_live_connection_with_owner_membership(
+                &registry,
+                &manager,
+                tenant,
+                removed_agent,
+                Some(removed_owner),
+                true,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                false,
+            );
+            let removed_owner_audio = register_live_connection_with_owner_membership(
+                &registry,
+                &manager,
+                tenant,
+                removed_agent,
+                Some(removed_owner),
+                true,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                false,
+            );
+            let banned_owner_root = register_live_connection_with_owner_membership(
+                &registry,
+                &manager,
+                tenant,
+                banned_agent,
+                Some(banned_owner),
+                true,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                false,
+            );
+            let banned_owner_audio = register_live_connection_with_owner_membership(
+                &registry,
+                &manager,
+                tenant,
+                banned_agent,
+                Some(banned_owner),
+                true,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                false,
+            );
+            let late_link_root = register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                late_link_agent,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                false,
+            );
+            let late_link_audio = register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                late_link_agent,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                false,
+            );
+            let stable_member_root = register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                stable_agent,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Root,
+                false,
+            );
+            let stable_member_audio = register_live_connection(
+                &registry,
+                &manager,
+                tenant,
+                stable_agent,
+                None,
+                false,
+                crate::nip_fi_session::NipFiWsRoute::Audio,
+                false,
+            );
+
+            db.set_agent_owner_for_authorization(tenant, &late_link_agent, &current_owner)
+                .await
+                .expect("commit first stored owner link after admission");
+            assert_eq!(
+                db.remove_relay_member(tenant, &hex::encode(direct_member))
+                    .await
+                    .expect("commit direct member removal"),
+                buzz_db::relay_members::RemoveResult::Removed
+            );
+            assert_eq!(
+                db.remove_relay_member(tenant, &hex::encode(removed_owner))
+                    .await
+                    .expect("commit captured owner removal"),
+                buzz_db::relay_members::RemoveResult::Removed
+            );
+            db.ban_community_member(tenant, &banned_owner, &actor, None, None)
+                .await
+                .expect("commit captured owner ban");
+            // Deliberately send no registry disconnect or Redis command. The
+            // sockets remain live until the production scan reads the writer.
+            assert!(!root.cancel.is_cancelled());
+            assert!(!audio.cancel.is_cancelled());
+            assert!(!removed_owner_root.cancel.is_cancelled());
+            assert!(!removed_owner_audio.cancel.is_cancelled());
+            assert!(!banned_owner_root.cancel.is_cancelled());
+            assert!(!banned_owner_audio.cancel.is_cancelled());
+            assert!(!late_link_root.cancel.is_cancelled());
+            assert!(!late_link_audio.cancel.is_cancelled());
+            let committed_at = std::time::Instant::now();
+
+            let lookup: LiveAuthorizationBatchLookup = Arc::new({
+                let db = db.clone();
+                move |targets| {
+                    let db = db.clone();
+                    Box::pin(async move { db.live_authorization_state_batch(&targets).await })
+                }
+            });
+            let report = revalidate_live_authorization_sessions(
+                &registry,
+                &manager,
+                true,
+                true,
+                &CancellationToken::new(),
+                lookup,
+            )
+            .await;
+            let elapsed = committed_at.elapsed();
+
+            assert_eq!(report.checked_targets, 5);
+            assert_eq!(report.closed_sessions, 8);
+            assert!(root.cancel.is_cancelled());
+            assert!(audio.cancel.is_cancelled());
+            assert!(removed_owner_root.cancel.is_cancelled());
+            assert!(removed_owner_audio.cancel.is_cancelled());
+            assert!(banned_owner_root.cancel.is_cancelled());
+            assert!(banned_owner_audio.cancel.is_cancelled());
+            assert!(
+                late_link_root.cancel.is_cancelled() && late_link_audio.cancel.is_cancelled(),
+                "sessions admitted ownerless are revoked when a stored owner link is later added"
+            );
+            assert!(
+                !stable_member_root.cancel.is_cancelled()
+                    && !stable_member_audio.cancel.is_cancelled(),
+                "a stable direct member with no owner link remains authorized"
+            );
+            assert!(elapsed < LIVE_AUTHORIZATION_MAX_STALENESS);
+            eprintln!(
+                "observed committed-removal, ban, or owner-link change to root/audio-revocation latency: {} ms",
+                elapsed.as_millis(),
+            );
+        }
+    }
+}
+
+/// One admitted socket and the policy facts captured when it was authorized.
+#[derive(Debug, Clone)]
+pub(crate) struct LiveAuthorizationSession {
+    /// Connection identifier used to close only this socket.
+    pub connection_id: Uuid,
+    /// Host-resolved tenant for the socket.
+    pub community_id: CommunityId,
+    /// Route-specific terminal behavior.
+    pub route: crate::nip_fi_session::NipFiWsRoute,
+    /// NIP-42-authenticated principal.
+    pub pubkey: [u8; 32],
+    /// Owner recorded when the session was admitted.
+    pub owner_pubkey: Option<[u8; 32]>,
+    /// Whether the captured owner was a relay member when this socket was admitted.
+    pub owner_was_relay_member_at_admission: bool,
+    /// Whether closed-relay membership was granted through NIP-OA delegation.
+    pub membership_via_owner: bool,
+    /// Most recent successful authoritative access check.
+    pub last_checked_at: TokioInstant,
+}
+
+/// Why a community-bound socket is being asked to stop.
+///
+/// Only deletion is externally attributed today. Ordinary lifecycle exits keep
+/// using cancellation alone and therefore retain the existing bare-close
+/// behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommunityDisconnectReason {
+    CommunityDeleted,
+    /// NIP-FI: the connection's proven pubkey was added to the deny set.
+    AuthorizationDenied,
+    /// The authenticated pubkey lost access to the community (e.g. a ban).
+    AccessRevoked,
+    /// The relay could not re-establish the socket's access decision.
+    AuthorizationUnavailable,
+}
+
+impl CommunityDisconnectReason {
+    pub(crate) fn close_message(self) -> WsMessage {
+        match self {
+            Self::CommunityDeleted => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("community deleted"),
+            })),
+            Self::AuthorizationDenied => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("authorization denied"),
+            })),
+            Self::AccessRevoked => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("access revoked"),
+            })),
+            Self::AuthorizationUnavailable => {
+                WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: WsUtf8Bytes::from_static("authorization unavailable"),
+                }))
+            }
         }
     }
 }
