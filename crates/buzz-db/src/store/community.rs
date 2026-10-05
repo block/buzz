@@ -149,32 +149,11 @@ impl Db {
     /// Returns whether a community id still exists in the active lifecycle state.
     #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
-        self.is_community_active_with_operation(
-            community_id,
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
-        .await
-    }
-
-    /// Background lifecycle revalidation variant of [`Self::is_community_active`].
-    #[datastore_span(name = "is_community_active_for_maintenance", system = "postgresql")]
-    pub async fn is_community_active_for_maintenance(
-        &self,
-        community_id: CommunityId,
-    ) -> Result<bool> {
-        self.is_community_active_with_operation(
-            community_id,
-            crate::observability::WriterOperation::Maintenance,
-        )
-        .await
-    }
-
-    async fn is_community_active_with_operation(
-        &self,
-        community_id: CommunityId,
-        operation: crate::observability::WriterOperation,
-    ) -> Result<bool> {
-        let mut connection = crate::observability::acquire_writer(&self.pool, operation).await?;
+        .await?;
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )

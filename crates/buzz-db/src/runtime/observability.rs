@@ -256,6 +256,22 @@ impl TransactionOperation {
         }
     }
 
+    /// Whether this transaction's writer checkout also feeds the legacy
+    /// `buzz_db_pool_acquire_wait_seconds` / `buzz_db_pool_acquisitions_total`
+    /// families. Only seams that predate operation-labelled pool metrics do;
+    /// later seams must not change those families' observed population.
+    const fn emits_legacy_pool_metrics(self) -> bool {
+        match self {
+            Self::ReplaceParameterizedEvent
+            | Self::ReplaceAddressableEvent
+            | Self::PublishNip43MembershipLocked
+            | Self::AcceptPushLeaseEvent
+            | Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion => true,
+            Self::CommunityArchiveFence | Self::InactiveCommunityFence => false,
+        }
+    }
+
     const fn writer_operation(self) -> WriterOperation {
         match self {
             Self::ReplaceParameterizedEvent
@@ -511,7 +527,12 @@ pub(crate) async fn begin_transaction(
     pool: &sqlx::PgPool,
     operation: TransactionOperation,
 ) -> sqlx::Result<(sqlx::Transaction<'static, sqlx::Postgres>, TransactionTimer)> {
-    let connection = acquire_writer_with_legacy_metrics(pool, operation.writer_operation()).await?;
+    let connection = acquire(
+        pool,
+        operation.writer_operation().pair(),
+        operation.emits_legacy_pool_metrics(),
+    )
+    .await?;
     let transaction = sqlx::Transaction::begin(connection, None).await?;
     Ok((transaction, TransactionTimer::start(operation)))
 }
@@ -583,9 +604,9 @@ impl Drop for TransactionTimer {
 mod tests {
     use super::{
         acquire_reader_with_legacy_metrics, acquire_writer, acquire_writer_with_legacy_metrics,
-        observe_advisory_lock, record_pool_acquire, refresh_pool_waiters, LockType, Outcome,
-        PoolAcquireAttempt, PoolOperation, ReaderOperation, TransactionOperation, TransactionTimer,
-        WriterOperation,
+        begin_transaction, observe_advisory_lock, record_pool_acquire, refresh_pool_waiters,
+        LockType, Outcome, PoolAcquireAttempt, PoolOperation, ReaderOperation,
+        TransactionOperation, TransactionTimer, WriterOperation,
     };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use std::collections::{BTreeMap, BTreeSet};
@@ -994,6 +1015,21 @@ mod tests {
             0
         );
 
+        for operation in [
+            TransactionOperation::CommunityArchiveFence,
+            TransactionOperation::InactiveCommunityFence,
+        ] {
+            let Err(error) = begin_transaction(&pool, operation).await else {
+                panic!("closed newly instrumented transaction seam errors");
+            };
+            assert!(matches!(error, sqlx::Error::PoolClosed));
+        }
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            0,
+            "community lifecycle fences must not expand the legacy pool families"
+        );
+
         let error = acquire_writer_with_legacy_metrics(&pool, WriterOperation::EventWrite)
             .await
             .expect_err("closed legacy seam errors");
@@ -1001,6 +1037,20 @@ mod tests {
         assert_eq!(
             legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
             1
+        );
+
+        let Err(error) =
+            begin_transaction(&pool, TransactionOperation::FenceCommunityDeletion).await
+        else {
+            panic!("closed legacy transaction seam errors");
+        };
+        assert!(matches!(error, sqlx::Error::PoolClosed));
+        // `snapshot()` drains counters, so each assertion sees only the
+        // acquisitions recorded since the previous snapshot.
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            1,
+            "pre-existing deletion fences keep their legacy pool population"
         );
     }
 
@@ -1492,7 +1542,7 @@ mod tests {
         // writer acquisition has been attributed to `event_write`.
         let _ = writer_db.begin_event_write_transaction(test_scope).await;
         let _ = writer_db
-            .is_community_active_for_maintenance(test_scope)
+            .with_inactive_community_fence(test_scope, |_| ())
             .await;
         let _ = writer_db.usage_community_count().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
