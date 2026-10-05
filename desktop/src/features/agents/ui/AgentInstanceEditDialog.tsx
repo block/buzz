@@ -29,7 +29,7 @@ import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
-import { effortChoices } from "./effortPicker";
+import { effortChoices, isSavableEffort, ownEffortLevel } from "./effortPicker";
 import { EffortPickerField } from "./EffortPickerField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
@@ -636,6 +636,16 @@ export function AgentInstanceEditDialog({
     !isSaving &&
     !isAvatarUploadPending;
 
+  // Harness pin resolution — see resolveAgentCommandUpdate for the full
+  // sentinel/pin/no-op contract. "" is the pin→inherit transition.
+  const agentCommandUpdate = resolveAgentCommandUpdate({
+    inheritHarness,
+    agentCommand,
+    originalAgentCommand: agent.agentCommand,
+    agentCommandOverride: agent.agentCommandOverride ?? null,
+  });
+  const inheritTransition = agentCommandUpdate === "";
+
   async function handleSubmit() {
     setIsSaving(true);
     setSetterError(null);
@@ -649,16 +659,6 @@ export function AgentInstanceEditDialog({
       // provider-backed inherit-transition carries the persona model (readiness
       // requires one) and a deliberate local model still wins.
       const normalizedModel = inheritedSubmission.model;
-
-      // Harness pin resolution — see resolveAgentCommandUpdate for the full
-      // sentinel/pin/no-op contract, including the inherit→pin transition where
-      // the prefilled command equals the original but must still be pinned.
-      const agentCommandUpdate = resolveAgentCommandUpdate({
-        inheritHarness,
-        agentCommand,
-        originalAgentCommand: agent.agentCommand,
-        agentCommandOverride: agent.agentCommandOverride ?? null,
-      });
 
       // Classify the effective post-submit runtime's provider capability as a
       // tri-state: "capable" persists the provider, "locked" clears it (only
@@ -751,7 +751,7 @@ export function AgentInstanceEditDialog({
       const effortSubmission = resolveEffortSubmission({
         effortLevel: effortLevel ?? null,
         originalEffortLevel: storedEffort,
-        inheritTransition: agentCommandUpdate === "",
+        inheritTransition,
         choices: effortOptions,
       });
       if (effortTouched && effortSubmission.persist) {
@@ -851,8 +851,7 @@ export function AgentInstanceEditDialog({
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
   });
-  const storedEffort =
-    configSurfaceQuery.data?.normalized.thinkingEffort?.value ?? null;
+  const storedEffort = ownEffortLevel(normalizedConfig?.thinkingEffort);
   const effortOptions = effortChoices({
     runtimeId: selectedRuntime?.id,
     models: [
@@ -863,6 +862,9 @@ export function AgentInstanceEditDialog({
     sessionApplies: !runtimeTouched.current,
     session: configSurfaceQuery.data,
   });
+  // Show a pick only while Save would keep it.
+  const effortPickKept =
+    effortTouched && isSavableEffort(effortLevel, effortOptions);
   const modelStatusMessage = resolveModelFieldStatusMessage({
     discoveredModelOptions,
     loading: modelDiscoveryLoading,
@@ -1111,13 +1113,12 @@ export function AgentInstanceEditDialog({
 
             <EffortPickerField
               backend={agent.backend}
-              choices={effortOptions}
+              // The inherit transition clears effort, so nothing to pick.
+              choices={inheritTransition ? undefined : effortOptions}
               disabled={isSaving}
-              // A stored level belongs to the saved runtime.
-              storedEffort={
-                selectedRuntimeId === savedRuntimeId ? storedEffort : null
-              }
-              value={effortTouched ? effortLevel : storedEffort}
+              // A stored level survives a runtime switch; keep it clearable.
+              storedEffort={inheritTransition ? null : storedEffort}
+              value={effortPickKept ? effortLevel : storedEffort}
               onChange={setEffortLevel}
             />
 

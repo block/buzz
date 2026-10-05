@@ -1,10 +1,11 @@
 /**
  * Thinking-effort picker in the real Edit and Create dialogs for Claude Code.
  *
- * Levels come from the running session only while it describes the model
- * being saved; otherwise from Claude model data for the model that will run
+ * Levels never come from the stored session, which does not record the model
+ * it ran; they come from Claude model data for the model that will run
  * (explicit, then global, then the adapter's reported default). A level the
- * saved model does not offer is never submitted.
+ * saved model does not offer is never submitted, and only the agent's own
+ * saved level shows as stored.
  */
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
@@ -49,9 +50,14 @@ const CLAUDE_MODELS = {
   ],
 };
 
+/**
+ * `origin` is the tier the reported effort resolved from; only `buzzExplicit`
+ * is the agent's own saved level.
+ */
 function surface(
   effort?: { configId: string; options: string[] },
   storedEffort?: string,
+  origin = "buzzExplicit",
 ) {
   return {
     runtimeId: "claude",
@@ -64,8 +70,11 @@ function surface(
       thinkingEffort: storedEffort
         ? {
             value: storedEffort,
-            origin: "buzzManaged",
-            writeVia: "envVar",
+            origin,
+            writeVia: {
+              type: "respawnWithEnvVar",
+              envKey: "BUZZ_ACP_EFFORT_LEVEL",
+            },
             overriddenValue: null,
             overriddenOrigin: null,
             isRequired: false,
@@ -398,6 +407,91 @@ test.describe("edit dialog", () => {
       await expect(dialog).toHaveCount(0);
       const updates = await payloadsFor(page, "update_managed_agent");
       expect(updates).toHaveLength(1);
+      if (clear) expect(updates[0].input).toHaveProperty("effortLevel", null);
+      else expect(updates[0].input).not.toHaveProperty("effortLevel");
+    });
+  }
+
+  test("a config-file effort is not shown as the agent's stored level", async ({
+    page,
+  }) => {
+    // ~/.claude/settings.json effortLevel reaches the surface as configFile.
+    await install(page, {
+      agentConfigSurface: surface(undefined, "max", "configFile"),
+    });
+    const dialog = await openEdit(page);
+    const effort = dialog.locator("#edit-agent-effort");
+    await expect(effort).toHaveText("Adapter default");
+    expect(await menuValues(page, effort)).toEqual(ADAPTER_LEVELS);
+  });
+
+  test("a config-file effort shows no picker for Haiku", async ({ page }) => {
+    await install(page, {
+      managedAgents: [{ ...AGENT, model: "haiku" }],
+      agentConfigSurface: surface(undefined, "max", "configFile"),
+    });
+    const dialog = await openEdit(page);
+    await expect(dialog.locator("#edit-agent-model")).toHaveText("Haiku");
+    await expect(dialog.locator("#edit-agent-effort")).toHaveCount(0);
+  });
+
+  test("a pick the new model drops shows the stored level Save keeps", async ({
+    page,
+  }) => {
+    await install(page, {
+      managedAgents: [{ ...AGENT, model: "claude-opus-4-8" }],
+      agentConfigSurface: surface(undefined, "max"),
+      discoverAgentModels: {
+        ...CLAUDE_MODELS,
+        models: [
+          ...CLAUDE_MODELS.models,
+          { id: "claude-opus-4-8", name: "Opus 4.8" },
+        ],
+      },
+    });
+    const dialog = await openEdit(page);
+    const effort = dialog.locator("#edit-agent-effort");
+    await pick(page, effort, "high");
+    await pick(page, dialog.locator("#edit-agent-model"), "Haiku");
+    await expect(effort).toHaveText("max");
+    await expect(dialog).toContainText("This model may not support max.");
+
+    await dialog.getByRole("button", { name: "Save changes" }).click();
+    await expect(dialog).toHaveCount(0);
+    const updates = await payloadsFor(page, "update_managed_agent");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].input).not.toHaveProperty("effortLevel");
+  });
+
+  for (const clear of [false, true]) {
+    test(`a stored level survives a switch to another runtime (${clear ? "cleared" : "untouched"})`, async ({
+      page,
+    }) => {
+      // The backend keeps effort_level across a runtime switch.
+      await install(page, {
+        managedAgents: [{ ...AGENT, runtime: "codex" }],
+        agentConfigSurface: surface(undefined, "xhigh"),
+      });
+      const dialog = await openEdit(page);
+      const effort = dialog.locator("#edit-agent-effort");
+      await expect(effort).toHaveText("xhigh");
+      await pick(page, dialog.locator("#edit-agent-runtime"), "Claude Code");
+      await expect(effort).toHaveText("xhigh");
+      await expect(dialog).toContainText("This model may not support xhigh.");
+      expect(await menuValues(page, effort)).toEqual([
+        ...ADAPTER_LEVELS,
+        "xhigh",
+      ]);
+      if (clear) {
+        await pick(page, effort, "Adapter default");
+        await expect(effort).toHaveText("Adapter default");
+      }
+
+      await dialog.getByRole("button", { name: "Save changes" }).click();
+      await expect(dialog).toHaveCount(0);
+      const updates = await payloadsFor(page, "update_managed_agent");
+      expect(updates).toHaveLength(1);
+      expect(updates[0].input.agentCommand).toBe("claude");
       if (clear) expect(updates[0].input).toHaveProperty("effortLevel", null);
       else expect(updates[0].input).not.toHaveProperty("effortLevel");
     });

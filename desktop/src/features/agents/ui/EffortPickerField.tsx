@@ -8,19 +8,20 @@ import {
 import { PersonaDropdownField } from "./PersonaDropdownField";
 
 /**
- * Thinking-effort write control for the edit dialog.
+ * Thinking-effort write control for the agent edit and create dialogs.
  *
  * Local-only by construction: the Rust backend rejects effort writes for
  * non-local backends (remote effort is set at deploy time via `policy_env`). So the
  * control renders only for a local backend AND when `effortChoices` knows the
- * levels for the model that will run (session list, else Claude manifest). The
- * read-only configured-vs-running two-facts display lives in `AgentConfigPanel`;
- * this is the write control.
+ * levels for the model that will run (Claude model data for Claude, the running
+ * session's list otherwise) or a level is stored. The read-only
+ * configured-vs-running two-facts display lives in `AgentConfigPanel`; this is
+ * the write control.
  *
  * Save-gated, not direct-write: the control is fully controlled by the parent
  * dialog (`value`/`onChange`) and owns no mutation. The dialog persists the
- * selection by embedding `effortLevel` in the locked `update_managed_agent`
- * call (PR #4625), so the effort write is atomic with any access-policy change
+ * selection in its save payload (in Edit, the locked `update_managed_agent`
+ * call, PR #4625), so the effort write is atomic with any access-policy change
  * and can never race or survive a Cancel/failed Save.
  */
 export function EffortPickerField({
@@ -41,13 +42,12 @@ export function EffortPickerField({
   storedEffort?: string | null;
   onChange: (level: string | null) => void;
 }) {
-  const { visible, options, selectValue, unlisted, unknownModel } =
-    effortPickerState({
-      backend,
-      effortOptions: choices,
-      currentEffort: value,
-      storedEffort,
-    });
+  const { visible, options, selectValue, note } = effortPickerState({
+    backend,
+    effortOptions: choices,
+    currentEffort: value,
+    storedEffort,
+  });
 
   if (!visible) {
     return null;
@@ -73,11 +73,12 @@ export function EffortPickerField({
         value={selectValue}
       />
       <p className="text-xs text-muted-foreground">
-        {unknownModel
-          ? `Support for ${selectValue} isn't known yet. Applied at the next session start.`
-          : unlisted
-            ? `This model may not support ${selectValue}. Applied at the next session start.`
-            : "Applied at the next session start."}
+        {note === "unknownModel"
+          ? `Support for ${selectValue} isn't known yet. `
+          : note === "unlisted"
+            ? `This model may not support ${selectValue}. `
+            : null}
+        Applied at the next session start.
       </p>
     </div>
   );

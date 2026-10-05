@@ -1,6 +1,7 @@
 import type {
   AcpConfigOptionValue,
   ManagedAgentBackend,
+  NormalizedField,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
 import type { PersonaDropdownOption } from "./agentConfigOptions";
@@ -13,7 +14,7 @@ import { resolveModelCapabilities } from "./modelCapabilities";
 export const EFFORT_DEFAULT_DROPDOWN_VALUE = "__effort_default__";
 
 /**
- * Pure gating + option compute for the effort write control in the edit dialog.
+ * Pure gating + option compute for the effort write control.
  *
  * The picker is a LOCAL-only, Save-gated write control: the dialog embeds the
  * selection in the locked `update_managed_agent` payload (PR #4625), which the
@@ -21,8 +22,8 @@ export const EFFORT_DEFAULT_DROPDOWN_VALUE = "__effort_default__";
  * time via `policy_env`). So the UI must not offer it for a provider backend,
  * and there's nothing to pick until `effortChoices` knows the model's levels.
  *
- * `visible` is the single gate the dialog renders on: local backend AND known
- * choices.
+ * `visible` is the single gate the dialog renders on: local backend AND either
+ * known choices or a stored level, which stays shown so it can be cleared.
  */
 export function effortPickerState({
   backend,
@@ -39,21 +40,27 @@ export function effortPickerState({
   visible: boolean;
   options: PersonaDropdownOption[];
   selectValue: string;
-  /** The stored level is selected but the model doesn't list it. */
-  unlisted: boolean;
-  /** The model isn't known yet, so support for `selectValue` isn't either. */
-  unknownModel: boolean;
+  /**
+   * Why the selected level may not apply: the model doesn't list it
+   * (`unlisted`), or the model isn't known yet (`unknownModel`).
+   */
+  note: "unlisted" | "unknownModel" | null;
 } {
   const listed = Array.isArray(effortOptions) ? effortOptions : [];
+  const unknownModel = effortOptions === EFFORT_LEVELS_UNKNOWN;
   const isListed = (value: string) =>
     listed.some((option) => option.value === value);
-  // A saved level the model doesn't list stays a visible, clearable option
-  // rather than reading as "Adapter default"; only the user may clear it.
   const stored = storedEffort?.trim() ?? "";
-  const storedUnlisted = stored.length > 0 && !isListed(stored);
+  const current = currentEffort?.trim() ?? "";
+  // Unlisted levels that stay selectable rather than reading as "Adapter
+  // default": a saved level, which only the user may clear, and while the
+  // model is unknown, the pick Save keeps.
+  const unlisted = [...new Set([stored, unknownModel ? current : ""])].filter(
+    (value) => value.length > 0 && !isListed(value),
+  );
   const visible =
     backend.type === "local" &&
-    (Array.isArray(effortOptions) || storedUnlisted);
+    (Array.isArray(effortOptions) || stored.length > 0);
 
   const options: PersonaDropdownOption[] = [
     { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
@@ -61,23 +68,30 @@ export function effortPickerState({
       label: option.displayName ?? option.value,
       value: option.value,
     })),
-    ...(storedUnlisted ? [{ label: stored, value: stored }] : []),
+    ...unlisted.map((value) => ({ label: value, value })),
   ];
 
-  const trimmed = currentEffort?.trim() ?? "";
-  const unlisted = storedUnlisted && trimmed === stored;
-  const selectValue =
-    unlisted || (trimmed.length > 0 && isListed(trimmed))
-      ? trimmed
-      : EFFORT_DEFAULT_DROPDOWN_VALUE;
-
+  const selectedUnlisted = unlisted.includes(current);
   return {
     visible,
     options,
-    selectValue,
-    unlisted: unlisted && effortOptions !== EFFORT_LEVELS_UNKNOWN,
-    unknownModel: unlisted && effortOptions === EFFORT_LEVELS_UNKNOWN,
+    selectValue:
+      selectedUnlisted || (current.length > 0 && isListed(current))
+        ? current
+        : EFFORT_DEFAULT_DROPDOWN_VALUE,
+    note: !selectedUnlisted ? null : unknownModel ? "unknownModel" : "unlisted",
   };
+}
+
+/**
+ * The agent's own saved effort level from its config surface. A session,
+ * definition, global, or config-file value is not the agent's to show as
+ * stored or to clear.
+ */
+export function ownEffortLevel(
+  field: NormalizedField | null | undefined,
+): string | null {
+  return field?.origin === "buzzExplicit" ? field.value : null;
 }
 
 /**
@@ -108,12 +122,15 @@ export type EffortOptions =
 /** Model ids in precedence order: explicit/persona, global, adapter default. */
 export type EffortModels = readonly (string | null | undefined)[];
 
+/** Claude Code's model aliases, which the manifest does not resolve. */
+const CLAUDE_ALIASES = new Set(["default", "opus", "opusplan", "sonnet"]);
 const CLAUDE_ALIAS_EFFORTS = ["low", "medium", "high"];
 
 /**
  * Effort levels to offer for the model that will actually run, or `undefined`
  * to hide the picker (`EFFORT_LEVELS_UNKNOWN` while Claude's model is not yet
- * known). Claude levels always come from the capability manifest.
+ * known). Claude levels always come from the capability manifest, except for
+ * Claude Code's aliases. A model the manifest doesn't know offers none.
  * Other runtimes keep native-only behavior: the running session's own list
  * while the runtime is unchanged (`sessionApplies`). The first
  * non-blank of `models` wins. A blank id must never reach the manifest: its blank
@@ -151,12 +168,11 @@ export function effortChoices({
     "anthropic",
     id,
   );
-  const levels =
-    alias === "opus" || alias === "sonnet"
-      ? CLAUDE_ALIAS_EFFORTS
-      : thinkingMode === "adaptive" || thinkingMode === "manual-budget"
-        ? supportedEfforts
-        : [];
+  const levels = CLAUDE_ALIASES.has(alias)
+    ? CLAUDE_ALIAS_EFFORTS
+    : thinkingMode === "adaptive" || thinkingMode === "manual-budget"
+      ? supportedEfforts
+      : [];
   return levels.length > 0 ? levels.map((value) => ({ value })) : undefined;
 }
 

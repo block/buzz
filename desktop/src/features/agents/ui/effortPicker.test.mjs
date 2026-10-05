@@ -17,7 +17,7 @@ const options = [
   { value: "high", displayName: "High" },
 ];
 
-test("effort picker renders for a local backend with a discovered configId", () => {
+test("effort picker renders for a local backend with known levels", () => {
   const state = effortPickerState({
     backend: localBackend,
     effortOptions: options,
@@ -26,7 +26,7 @@ test("effort picker renders for a local backend with a discovered configId", () 
   assert.equal(state.visible, true);
 });
 
-test("effort picker is hidden for a provider backend even when a configId exists", () => {
+test("effort picker is hidden for a provider backend even with known levels", () => {
   const state = effortPickerState({
     backend: providerBackend,
     effortOptions: options,
@@ -35,7 +35,7 @@ test("effort picker is hidden for a provider backend even when a configId exists
   assert.equal(state.visible, false);
 });
 
-test("effort picker is hidden for a local backend without a discovered configId", () => {
+test("effort picker is hidden for a local backend whose model offers no levels", () => {
   const state = effortPickerState({
     backend: localBackend,
     effortOptions: undefined,
@@ -177,6 +177,28 @@ test("effortChoices_discoveryPendingOrFailed_reportsUnknownModel", () => {
   assert.equal(choices, EFFORT_LEVELS_UNKNOWN);
 });
 
+for (const alias of ["default", "opusplan", "default[1m]", "OpusPlan[1m]"]) {
+  test(`effortChoices_claudeAlias_${alias}_offersAliasLevels`, () => {
+    const choices = effortChoices({
+      runtimeId: "claude",
+      models: [alias],
+      sessionApplies: false,
+    });
+    assert.deepEqual(values(choices), ["low", "medium", "high"]);
+  });
+}
+
+test("effortChoices_unrecognizedClaudeModel_offersNone", () => {
+  // The manifest's unknown fallback is also what Haiku resolves to, so an
+  // unrecognized id cannot be told apart from a model without levels.
+  const choices = effortChoices({
+    runtimeId: "claude",
+    models: ["claude-future-9"],
+    sessionApplies: false,
+  });
+  assert.equal(choices, undefined);
+});
+
 test("isSavableEffort_rejectsLevelTheModelDoesNotOffer", () => {
   assert.equal(isSavableEffort("high", undefined), false);
   assert.equal(isSavableEffort("max", [{ value: "high" }]), false);
@@ -205,12 +227,27 @@ test("effortPickerState_unknownModelWithStoredLevel_showsItAsUnknown", () => {
     storedEffort: "max",
   });
   assert.equal(state.visible, true);
-  assert.equal(state.unknownModel, true);
-  assert.equal(state.unlisted, false);
+  assert.equal(state.note, "unknownModel");
   assert.deepEqual(state.options, [
     { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
     { label: "max", value: "max" },
   ]);
+});
+
+test("effortPickerState_unknownModelWithStoredLevel_showsThePickSaveKeeps", () => {
+  // isSavableEffort keeps any pick while the model is unknown.
+  const state = effortPickerState({
+    backend: localBackend,
+    effortOptions: EFFORT_LEVELS_UNKNOWN,
+    currentEffort: "high",
+    storedEffort: "max",
+  });
+  assert.equal(state.selectValue, "high");
+  assert.equal(state.note, "unknownModel");
+  assert.deepEqual(
+    state.options.map((option) => option.value),
+    [EFFORT_DEFAULT_DROPDOWN_VALUE, "max", "high"],
+  );
 });
 
 test("effortPickerState_storedLevelTheModelDoesNotList_staysSelectable", () => {
@@ -221,7 +258,7 @@ test("effortPickerState_storedLevelTheModelDoesNotList_staysSelectable", () => {
     storedEffort: "max",
   });
   assert.equal(state.visible, true);
-  assert.equal(state.unlisted, true);
+  assert.equal(state.note, "unlisted");
   assert.equal(state.selectValue, "max");
   assert.deepEqual(state.options, [
     { label: "Adapter default", value: EFFORT_DEFAULT_DROPDOWN_VALUE },
@@ -237,7 +274,18 @@ test("effortPickerState_clearedUnlistedStoredLevel_staysOfferedButUnselected", (
     storedEffort: "max",
   });
   assert.equal(state.visible, true);
-  assert.equal(state.unlisted, false);
+  assert.equal(state.note, null);
   assert.equal(state.selectValue, EFFORT_DEFAULT_DROPDOWN_VALUE);
   assert.equal(state.options.at(-1).value, "max");
+});
+
+test("effortPickerState_listedSelection_hasNoNote", () => {
+  const state = effortPickerState({
+    backend: localBackend,
+    effortOptions: options,
+    currentEffort: "high",
+    storedEffort: "max",
+  });
+  assert.equal(state.selectValue, "high");
+  assert.equal(state.note, null);
 });
