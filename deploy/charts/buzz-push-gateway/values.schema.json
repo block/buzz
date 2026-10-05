@@ -239,6 +239,12 @@
         },
         "resources": {
           "type": "object"
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     }

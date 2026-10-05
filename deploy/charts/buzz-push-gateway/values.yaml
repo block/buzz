@@ -10,6 +10,8 @@ existingSecret: buzz-push-gateway
 # DDL-capable credentials are used only by the pre-install/pre-upgrade migration
 # Job. Runtime DATABASE_URL in existingSecret should have DML-only privileges.
 migration:
+  # Applies only to migration Pods, independently of runtime podAnnotations.
+  podAnnotations: {}
   existingSecret: buzz-push-gateway-migrations
   databaseUrlKey: DATABASE_URL
   # Existing LOGIN role used by runtime DATABASE_URL. Migrations grant it only
