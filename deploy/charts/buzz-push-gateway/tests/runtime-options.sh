@@ -39,3 +39,13 @@ reject --set podLabels.invalid=true
 for label in name instance component; do
   reject --set-string "podLabels.app\\.kubernetes\\.io/$label=override"
 done
+
+# Kubernetes NetworkPolicy names are DNS subdomains, not single DNS labels.
+long_name=$(printf '%0253d' 0)
+for name in runtime.platform.example "$long_name"; do
+  helm template push "$chart" --set networkPolicy.enabled=false \
+    --set-string "networkPolicy.externalPolicyName=$name" >/dev/null
+done
+for name in "$long_name"x .runtime runtime. runtime..example Runtime runtime.-example; do
+  reject --set networkPolicy.enabled=false --set-string "networkPolicy.externalPolicyName=$name"
+done

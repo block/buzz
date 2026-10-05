@@ -150,8 +150,8 @@
         "externalPolicyName": {
           "type": "string",
           "description": "Name of the replacement runtime NetworkPolicy supplied by the parent chart. Required when the upstream policy is disabled.",
-          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
-          "maxLength": 63
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253
         }
       },
       "allOf": [
