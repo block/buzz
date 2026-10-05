@@ -110,6 +110,12 @@ Future<bool> _showNativeMessageActions({
           messageId: message.id,
           createdAt: message.createdAt,
           threadRootId: message.rootId,
+          channelCatchUp: _readByChannelCatchUp(
+            ref,
+            channelId,
+            message,
+            currentPubkey,
+          ),
         );
         action('read', unread ? 'Mark read' : 'Mark unread', 'envelope', () {
           final notifier = ref.read(readStateProvider.notifier);

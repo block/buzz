@@ -310,6 +310,12 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
         messageId: message.id,
         createdAt: message.createdAt,
         threadRootId: message.rootId,
+        channelCatchUp: _readByChannelCatchUp(
+          ref,
+          channelId,
+          message,
+          currentPubkey,
+        ),
       );
       actions.add(
         _PopoverMessageAction(
