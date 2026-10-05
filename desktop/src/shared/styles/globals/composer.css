@@ -92,6 +92,23 @@
   );
 }
 
+.composer-tucked-banner {
+  mask:
+    linear-gradient(black 0 0) top / 100% calc(100% - 0.75rem) no-repeat,
+    radial-gradient(
+      circle at 100% calc(100% + 0.25rem),
+      transparent 1rem,
+      black calc(1rem + 0.5px)
+    )
+    left bottom / 1rem 0.75rem no-repeat,
+    radial-gradient(
+      circle at 0 calc(100% + 0.25rem),
+      transparent 1rem,
+      black calc(1rem + 0.5px)
+    )
+    right bottom / 1rem 0.75rem no-repeat;
+}
+
 .rich-text-composer .tiptap {
   @apply text-message font-normal tracking-normal;
   outline: none;

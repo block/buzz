@@ -238,8 +238,9 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     await composer.getByTestId("welcome-composer-guide-banner").count(),
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
-  // Banner is in normal flow above the composer, no overlap.
-  expect(bannerBox.y + bannerBox.height).toBeLessThanOrEqual(composerBox.y);
+  // The banner tucks under the composer so its sides meet the composer's
+  // rounded top corners.
+  expect(bannerBox.y + bannerBox.height).toBeCloseTo(composerBox.y + 12, 0);
   // The dock backdrop is absolute inset-y-0 inside composer-dock, which now
   // contains the guidance layer + composer in flow, so its top aligns with the
   // guidance layer top (not the composer top).
@@ -247,11 +248,12 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     1,
   );
   expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
-  // The guidance backdrop extends bottom-3 (12px) short of the banner's bottom,
-  // visually connecting up to the composer.
-  expect(guidanceBackdropBox.y + guidanceBackdropBox.height).toBeLessThan(
-    composerBox.y,
-  );
+  // The guidance backdrop stops at the composer's top edge.
+  expect(
+    Math.abs(
+      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
+    ),
+  ).toBeLessThanOrEqual(1);
   expect(
     await page
       .getByTestId("channel-composer-overlay")
@@ -273,6 +275,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
       bottomLeft: styles.borderBottomLeftRadius,
       bottomRight: styles.borderBottomRightRadius,
       filter: styles.filter,
+      maskImage: styles.maskImage,
       zIndex: styles.zIndex,
       topLeft: styles.borderTopLeftRadius,
       topRight: styles.borderTopRightRadius,
@@ -295,6 +298,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   expect(radii.bottomLeft).toBe("0px");
   expect(radii.bottomRight).toBe("0px");
   expect(radii.backdropFilter).toBe("none");
+  expect(radii.maskImage).not.toBe("none");
   expect(radii.backgroundColor).not.toBe(composerBackgroundColor);
   expect(dockBackdropFilter).not.toBe("none");
   expect(guidanceBackdropFilter).toBe(dockBackdropFilter);
