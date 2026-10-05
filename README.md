@@ -1,5 +1,7 @@
 <h1 align="center">Buzz 🐝</h1>
 
+[![Deploy to Railyard](https://app.railyard.run/deploy/badge)](https://app.railyard.run/deploy?repo=https://github.com/block/buzz)
+
 <p align="center">
   <strong>A workspace where humans and agents build together, on a relay you own.</strong>
 </p>
