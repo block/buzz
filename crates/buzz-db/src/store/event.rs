@@ -1161,7 +1161,7 @@ pub async fn soft_delete_by_coordinate(
 /// When the target event is a kind-40100 (canvas) event, this function derives
 /// the target's `kind` and `channel_id` from the database inside the same
 /// transaction and acquires the same `(community, kind, channel)` advisory lock
-/// used by [`insert_channel_head_checked`] before the UPDATE. This prevents a
+/// used by [`insert_canvas_head_checked`] before the UPDATE. This prevents a
 /// concurrent tagged write from observing a head that is simultaneously being
 /// removed. The serialization invariant is owned entirely by this function;
 /// callers do not classify the target kind.
@@ -1728,8 +1728,6 @@ pub(crate) async fn acquire_canvas_event_write_lock_if_needed(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    use crate::store::replaceable::event_replacement_lock_key;
-
     if event_kind_i32(event) != KIND_CANVAS as i32 {
         return Ok(());
     }
@@ -1737,6 +1735,18 @@ pub(crate) async fn acquire_canvas_event_write_lock_if_needed(
     let Some(channel_id) = channel_id else {
         return Ok(());
     };
+
+    acquire_canvas_coordinate_lock(tx, community_id, channel_id).await
+}
+
+/// Take the per-`(community, canvas kind, channel)` advisory lock that
+/// serializes canvas writes on one channel head, author excluded.
+async fn acquire_canvas_coordinate_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    use crate::store::replaceable::event_replacement_lock_key;
 
     let lock_key = event_replacement_lock_key(
         community_id,
@@ -1759,7 +1769,7 @@ pub(crate) async fn acquire_canvas_event_write_lock_if_needed(
 ///
 /// For kind-40100 (canvas) events with a `channel_id`, acquires the same
 /// `(community, kind, channel)` advisory lock used by
-/// [`insert_channel_head_checked`] so that untagged unconditional canvas appends
+/// [`insert_canvas_head_checked`] so that untagged unconditional canvas appends
 /// serialize against concurrent tagged writes on the same coordinate. Untagged
 /// writes remain unconditional — they never conflict — but must not race the
 /// head read inside a concurrent tagged transaction.
@@ -1804,7 +1814,7 @@ pub enum ChannelHeadWriteStatus {
     SupersedeFailed,
 }
 
-/// Optimistic-concurrency precondition for [`insert_channel_head_checked`].
+/// Optimistic-concurrency precondition for [`insert_canvas_head_checked`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelHeadPrecondition<'a> {
     /// Require that no live head exists yet (first creation of the canvas).
@@ -1830,8 +1840,12 @@ fn candidate_supersedes_head(
     }
 }
 
-/// Conditionally append a channel-head event (canvas kind 40100) under an
-/// optimistic-concurrency precondition.
+/// Conditionally append a canvas event (kind 40100) as its channel's head
+/// under an optimistic-concurrency precondition.
+///
+/// Any other kind is rejected with [`DbError::InvalidData`] before a
+/// transaction opens: the head read and the coordinate lock below are only
+/// meaningful for canvas, so the contract is enforced rather than assumed.
 ///
 /// Acquires a per-`(community, kind, channel)` advisory lock (author excluded
 /// so cross-author concurrent edits serialize on the same head), reads the head
@@ -1843,7 +1857,7 @@ fn candidate_supersedes_head(
 /// strictly ahead of the head; if not, returns `SupersedeFailed`. Re-submitting
 /// the byte-identical live head short-circuits to `Duplicate` without evaluating
 /// the precondition (safe transport-retry semantics).
-pub async fn insert_channel_head_checked(
+pub async fn insert_canvas_head_checked(
     pool: &PgPool,
     community_id: CommunityId,
     event: &Event,
@@ -1851,6 +1865,11 @@ pub async fn insert_channel_head_checked(
     precondition: ChannelHeadPrecondition<'_>,
 ) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
+    if kind_i32 != KIND_CANVAS as i32 {
+        return Err(DbError::InvalidData(format!(
+            "insert_canvas_head_checked requires kind {KIND_CANVAS}, got {kind_i32}"
+        )));
+    }
     let received_at = Utc::now();
     let incoming_id = event.id.as_bytes();
 
@@ -1860,8 +1879,7 @@ pub async fn insert_channel_head_checked(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, Some(channel_id))
-        .await?;
+    acquire_canvas_coordinate_lock(&mut tx, community_id, channel_id).await?;
 
     let head: Option<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, created_at FROM events \
@@ -2553,19 +2571,20 @@ impl Db {
     }
 
     /// Conditionally append a canvas write (kind 40100) under an optimistic-concurrency
-    /// precondition. Delegates to [`insert_channel_head_checked`].
+    /// precondition, rejecting any other kind. Delegates to
+    /// [`insert_canvas_head_checked`].
     ///
     /// Always uses the writer pool — the precondition check and the insert must
     /// be serialized on the writer to prevent TOCTOU races.
-    #[datastore_span(name = "insert_channel_head_checked", system = "postgresql")]
-    pub async fn insert_channel_head_checked(
+    #[datastore_span(name = "insert_canvas_head_checked", system = "postgresql")]
+    pub async fn insert_canvas_head_checked(
         &self,
         community_id: CommunityId,
         event: &nostr::Event,
         channel_id: Uuid,
         precondition: ChannelHeadPrecondition<'_>,
     ) -> Result<(StoredEvent, ChannelHeadWriteStatus)> {
-        insert_channel_head_checked(&self.pool, community_id, event, channel_id, precondition).await
+        insert_canvas_head_checked(&self.pool, community_id, event, channel_id, precondition).await
     }
 }
 
@@ -3718,6 +3737,30 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn canvas_head_checked_rejects_non_canvas_kinds_before_opening_a_transaction() {
+        // A lazy pool that is never connected: the kind check must reject
+        // before any writer acquisition, so no database is needed.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .expect("lazy pool");
+        let event = make_event_at(9, "not a canvas", 1000);
+
+        let error = insert_canvas_head_checked(
+            &pool,
+            CommunityId::from_uuid(Uuid::new_v4()),
+            &event,
+            Uuid::new_v4(),
+            ChannelHeadPrecondition::ExpectNoHead,
+        )
+        .await
+        .expect_err("non-canvas kinds must be rejected");
+        assert!(
+            matches!(&error, DbError::InvalidData(message) if message.contains("requires kind")),
+            "expected a kind rejection, got: {error:#}"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expect_no_head_creates_first_canvas() {
         let pool = setup_pool().await;
@@ -3725,7 +3768,7 @@ mod postgres_tests {
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let event = make_canvas_event_at("# First", 1000);
 
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &event,
@@ -3744,7 +3787,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let first = make_canvas_event_at("# First", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &first,
@@ -3755,7 +3798,7 @@ mod postgres_tests {
         .expect("first canvas");
 
         let second = make_canvas_event_at("# Racing create", 1001);
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &second,
@@ -3784,7 +3827,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let first = make_canvas_event_at("# First", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &first,
@@ -3796,7 +3839,7 @@ mod postgres_tests {
 
         let second = make_canvas_event_at("# Second", 1001);
         let head = first.id.as_bytes();
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &second,
@@ -3815,7 +3858,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let first = make_canvas_event_at("# First", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &first,
@@ -3827,7 +3870,7 @@ mod postgres_tests {
 
         let stale = make_canvas_event_at("# Stale edit", 1002);
         let wrong_head = [0u8; 32];
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &stale,
@@ -3848,7 +3891,7 @@ mod postgres_tests {
         let event = make_canvas_event_at("# Edit with no head", 1000);
         let some_head = [1u8; 32];
 
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &event,
@@ -3867,7 +3910,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let event = make_canvas_event_at("# First", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &event,
@@ -3879,7 +3922,7 @@ mod postgres_tests {
 
         // Replaying the exact head under ExpectedHead(head) is idempotent.
         let head = event.id.as_bytes();
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &event,
@@ -3902,7 +3945,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let event = make_canvas_event_at("# First", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &event,
@@ -3914,7 +3957,7 @@ mod postgres_tests {
 
         // Replay the same bytes with a now-stale `ExpectNoHead` tag: a head
         // exists, so the precondition would reject — but replay short-circuits.
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &event,
@@ -3938,7 +3981,7 @@ mod postgres_tests {
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
         let (lower, higher) = same_second_ordered_pair(1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &lower,
@@ -3949,7 +3992,7 @@ mod postgres_tests {
         .expect("first canvas is lower-id head");
 
         // Candidate has the same created_at but a higher id → cannot supersede.
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &higher,
@@ -3982,7 +4025,7 @@ mod postgres_tests {
 
         let (lower, higher) = same_second_ordered_pair(1000);
         // Seed the higher-id event as the head first.
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &higher,
@@ -3993,7 +4036,7 @@ mod postgres_tests {
         .expect("first canvas is higher-id head");
 
         // Lower id at the same second sorts strictly ahead → advances.
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &lower,
@@ -4014,7 +4057,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let head = make_canvas_event_at("# Head", 2000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &head,
@@ -4026,7 +4069,7 @@ mod postgres_tests {
 
         // Writer's clock is behind — created_at earlier than head.
         let behind = make_canvas_event_at("# Behind clock", 1100);
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &behind,
@@ -4038,7 +4081,7 @@ mod postgres_tests {
         assert_eq!(status, ChannelHeadWriteStatus::SupersedeFailed);
     }
     /// Derives the advisory-lock key for a canvas coordinate, matching the key
-    /// computed inside `insert_channel_head_checked` and
+    /// computed inside `insert_canvas_head_checked` and
     /// `soft_delete_event_and_update_thread`.
     fn canvas_lock_key(community: CommunityId, channel: Uuid) -> i64 {
         crate::store::replaceable::event_replacement_lock_key(
@@ -4115,7 +4158,7 @@ mod postgres_tests {
 
         // H: seed the initial head.
         let head = make_canvas_event_at("# Head", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &head,
@@ -4128,7 +4171,7 @@ mod postgres_tests {
 
         // A: insert a second revision.
         let a = make_canvas_event_at("# A", 1001);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &a,
@@ -4161,7 +4204,7 @@ mod postgres_tests {
         );
 
         // Replay byte-identical A against live head H — must not return Duplicate.
-        let (_, status) = insert_channel_head_checked(
+        let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
             &a,
@@ -4226,7 +4269,7 @@ mod postgres_tests {
     /// scheduler-dependent.
     ///
     /// Mutation oracle: removing `pg_advisory_xact_lock` from
-    /// `insert_channel_head_checked` means neither writer queues as a waiter;
+    /// `insert_canvas_head_checked` means neither writer queues as a waiter;
     /// `wait_for_advisory_waiters` times out, or both writers read the same head,
     /// both insert, and `head_count` becomes 3 instead of 2.
     #[tokio::test]
@@ -4237,7 +4280,7 @@ mod postgres_tests {
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
         let base = make_canvas_event_at("# Base", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &base,
@@ -4267,7 +4310,7 @@ mod postgres_tests {
         let (pool_a, pool_b) = (pool.clone(), pool.clone());
         let (id_a, id_b) = (base_id.clone(), base_id.clone());
         let ta = tokio::spawn(async move {
-            insert_channel_head_checked(
+            insert_canvas_head_checked(
                 &pool_a,
                 community,
                 &a,
@@ -4278,7 +4321,7 @@ mod postgres_tests {
             .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
         });
         let tb = tokio::spawn(async move {
-            insert_channel_head_checked(
+            insert_canvas_head_checked(
                 &pool_b,
                 community,
                 &b,
@@ -4367,7 +4410,7 @@ mod postgres_tests {
     /// is the blocker released.
     ///
     /// Mutation oracle: removing `pg_advisory_xact_lock` from
-    /// `insert_channel_head_checked` means neither writer queues as a waiter;
+    /// `insert_canvas_head_checked` means neither writer queues as a waiter;
     /// `wait_for_advisory_waiters` times out, or both writers read `None` for
     /// the head, both pass `ExpectNoHead`, both insert, and `head_count` becomes 2.
     #[tokio::test]
@@ -4391,7 +4434,7 @@ mod postgres_tests {
 
         let (pool_a, pool_b) = (pool.clone(), pool.clone());
         let ta = tokio::spawn(async move {
-            insert_channel_head_checked(
+            insert_canvas_head_checked(
                 &pool_a,
                 community,
                 &a,
@@ -4402,7 +4445,7 @@ mod postgres_tests {
             .map(|(stored, status)| (stored.event.id.to_bytes().to_vec(), status))
         });
         let tb = tokio::spawn(async move {
-            insert_channel_head_checked(
+            insert_canvas_head_checked(
                 &pool_b,
                 community,
                 &b,
@@ -4556,7 +4599,7 @@ mod postgres_tests {
 
         // Insert a canvas event to delete.
         let event = make_canvas_event_at("# To delete", 1000);
-        insert_channel_head_checked(
+        insert_canvas_head_checked(
             &pool,
             community,
             &event,
