@@ -1,3 +1,6 @@
+import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/material.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -294,10 +297,13 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.storing);
       }
 
-      test(
-        'desktop-only code is verified remotely before import approval',
-        () async {
-          await notifier.pair(pairingCode);
+      testWidgets(
+        'delayed desktop responses retain one attempt and leave code entry',
+        (tester) async {
+          final pairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await pairing;
           expect(socket.published.single['tags'], hasLength(1));
           expect(
             socket
@@ -315,6 +321,17 @@ void main() {
           final first = socket.decryptedPublishedMessages(sourceSecret).last;
           expect(first['type'], 'code-submit');
           expect(first['code'], '111111');
+          bool? wrongResult;
+          unawaited(wrong.then((value) => wrongResult = value));
+          await tester.pump(const Duration(seconds: 11));
+          expect(wrongResult, isNull);
+          expect(await notifier.verifyDesktopCode('111111'), isFalse);
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'code-submit'),
+            hasLength(1),
+          );
           socket.sendSourceMessage(
             sourceSecret: sourceSecret,
             sessionSecretHex: sessionSecretHex,
@@ -326,14 +343,53 @@ void main() {
           );
           expect(await wrong, isFalse);
           expect(importAuth.lastCommunity, isNull);
-          final correct = notifier.verifyDesktopCode('222222');
+          await tester.pumpWidget(
+            UncontrolledProviderScope(
+              container: container,
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: const PairingPage(),
+              ),
+            ),
+          );
+          await tester.enterText(
+            find.byKey(const Key('pairing-code-input')),
+            '222222',
+          );
+          await tester.pump(const Duration(seconds: 11));
+          expect(find.text('Enter pairing code'), findsOneWidget);
+          expect(
+            find.text('Couldn’t check the code. Try again.'),
+            findsNothing,
+          );
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'code-submit'),
+            hasLength(2),
+          );
           socket.sendSourceMessage(
             sourceSecret: sourceSecret,
             sessionSecretHex: sessionSecretHex,
             message: {'type': 'sas-confirm'},
             includeTranscriptHash: true,
           );
-          expect(await correct, isTrue);
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'payload',
+              'payload_type': 'credentials',
+              'payload': jsonEncode({
+                'relayUrl': 'https://relay.test',
+                'pubkey': nostr.Keys(sourceSecret).public,
+                'nsec': nostr.Keys(sourceSecret).nsec,
+              }),
+            },
+          );
+          await tester.pump();
+          expect(find.text('Enter pairing code'), findsNothing);
+          expect(find.text('Protect your identity'), findsOneWidget);
           expect(
             container.read(pairingProvider).status,
             PairingStatus.confirmingSas,
@@ -341,24 +397,26 @@ void main() {
           expect(importAuth.lastCommunity, isNull);
           notifier.setProtectSensitiveActions(false);
           notifier.confirmSas();
-          await Future<void>.delayed(Duration.zero);
-          expect(
-            container.read(pairingProvider).status,
-            PairingStatus.transferring,
-          );
+          await tester.pump();
+          expect(container.read(pairingProvider).status, PairingStatus.storing);
           expect(
             socket
                 .decryptedPublishedMessages(sourceSecret)
                 .where((m) => m['type'] == 'sas-confirm'),
             isEmpty,
           );
+          notifier.reset();
+          await tester.pumpWidget(const SizedBox.shrink());
         },
       );
 
-      test(
-        'final rejected guess exits the session and reset cancels pending verification',
-        () async {
-          await notifier.pair(pairingCode);
+      testWidgets(
+        'delayed final rejection exits the session and reset cancels pending verification',
+        (tester) async {
+          final pairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await pairing;
           socket.sendSourceMessage(
             sourceSecret: sourceSecret,
             sessionSecretHex: sessionSecretHex,
@@ -366,6 +424,7 @@ void main() {
           );
           final result = notifier.verifyDesktopCode('111111');
           final request = socket.decryptedPublishedMessages(sourceSecret).last;
+          await tester.pump(const Duration(seconds: 11));
           socket.sendSourceMessage(
             sourceSecret: sourceSecret,
             sessionSecretHex: sessionSecretHex,
@@ -379,7 +438,10 @@ void main() {
           expect(container.read(pairingProvider).status, PairingStatus.error);
           expect(importAuth.lastCommunity, isNull);
           notifier.reset();
-          await notifier.pair(pairingCode);
+          final nextPairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await nextPairing;
           socket.sendSourceMessage(
             sourceSecret: sourceSecret,
             sessionSecretHex: sessionSecretHex,

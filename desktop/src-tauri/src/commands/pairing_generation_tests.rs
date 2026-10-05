@@ -127,3 +127,37 @@ async fn current_task_clears_its_session() {
 
     assert!(session.lock().await.is_none());
 }
+
+fn prepared_context(pairing: &PairingHandle) -> super::PairingTaskContext {
+    *pairing.payload.lock().unwrap() = Some(zeroize::Zeroizing::new("test-identity".into()));
+    super::PairingTaskContext {
+        payload: Arc::clone(&pairing.payload),
+        mode: super::PairingMode::SendIdentity,
+        generation: Arc::clone(&pairing.generation),
+        generation_fence: Arc::clone(&pairing.generation_fence),
+        task_generation: pairing.generation.load(Ordering::SeqCst),
+    }
+}
+
+#[test]
+fn code_entry_transfer_consumes_the_managed_secret() {
+    let pairing = PairingHandle::new();
+    let context = prepared_context(&pairing);
+    let identity = context.take_payload().unwrap();
+    assert_eq!(identity.as_str(), "test-identity");
+    assert!(pairing.payload.lock().unwrap().is_none());
+    assert!(context.take_payload().is_err());
+}
+
+#[test]
+fn terminal_worker_clears_secret_but_stale_worker_cannot_touch_replacement() {
+    let pairing = PairingHandle::new();
+    let context = prepared_context(&pairing);
+    context.clear_payload_if_current();
+    assert!(pairing.payload.lock().unwrap().is_none());
+    let context = prepared_context(&pairing);
+    pairing.generation.fetch_add(1, Ordering::SeqCst);
+    context.clear_payload_if_current();
+    assert!(context.take_payload().is_err());
+    assert!(pairing.payload.lock().unwrap().is_some());
+}

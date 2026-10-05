@@ -161,7 +161,9 @@ class PairingNotifier extends Notifier<PairingState> {
       ],
     );
     try {
-      return await result.future.timeout(const Duration(seconds: 10));
+      // Keep this logical attempt pending until its response or session cleanup.
+      // A local deadline cannot undo a guess already consumed by the source.
+      return await result.future;
     } finally {
       if (identical(_codeResult, result)) {
         _codeResult = null;

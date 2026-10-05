@@ -415,7 +415,13 @@ class App extends HookConsumerWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    child ?? const SizedBox.shrink(),
+                    ExcludeSemantics(
+                      excluding: pairedCommunity != null,
+                      child: AbsorbPointer(
+                        absorbing: pairedCommunity != null,
+                        child: child ?? const SizedBox.shrink(),
+                      ),
+                    ),
                     // Cover the navigator while onboarding is removed and the
                     // destination installs the matching avatar-flight route.
                     if (pairedCommunity != null)

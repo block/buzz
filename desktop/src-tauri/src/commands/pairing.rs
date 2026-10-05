@@ -46,11 +46,33 @@ enum PairingMode {
 
 #[derive(Clone)]
 struct PairingTaskContext {
-    payload: Option<Zeroizing<String>>,
+    payload: Arc<std::sync::Mutex<Option<Zeroizing<String>>>>,
     mode: PairingMode,
     generation: Arc<AtomicU64>,
     generation_fence: Arc<std::sync::Mutex<()>>,
     task_generation: u64,
+}
+
+impl PairingTaskContext {
+    fn take_payload(&self) -> Result<Zeroizing<String>, String> {
+        let _fence = self.generation_fence.lock().map_err(|e| e.to_string())?;
+        ensure_pairing_task_is_current(&self.generation, self.task_generation)?;
+        self.payload
+            .lock()
+            .map_err(|e| e.to_string())?
+            .take()
+            .ok_or_else(|| "Pairing payload missing".into())
+    }
+
+    fn clear_payload_if_current(&self) {
+        let _fence = self
+            .generation_fence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pairing_task_is_current(&self.generation, self.task_generation) {
+            *self.payload.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
 }
 
 /// Managed Tauri state for an active pairing session.
@@ -67,7 +89,7 @@ pub struct PairingHandle {
     outbound_tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
     /// Pre-built payload string (contains nsec) to send after SAS confirmation.
     /// Wrapped in Zeroizing so the nsec is cleared from memory on drop.
-    payload: std::sync::Mutex<Option<Zeroizing<String>>>,
+    payload: Arc<std::sync::Mutex<Option<Zeroizing<String>>>>,
     mode: Arc<std::sync::Mutex<PairingMode>>,
 }
 
@@ -80,7 +102,7 @@ impl PairingHandle {
             start_lock: tokio::sync::Mutex::new(()),
             cancel: std::sync::Mutex::new(None),
             outbound_tx: std::sync::Mutex::new(None),
-            payload: std::sync::Mutex::new(None),
+            payload: Arc::new(std::sync::Mutex::new(None)),
             mode: Arc::new(std::sync::Mutex::new(PairingMode::SendIdentity)),
         }
     }
@@ -172,7 +194,7 @@ async fn start_pairing_session(
         pairing_relay_url,
         Arc::clone(&pairing.session),
         PairingTaskContext {
-            payload: pairing.payload.lock().map_err(|e| e.to_string())?.clone(),
+            payload: Arc::clone(&pairing.payload),
             mode,
             generation: Arc::clone(&pairing.generation),
             generation_fence: Arc::clone(&pairing.generation_fence),
@@ -322,6 +344,7 @@ async fn pairing_ws_task(
             let _ = app.emit("pairing-error", PairingErrorPayload { message: e });
         }
     }
+    context.clear_payload_if_current();
     clear_pairing_session_if_current(&session, &context.generation, context.task_generation).await;
 }
 
@@ -362,7 +385,6 @@ async fn pairing_ws_task_inner(
     let mut read = futures_util::stream::iter(pending.into_iter().map(Ok)).chain(read);
 
     let mut code_entry = false;
-    let mut payload = context.payload.clone();
     let hard_timeout = tokio::time::sleep(Duration::from_secs(130));
     tokio::pin!(hard_timeout);
 
@@ -438,7 +460,7 @@ async fn pairing_ws_task_inner(
                                 continue;
                             }
                             Ok((proof, true)) => {
-                                let identity = payload.take().ok_or("Pairing payload missing")?;
+                                let identity = context.take_payload()?;
                                 let transfer = s.send_payload(PayloadType::Custom, identity)
                                     .map_err(|e| e.to_string())?;
                                 ensure_pairing_task_is_current(&context.generation, context.task_generation)?;
