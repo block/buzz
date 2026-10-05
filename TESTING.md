@@ -80,9 +80,9 @@ Workflow webhooks also use a secret-authenticated caller with no user principal.
 Before creating a run, the handler separately checks the saved workflow owner's
 channel membership and role, but it does not check that owner's community-ban
 state. The inventory's `not_applicable:webhook_secret_auth` entry is a
-provisional caller-auth classification, not proof that an owner ban is
-irrelevant. Whether the owner's ban should gate webhook trigger and run
-creation remains an explicit policy question.
+provisional restriction classification based on secret-only caller auth, not
+proof that an owner ban is irrelevant. Whether the owner's ban should gate
+webhook trigger and run creation remains an explicit policy question.
 
 Root and huddle admission, final-admission races, fail-closed reads, owner-to-
 agent restriction, timeout behavior, and tenant-scoped eviction point to their
