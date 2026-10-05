@@ -168,6 +168,7 @@ export default defineConfig({
         "**/agent-lifecycle-feedback.spec.ts",
         "**/agent-access-warning.spec.ts",
         "**/edit-agent-run-on.spec.ts",
+        "**/claude-effort-picker.spec.ts",
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/observer-archive-policy.spec.ts",
@@ -188,7 +189,6 @@ export default defineConfig({
       name: "integration",
       testMatch: [
         "**/agents.spec.ts",
-        "**/claude-effort-picker.spec.ts",
         "**/agent-availability.spec.ts",
         "**/agent-snapshot-recipient.spec.ts",
         "**/onboarding.spec.ts",
