@@ -474,7 +474,7 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
-  func testLargeTitleHandoffFadesAndCanReverseBeforeFinishing() async throws {
+  func testLargeTitleTextFadesWithScrollAndCompactTitleCanReverse() async throws {
     guard !UIAccessibility.isReduceMotionEnabled else {
       throw XCTSkip("The system has disabled transition animation")
     }
@@ -503,31 +503,44 @@ class RunnerTests: XCTestCase {
     func visibleOpacity(of view: UIView) -> Float {
       guard !view.isHidden else { return 0 }
       let opacity = view.layer.presentation()?.opacity ?? Float(view.alpha)
-      return opacity * (view.superview.map { visibleOpacity(of: $0) } ?? 1)
+      let maskOpacity = view.layer.mask.map { $0.presentation()?.opacity ?? $0.opacity } ?? 1
+      return opacity * maskOpacity * (view.superview.map { visibleOpacity(of: $0) } ?? 1)
     }
     let title = try XCTUnwrap(labels(in: navigation.view)
       .filter { $0.text == "Home" }.max { $0.font.pointSize < $1.font.pointSize })
+    let centeredTitle = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView?.subviews.compactMap { $0 as? UILabel }.first)
     let initialTitleY = title.convert(title.bounds, to: parent.view).minY
-    messenger.scroll(to: boundary - 2)
-    XCTAssertEqual(visibleOpacity(of: title), 1, accuracy: 0.01)
+    XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
+    messenger.scroll(to: boundary * 0.7)
+    XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
+    XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6, "The actual large text must fade before it collapses")
+    // Flutter also resizes the platform view every scroll frame. Exercise that
+    // layout, which could invalidate a snapshot-only header transition.
+    bar.view().frame.size.height -= boundary * 0.7
+    bar.view().setNeedsLayout()
+    bar.view().layoutIfNeeded()
+    XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6)
     messenger.scroll(to: boundary)
     try await Task.sleep(nanoseconds: 60_000_000)
-    let transitions = (navigation.view.layer.animationKeys() ?? []).compactMap {
-      navigation.view.layer.animation(forKey: $0) as? CATransition
-    }
-    XCTAssertFalse(transitions.isEmpty, "The native header must crossfade at the title boundary")
-    // Reverse while the handoff is still active; the final state must match
-    // the latest gesture rather than the previous animation's destination.
-    messenger.scroll(to: boundary - 2)
+    XCTAssertFalse(try XCTUnwrap(centeredTitle.layer.mask).bounds.isEmpty)
+    XCTAssertGreaterThan(visibleOpacity(of: centeredTitle), 0.01)
+    XCTAssertLessThan(visibleOpacity(of: centeredTitle), 0.99)
+    XCTAssertEqual(title.textColor.cgColor.alpha, 0, accuracy: 0.01)
+    messenger.scroll(to: boundary * 0.7)
     try await Task.sleep(nanoseconds: 240_000_000)
-    XCTAssertEqual(visibleOpacity(of: title), 1, accuracy: 0.01)
+    XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
+    XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
     messenger.scroll(to: boundary)
     try await Task.sleep(nanoseconds: 240_000_000)
-    XCTAssertEqual(visibleOpacity(of: title), 0, accuracy: 0.01)
+    XCTAssertEqual(visibleOpacity(of: centeredTitle), 1, accuracy: 0.01)
     XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
     messenger.scroll(to: 0)
+    bar.view().frame.size.height += boundary * 0.7
+    bar.view().setNeedsLayout()
+    bar.view().layoutIfNeeded()
     try await Task.sleep(nanoseconds: 240_000_000)
-    XCTAssertEqual(visibleOpacity(of: title), 1, accuracy: 0.01)
+    XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
+    XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
     XCTAssertEqual(navigation.navigationBar.frame.height, expanded, accuracy: 0.5)
     XCTAssertEqual(title.convert(title.bounds, to: parent.view).minY, initialTitleY, accuracy: 0.5)
   }

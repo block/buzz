@@ -215,6 +215,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var usesSystemScrollEdge = false
   private var expandedBarHeight: CGFloat = 0
   private var titleIsCollapsed: Bool?
+  private let compactTitle = UILabel()
+  private let compactTitleContainer = UIStackView()
+  private let compactTitleMask = CALayer()
+  private var titleColor = UIColor.label
+  private var largeTitleOpacity: CGFloat = -1
   private var measuredWidth: CGFloat = 0
   private var measuredSafeTop: CGFloat = -1
   private var measuredCategory: UIContentSizeCategory?
@@ -328,6 +333,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let bar = navigation.navigationBar
     let color = Self.color(args["foreground"])
     bar.tintColor = color
+    titleColor = color
+    largeTitleOpacity = -1
     let largeTitle = args["largeTitle"] as? Bool == true
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
@@ -396,6 +403,18 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }
       button.frame.size = button.intrinsicContentSize
       item.titleView = button
+    } else if largeTitle {
+      compactTitle.text = item.title
+      compactTitle.font = .preferredFont(forTextStyle: .headline)
+      compactTitle.adjustsFontForContentSizeCategory = true
+      compactTitle.textColor = color
+      compactTitle.accessibilityTraits = .header
+      compactTitle.sizeToFit()
+      compactTitleMask.backgroundColor = UIColor.black.cgColor
+      compactTitle.layer.mask = compactTitleMask
+      if compactTitle.superview == nil { compactTitleContainer.addArrangedSubview(compactTitle) }
+      compactTitleContainer.frame.size = compactTitle.intrinsicContentSize
+      item.titleView = compactTitleContainer
     } else {
       item.titleView = nil
     }
@@ -473,32 +492,53 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let contentBehindBar = usesSystemScrollEdge && alwaysFrosted && !navigation.navigationBar.prefersLargeTitles
     let desired = CGPoint(x: 0, y: contentBehindBar ? offset : -topInset + offset)
     let compactHeight = (metrics?["compactHeight"] as? CGFloat) ?? navigation.navigationBar.frame.height
-    let collapsed = offset >= max(0, expandedBarHeight - compactHeight)
-    let animateHandoff = navigation.navigationBar.prefersLargeTitles
-      && titleIsCollapsed != nil && titleIsCollapsed != collapsed
-      && !UIAccessibility.isReduceMotionEnabled
+    let collapseRange = max(1, expandedBarHeight - compactHeight)
+    let collapsed = offset >= collapseRange
+    let wasCollapsed = titleIsCollapsed
     titleIsCollapsed = collapsed
-    if abs(scroll.contentOffset.y - desired.y) > 0.1 {
-      let update = {
-        scroll.setContentOffset(desired, animated: false)
-        self.navigation.view.layoutIfNeeded()
-        // Expanding changes UIKit's inset and can compensate the offset.
-        // Restore the gesture position after that layout adjustment.
-        if abs(scroll.contentOffset.y - desired.y) > 0.1 {
-          scroll.setContentOffset(desired, animated: false)
-          self.navigation.view.layoutIfNeeded()
+    UIView.performWithoutAnimation {
+      if navigation.navigationBar.prefersLargeTitles {
+        // Fade the actual text throughout the last part of the gesture. A
+        // snapshot transition of the platform view gets clipped by Flutter's
+        // shrinking header and can still look like a one-frame title switch.
+        let progress = min(1, max(0, (offset - collapseRange * 0.35) / (collapseRange * 0.65)))
+        let opacity = 1 - progress
+        if abs(largeTitleOpacity - opacity) > 0.001 {
+          largeTitleOpacity = opacity
+          for appearance in [navigation.navigationBar.standardAppearance,
+                             navigation.navigationBar.scrollEdgeAppearance,
+                             navigation.navigationBar.compactAppearance].compactMap({ $0 }) {
+            appearance.largeTitleTextAttributes[.foregroundColor] = titleColor.withAlphaComponent(opacity)
+          }
+          navigation.navigationBar.largeTitleTextAttributes = [.foregroundColor: titleColor.withAlphaComponent(opacity)]
         }
       }
-      if animateHandoff {
-        // Programmatic offsets otherwise switch UIKit's title visibility in
-        // one frame. Crossfade the native header only at that boundary. Keep
-        // scroll geometry immediate so inset adjustments cannot animate it
-        // away from Flutter's position. The status fade is a separate sibling.
-        UIView.transition(with: navigation.view, duration: 0.18,
-                          options: [.transitionCrossDissolve, .beginFromCurrentState, .allowUserInteraction],
-                          animations: { UIView.performWithoutAnimation(update) })
-      } else {
-        UIView.performWithoutAnimation(update)
+      scroll.setContentOffset(desired, animated: false)
+      navigation.view.layoutIfNeeded()
+      // Expanding changes UIKit's inset and can compensate the offset.
+      if abs(scroll.contentOffset.y - desired.y) > 0.1 {
+        scroll.setContentOffset(desired, animated: false)
+        navigation.view.layoutIfNeeded()
+      }
+    }
+    if navigation.navigationBar.prefersLargeTitles {
+      // UIKit owns title-view alpha on some iOS versions. A mask keeps the
+      // text fade independent from its layout-driven visibility changes.
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      compactTitleMask.frame = compactTitle.bounds
+      compactTitleMask.opacity = collapsed ? 1 : 0
+      CATransaction.commit()
+      if wasCollapsed != collapsed {
+        compactTitleMask.removeAllAnimations()
+        if collapsed && wasCollapsed != nil && !UIAccessibility.isReduceMotionEnabled {
+          let fade = CABasicAnimation(keyPath: "opacity")
+          fade.fromValue = 0
+          fade.toValue = 1
+          fade.duration = 0.18
+          fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+          compactTitleMask.add(fade, forKey: "titleFade")
+        }
       }
     }
   }
