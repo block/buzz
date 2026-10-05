@@ -59,4 +59,56 @@ void main() {
     );
     expect(flattenDetailsBlocks('plain'), 'plain');
   });
+
+  test('markers past the depth limit stay text', () {
+    const depth = maxDetailsDepth + 1;
+    final content = [
+      for (var i = 0; i < depth; i++) ':::details L$i',
+      'x',
+      for (var i = 0; i < depth; i++) ':::',
+    ].join('\n');
+    var segments = splitDetailsBlocks(content);
+    var levels = 0;
+    while (segments.whereType<DetailsBlock>().isNotEmpty) {
+      final block = segments.whereType<DetailsBlock>().single;
+      levels++;
+      segments = splitDetailsBlocks(block.body, depth: levels);
+    }
+    expect(levels, maxDetailsDepth);
+    expect(
+      (segments.single as DetailsText).text,
+      contains(':::details L$maxDetailsDepth'),
+    );
+  });
+
+  test('stays linear on hostile nesting near the message size limit', () {
+    final content = '${':::details x\n' * 3000}${':::\n' * 3000}';
+    expect(content.length, lessThan(64 * 1024));
+    final watch = Stopwatch()..start();
+    final segments = splitDetailsBlocks(content);
+    final flat = flattenDetailsBlocks(content);
+    expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+    expect(segments.whereType<DetailsBlock>(), hasLength(1));
+    expect(flat, isNotEmpty);
+  });
+
+  test('an info-string line does not close a fence', () {
+    const content = '```js\n``` trailing\n:::details Inside code\nx\n:::\n```';
+    expect(splitDetailsBlocks(content).single, isA<DetailsText>());
+  });
+
+  test('recognises markers with CRLF line endings', () {
+    final block = splitDetailsBlocks(
+      'Board\r\n:::details A\r\nx\r\n:::\r\nAfter',
+    ).whereType<DetailsBlock>().single;
+    expect(block.title, 'A');
+    expect(block.key, '0:A');
+  });
+
+  test('titles are plain text', () {
+    final block = splitDetailsBlocks(
+      ':::details [docs](https://example.com) **now**\nx\n:::',
+    ).whereType<DetailsBlock>().single;
+    expect(block.title, 'docs now');
+  });
 }

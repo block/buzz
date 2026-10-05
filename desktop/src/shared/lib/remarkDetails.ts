@@ -10,7 +10,9 @@
  * otherwise be read as a lazy continuation of that item). `remarkDetails`
  * then turns the marker paragraphs into a custom node rendered as a
  * disclosure by `markdown.tsx`. Markers are recognised only at column 0,
- * outside fenced code, and only in matched pairs; anything else stays text.
+ * outside fenced code, in matched pairs and at most `MAX_DETAILS_DEPTH`
+ * deep; anything else stays text. Mobile mirrors these rules in
+ * `details_blocks.dart`.
  */
 
 type Node = {
@@ -18,37 +20,59 @@ type Node = {
   [key: string]: any;
 };
 
-const OPEN_RE = /^:::details[ \t]+(\S.*)$/;
+/** Deeper markers stay text, which bounds render recursion on hostile input. */
+export const MAX_DETAILS_DEPTH = 4;
+
+const OPEN_RE = /^:::details[ \t]+\S.*$/;
 const CLOSE_RE = /^:::[ \t]*$/;
-const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/** The fence a line opens, or null. Backtick info strings may not contain a
+ * backtick (CommonMark). */
+function fenceOpen(line: string): string | null {
+  const match = FENCE_OPEN_RE.exec(line);
+  if (!match) return null;
+  return match[1][0] === "`" && match[2].includes("`") ? null : match[1];
+}
+
+function closesFence(line: string, fence: string): boolean {
+  const match = FENCE_CLOSE_RE.exec(line);
+  return (
+    match !== null &&
+    match[1][0] === fence[0] &&
+    match[1].length >= fence.length
+  );
+}
 
 /** Returns the indices of opening and closing marker lines that pair up. */
 function matchedMarkerLines(lines: string[]): Set<number> {
   const matched = new Set<number>();
+  // Opener line index, or -1 for an opener past the depth limit: it still
+  // consumes its closer, so both stay text.
   const open: number[] = [];
+  let depth = 0;
   let fence: string | null = null;
 
-  lines.forEach((line, index) => {
-    const fenceMatch = FENCE_RE.exec(line);
+  lines.forEach((rawLine, index) => {
+    const line = rawLine.replace(/\r$/, "");
     if (fence) {
-      if (
-        fenceMatch &&
-        fenceMatch[1][0] === fence[0] &&
-        fenceMatch[1].length >= fence.length
-      ) {
-        fence = null;
-      }
+      if (closesFence(line, fence)) fence = null;
       return;
     }
-    if (fenceMatch) {
-      fence = fenceMatch[1];
-      return;
-    }
+    fence = fenceOpen(line);
+    if (fence) return;
     if (OPEN_RE.test(line)) {
-      open.push(index);
+      const allowed = depth < MAX_DETAILS_DEPTH;
+      open.push(allowed ? index : -1);
+      if (allowed) depth += 1;
     } else if (CLOSE_RE.test(line) && open.length > 0) {
-      matched.add(open.pop() as number);
-      matched.add(index);
+      const start = open.pop() as number;
+      if (start >= 0) {
+        depth -= 1;
+        matched.add(start);
+        matched.add(index);
+      }
     }
   });
 
@@ -77,7 +101,7 @@ function isOpenMarker(node: Node): boolean {
     text !== null &&
     /^:::details[ \t]/.test(text) &&
     !node.children.some((child: Node) => child.type === "break") &&
-    plainText(summaryChildren(node)).trim() !== ""
+    summaryTitle(node) !== ""
   );
 }
 
@@ -86,11 +110,12 @@ function isCloseMarker(node: Node): boolean {
   return text !== null && node.children.length === 1 && CLOSE_RE.test(text);
 }
 
-/** Summary children: the marker paragraph minus its `:::details ` prefix. */
-function summaryChildren(marker: Node): Node[] {
-  const [first, ...rest] = marker.children as Node[];
-  const value = String(first.value).replace(/^:::details[ \t]+/, "");
-  return value ? [{ ...first, value }, ...rest] : rest;
+/** Plain-text title: the marker paragraph minus its `:::details ` prefix.
+ * Plain so the disclosure control holds no links or other controls. */
+function summaryTitle(marker: Node): string {
+  return plainText(marker.children as Node[])
+    .replace(/^:::details[ \t]+/, "")
+    .trim();
 }
 
 function plainText(nodes: Node[]): string {
@@ -103,7 +128,8 @@ function plainText(nodes: Node[]): string {
     .join("");
 }
 
-type Frame = { marker: Node; children: Node[] };
+/** `skipped` frames are openers past the depth limit; they stay text. */
+type Frame = { marker: Node; children: Node[]; skipped: boolean };
 
 export default function remarkDetails() {
   return (
@@ -113,18 +139,25 @@ export default function remarkDetails() {
     const occurrences = new Map<string, number>();
     const root: Node[] = [];
     const stack: Frame[] = [];
+    let depth = 0;
     const target = () => stack[stack.length - 1]?.children ?? root;
 
     for (const child of tree.children as Node[]) {
       if (isOpenMarker(child)) {
-        stack.push({ marker: child, children: [] });
+        const skipped = depth >= MAX_DETAILS_DEPTH;
+        if (!skipped) depth += 1;
+        stack.push({ marker: child, children: [], skipped });
         continue;
       }
       const frame = stack[stack.length - 1];
       if (frame && isCloseMarker(child)) {
         stack.pop();
-        const summary = summaryChildren(frame.marker);
-        const title = plainText(summary).trim();
+        if (frame.skipped) {
+          target().push(frame.marker, ...frame.children, child);
+          continue;
+        }
+        depth -= 1;
+        const title = summaryTitle(frame.marker);
         const occurrence = occurrences.get(title) ?? 0;
         occurrences.set(title, occurrence + 1);
         target().push({
@@ -132,7 +165,7 @@ export default function remarkDetails() {
           children: [
             {
               type: "detailsSummary",
-              children: summary,
+              children: [{ type: "text", value: title }],
               data: { hName: "summary" },
             },
             ...frame.children,

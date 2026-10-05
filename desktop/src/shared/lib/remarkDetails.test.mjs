@@ -4,7 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { renderCachedMarkdown } from "../ui/markdown/nodeCache.ts";
-import { prepareDetailsBlocks } from "./remarkDetails.ts";
+import { MAX_DETAILS_DEPTH, prepareDetailsBlocks } from "./remarkDetails.ts";
 
 // Runs the production parser (nodeCache.ts); `details` and `summary` stand in
 // for the MarkdownDetails components and expose the section key.
@@ -37,12 +37,6 @@ test("remarkDetails: folds a section whose closing marker follows a list", () =>
     '<p>Board</p>\n<section data-key="0:Waiting (2)"><h6>Waiting (2)</h6>' +
       "<ul>\n<li>one</li>\n<li>two</li>\n</ul></section>\n<p>After</p>",
   );
-});
-
-test("remarkDetails: keeps inline markdown in the summary", () => {
-  const html = render(":::details **Private** channels\nbody\n:::");
-  assert.match(html, /<h6><strong>Private<\/strong> channels<\/h6>/);
-  assert.match(html, /data-key="0:Private channels"/);
 });
 
 test("remarkDetails: numbers repeated titles so keys stay distinct", () => {
@@ -79,4 +73,39 @@ test("remarkDetails: ignores indented or quoted markers", () => {
 test("prepareDetailsBlocks: leaves content without markers untouched", () => {
   const content = "plain ::: text\n:::\n";
   assert.equal(prepareDetailsBlocks(content), content);
+});
+
+test("remarkDetails: renders the summary as plain text", () => {
+  const html = render(":::details [docs](https://example.com) **now**\nx\n:::");
+  assert.match(html, /<h6>docs now<\/h6>/);
+  assert.doesNotMatch(html, /<a /);
+});
+
+test("remarkDetails: markers past the depth limit stay text", () => {
+  const depth = MAX_DETAILS_DEPTH + 1;
+  const content =
+    Array.from({ length: depth }, (_, i) => `:::details L${i}`).join("\n") +
+    "\nx\n" +
+    Array.from({ length: depth }, () => ":::").join("\n");
+  const html = render(content);
+  assert.equal(html.match(/<section/g)?.length, MAX_DETAILS_DEPTH);
+  assert.match(html, new RegExp(`:::details L${MAX_DETAILS_DEPTH}`));
+});
+
+test("remarkDetails: survives hostile nesting near the message size limit", () => {
+  const content = `${":::details x\n".repeat(3000)}${":::\n".repeat(3000)}`;
+  assert.ok(content.length < 64 * 1024);
+  const html = render(content);
+  assert.equal(html.match(/<section/g)?.length, MAX_DETAILS_DEPTH);
+});
+
+test("remarkDetails: an info-string line does not close a fence", () => {
+  const content = "```js\n``` trailing\n:::details Inside code\nx\n:::\n```";
+  assert.equal(prepareDetailsBlocks(content), content);
+  assert.doesNotMatch(render(content), /<section/);
+});
+
+test("remarkDetails: recognises markers with CRLF line endings", () => {
+  const html = render("Board\r\n:::details A\r\nx\r\n:::\r\nAfter");
+  assert.match(html, /<section data-key="0:A"><h6>A<\/h6><p>x<\/p><\/section>/);
 });

@@ -365,6 +365,7 @@ class MessageContent extends HookConsumerWidget {
           : _MessageDetailsContent(
               segments: segments,
               messageId: messageId,
+              titleStyle: style,
               buildMarkdown: buildMarkdown,
             ),
     );

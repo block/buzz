@@ -3,35 +3,53 @@ part of '../message_content.dart';
 /// Open sections, keyed by message id and [DetailsBlock.key]. Kept for the
 /// app session so a reader's choice survives in-place edits of the message
 /// (status boards) and scrolling it out of view; collapsed is the default.
+/// Rebuilt empty on a community switch, and capped so the oldest choices are
+/// forgotten first.
 final _openMessageSectionsProvider =
     NotifierProvider<_OpenMessageSections, Set<String>>(
       _OpenMessageSections.new,
     );
 
+const _openMessageSectionsLimit = 500;
+
 class _OpenMessageSections extends Notifier<Set<String>> {
   @override
-  Set<String> build() => const {};
+  Set<String> build() {
+    ref.watch(relayConfigProvider);
+    return const {};
+  }
 
   void setOpen(String key, bool open) {
-    state = open ? {...state, key} : ({...state}..remove(key));
+    final next = {...state}..remove(key);
+    if (open) next.add(key);
+    while (next.length > _openMessageSectionsLimit) {
+      next.remove(next.first);
+    }
+    state = next;
   }
 }
 
 /// Renders [segments] from [splitDetailsBlocks]; [buildMarkdown] renders
-/// every piece of markdown (text, titles, bodies) the way the message does.
+/// text and bodies the way the message does.
 class _MessageDetailsContent extends StatelessWidget {
   final List<DetailsSegment> segments;
   final String? messageId;
+  final TextStyle? titleStyle;
 
   /// Keys of the enclosing sections, so nested keys stay unique.
   final String keyPrefix;
+
+  /// Nesting level of [segments], bounding how deep their bodies may nest.
+  final int depth;
   final Widget Function(String markdown) buildMarkdown;
 
   const _MessageDetailsContent({
     required this.segments,
     required this.messageId,
+    required this.titleStyle,
     required this.buildMarkdown,
     this.keyPrefix = '',
+    this.depth = 0,
   });
 
   @override
@@ -49,7 +67,9 @@ class _MessageDetailsContent extends StatelessWidget {
             DetailsBlock() => _MessageDetailsSection(
               block: segment,
               messageId: messageId,
+              titleStyle: titleStyle,
               keyPrefix: keyPrefix,
+              depth: depth,
               buildMarkdown: buildMarkdown,
             ),
           },
@@ -61,13 +81,17 @@ class _MessageDetailsContent extends StatelessWidget {
 class _MessageDetailsSection extends HookConsumerWidget {
   final DetailsBlock block;
   final String? messageId;
+  final TextStyle? titleStyle;
   final String keyPrefix;
+  final int depth;
   final Widget Function(String markdown) buildMarkdown;
 
   const _MessageDetailsSection({
     required this.block,
     required this.messageId,
+    required this.titleStyle,
     required this.keyPrefix,
+    required this.depth,
     required this.buildMarkdown,
   });
 
@@ -120,7 +144,14 @@ class _MessageDetailsSection extends HookConsumerWidget {
                       ),
                     ),
                     const SizedBox(width: Grid.half),
-                    Expanded(child: buildMarkdown(block.title)),
+                    Expanded(
+                      child: Text(
+                        block.title,
+                        style: titleStyle?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -130,9 +161,11 @@ class _MessageDetailsSection extends HookConsumerWidget {
             Padding(
               padding: const EdgeInsets.only(left: Grid.twelve + Grid.xxs),
               child: _MessageDetailsContent(
-                segments: splitDetailsBlocks(block.body),
+                segments: splitDetailsBlocks(block.body, depth: depth + 1),
                 messageId: messageId,
+                titleStyle: titleStyle,
                 keyPrefix: sectionKey,
+                depth: depth + 1,
                 buildMarkdown: buildMarkdown,
               ),
             ),
