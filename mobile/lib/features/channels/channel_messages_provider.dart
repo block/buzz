@@ -11,6 +11,7 @@ import 'thread_reply_ownership.dart';
 import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
+part 'channel_messages_provider/thread_auxiliary.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
@@ -141,11 +142,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _windowStore = const ChannelWindowStore.empty();
     // A reconnect window can lag a confirmed thread query and contains only
     // top-level rows. Keep known replies as summary evidence, including their
-    // deletion markers so a reset cannot resurrect a deleted reply.
+    // overlays so reconnecting does not drop reactions, edits, or deletions.
     for (final event in _lastKnownMessages ?? const <NostrEvent>[]) {
       if (event.threadReference.parentId != null ||
-          event.kind == EventKind.deletion ||
-          event.kind == EventKind.nip29DeleteEvent) {
+          EventKind.channelAuxEventKinds.contains(event.kind)) {
         _mergeWindowEventIntoStore(event);
       }
     }
@@ -654,6 +654,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Publishes an insertion-complete thread scan, preserving aggregate facts
   /// before payload eviction. Only absent pre-query, accepted IDs are removed;
   /// in-flight sends and arrivals after the query began remain provisional.
+  /// Auxiliary overlays are cached separately, without contributing to counts.
   /// Returns whether this scan applied, rather than losing to newer evidence.
   bool cacheCompleteThreadQuery(
     String rootId,
@@ -661,6 +662,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     List<NostrEvent> replies, {
     Set<String> provisionalReplyIds = const {},
     int? queryVersion,
+    List<NostrEvent> auxiliaryEvents = const [],
   }) {
     if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
       return false;
@@ -723,6 +725,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _queryThreadSummaries.remove(_queryThreadSummaries.keys.first);
     }
     cacheConfirmedThreadReplies(replies);
+    _cacheThreadAuxiliaryEvents(rootId, replies, auxiliaryEvents);
     return true;
   }
 

@@ -11,6 +11,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   bool honorDepthLimit = false;
   final filtersSeen = <NostrFilter>[];
   List<NostrEvent> replies = const [];
+  List<List<NostrEvent>>? pages;
   Completer<List<NostrEvent>>? nextQueryGate;
 
   @override
@@ -27,6 +28,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     queryCount++;
     filtersSeen.addAll(filters);
+    if (pages case final pages?) return pages.removeAt(0);
     final gate = nextQueryGate;
     if (gate != null) {
       nextQueryGate = null;
@@ -55,6 +57,67 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
 
 void main() {
   const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
+
+  NostrEvent reaction(String id) => NostrEvent(
+    id: id,
+    pubkey: 'alice',
+    createdAt: 9999,
+    kind: EventKind.reaction,
+    tags: const [
+      ['h', 'chan'],
+      ['e', 'reply-199'],
+    ],
+    content: '+',
+    sig: '',
+  );
+
+  test('auxiliary events do not count toward EOF or become cursors', () async {
+    final session = _FakeRelaySession()
+      ..pages = [
+        [for (var i = 0; i < 200; i++) _reply('reply-$i', i), reaction('r1')],
+        [_reply('reply-200', 200), reaction('r1'), reaction('r2')],
+      ];
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+    final auxiliaryEvents = <NostrEvent>[];
+    final replies = await fetchCompleteThreadReplies(
+      session,
+      args,
+      auxiliaryEvents: auxiliaryEvents,
+    );
+    expect(replies, hasLength(201));
+    expect(auxiliaryEvents.map((event) => event.id), ['r1', 'r2']);
+    expect(session.queryCount, 2);
+    expect(session.filtersSeen.first.extensions['include_aux'], isTrue);
+    expect(session.filtersSeen.last.extensions['thread_cursor'], 199);
+    expect(
+      session.filtersSeen.last.extensions['thread_cursor_id'],
+      'reply-199',
+    );
+  });
+
+  test('a short reply page with many auxiliary events is EOF', () async {
+    final session = _FakeRelaySession()
+      ..replies = [
+        _reply('reply', 1),
+        for (var i = 0; i < 200; i++) reaction('r$i'),
+      ];
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.listen(threadRepliesProvider(args), (_, _) {});
+    expect(
+      (await container.read(
+        threadRepliesProvider(args).future,
+      )).map((event) => event.id),
+      ['reply'],
+    );
+    expect(session.queryCount, 1);
+  });
 
   test('complete scan includes a legal 80-deep reply chain', () async {
     final session = _FakeRelaySession()

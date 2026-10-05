@@ -59,7 +59,12 @@ final threadRepliesProvider = FutureProvider.autoDispose
         );
       }
       try {
-        final replies = await fetchCompleteThreadReplies(session, args);
+        final auxiliaryEvents = <NostrEvent>[];
+        final replies = await fetchCompleteThreadReplies(
+          session,
+          args,
+          auxiliaryEvents: auxiliaryEvents,
+        );
         // Explicit markers also settle unacknowledged local sends, whose
         // absence cannot prove deletion even in an insertion-complete scan.
         final missingIds =
@@ -102,6 +107,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
             replies,
             provisionalReplyIds: missingIds.difference(deletedTargets),
             queryVersion: queryVersion,
+            auxiliaryEvents: auxiliaryEvents,
           );
           if (deletions.isNotEmpty) {
             channel.cacheThreadDeletions(
@@ -122,12 +128,16 @@ final threadRepliesProvider = FutureProvider.autoDispose
 
 /// Exhaustively scans a thread using insertion-complete cursor pages.
 /// [isCurrent] lets a background refresh stop between pages after disposal.
+/// [auxiliaryEvents] receives reaction, edit, and deletion overlays separately
+/// from replies so they never affect pagination or thread reply counts.
 Future<List<NostrEvent>> fetchCompleteThreadReplies(
   RelaySessionNotifier session,
   ThreadRepliesArgs args, {
   bool Function()? isCurrent,
+  List<NostrEvent>? auxiliaryEvents,
 }) async {
   final replies = <NostrEvent>[];
+  final auxiliaryIds = <String>{};
   // -1 precedes unsigned Nostr timestamps. A non-null cursor selects the
   // insertion-complete route and writer-verified EOF instead of a stale head.
   _ThreadCursor? cursor = const _ThreadCursor(
@@ -141,9 +151,21 @@ Future<List<NostrEvent>> fetchCompleteThreadReplies(
     final events = await session.queryRelay([
       _threadRepliesFilter(args, cursor),
     ]);
-    replies.addAll(events);
-    if (events.length < 200) return replies;
-    final last = events.last;
+    final pageReplies = events
+        .where(
+          (event) => EventKind.channelTimelineContentKinds.contains(event.kind),
+        )
+        .toList();
+    auxiliaryEvents?.addAll(
+      events.where(
+        (event) =>
+            EventKind.channelAuxEventKinds.contains(event.kind) &&
+            auxiliaryIds.add(event.id),
+      ),
+    );
+    replies.addAll(pageReplies);
+    if (pageReplies.length < 200) return replies;
+    final last = pageReplies.last;
     cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
   }
   throw Exception('Thread ${args.rootId} exceeded the page safety limit.');
@@ -163,6 +185,7 @@ NostrFilter _threadRepliesFilter(
     extensions: {
       // The relay binds this as signed i32. Include every representable depth.
       'depth_limit': 0x7fffffff,
+      'include_aux': true,
       if (cursor != null) 'thread_cursor': cursor.createdAt,
       if (cursor != null) 'thread_cursor_id': cursor.eventId,
     },
@@ -252,9 +275,8 @@ final threadRepliesWithLocalProvider = Provider.autoDispose
 /// Union two event lists by id, newest-wins, in timeline order.
 ///
 /// The thread view needs this to fold the channel's live socket events into its
-/// own one-shot query result: the query asks for content kinds only, so
-/// reactions, edits, and deletions that land while a thread is open never reach
-/// it on their own.
+/// own one-shot content result: fetched auxiliary overlays are cached in the
+/// channel alongside live reactions, edits, and deletions.
 List<NostrEvent> mergeThreadEvents(
   Iterable<NostrEvent> first,
   Iterable<NostrEvent> second,
