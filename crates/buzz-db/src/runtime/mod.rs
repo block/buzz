@@ -1286,11 +1286,14 @@ impl Db {
 
     /// Begin an event-write transaction admitted for `community`.
     ///
-    /// This is the only public way to open an event-write transaction. It takes
-    /// the shared community admission lock before returning, so callers cannot
-    /// take domain or row locks ahead of tenant admission, and a quiescing
-    /// community rejects the write at entry rather than at its first fenced
-    /// statement. Commit-time database fences remain the authoritative backstop.
+    /// This is the only `Db` constructor for event-write transactions. It takes
+    /// the shared community admission lock before returning, so callers that use
+    /// it cannot take domain or row locks ahead of tenant admission, and a
+    /// quiescing community rejects the write at entry rather than at its first
+    /// fenced statement. The compiler does not enforce this: a transaction
+    /// opened from [`Db::pool`] can still reach the public `*_in_transaction`
+    /// helpers, and only the source-policy tests and the commit-time database
+    /// fences, which remain the authoritative backstop, catch it.
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
     /// The transaction holds an owned pool handle, not a borrow.

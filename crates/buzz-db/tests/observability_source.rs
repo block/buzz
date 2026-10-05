@@ -1327,6 +1327,120 @@ fn unadmitted_event_write_transaction_openers(sources: &[(String, String)]) -> V
         .collect()
 }
 
+/// Remove each top-level `#[cfg(test)]` item and keep the production code
+/// around it. Truncating at the first `#[cfg(test)]` would hide production
+/// functions that follow a test-only item. Relies on rustfmt layout: a
+/// top-level item closes on a column-0 `}` line, or ends on its first line.
+fn strip_cfg_test_items(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if line != "#[cfg(test)]" {
+            kept.push_str(line);
+            kept.push('\n');
+            continue;
+        }
+        let mut opened = false;
+        for (index, line) in lines
+            .by_ref()
+            .skip_while(|line| line.starts_with("#["))
+            .enumerate()
+        {
+            let opens = line.matches('{').count();
+            opened |= opens > 0;
+            let single_line_block = index == 0 && opens > 0 && opens == line.matches('}').count();
+            let statement_end = !opened && line.trim_end().ends_with(';');
+            if single_line_block || statement_end || line == "}" || line == "};" {
+                break;
+            }
+        }
+    }
+    kept
+}
+
+#[test]
+fn cfg_test_items_are_skipped_without_hiding_later_production_code() {
+    let source = "pub fn before() {}\n\
+#[cfg(test)]\n\
+struct Marker;\n\
+pub fn after_struct() {}\n\
+#[cfg(test)]\n\
+static LOCK: std::sync::Mutex<()> =\n\
+    std::sync::Mutex::new(());\n\
+pub fn after_static() {}\n\
+#[cfg(test)]\n\
+#[derive(Debug)]\n\
+struct Fields {\n\
+    value: u8,\n\
+}\n\
+pub fn after_fields() {}\n\
+#[cfg(test)]\n\
+mod tests {\n\
+    fn hidden() {\n\
+    }\n\
+}\n\
+pub fn after_module() {}\n";
+    let production = strip_cfg_test_items(source);
+    for name in [
+        "before",
+        "after_struct",
+        "after_static",
+        "after_fields",
+        "after_module",
+    ] {
+        assert!(
+            production.contains(&format!("pub fn {name}()")),
+            "{name} is production code and must stay visible: {production}"
+        );
+    }
+    for hidden in ["Marker", "LOCK", "value: u8", "fn hidden"] {
+        assert!(
+            !production.contains(hidden),
+            "{hidden} is test-only and must be skipped: {production}"
+        );
+    }
+
+    let raw_opener_after_test_item = "#[cfg(test)]\n\
+struct X;\n\
+pub async fn raw_opener(pool: &sqlx::PgPool) {\n\
+    let mut tx = pool.begin().await.expect(\"tx\");\n\
+    insert_row_in_transaction(&mut tx).await;\n\
+}\n\
+pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {\n\
+    sqlx::query(\"INSERT INTO events (community_id, id) VALUES ($1, $2)\")\n\
+        .execute(&mut **tx)\n\
+        .await\n\
+        .expect(\"write\");\n\
+}\n";
+    let violations = unadmitted_event_write_transaction_openers(&[(
+        "fixture".to_owned(),
+        strip_cfg_test_items(raw_opener_after_test_item),
+    )]);
+    assert_eq!(
+        violations,
+        ["fixture: pub async fn raw_opener(pool: &sqlx::PgPool) {"],
+        "a raw opener after a test-only item must still be scanned"
+    );
+}
+
+#[test]
+fn event_write_constructor_docs_do_not_claim_compile_time_enforcement() {
+    let source = include_str!("../src/runtime/mod.rs");
+    let docs = source
+        .split_once("    /// Begin an event-write transaction admitted for `community`.")
+        .and_then(|(_, rest)| rest.split_once("    pub async fn begin_event_write_transaction("))
+        .map(|(docs, _)| docs)
+        .expect("constructor docs");
+    assert!(
+        !docs.contains("only public way"),
+        "Db::pool() and the pub *_in_transaction helpers still allow unadmitted transactions"
+    );
+    assert!(
+        docs.contains("The compiler does not enforce this"),
+        "the docs must say that enforcement is policy plus database fences, not types"
+    );
+}
+
 #[test]
 fn event_write_provenance_rejects_unadmitted_transaction_openers() {
     let source = r#"
@@ -1389,12 +1503,10 @@ fn event_write_transactions_are_admitted_where_they_are_opened() {
                 .to_string_lossy()
                 .replace('\\', "/");
             let source = std::fs::read_to_string(&path).expect("read source file");
-            let production = source
-                .split("\n#[cfg(test)]")
-                .next()
-                .unwrap_or(&source)
-                .to_owned();
-            sources.push((format!("{crate_name}/src/{relative}"), production));
+            sources.push((
+                format!("{crate_name}/src/{relative}"),
+                strip_cfg_test_items(&source),
+            ));
         }
     }
 
@@ -1403,6 +1515,8 @@ fn event_write_transactions_are_admitted_where_they_are_opened() {
         violations.is_empty(),
         "these functions open a transaction for an event-write helper without community \
          admission; open it with Db::begin_event_write_transaction(community) or \
-         begin_community_event_write_transaction before any domain lock: {violations:?}"
+         begin_community_event_write_transaction (this scan checks that admission is present, \
+         not that it precedes domain locks; per-path PostgreSQL tests pin ordering): \
+         {violations:?}"
     );
 }
