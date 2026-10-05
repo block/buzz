@@ -85,13 +85,13 @@ import os.log
       binaryMessenger: messenger
     )
     hapticsChannel?.setMethodCallHandler { call, result in
-      guard call.method == "success" else {
+      guard call.method == "success" || call.method == "error" else {
         result(FlutterMethodNotImplemented)
         return
       }
       let generator = UINotificationFeedbackGenerator()
       generator.prepare()
-      generator.notificationOccurred(.success)
+      generator.notificationOccurred(call.method == "error" ? .error : .success)
       result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(

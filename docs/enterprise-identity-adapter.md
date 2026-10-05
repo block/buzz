@@ -142,15 +142,21 @@ Content-Type: application/json
 ```
 
 - `relay_url` selects an adapter-configured relay; the adapter never fetches it.
-  An unknown relay is denied.
+  Clients MUST send it in the canonical form `wss://host[:port]`, with the
+  scheme in lowercase, the host as its lowercase ASCII (A-label) form with no
+  trailing dot, the default port omitted, and no trailing slash, path, query, or
+  fragment. Adapters MUST configure relays in this canonical form and MUST
+  compare `relay_url` against it exactly.
+  An unknown relay MUST be rejected with 403 `authorization_denied`.
 - `nostr_pubkey` is the lowercase hex key the client will authenticate to the
   relay with. The NIP-98 event MUST be signed by this key, use kind `27235`,
   carry exactly one `u` tag equal to the absolute URL of this endpoint, a
   `method` tag of `POST`, and a `payload` tag equal to the lowercase hex SHA-256
-  of the exact request body bytes. Its `created_at` MUST be current; adapters
-  should allow no more than 60 seconds of age.
-- The request body is limited to 4096 bytes and MUST NOT be content-encoded.
-  Unknown fields are rejected.
+  of the exact request body bytes. Its `created_at` MUST be no more than 60
+  seconds old and MUST NOT be more than 5 seconds in the future.
+- The request body is limited to 4096 bytes and MUST NOT be content-encoded. A
+  content-encoded body, such as a gzipped body, MUST be rejected with 400
+  `invalid_request`. Unknown fields are rejected.
 - Clients and adapters MUST NOT log the values of the `Authorization` or
   `Nostr-Authorization` headers.
 
@@ -164,16 +170,21 @@ Success response (`200`, `Cache-Control: no-store`):
 }
 ```
 
-`expires_at` is the assertion `exp` as Unix seconds. Under this adapter contract
-an assertion lives at most 5 minutes and never outlives the adapter session;
-clients request a fresh one before it expires. The 5-minute cap is this
-contract's rule, not a relay constant: the relay enforces the token `exp` and
-its own deployment-configured `maximum_assertion_age`. The assertion itself
-follows [NIP-FI](nips/NIP-FI.md): a dedicated assertion's protected `typ` is
+`expires_at` is the assertion `exp` as Unix seconds. Adapters MUST issue
+assertions with `exp - iat <= 300` seconds and MUST NOT set `exp` later than the
+adapter session's expiry. Clients MAY refuse an assertion with more than 300
+seconds remaining when it arrives. The 5-minute cap is this contract's rule, not
+a relay constant: the relay enforces the token `exp` and its own
+deployment-configured `maximum_assertion_age`. The assertion itself follows
+[NIP-FI](nips/NIP-FI.md): a dedicated assertion's protected `typ` MUST be exactly
 `nip-fi+jwt`, and its `aud` MUST exactly match the canonical host URI of the
 community the relay resolves from the connection's `Host`. The assertion's
 `nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay
-rejects any other key.
+rejects any other key. Clients MUST reject a response whose `nostr_pubkey`
+differs from the key sent in the request.
+A client that rejects a `200` response, including one it cannot parse, MUST
+treat it as a refusal: keep the session, show it as refused, and not retry
+automatically.
 
 Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 
@@ -188,6 +199,11 @@ Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 | 413 | `request_too_large` | The body exceeds 4096 bytes | Keep the session, show the error, do not retry automatically |
 | 429 | `rate_limited` | Too many requests | Keep the session, retry with bounded backoff |
 | 503 | `issuance_unavailable` | The adapter could not issue an assertion | Keep the session, retry with bounded backoff |
+
+Clients MUST retry 429 and 503 with bounded backoff whatever the `error` code.
+Clients MUST treat any other status, or a 400/401/403/413 with a code this
+contract does not define, as a refusal: keep the session, show it as refused,
+and not retry automatically.
 
 A missing session is always 401 `session_required`, never 400. Network failures
 are handled like 429 and 503: keep the session and retry with bounded backoff.

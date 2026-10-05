@@ -15,6 +15,7 @@
 
 use nostr::{Event, ToBech32};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -154,6 +155,81 @@ impl BatchEvent {
     pub fn reply_thread(&self) -> String {
         reply_thread(&self.event, self.edit.as_ref())
     }
+
+    /// See [`ReplyRoute`].
+    pub fn reply_route(&self) -> ReplyRoute {
+        ReplyRoute {
+            root_event_id: self
+                .routing_thread_tags()
+                .root_event_id
+                .map(|root| root.to_ascii_lowercase()),
+            thread: self.reply_thread(),
+        }
+    }
+}
+
+/// Where a turn's `<context>` sends ordinary replies, as far as the
+/// native-steer guard needs to know.
+///
+/// A native steer adds a message to a running turn without a new `<context>`,
+/// so the turn keeps replying where its own `<context>` points. A message may
+/// be steered natively only when that destination is also right for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyRoute {
+    /// Routed thread root, lowercase; `None` for a top-level message.
+    root_event_id: Option<String>,
+    /// See [`reply_thread`].
+    thread: String,
+}
+
+impl ReplyRoute {
+    /// Whether a turn whose `<context>` was rendered for `self` also replies
+    /// correctly to `incoming`.
+    ///
+    /// In a channel, a top-level message is answered in a new thread rooted at
+    /// that message, so two messages share a destination only when they share
+    /// a [`reply_thread`]. In a DM, a top-level message's `<context>` names no
+    /// reply target (see `format_prompt`): every top-level DM message replies
+    /// at the top of the same conversation. DM messages therefore share a
+    /// destination when they share a thread root, including none.
+    pub fn accepts_steer(&self, incoming: &ReplyRoute, is_dm: bool) -> bool {
+        if is_dm {
+            self.root_event_id == incoming.root_event_id
+        } else {
+            self.thread == incoming.thread
+        }
+    }
+}
+
+/// Whether the running turn's prompt rendered its channel as a DM.
+///
+/// The prompt task records this when it formats the turn's `<context>`
+/// (`format_prompt`'s `is_dm`). The steer guard reads the recorded value
+/// instead of classifying the incoming event again: channel metadata can
+/// become resolvable after the turn starts, and the guard must apply the rule
+/// that matches the `<context>` the agent actually received.
+#[derive(Debug, Clone, Default)]
+pub struct PromptDmClassification(Arc<OnceLock<bool>>);
+
+impl PromptDmClassification {
+    /// Record the prompt's classification. Later calls are ignored: a turn has
+    /// one `<context>`.
+    pub fn record(&self, is_dm: bool) {
+        let _ = self.0.set(is_dm);
+    }
+
+    /// The recorded classification; `None` before the prompt is formatted.
+    pub fn get(&self) -> Option<bool> {
+        self.0.get().copied()
+    }
+}
+
+/// Reply destination of an in-flight turn, and how its prompt classified the
+/// channel.
+#[derive(Debug, Clone)]
+struct InFlightReplyRoute {
+    route: ReplyRoute,
+    prompt_is_dm: PromptDmClassification,
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -241,9 +317,9 @@ pub struct EventQueue {
     in_flight_deadlines: HashMap<SessionScope, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
     in_flight_batch_sizes: HashMap<SessionScope, usize>,
-    /// Reply thread of each in-flight turn: the [`reply_thread`] of the batch
+    /// Reply route of each in-flight turn: the [`ReplyRoute`] of the batch
     /// event whose `<context>` routes the turn's replies (its last event).
-    in_flight_reply_threads: HashMap<SessionScope, String>,
+    in_flight_reply_routes: HashMap<SessionScope, InFlightReplyRoute>,
     retry_after: HashMap<SessionScope, Instant>,
     /// Per-scope retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<SessionScope, u32>,
@@ -285,7 +361,7 @@ impl EventQueue {
             in_flight_scopes: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
-            in_flight_reply_threads: HashMap::new(),
+            in_flight_reply_routes: HashMap::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
@@ -433,7 +509,7 @@ impl EventQueue {
             );
             self.in_flight_scopes.remove(&scope);
             self.in_flight_deadlines.remove(&scope);
-            self.in_flight_reply_threads.remove(&scope);
+            self.in_flight_reply_routes.remove(&scope);
             // Recover any withheld goose-native steer events for the expired
             // scope back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -477,7 +553,7 @@ impl EventQueue {
                             .insert(scope.clone(), now + self.in_flight_deadline);
                         self.in_flight_batch_sizes
                             .insert(scope.clone(), cancelled.len());
-                        self.record_in_flight_reply_thread(&scope, &cancelled);
+                        self.record_in_flight_reply_route(&scope, &cancelled);
                         return Some(FlushBatch {
                             channel_id: scope.channel_id(),
                             scope,
@@ -515,7 +591,7 @@ impl EventQueue {
             .insert(scope.clone(), now + self.in_flight_deadline);
         self.in_flight_batch_sizes
             .insert(scope.clone(), events.len());
-        self.record_in_flight_reply_thread(&scope, &events);
+        self.record_in_flight_reply_route(&scope, &events);
 
         // Merge any cancelled events stored by requeue_as_cancelled().
         let cancelled_events = self.cancelled_batches.remove(&scope).unwrap_or_default();
@@ -568,7 +644,7 @@ impl EventQueue {
         self.in_flight_scopes.remove(&scope);
         self.in_flight_deadlines.remove(&scope);
         self.in_flight_batch_sizes.remove(&scope);
-        self.in_flight_reply_threads.remove(&scope);
+        self.in_flight_reply_routes.remove(&scope);
         let now = Instant::now();
         match self.retry_after.get(&scope) {
             // Active throttle → scope was requeued; keep retry_counts intact.
@@ -787,7 +863,7 @@ impl EventQueue {
             );
             self.in_flight_scopes.remove(&scope);
             self.in_flight_deadlines.remove(&scope);
-            self.in_flight_reply_threads.remove(&scope);
+            self.in_flight_reply_routes.remove(&scope);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired scope so they are
             // not permanently orphaned in the side table.
@@ -943,25 +1019,58 @@ impl EventQueue {
         self.in_flight_scopes.contains(&scope.into_scope())
     }
 
-    /// The reply thread of the turn in flight for `scope`, if any.
+    /// Whether a message with reply route `incoming` may be steered natively
+    /// into the turn in flight for `scope`.
     ///
-    /// A native steer adds a message to a running turn without a new
-    /// `<context>`, so the turn keeps replying where its own `<context>`
-    /// points. A message whose [`reply_thread`] differs (possible under the
-    /// channel session policy) must not be steered natively; the cancel+merge
-    /// path re-dispatches it with its own full `<context>`.
-    pub fn in_flight_reply_thread(&self, scope: &SessionScope) -> Option<&str> {
-        self.in_flight_reply_threads.get(scope).map(String::as_str)
+    /// A message whose route the running turn does not accept (see
+    /// [`ReplyRoute::accepts_steer`]; possible whenever one session spans
+    /// several reply destinations: the channel session policy, or a DM) must
+    /// not be steered natively; the cancel+merge path re-dispatches it with
+    /// its own full `<context>`.
+    ///
+    /// The rule follows how the running turn's prompt classified the channel
+    /// (see [`PromptDmClassification`]). Until the prompt task records that,
+    /// `channel_is_dm` is the listener's own classification, where unresolved
+    /// metadata counts as a DM. A channel the listener knows is not a DM also
+    /// renders as one in the prompt, so the channel rule applies at once.
+    /// Otherwise the prompt may render either way, and the answer is `false`.
+    pub fn in_flight_accepts_steer(
+        &self,
+        scope: &SessionScope,
+        incoming: &ReplyRoute,
+        channel_is_dm: bool,
+    ) -> bool {
+        let Some(running) = self.in_flight_reply_routes.get(scope) else {
+            return false;
+        };
+        match running.prompt_is_dm.get() {
+            Some(is_dm) => running.route.accepts_steer(incoming, is_dm),
+            None if !channel_is_dm => running.route.accepts_steer(incoming, false),
+            None => false,
+        }
     }
 
-    fn record_in_flight_reply_thread(&mut self, scope: &SessionScope, events: &[BatchEvent]) {
+    /// The cell in which the prompt task for `scope`'s in-flight turn records
+    /// its DM classification (see [`PromptDmClassification`]).
+    pub fn in_flight_prompt_dm(&self, scope: &SessionScope) -> Option<PromptDmClassification> {
+        self.in_flight_reply_routes
+            .get(scope)
+            .map(|running| running.prompt_is_dm.clone())
+    }
+
+    fn record_in_flight_reply_route(&mut self, scope: &SessionScope, events: &[BatchEvent]) {
         match events.last() {
             Some(last) => {
-                self.in_flight_reply_threads
-                    .insert(scope.clone(), last.reply_thread());
+                self.in_flight_reply_routes.insert(
+                    scope.clone(),
+                    InFlightReplyRoute {
+                        route: last.reply_route(),
+                        prompt_is_dm: PromptDmClassification::default(),
+                    },
+                );
             }
             None => {
-                self.in_flight_reply_threads.remove(scope);
+                self.in_flight_reply_routes.remove(scope);
             }
         }
     }
@@ -1216,8 +1325,8 @@ pub(crate) fn reaction_target_id(event: &Event) -> String {
 /// the routed event itself when it is top-level (a reply opens a thread
 /// rooted there). Lowercase, so equivalent hex spellings compare equal.
 ///
-/// This is the thread-session key, and it decides whether a message may be
-/// steered natively into a running turn (see [`EventQueue::in_flight_reply_thread`]).
+/// This is the thread-session key. Outside DMs it also decides whether a
+/// message may be steered natively into a running turn (see [`ReplyRoute`]).
 pub(crate) fn reply_thread(event: &Event, edit: Option<&ResolvedEdit>) -> String {
     routing_thread_tags(event, edit)
         .root_event_id
@@ -2220,6 +2329,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
+    // `ReplyRoute::accepts_steer` mirrors this DM rule; keep them in sync.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
         thread_tags
@@ -2394,6 +2504,50 @@ impl MergeFraming {
 pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
     let framing = MergeFraming::for_reason(Some(CancelReason::Steer));
     (framing.new_tag, framing.closing_note)
+}
+
+#[cfg(test)]
+mod reply_route_tests {
+    use super::ReplyRoute;
+
+    fn route(root: Option<&str>, thread: &str) -> ReplyRoute {
+        ReplyRoute {
+            root_event_id: root.map(str::to_string),
+            thread: thread.to_string(),
+        }
+    }
+
+    /// A top-level message (no root) whose replies open thread `id`.
+    fn top_level(id: &str) -> ReplyRoute {
+        route(None, id)
+    }
+
+    /// A reply in the thread rooted at `root`.
+    fn in_thread(root: &str) -> ReplyRoute {
+        route(Some(root), root)
+    }
+
+    #[test]
+    fn channel_steers_only_within_one_reply_thread() {
+        assert!(in_thread("a").accepts_steer(&in_thread("a"), false));
+        assert!(!in_thread("a").accepts_steer(&in_thread("b"), false));
+        // Replies to a top-level message open a thread rooted at it.
+        assert!(top_level("a").accepts_steer(&in_thread("a"), false));
+        assert!(in_thread("a").accepts_steer(&top_level("a"), false));
+        assert!(!top_level("a").accepts_steer(&top_level("b"), false));
+        assert!(!top_level("a").accepts_steer(&in_thread("b"), false));
+    }
+
+    #[test]
+    fn dm_steers_within_one_thread_or_the_top_level() {
+        // Every top-level DM message replies at the top of the conversation.
+        assert!(top_level("a").accepts_steer(&top_level("b"), true));
+        assert!(in_thread("a").accepts_steer(&in_thread("a"), true));
+        assert!(!in_thread("a").accepts_steer(&in_thread("b"), true));
+        // A top-level DM turn has no `--reply-to`; a threaded one does.
+        assert!(!top_level("a").accepts_steer(&in_thread("a"), true));
+        assert!(!in_thread("a").accepts_steer(&top_level("b"), true));
+    }
 }
 
 #[cfg(test)]

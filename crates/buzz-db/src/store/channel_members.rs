@@ -1098,6 +1098,10 @@ pub struct LargeChannelRoster {
 
 /// Returns active channels whose canonical roster exceeds `minimum_members`.
 ///
+/// Only active communities are scanned: archived communities must not have
+/// their discovery state rewritten, and deleting or tombstoned communities
+/// would only produce fenced-write failures.
+///
 /// This is an internal cross-community maintenance read. Callers must preserve
 /// the returned community id when reading or rewriting discovery state.
 pub async fn list_large_channel_rosters_needing_reconciliation(
@@ -1125,7 +1129,11 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
         )
         SELECT lr.community_id, community.host, lr.channel_id, lr.member_count
         FROM large_rosters lr
-        JOIN communities community ON community.id = lr.community_id
+        JOIN communities community
+          ON community.id = lr.community_id
+         AND community.archived_at IS NULL
+         AND community.deleted_at IS NULL
+         AND community.deletion_state = 'active'
         JOIN LATERAL (
             SELECT roster.tags
             FROM events roster
@@ -2332,6 +2340,99 @@ mod postgres_tests {
                 .await
                 .expect("check converged snapshot");
         assert!(converged.is_empty());
+    }
+
+    /// Seed a channel whose roster (owner + one member) has diverged from its
+    /// live relay-authored kind-39002 snapshot (owner only).
+    async fn seed_divergent_roster(pool: &PgPool, community_id: Uuid, relay_pubkey: &[u8]) -> Uuid {
+        let creator = random_pubkey();
+        let channel = create_test_channel(
+            pool,
+            community_id,
+            "divergent-roster",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create test channel");
+        let tags = serde_json::json!([
+            ["d", channel.id.to_string()],
+            ["p", hex::encode(&creator), "", "owner"]
+        ]);
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
+            VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, $6, $7)
+            "#,
+        )
+        .bind(community_id)
+        .bind(random_pubkey())
+        .bind(relay_pubkey)
+        .bind(tags)
+        .bind(vec![0u8; 64])
+        .bind(channel.id)
+        .bind(channel.id.to_string())
+        .execute(pool)
+        .await
+        .expect("insert roster snapshot");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at) \
+             VALUES ($1, $2, $3, 'member', NOW())",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(random_pubkey())
+        .execute(pool)
+        .await
+        .expect("diverge roster");
+        channel.id
+    }
+
+    /// Startup roster reconciliation must not rewrite discovery state for
+    /// archived communities, nor attempt fenced writes for deleting or
+    /// tombstoned ones. Same active-community predicate as #7558.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn large_roster_reconciliation_skips_archived_and_deleted_communities() {
+        let pool = setup_pool().await;
+        let relay_pubkey = random_pubkey();
+        let mut fixtures = Vec::new();
+        for label in ["active", "archived", "quiescing", "fenced", "tombstone"] {
+            let community_id = make_test_community(&pool).await;
+            let channel_id = seed_divergent_roster(&pool, community_id, &relay_pubkey).await;
+            fixtures.push((label, community_id, channel_id));
+        }
+        for (label, community_id, _) in &fixtures {
+            match *label {
+                "active" => {}
+                "archived" => {
+                    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+                        .bind(community_id)
+                        .execute(&pool)
+                        .await
+                        .expect("archive fixture");
+                }
+                state => crate::test_support::set_deletion_state(&pool, *community_id, state).await,
+            }
+        }
+
+        let candidates = list_large_channel_rosters_needing_reconciliation(&pool, 1, &relay_pubkey)
+            .await
+            .expect("list candidates");
+        let found: Vec<(CommunityId, Uuid)> = candidates
+            .iter()
+            .map(|c| (c.community_id, c.channel_id))
+            .collect();
+        let (_, active_community, active_channel) = fixtures[0];
+        assert_eq!(
+            found,
+            vec![(CommunityId::from_uuid(active_community), active_channel)],
+            "only the active community's divergent roster may be reconciled"
+        );
     }
 
     /// A random non-admin, non-owner user cannot remove someone else's bot.

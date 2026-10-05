@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 bash deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh
+bash deploy/charts/buzz-push-gateway/tests/migration-annotations.sh
 out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); datadog_out=$(mktemp)
 trap 'rm -f "$out" "$production_out" "$route_out" "$datadog_out" "${monitoring_out:-}"' EXIT
 gateway_origin_arg=(--set 'gatewayOrigin=https://push.example')

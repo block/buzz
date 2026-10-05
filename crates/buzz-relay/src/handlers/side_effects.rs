@@ -3129,7 +3129,7 @@ pub async fn reconcile_nip43_membership_snapshots_with_purpose(
 ) -> anyhow::Result<usize> {
     let communities = match purpose {
         Nip43ReconciliationPurpose::Bootstrap => state.db.bootstrap_community_hosts().await?,
-        Nip43ReconciliationPurpose::Maintenance => state.db.usage_community_hosts().await?,
+        Nip43ReconciliationPurpose::Maintenance => state.db.active_community_hosts().await?,
     };
     let mut reconciled = 0usize;
 
@@ -3959,5 +3959,137 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    mod postgres_tests {
+        use super::*;
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        async fn insert_community(pool: &sqlx::PgPool) -> Uuid {
+            let id = Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(id)
+                .bind(format!("nip43-sweep-{}.example", id.simple()))
+                .execute(pool)
+                .await
+                .expect("insert community fixture");
+            id
+        }
+
+        async fn set_deletion_state(pool: &sqlx::PgPool, id: Uuid, state: &str) {
+            let mut tx = pool.begin().await.expect("begin lifecycle fixture");
+            sqlx::query(
+                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                        set_config('buzz.deletion_fence_generation', '0', true)",
+            )
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("authorize lifecycle fixture");
+            sqlx::query(
+                "UPDATE communities SET deletion_state = $2, \
+                        deleted_at = CASE WHEN $2 = 'tombstone' THEN now() END \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(state)
+            .execute(&mut *tx)
+            .await
+            .expect("set lifecycle state");
+            tx.commit().await.expect("commit lifecycle fixture");
+        }
+
+        async fn membership_snapshots(pool: &sqlx::PgPool, id: Uuid) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2")
+                .bind(id)
+                .bind(KIND_NIP43_MEMBERSHIP_LIST as i32)
+                .fetch_one(pool)
+                .await
+                .expect("count membership snapshots")
+        }
+
+        fn reconciliation_failures(recorder: &DebuggingRecorder) -> u64 {
+            recorder
+                .snapshotter()
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, _, _, _)| {
+                    key.key().name() == "buzz_nip43_membership_reconciliation_failures_total"
+                })
+                .map(|(_, _, _, value)| match value {
+                    DebugValue::Counter(value) => value,
+                    other => panic!("reconciliation failures must be a counter: {other:?}"),
+                })
+                .sum()
+        }
+
+        /// Regression for #7558 on the worker path: repeated NIP-43
+        /// maintenance sweeps reconcile the active community once and never
+        /// hand archived, quiescing, fenced, or tombstoned communities to the
+        /// publisher, so the fence never rejects a write and nothing warns.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn maintenance_sweep_skips_archived_and_deleted_communities() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to test DB");
+            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+
+            let active = insert_community(&pool).await;
+            let archived = insert_community(&pool).await;
+            let quiescing = insert_community(&pool).await;
+            let fenced = insert_community(&pool).await;
+            let tombstone = insert_community(&pool).await;
+            sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+                .bind(archived)
+                .execute(&pool)
+                .await
+                .expect("archive fixture");
+            set_deletion_state(&pool, quiescing, "quiescing").await;
+            set_deletion_state(&pool, fenced, "fenced").await;
+            set_deletion_state(&pool, tombstone, "tombstone").await;
+
+            let recorder = DebuggingRecorder::new();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            for sweep in 0..3 {
+                reconcile_nip43_membership_snapshots_with_purpose(
+                    &state,
+                    Nip43ReconciliationPurpose::Maintenance,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("maintenance sweep {sweep}: {e}"));
+            }
+
+            assert_eq!(
+                reconciliation_failures(&recorder),
+                0,
+                "no community may fail reconciliation on any sweep"
+            );
+            assert_eq!(
+                membership_snapshots(&pool, active).await,
+                1,
+                "the active community is reconciled once and then left alone"
+            );
+            for (label, id) in [
+                ("archived", archived),
+                ("quiescing", quiescing),
+                ("fenced", fenced),
+                ("tombstone", tombstone),
+            ] {
+                assert_eq!(
+                    membership_snapshots(&pool, id).await,
+                    0,
+                    "{label} community must not receive a maintenance write"
+                );
+            }
+            let tombstone_state: String =
+                sqlx::query_scalar("SELECT deletion_state FROM communities WHERE id = $1")
+                    .bind(tombstone)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("tombstone row is retained");
+            assert_eq!(tombstone_state, "tombstone");
+        }
     }
 }

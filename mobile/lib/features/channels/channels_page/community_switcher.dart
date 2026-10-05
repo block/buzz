@@ -65,12 +65,14 @@ class _CommunityFlight {
 class _CommunitySwitcherPage extends HookConsumerWidget {
   const _CommunitySwitcherPage({
     required this.destination,
+    this.arrivingCommunity,
     required this.prepareLanding,
     required this.onFlightChanged,
     required this.onTransitionProgress,
   });
 
   final Rect? destination;
+  final Community? arrivingCommunity;
   final Future<Rect?> Function() prepareLanding;
   final ValueChanged<bool> onFlightChanged;
   final ValueChanged<double> onTransitionProgress;
@@ -80,13 +82,26 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
     final communitiesAsync = ref.watch(communityListProvider);
     final activeId = ref.watch(activeCommunityProvider).value?.id;
     final isEditing = useState(false);
-    final flight = useState<_CommunityFlight?>(null);
+    final flight = useState<_CommunityFlight?>(
+      arrivingCommunity == null
+          ? null
+          : _CommunityFlight(
+              arrivingCommunity!,
+              Rect.fromCenter(
+                center: MediaQuery.sizeOf(context).center(Offset.zero),
+                width: _communityCenteredAvatarSize,
+                height: _communityCenteredAvatarSize,
+              ),
+              null,
+            ),
+    );
     final landingBounds = useState(destination);
     if (flight.value != null) ref.watch(_communityContentReadyProvider);
     final error = useState<String?>(null);
     final failedCommunityId = useState<String?>(null);
     final centering = useAnimationController(
       duration: _communityCenterDuration,
+      initialValue: arrivingCommunity == null ? 0 : 1,
     );
     final controller = useAnimationController(
       duration: _communityDepartureDuration,
@@ -100,7 +115,7 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
               // Keep avatar decoding/painting out of the per-frame motion build.
               child: Material(
                 type: MaterialType.transparency,
-                child: _CommunityAvatar(
+                child: CommunityAvatar(
                   name: selected.community.name,
                   relayUrl: selected.community.relayUrl,
                   size: _communityGridAvatarSize,
@@ -133,21 +148,27 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
       }
     }
 
-    Future<void> selectCommunity(Community community, Rect origin) async {
-      if (flight.value != null) return;
-      if (community.id == activeId && community.id != failedCommunityId.value) {
+    Future<void> selectCommunity(
+      Community community,
+      Rect origin, {
+      bool arriving = false,
+    }) async {
+      if (flight.value != null && !arriving) return;
+      if (!arriving &&
+          community.id == activeId &&
+          community.id != failedCommunityId.value) {
         Navigator.of(context).pop();
         return;
       }
       error.value = null;
       flight.value = _CommunityFlight(community, origin, activeId);
       onFlightChanged(true);
-      unawaited(HapticFeedback.selectionClick());
-      final animate = !reducedMotion && destination != null;
+      if (!arriving) unawaited(HapticFeedback.selectionClick());
+      final animate = !reducedMotion && (arriving || destination != null);
       try {
         // Relay teardown, credential changes and provider hydration must not
         // compete with the grid-to-center motion on the UI isolate.
-        if (animate) {
+        if (animate && !arriving) {
           await centering.forward(from: 0).orCancel;
         } else {
           centering.value = 1;
@@ -155,15 +176,17 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
         if (!context.mounted) return;
         await WidgetsBinding.instance.endOfFrame;
         if (!context.mounted) return;
-        await ref
-            .read(communityListProvider.notifier)
-            .switchCommunity(community.id);
+        if (!arriving) {
+          await ref
+              .read(communityListProvider.notifier)
+              .switchCommunity(community.id);
+        }
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;
         // Refresh this scope before awaiting its content. ChannelsNotifier
         // fences cached snapshots to the destination relay and identity.
-        ref.invalidate(channelsProvider);
+        if (!arriving) ref.invalidate(channelsProvider);
         await (() async {
           await waitForContent();
           if (!context.mounted) return;
@@ -197,6 +220,21 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
       }
     }
 
+    useEffect(() {
+      if (arrivingCommunity == null) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        unawaited(
+          selectCommunity(
+            arrivingCommunity!,
+            flight.value!.origin,
+            arriving: true,
+          ),
+        );
+      });
+      return null;
+    }, const []);
+
     Future<void> addCommunity() async {
       final navigator = Navigator.of(context, rootNavigator: true);
       final route = ModalRoute.of(context);
@@ -215,129 +253,138 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
       );
     }
 
+    final ios = defaultTargetPlatform == TargetPlatform.iOS;
+    final header = ios
+        ? SizedBox(
+            height: frostedAppBarHeight(context),
+            child: IosNavigationBar(
+              title: '',
+              leading: IosNavigationAction(
+                label: 'Close community switcher',
+                symbol: 'xmark',
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+              actions: [
+                IosNavigationAction(
+                  label: isEditing.value ? 'Done' : 'Edit',
+                  onPressed: () => isEditing.value = !isEditing.value,
+                ),
+              ],
+            ),
+          )
+        : Padding(
+            padding: const EdgeInsets.all(Grid.xxs),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: 'Close community switcher',
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(LucideIcons.x),
+                ),
+                const Spacer(),
+                TextButton(
+                  key: const Key('community-switcher-edit'),
+                  onPressed: () => isEditing.value = !isEditing.value,
+                  child: Text(isEditing.value ? 'Done' : 'Edit'),
+                ),
+              ],
+            ),
+          );
+    final body = SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        Grid.gutter,
+        Grid.xs,
+        Grid.gutter,
+        Grid.md,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: Column(
+            children: [
+              Text(
+                'Switch Community',
+                key: const Key('community-switcher-title'),
+                textAlign: TextAlign.center,
+                style: context.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: Grid.md),
+              if (error.value != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Grid.xs),
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      error.value!,
+                      style: TextStyle(color: context.colors.error),
+                    ),
+                  ),
+                ),
+              communitiesAsync.when(
+                loading: () => const Center(
+                  child: BuzzLoadingIndicator(
+                    size: 40,
+                    semanticLabel: 'Loading communities',
+                  ),
+                ),
+                error: (e, _) => Text('Error loading communities: $e'),
+                data: (communities) => _CommunityGrid(
+                  children: [
+                    for (final community in communities)
+                      _CommunityGridTile(
+                        community: community,
+                        // Keep the current-community marker stable
+                        // while the selected avatar leaves the grid.
+                        isActive:
+                            community.id ==
+                            (flight.value == null
+                                ? activeId
+                                : flight.value!.previousCommunityId),
+                        isEditing: isEditing.value,
+                        hidden: flight.value?.community.id == community.id,
+                        onSelect: selectCommunity,
+                        onRemove: () => _confirmRemoveCommunity(
+                          context,
+                          ref,
+                          community,
+                          closeSheetAfterRemoval: community.id == activeId,
+                        ),
+                      ),
+                    _CommunityGridAdd(onTap: addCommunity),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
     final surface = Material(
       key: const Key('community-switcher-page'),
       color: context.colors.surface,
       child: SafeArea(
-        top: defaultTargetPlatform != TargetPlatform.iOS,
-        child: Column(
-          children: [
-            if (defaultTargetPlatform == TargetPlatform.iOS)
-              SizedBox(
-                height: frostedAppBarHeight(context),
-                child: IosNavigationBar(
-                  title: '',
-                  leading: IosNavigationAction(
-                    label: 'Close community switcher',
-                    symbol: 'xmark',
-                    onPressed: () => Navigator.of(context).pop(),
+        top: !ios,
+        child: ios
+            ? Stack(
+                children: [
+                  Positioned.fill(
+                    top: frostedAppBarHeight(context),
+                    child: body,
                   ),
-                  actions: [
-                    IosNavigationAction(
-                      label: isEditing.value ? 'Done' : 'Edit',
-                      onPressed: () => isEditing.value = !isEditing.value,
-                    ),
-                  ],
-                ),
+                  // Paint the native bar last, as in FrostedScaffold. Painting
+                  // Flutter content after a UIKit view can hide that content
+                  // during this route's opacity/scale composition on iOS.
+                  Positioned(top: 0, left: 0, right: 0, child: header),
+                ],
               )
-            else
-              Padding(
-                padding: const EdgeInsets.all(Grid.xxs),
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: 'Close community switcher',
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(LucideIcons.x),
-                    ),
-                    const Spacer(),
-                    TextButton(
-                      key: const Key('community-switcher-edit'),
-                      onPressed: () => isEditing.value = !isEditing.value,
-                      child: Text(isEditing.value ? 'Done' : 'Edit'),
-                    ),
-                  ],
-                ),
+            : Column(
+                children: [
+                  header,
+                  Expanded(child: body),
+                ],
               ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(
-                  Grid.gutter,
-                  Grid.xs,
-                  Grid.gutter,
-                  Grid.md,
-                ),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 440),
-                    child: Column(
-                      children: [
-                        Text(
-                          'Switch Community',
-                          key: const Key('community-switcher-title'),
-                          textAlign: TextAlign.center,
-                          style: context.textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: Grid.md),
-                        if (error.value != null)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: Grid.xs),
-                            child: Semantics(
-                              liveRegion: true,
-                              child: Text(
-                                error.value!,
-                                style: TextStyle(color: context.colors.error),
-                              ),
-                            ),
-                          ),
-                        communitiesAsync.when(
-                          loading: () => const Center(
-                            child: BuzzLoadingIndicator(
-                              size: 40,
-                              semanticLabel: 'Loading communities',
-                            ),
-                          ),
-                          error: (e, _) =>
-                              Text('Error loading communities: $e'),
-                          data: (communities) => _CommunityGrid(
-                            children: [
-                              for (final community in communities)
-                                _CommunityGridTile(
-                                  community: community,
-                                  // Keep the current-community marker stable
-                                  // while the selected avatar leaves the grid.
-                                  isActive:
-                                      community.id ==
-                                      (flight.value == null
-                                          ? activeId
-                                          : flight.value!.previousCommunityId),
-                                  isEditing: isEditing.value,
-                                  hidden:
-                                      flight.value?.community.id ==
-                                      community.id,
-                                  onSelect: selectCommunity,
-                                  onRemove: () => _confirmRemoveCommunity(
-                                    context,
-                                    ref,
-                                    community,
-                                    closeSheetAfterRemoval:
-                                        community.id == activeId,
-                                  ),
-                                ),
-                              _CommunityGridAdd(onTap: addCommunity),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
 
@@ -570,7 +617,7 @@ class _CommunityGridTile extends HookWidget {
                     opacity: hidden ? 0 : 1,
                     child: SizedBox(
                       key: avatarKey,
-                      child: _CommunityAvatar(
+                      child: CommunityAvatar(
                         key: Key('community-switcher-avatar-${community.id}'),
                         name: community.name,
                         relayUrl: community.relayUrl,
