@@ -355,8 +355,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("restriction state must precede full ban reads")
         .0;
     assert!(restriction_state.contains("WriterOperation::Authorization"));
-    assert!(restriction_state.contains("fetch_optional(&mut *connection)"));
-    assert!(!restriction_state.contains("fetch_optional(pool)"));
+    // The single aggregate row is read on the attributed writer connection,
+    // never directly on the pool.
+    assert!(restriction_state.contains("fetch_one(&mut *connection)"));
+    assert!(!restriction_state.contains("(pool)"));
 
     let community_store = include_str!("../src/store/community.rs");
     let ensure_community = community_store
@@ -943,20 +945,33 @@ fn fn_signature_starts_here(trimmed_line: &str) -> bool {
     .any(|prefix| trimmed_line.starts_with(prefix))
 }
 
+/// Split production source into one slice per function. A slice runs from its
+/// signature to the doc comment or attributes of the next function, so a
+/// following function's docs (which may quote SQL) are never attributed to the
+/// function before it.
 fn function_slices(production_source: &str) -> Vec<&str> {
+    // (signature offset, offset where the next function's lead-in begins)
     let mut starts = Vec::new();
+    let mut lead_ins = Vec::new();
+    let mut lead_in: Option<usize> = None;
     let mut offset = 0usize;
     for line in production_source.split_inclusive('\n') {
         let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
         if fn_signature_starts_here(trimmed) {
-            starts.push(offset + (line.len() - trimmed.len()));
+            starts.push(offset + indent);
+            lead_ins.push(lead_in.take().unwrap_or(offset + indent));
+        } else if trimmed.starts_with("///") || trimmed.starts_with("#[") {
+            lead_in.get_or_insert(offset);
+        } else {
+            lead_in = None;
         }
         offset += line.len();
     }
 
     let mut functions = Vec::new();
     for (index, start) in starts.iter().enumerate() {
-        let end = starts
+        let end = lead_ins
             .get(index + 1)
             .copied()
             .unwrap_or(production_source.len());
