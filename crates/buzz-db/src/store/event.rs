@@ -125,8 +125,9 @@ pub struct EventQuery {
     /// defense-in-depth catches any residual mismatch.
     pub shared_gated_reader: Option<Vec<u8>>,
     /// Author-only visibility reader for [`query_events`]: exclude foreign
-    /// [`AUTHOR_ONLY_KINDS`] before ordering, offset and limit. This does not
-    /// affect `count_events`; callers must retain its existing fallback gate.
+    /// [`AUTHOR_ONLY_KINDS`] before ordering, offset and limit. The SQL
+    /// `count_events` path ignores it, so callers must keep their existing
+    /// fallback gate; COUNT fallbacks built on `query_events` do apply it.
     pub author_only_reader: Option<Vec<u8>>,
 }
 
@@ -679,13 +680,62 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         }
     }
 
-    if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
-        qb.push(format!(" AND {col_prefix}kind IN ("));
-        let mut sep = qb.separated(", ");
-        for k in ks {
-            sep.push_bind(*k);
+    let kinds = q.kinds.as_deref().filter(|k| !k.is_empty());
+    match (kinds, q.author_only_reader.as_ref()) {
+        // Author-only visibility belongs before pagination, like shared-gated
+        // visibility; relay result checks remain defense in depth. With
+        // explicit kinds, split them so Postgres sees `public kinds OR the
+        // reader's own private rows` and can estimate and index each side.
+        // The equivalent `kind IN (..) AND (kind NOT IN (private) OR pubkey =
+        // reader)` looks broad to the planner: when foreign private rows
+        // dominate the kinds, it walks the community's primary key backward.
+        (Some(ks), Some(reader_bytes)) => {
+            let (private, public): (Vec<i32>, Vec<i32>) = ks
+                .iter()
+                .partition(|k| AUTHOR_ONLY_KINDS.iter().any(|a| *a as i32 == **k));
+            qb.push(" AND (");
+            if !public.is_empty() {
+                qb.push(format!("{col_prefix}kind IN ("));
+                let mut sep = qb.separated(", ");
+                for k in &public {
+                    sep.push_bind(*k);
+                }
+                qb.push(")");
+            }
+            if !private.is_empty() {
+                if !public.is_empty() {
+                    qb.push(" OR ");
+                }
+                qb.push(format!("({col_prefix}kind IN ("));
+                let mut sep = qb.separated(", ");
+                for k in &private {
+                    sep.push_bind(*k);
+                }
+                qb.push(format!(") AND {col_prefix}pubkey = "));
+                qb.push_bind(reader_bytes.clone());
+                qb.push(")");
+            }
+            qb.push(")");
         }
-        qb.push(")");
+        (Some(ks), None) => {
+            qb.push(format!(" AND {col_prefix}kind IN ("));
+            let mut sep = qb.separated(", ");
+            for k in ks {
+                sep.push_bind(*k);
+            }
+            qb.push(")");
+        }
+        (None, Some(reader_bytes)) => {
+            qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
+            let mut sep = qb.separated(", ");
+            for kind in AUTHOR_ONLY_KINDS {
+                sep.push_bind(*kind as i32);
+            }
+            qb.push(format!(") OR {col_prefix}pubkey = "));
+            qb.push_bind(reader_bytes.clone());
+            qb.push(")");
+        }
+        (None, None) => {}
     }
 
     if let Some(ref pk) = q.pubkey {
@@ -799,19 +849,6 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push_bind(reader_bytes.clone());
         qb.push(format!(" OR {col_prefix}tags @> "));
         qb.push_bind(shared_containment);
-        qb.push(")");
-    }
-
-    // Author-only visibility belongs before pagination, just like shared-gated
-    // visibility. Keep relay result checks as defense in depth.
-    if let Some(ref reader_bytes) = q.author_only_reader {
-        qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
-        let mut sep = qb.separated(", ");
-        for kind in AUTHOR_ONLY_KINDS {
-            sep.push_bind(*kind as i32);
-        }
-        qb.push(format!(") OR {col_prefix}pubkey = "));
-        qb.push_bind(reader_bytes.clone());
         qb.push(")");
     }
 
@@ -2595,6 +2632,38 @@ mod e_tag_filter_shape_tests {
         assert!(!sql[..fence_end].contains("ORDER BY"));
         assert!(!sql[..fence_end].contains("LIMIT"));
         assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
+    }
+
+    /// Explicit kinds must reach SQL as `public OR own private`, not as a
+    /// `NOT IN .. OR pubkey` mask the planner cannot estimate: on a large
+    /// community that mask made a sparse mixed-kind read walk every row.
+    #[test]
+    fn author_only_reader_splits_explicit_kinds() {
+        let shape = |kinds: Option<Vec<i32>>| {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.kinds = kinds;
+            q.author_only_reader = Some(vec![1; 32]);
+            build_query_events_sql(&q).sql().as_str().to_owned()
+        };
+
+        let mixed = shape(Some(vec![30300, 1, 30350]));
+        assert!(
+            mixed.contains("AND (kind IN ($2) OR (kind IN ($3, $4) AND pubkey = $5))"),
+            "{mixed}"
+        );
+        assert!(!mixed.contains("NOT IN"), "{mixed}");
+
+        let private = shape(Some(vec![30300]));
+        assert!(
+            private.contains("AND ((kind IN ($2) AND pubkey = $3))"),
+            "{private}"
+        );
+
+        let kindless = shape(None);
+        assert!(
+            kindless.contains("AND (kind NOT IN ($2, $3, $4) OR pubkey = $5)"),
+            "{kindless}"
+        );
     }
 
     #[test]
