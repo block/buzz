@@ -3,13 +3,8 @@ part of '../channels_page.dart';
 class _ChannelsSkeleton extends StatelessWidget {
   final List<Channel>? channels;
   final double topInset;
-  final SessionStatus status;
 
-  const _ChannelsSkeleton({
-    required this.channels,
-    required this.topInset,
-    required this.status,
-  });
+  const _ChannelsSkeleton({required this.channels, required this.topInset});
 
   @override
   Widget build(BuildContext context) {
@@ -38,33 +33,21 @@ class _ChannelsSkeleton extends StatelessWidget {
     const fallbackWidths = <double>[136, 184, 112, 160, 208, 128];
     if (widths.isEmpty) widths.addAll(fallbackWidths);
 
-    final semanticsLabel = switch (status) {
-      SessionStatus.connecting => 'Connecting',
-      SessionStatus.reconnecting => 'Reconnecting',
-      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
-    };
-    return Semantics(
-      key: const Key('channels-connection-skeleton'),
-      liveRegion: true,
-      label: semanticsLabel,
-      child: ExcludeSemantics(
-        child: ListView.builder(
-          cacheExtent: 0,
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            topInset + Grid.twelve,
-            Grid.gutter,
-            80,
-          ),
-          itemBuilder: (_, section) => Padding(
-            padding: const EdgeInsets.only(bottom: Grid.xs),
-            child: _ChannelSkeletonSection(
-              widths: List.generate(
-                4,
-                (row) => widths[(section * 4 + row) % widths.length],
-              ),
-            ),
+    return ListView.builder(
+      cacheExtent: 0,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: EdgeInsets.fromLTRB(
+        Grid.gutter,
+        topInset + Grid.twelve,
+        Grid.gutter,
+        80,
+      ),
+      itemBuilder: (_, section) => Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xs),
+        child: _ChannelSkeletonSection(
+          widths: List.generate(
+            4,
+            (row) => widths[(section * 4 + row) % widths.length],
           ),
         ),
       ),

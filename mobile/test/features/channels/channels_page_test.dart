@@ -924,6 +924,38 @@ void main() {
     expect(find.text('general'), findsOneWidget);
   });
 
+  testWidgets('keeps a fetched empty channel list visible during reconnect', (
+    tester,
+  ) async {
+    final relaySession = _ReconnectingRelaySession(
+      initialStatus: SessionStatus.connected,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(const [])),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No conversations yet'), findsOneWidget);
+    relaySession.setReconnecting();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(
+      tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+      isFalse,
+    );
+    expect(
+      tester
+          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
+          .opacity,
+      1,
+    );
+    expect(find.text('No conversations yet'), findsOneWidget);
+  });
+
   testWidgets('announces neutral loading outside connection transitions', (
     tester,
   ) async {

@@ -312,24 +312,6 @@ class ChannelsPage extends HookConsumerWidget {
       return timer.cancel;
     }, [canSurfaceError]);
 
-    // Keep cached content steady through brief socket flaps. A sustained
-    // reconnect swaps to element-shaped skeletons that match desktop.
-    final showConnectionSkeleton = useState(false);
-    final isReconnectingWithContent =
-        channels != null &&
-        (sessionState.status == SessionStatus.connecting ||
-            sessionState.status == SessionStatus.reconnecting);
-    useEffect(() {
-      if (!isReconnectingWithContent) {
-        showConnectionSkeleton.value = false;
-        return null;
-      }
-      final timer = Timer(const Duration(seconds: 2), () {
-        showConnectionSkeleton.value = true;
-      });
-      return timer.cancel;
-    }, [isReconnectingWithContent]);
-
     Rect? measureCommunityAvatar() {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         final header = headerKey.currentContext?.findRenderObject();
@@ -538,7 +520,6 @@ class ChannelsPage extends HookConsumerWidget {
         channelsAsync: channelsAsync,
         showError: showError.value,
         sessionStatus: sessionState.status,
-        showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,

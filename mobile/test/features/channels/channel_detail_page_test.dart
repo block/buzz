@@ -75,6 +75,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
@@ -490,6 +491,7 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  _loadingReviewTests();
   threadReplyRefreshTests();
   presenceTests();
   setUp(() async {
@@ -15539,7 +15541,11 @@ class _TrackingRelaySession extends RelaySessionNotifier {
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
+  final SessionStatus initialStatus;
+  void setReconnecting() =>
+      state = const SessionState(status: SessionStatus.reconnecting);
   _ReconnectingRelaySession({
+    this.initialStatus = SessionStatus.reconnecting,
     this.huddleCreatePublishGate,
     this.huddleEndPublishGate,
   });
@@ -15551,8 +15557,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   final List<int> publishedKinds = [];
 
   @override
-  SessionState build() =>
-      const SessionState(status: SessionStatus.reconnecting);
+  SessionState build() => SessionState(status: initialStatus);
 
   @override
   Future<List<NostrEvent>> fetchHistory(

@@ -223,7 +223,9 @@ class VoiceNoteAttachment extends HookConsumerWidget {
                             },
                     );
                     return state.isLoading
-                        ? SkeletonShimmer(child: waveformWidget)
+                        ? ExcludeSemantics(
+                            child: SkeletonShimmer(child: waveformWidget),
+                          )
                         : waveformWidget;
                   },
                 ),

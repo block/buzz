@@ -129,6 +129,20 @@ class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   }) async {}
 }
 
+class _ReadyTransitionVoiceNotePlayer extends _LoadingVoiceNotePlayer {
+  bool loading = true;
+  @override
+  VoiceNotePlaybackState get state => VoiceNotePlaybackState(
+    isLoading: loading,
+    canCancelLoading: loading,
+    duration: const Duration(seconds: 3),
+  );
+  void finishLoading() {
+    loading = false;
+    notifyListeners();
+  }
+}
+
 class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
   int toggleCount = 0;
 
@@ -1216,6 +1230,43 @@ void main() {
         );
         expect(find.bySemanticsLabel('Loading voice note'), findsNothing);
       });
+
+      testWidgets(
+        'voice waveform semantics return only when playback is ready',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+
+          final player = _ReadyTransitionVoiceNotePlayer();
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.remote(
+                url: 'https://example.com/voice.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+          expect(find.bySemanticsLabel('Voice note waveform'), findsNothing);
+          player.finishLoading();
+          await tester.pumpAndSettle();
+          final node = tester.getSemantics(
+            find.bySemanticsLabel('Voice note waveform'),
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.increase),
+            isTrue,
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.decrease),
+            isTrue,
+          );
+          semantics.dispose();
+        },
+      );
 
       testWidgets('routes repeated loading-control taps through toggle', (
         tester,

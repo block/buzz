@@ -57,46 +57,35 @@ class _HeaderEphemeralBadge extends StatelessWidget {
 class _MessageTimelineSkeleton extends StatelessWidget {
   final List<TimelineMessage> messages;
   final double appBarTitleContentHeight;
-  final SessionStatus status;
 
   const _MessageTimelineSkeleton({
     required this.messages,
     required this.appBarTitleContentHeight,
-    required this.status,
   });
 
   @override
   Widget build(BuildContext context) {
-    final semanticsLabel = switch (status) {
-      SessionStatus.connecting => 'Connecting',
-      SessionStatus.reconnecting => 'Reconnecting',
-      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
-    };
-    return Semantics(
-      key: const Key('channel-detail-connection-skeleton'),
-      liveRegion: true,
-      label: semanticsLabel,
-      child: ExcludeSemantics(
-        child: ListView.builder(
-          cacheExtent: 0,
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            frostedAppBarHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.xs,
-            Grid.gutter,
+    return ListView.builder(
+      cacheExtent: 0,
+      reverse: true,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: EdgeInsets.fromLTRB(
+        Grid.gutter,
+        frostedAppBarHeight(
+              context,
+              titleContentHeight: appBarTitleContentHeight,
+            ) +
             Grid.xs,
-          ),
-          itemBuilder: (_, index) => Padding(
-            padding: const EdgeInsets.only(bottom: Grid.xs),
-            child: _MessageSkeletonRow(
-              index: index % 4,
-              message: index < messages.length ? messages[index] : null,
-            ),
-          ),
+        Grid.gutter,
+        Grid.xs,
+      ),
+      itemBuilder: (_, index) => Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xs),
+        child: _MessageSkeletonRow(
+          index: index % 4,
+          message: index < messages.length
+              ? messages[messages.length - 1 - index]
+              : null,
         ),
       ),
     );
