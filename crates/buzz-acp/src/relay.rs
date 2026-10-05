@@ -256,6 +256,8 @@ pub struct RestClient {
     pub auth_tag_json: Option<String>,
 }
 
+mod query_coalescing;
+
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
 fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
@@ -486,10 +488,7 @@ impl RestClient {
     pub async fn query(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
-        let resp = self.bridge_post("/query", &body_bytes).await?;
-        resp.json()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))
+        self.query_json(body_bytes).await
     }
 
     /// Query events via `POST /query` with a raw NIP-01 filter document.
@@ -499,10 +498,7 @@ impl RestClient {
     pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
-        let resp = self.bridge_post("/query", &body_bytes).await?;
-        resp.json()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))
+        self.query_json(body_bytes).await
     }
 
     /// Query every historical event matching one raw filter across bounded pages.
