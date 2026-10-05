@@ -169,6 +169,11 @@ impl Db {
     /// Serializing the synchronous action with unarchive prevents the final
     /// lifecycle order from becoming "restored, then disconnected". The exact
     /// timestamp also rejects delayed commands from an earlier archive cycle.
+    ///
+    /// `FOR NO KEY UPDATE` conflicts with unarchive's `FOR UPDATE` and its
+    /// `archived_at` update, but not with the `FOR KEY SHARE` locks that child
+    /// inserts referencing `communities(id)` take, so the fence never waits
+    /// on ordinary community writes.
     #[datastore_span(name = "with_community_archive_fence", system = "postgresql")]
     pub async fn with_community_archive_fence<T>(
         &self,
@@ -189,7 +194,7 @@ impl Db {
                WHERE id = $1
                  AND deletion_state = 'active'
                  AND deleted_at IS NULL
-               FOR UPDATE"#,
+               FOR NO KEY UPDATE"#,
                 )
                 .bind(community_id.as_uuid())
                 .bind(archived_at)
@@ -216,6 +221,9 @@ impl Db {
     /// The row lock serializes the synchronous action with unarchive so a
     /// periodic lifecycle revalidation cannot disconnect a community after it
     /// has been restored. Missing community ids are also treated as inactive.
+    /// It runs for every bound community on each revalidation tick, so it takes
+    /// `FOR NO KEY UPDATE` for the same reason as
+    /// [`Self::with_community_archive_fence`].
     #[datastore_span(name = "with_inactive_community_fence", system = "postgresql")]
     pub async fn with_inactive_community_fence<T>(
         &self,
@@ -234,7 +242,7 @@ impl Db {
                       deleted_at IS NOT NULL OR deletion_state <> 'active'
                FROM communities
                WHERE id = $1
-               FOR UPDATE"#,
+               FOR NO KEY UPDATE"#,
                 )
                 .bind(community_id.as_uuid())
                 .fetch_optional(&mut *tx)
