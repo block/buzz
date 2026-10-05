@@ -1,6 +1,11 @@
 import 'dart:async';
+import 'dart:ui' as ui;
+
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:buzz/shared/widgets/page_indicator.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1094,6 +1099,13 @@ void main() {
         await tester.pump();
 
         expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+        final spinner = find.byType(BuzzLoadingIndicator);
+        expect(tester.getSize(spinner), const Size.square(18));
+        expect(
+          tester.widget<BuzzLoadingIndicator>(spinner).color,
+          tester.element(spinner).colors.onSecondaryContainer,
+        );
+
         expect(find.byType(CircularProgressIndicator), findsNothing);
         expect(
           find.bySemanticsLabel('Cancel voice note loading'),
@@ -1666,29 +1678,16 @@ Photos
             findsOneWidget,
           );
           expect(
-            find.byKey(const ValueKey('message-media-image-viewer-filmstrip')),
-            findsOneWidget,
-          );
-          expect(
-            find.byKey(
-              const ValueKey('message-media-image-viewer-thumbnail:1'),
-            ),
+            find.byKey(const ValueKey('message-media-image-viewer-pagination')),
             findsOneWidget,
           );
           final displayedImage = tester.widget<MediaImage>(
             find.byKey(const ValueKey('message-media-image-viewer-image:1')),
           );
           expect(displayedImage.decodeWidth, isNotNull);
-          final selectedThumbnailClip = tester.widget<ClipRRect>(
-            find.byKey(
-              const ValueKey('message-media-image-viewer-thumbnail-clip:1'),
-            ),
-          );
-          final selectedThumbnailRadius =
-              selectedThumbnailClip.borderRadius as BorderRadius;
           expect(
-            selectedThumbnailRadius.topLeft.x,
-            closeTo(Radii.sm - 2.5, 0.01),
+            tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
+            1,
           );
 
           await tester.fling(
@@ -1698,111 +1697,203 @@ Photos
           );
           await tester.pumpAndSettle();
 
-          final thirdThumbnail = find.byKey(
-            const ValueKey('message-media-image-viewer-thumbnail:2'),
+          expect(
+            tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
+            2,
           );
-          final thirdSemantics = tester.widget<Semantics>(
-            find
-                .ancestor(of: thirdThumbnail, matching: find.byType(Semantics))
-                .first,
-          );
-          expect(thirdSemantics.properties.selected, isTrue);
+          expect(find.bySemanticsLabel('Image 3 of 3'), findsOneWidget);
         },
       );
 
       testWidgets(
-        'keeps adjacent carousel images active and ends with a gutter',
+        'paints neighboring photos through the avatar gutter after paging',
         (tester) async {
-          const first = 'https://example.com/media/gutter-one.png';
-          const second = 'https://example.com/media/gutter-two.png';
+          const connectivity = MethodChannel(
+            'dev.fluttercommunity.plus/connectivity_status',
+          );
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            connectivity,
+            (_) async => null,
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(connectivity, null),
+          );
+          _setSurfaceSize(tester, const Size(390, 844));
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          const urls = [
+            'https://example.com/media/gutter-one.png',
+            'https://example.com/media/gutter-two.png',
+            'https://example.com/media/gutter-three.png',
+          ];
+          final boundaryKey = GlobalKey();
           await tester.pumpWidget(
             _testable(
-              const MessageContent(
-                content:
-                    '''
-![image]($first)
-![image]($second)
-''',
-                tags: [
-                  ['imeta', 'url $first', 'm image/png'],
-                  ['imeta', 'url $second', 'm image/png'],
-                ],
+              RepaintBoundary(
+                key: boundaryKey,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 64, right: 16),
+                  child: MessageContent(
+                    mediaCarouselTrailingOverflow: 16,
+                    content: urls.map((url) => '![image]($url)').join('\n'),
+                    tags: [
+                      for (final url in urls)
+                        ['imeta', 'url $url', 'm image/png'],
+                    ],
+                  ),
+                ),
               ),
             ),
           );
           await tester.pumpAndSettle();
-
           final carousel = find.byKey(const ValueKey('message-media-carousel'));
-          final pageViewFinder = find.descendant(
-            of: carousel,
-            matching: find.byType(PageView),
+          final scroll = tester.widget<CustomScrollView>(
+            find.descendant(
+              of: carousel,
+              matching: find.byType(CustomScrollView),
+            ),
           );
-          final pageView = tester.widget<PageView>(pageViewFinder);
+          final controller = scroll.controller! as PageController;
+          final first = find.byKey(
+            ValueKey('message-media-carousel-item:${urls[0]}'),
+          );
+          expect(tester.getRect(first).left, 64);
+          final sampleY = tester.getRect(first).top.toInt() + 30;
 
-          expect(pageView.allowImplicitScrolling, isTrue);
-          expect(pageView.clipBehavior, Clip.none);
+          Future<List<int>> pixel(int x) async {
+            return (await tester.runAsync(() async {
+              final boundary =
+                  boundaryKey.currentContext!.findRenderObject()!
+                      as RenderRepaintBoundary;
+              final image = await boundary.toImage(pixelRatio: 1);
+              final bytes = (await image.toByteData(
+                format: ui.ImageByteFormat.rawRgba,
+              ))!;
+              final offset = (sampleY * image.width + x) * 4;
+              final rgba = bytes.buffer.asUint8List().sublist(
+                offset,
+                offset + 4,
+              );
+              image.dispose();
+              return rgba;
+            }))!;
+          }
 
-          pageView.controller!.jumpToPage(1);
+          final photoColor = await pixel(100);
+          expect(await pixel(20), isNot(photoColor));
+          controller.jumpToPage(1);
           await tester.pumpAndSettle();
+          // A layout-only assertion missed the original bug: the old sliver
+          // retained the image but stopped painting it in this visible gutter.
+          expect(tester.getRect(first).right, closeTo(64 - Grid.half, 0.01));
+          expect(await pixel(20), photoColor);
+          await tester.pump(const Duration(seconds: 2));
+          expect(await pixel(20), photoColor);
 
-          final lastCard = find.byKey(
-            const ValueKey('message-media-carousel-item:$second'),
+          controller.jumpToPage(2);
+          await tester.pumpAndSettle();
+          final last = find.byKey(
+            ValueKey('message-media-carousel-item:${urls[2]}'),
           );
           expect(
-            tester.getRect(carousel).right - tester.getRect(lastCard).right,
-            Grid.gutter,
+            tester.getRect(carousel).right - tester.getRect(last).right,
+            closeTo(Grid.gutter, 0.01),
           );
+          expect(await pixel(20), photoColor);
+          controller.jumpToPage(0);
+          await tester.pumpAndSettle();
+          expect(tester.getRect(first).left, 64);
+          expect(await pixel(20), isNot(photoColor));
         },
       );
 
-      testWidgets(
-        'jumps to a selected gallery thumbnail when motion is disabled',
-        (tester) async {
-          const first = 'https://example.com/media/reduced-motion-one.png';
-          const second = 'https://example.com/media/reduced-motion-two.png';
-          await tester.pumpWidget(
-            _testable(
-              const MessageContent(
-                content:
-                    '''
+      testWidgets('jumps to a selected gallery dot when motion is disabled', (
+        tester,
+      ) async {
+        const first = 'https://example.com/media/reduced-motion-one.png';
+        const second = 'https://example.com/media/reduced-motion-two.png';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '''
 ![image]($first)
 ![image]($second)
 ''',
-                tags: [
-                  ['imeta', 'url $first', 'm image/png'],
-                  ['imeta', 'url $second', 'm image/png'],
-                ],
-              ),
-              disableAnimations: true,
+              tags: [
+                ['imeta', 'url $first', 'm image/png'],
+                ['imeta', 'url $second', 'm image/png'],
+              ],
             ),
-          );
-          await tester.pumpAndSettle();
+            disableAnimations: true,
+          ),
+        );
+        await tester.pumpAndSettle();
 
-          await tester.tap(
-            find.byKey(const ValueKey('message-media-carousel-item:$first')),
-          );
-          await tester.pumpAndSettle();
-          await tester.tap(
-            find.byKey(
-              const ValueKey('message-media-image-viewer-thumbnail:1'),
+        await tester.tap(
+          find.byKey(const ValueKey('message-media-carousel-item:$first')),
+        );
+        await tester.pumpAndSettle();
+        final indicatorFinder = find.byType(PageIndicator);
+        await tester.tap(find.byKey(const ValueKey('page-indicator-dot-1')));
+        await tester.pump();
+        expect(tester.widget<PageIndicator>(indicatorFinder).selected, 1);
+        final pages = tester.widget<PageView>(
+          find.byKey(const ValueKey('message-media-image-viewer-pages')),
+        );
+        expect(pages.controller!.page, 1);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('uses glass photo controls and image pagination on iOS', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(
+          _testable(
+            MediaImageViewerPage(
+              imageUrl: 'https://example.com/one.png',
+              heroTag: 'one',
+              galleryItems: const [
+                MediaViewerImage(
+                  url: 'https://example.com/one.png',
+                  heroTag: 'one',
+                ),
+                MediaViewerImage(
+                  url: 'https://example.com/two.png',
+                  heroTag: 'two',
+                ),
+              ],
+              onReply: () {},
+              onMore: (_, _) {},
             ),
-          );
-          await tester.pumpAndSettle();
-
-          final selectedThumbnail = tester.widget<Semantics>(
-            find
-                .ancestor(
-                  of: find.byKey(
-                    const ValueKey('message-media-image-viewer-thumbnail:1'),
-                  ),
-                  matching: find.byType(Semantics),
-                )
-                .first,
-          );
-          expect(selectedThumbnail.properties.selected, isTrue);
-          expect(tester.takeException(), isNull);
-        },
-      );
+          ),
+        );
+        await tester.pumpAndSettle();
+        final views = tester.widgetList<UiKitView>(find.byType(UiKitView));
+        final pagination = views.singleWhere(
+          (view) => view.viewType == 'buzz/theme_pagination_glass',
+        );
+        final params = pagination.creationParams! as Map<String, Object>;
+        expect(params['accessibilityLabel'], 'Image');
+        expect(params['containerHeight'], 48);
+        expect(params['brightness'], 'dark');
+        expect(params['count'], 2);
+        expect(params['selected'], 0);
+        final buttons = views.where(
+          (view) => view.viewType == 'buzz/navigation_glass',
+        );
+        expect(
+          buttons.map(
+            (view) => (view.creationParams! as Map<String, Object>)['icon'],
+          ),
+          unorderedEquals(['reply', 'more']),
+        );
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      });
 
       testWidgets('resets carousel paging when gallery images change', (
         tester,
@@ -1828,10 +1919,10 @@ Photos
 
         await tester.pumpWidget(gallery(firstGallery));
         await tester.pumpAndSettle();
-        final firstCarousel = tester.widget<PageView>(
+        final firstCarousel = tester.widget<CustomScrollView>(
           find.descendant(
             of: find.byKey(const ValueKey('message-media-carousel')),
-            matching: find.byType(PageView),
+            matching: find.byType(CustomScrollView),
           ),
         );
 
@@ -1841,14 +1932,17 @@ Photos
           1200,
         );
         await tester.pumpAndSettle();
-        expect(firstCarousel.controller!.page, greaterThan(0));
+        expect(
+          (firstCarousel.controller! as PageController).page,
+          greaterThan(0),
+        );
 
         await tester.pumpWidget(gallery(secondGallery));
         await tester.pumpAndSettle();
-        final secondCarousel = tester.widget<PageView>(
+        final secondCarousel = tester.widget<CustomScrollView>(
           find.descendant(
             of: find.byKey(const ValueKey('message-media-carousel')),
-            matching: find.byType(PageView),
+            matching: find.byType(CustomScrollView),
           ),
         );
 
@@ -1856,7 +1950,7 @@ Photos
           secondCarousel.controller,
           isNot(same(firstCarousel.controller)),
         );
-        expect(secondCarousel.controller!.page, 0);
+        expect((secondCarousel.controller! as PageController).page, 0);
       });
 
       testWidgets(

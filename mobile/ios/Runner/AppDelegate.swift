@@ -41,6 +41,7 @@ import os.log
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
   private var huddleMediaPlugin: HuddleMediaPlugin?
@@ -241,6 +242,13 @@ import os.log
     nativeEmojiPickerCoordinator = NativeEmojiPickerCoordinator(
       messenger: messenger,
       parentViewController: nativeEmojiPickerRegistrar?.viewController
+    )
+
+    nativeConfirmationDialogCoordinator = NativeConfirmationDialogCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeConfirmationDialog"
+      )?.viewController
     )
 
     let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(

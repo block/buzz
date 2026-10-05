@@ -143,7 +143,7 @@ class _TypingTextShimmer extends HookWidget {
         animation: animation,
         child: label,
         builder: (context, child) {
-          final center = 1.5 - (animation.value * 3);
+          final center = -1.5 + (animation.value * 3);
           return ShaderMask(
             key: const ValueKey('channel-typing-shimmer'),
             blendMode: BlendMode.srcIn,

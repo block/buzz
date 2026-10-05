@@ -34,8 +34,8 @@ void presenceTests() {
       ),
     );
     await tester.pumpAndSettle();
-    final avatar = find.byKey(const ValueKey('dm-header-avatar'));
-    final bounds = tester.getRect(avatar);
+    final header = find.byKey(const ValueKey('dm-header-text-stack'));
+    final center = tester.getCenter(header).dx;
     for (final entry in <String?, String>{
       null: 'Unknown',
       'online': 'Online',
@@ -51,10 +51,11 @@ void presenceTests() {
         entry.value,
       );
       expect(
-        tester.widget<MaskedAvatarBadge>(avatar).badge,
-        entry.key == null ? isNull : isNotNull,
+        find.byKey(const ValueKey('dm-header-presence-dot')),
+        entry.key == null ? findsNothing : findsOneWidget,
       );
-      expect(tester.getRect(avatar), bounds);
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
+      expect(tester.getCenter(header).dx, center);
       await _capturePresence(tester, 'dm-${entry.value}');
     }
     cache.setPresence(null);

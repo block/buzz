@@ -22,13 +22,17 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
-private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
+final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
+  var maximumWidth: CGFloat = 240 {
+    didSet { if maximumWidth != oldValue { invalidateIntrinsicContentSize() } }
+  }
   var onActivate: (() -> Void)?
   var onExpiryPressed: ((String) -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
   private var avatarView: UIImageView?
   private var presenceView: UIView?
+  private var subtitlePresenceView: UIView?
   private var expiryView: UIButton?
 
   init(title: String?, subtitle: String, color: UIColor) {
@@ -45,6 +49,9 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
       label.adjustsFontForContentSizeCategory = false
       addSubview(label)
     }
+    // Flutter creates platform views with a zero frame. Keep a nonzero
+    // intrinsic width and let UINavigationBar compress it between its items.
+    setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     isAccessibilityElement = true
     accessibilityTraits = .button
     let tap = UITapGestureRecognizer(target: self, action: #selector(activate))
@@ -71,6 +78,17 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
     }
   }
 
+  func setSubtitlePresence(_ color: UIColor) {
+    let dot = UIView()
+    dot.backgroundColor = color
+    dot.layer.cornerRadius = 3
+    dot.isAccessibilityElement = false
+    dot.accessibilityIdentifier = "dm-navigation-status-dot"
+    addSubview(dot)
+    subtitlePresenceView = dot
+    invalidateIntrinsicContentSize()
+  }
+
   func setEphemeralStatus(_ label: String) {
     let clock = UIButton(type: .custom)
     clock.setImage(UIImage(systemName: "clock"), for: .normal)
@@ -86,8 +104,14 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
   }
 
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-    var touched = touch.view
-    while let view = touched {
+    acceptsTitleTouch(in: touch.view)
+  }
+
+  // UIKit can wrap titleView in a UIControl. Only controls inside our title
+  // (such as the retention disclosure) should consume the title tap.
+  func acceptsTitleTouch(in touchedView: UIView?) -> Bool {
+    var touched = touchedView
+    while let view = touched, view !== self {
       if view is UIControl { return false }
       touched = view.superview
     }
@@ -105,7 +129,7 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width) + 16 + (avatarView == nil ? 0 : 40) + (expiryView == nil ? 0 : 44),
+    CGSize(width: min(maximumWidth, max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width + (subtitlePresenceView == nil ? 0 : 12)) + 16 + (avatarView == nil ? 0 : 40) + (expiryView == nil ? 0 : 44)),
            height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
   }
 
@@ -131,6 +155,14 @@ private final class NavigationTitleView: UIView, UIGestureRecognizerDelegate {
                               y: 0, width: 44, height: bounds.height)
     titleLabel.frame = CGRect(x: textX, y: top, width: textWidth, height: titleHeight)
     subtitleLabel.frame = CGRect(x: textX, y: top + titleHeight, width: textWidth, height: subtitleHeight)
+    if let dot = subtitlePresenceView {
+      let labelWidth = min(subtitleLabel.intrinsicContentSize.width, max(0, textWidth - 12))
+      let groupX = textX + (textWidth - labelWidth - 12) / 2
+      dot.frame = CGRect(x: rtl ? groupX + labelWidth + 6 : groupX,
+                         y: top + titleHeight + (subtitleHeight - 6) / 2, width: 6, height: 6)
+      subtitleLabel.frame = CGRect(x: rtl ? groupX : groupX + 12,
+                                   y: top + titleHeight, width: labelWidth, height: subtitleHeight)
+    }
     let avatarX: CGFloat = rtl ? bounds.width - 40 : 8
     avatarView?.frame = CGRect(x: avatarX, y: (bounds.height - 32) / 2, width: 32, height: 32)
     presenceView?.frame = CGRect(x: avatarX + (rtl ? 0 : 24), y: (bounds.height - 32) / 2 + 24, width: 8, height: 8)
@@ -176,6 +208,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var measuredCategory: UIContentSizeCategory?
   private var measuring = false
   private var metrics: [String: Any]?
+  private weak var trackedAvatar: UIButton?
+  private var reportedAvatarFrame: CGRect?
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -202,6 +236,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     channel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
       case "configure": self?.configure(call.arguments as? [String: Any] ?? [:])
+      case "prepareForReveal":
+        UIView.performWithoutAnimation {
+          self?.container.setNeedsLayout()
+          self?.container.layoutIfNeeded()
+        }
       case "scroll":
         self?.setScrollOffset((call.arguments as? NSNumber)?.doubleValue ?? 0)
       default: result(FlutterMethodNotImplemented); return
@@ -227,11 +266,30 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.layoutIfNeeded()
     measureIfNeeded()
     applyScroll()
+    reportAvatarBounds()
+  }
+
+  private func reportAvatarBounds() {
+    guard let avatar = trackedAvatar, avatar.window != nil, avatar.bounds.width > 0 else { return }
+    avatar.layoutIfNeeded()
+    guard let image = avatar.imageView, image.bounds.width > 0 else { return }
+    let frame = image.convert(image.bounds, to: container)
+    guard frame != reportedAvatarFrame else { return }
+    reportedAvatarFrame = frame
+    DispatchQueue.main.async { [weak self] in
+      self?.channel.invokeMethod("avatarBounds", arguments: [
+        "id": "leading", "x": frame.minX, "y": frame.minY,
+        "width": frame.width, "height": frame.height
+      ])
+    }
   }
 
   private func configure(_ args: [String: Any]) {
     navigation.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
     material.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
+    // Refresh the system material tint whenever the Flutter theme changes.
+    material.contentView.backgroundColor = args["background"] is NSNumber
+      ? Self.color(args["background"]).withAlphaComponent(0.25) : .clear
     let bar = navigation.navigationBar
     let color = Self.color(args["foreground"])
     bar.tintColor = color
@@ -248,9 +306,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let largeTitle = args["largeTitle"] as? Bool == true
     if bar.prefersLargeTitles != largeTitle { measuredWidth = 0 }
     bar.prefersLargeTitles = largeTitle
-    // Compact chat headers can open over a bottom-anchored timeline before
-    // Flutter emits any scroll notification. Keep their title readable at rest.
-    material.alpha = largeTitle ? min(1, offset / 12) : 1
+    // A title alone does not need a backdrop. Reveal material only as the
+    // page scrolls beneath the navigation controls, for every title size.
+    material.alpha = min(1, offset / 12)
     // Use the same ultra-thin material and soft lower edge on every page.
     // Compact titles have a member-count line, so begin their fade below it
     // rather than washing out the subtitle or ending in a hard rectangle.
@@ -279,6 +337,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         button.setAvatar(makeItem(avatar).image,
                          presence: args["titlePresenceColor"] is NSNumber ? Self.color(args["titlePresenceColor"]) : nil)
       }
+      if args["titleAvatar"] as? [String: Any] == nil, args["titlePresenceColor"] is NSNumber {
+        button.setSubtitlePresence(Self.color(args["titlePresenceColor"]))
+      }
       if let label = args["ephemeralLabel"] as? String {
         button.setEphemeralStatus(label)
       }
@@ -288,6 +349,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       item.titleView = nil
     }
     item.largeTitleDisplayMode = bar.prefersLargeTitles ? .always : .never
+    trackedAvatar = nil
+    reportedAvatarFrame = nil
     if let leading = args["leading"] as? [String: Any] {
       item.leftBarButtonItems = [makeItem(leading)]
     } else if args["back"] as? Bool == true {
@@ -338,8 +401,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
 
   private func setScrollOffset(_ value: CGFloat) {
     offset = max(0, value)
-    material.alpha = navigation.navigationBar.prefersLargeTitles ? min(1, offset / 12) : 1
+    material.alpha = min(1, offset / 12)
     applyScroll()
+    reportAvatarBounds()
   }
 
   private func applyScroll() {
@@ -376,6 +440,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       ? UIBarButtonItem(primaryAction: action)
       : UIBarButtonItem(title: action.title, image: action.image, primaryAction: nil,
                         menu: UIMenu(children: children.map(makeAction)))
+    if #available(iOS 26.0, *) {
+      item.hidesSharedBackground = data["plain"] as? Bool == true
+    }
     item.accessibilityLabel = data["label"] as? String
     item.isEnabled = data["enabled"] as? Bool == true
     if data["avatarInitial"] is String { item.title = nil }
@@ -421,6 +488,27 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         UIBezierPath(ovalIn: CGRect(x: 19.5, y: 1.5, width: 7, height: 7)).fill()
       }.withRenderingMode(.alwaysOriginal)
       item.accessibilityValue = data["activityLabel"] as? String
+    }
+    if data["tracksAvatarBounds"] as? Bool == true, data["id"] as? String == "leading",
+       data["avatarInitial"] is String {
+      // An explicit native button gives Flutter a public, measured destination
+      // without depending on UINavigationBar's private view hierarchy.
+      let button = UIButton(type: .custom)
+      // UIKit adds the glass button's own padding around this custom view.
+      // Match the 36-point image on both axes so that glass stays circular.
+      button.frame = CGRect(x: 0, y: 0, width: 36, height: 36)
+      button.widthAnchor.constraint(equalToConstant: 36).isActive = true
+      button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+      button.setImage(item.image?.withAlignmentRectInsets(.zero), for: .normal)
+      button.addAction(action, for: .touchUpInside)
+      button.isEnabled = item.isEnabled
+      button.accessibilityLabel = item.accessibilityLabel
+      button.accessibilityIdentifier = "community-navigation-avatar"
+      let hidden = data["avatarHidden"] as? Bool == true
+      button.alpha = hidden ? 0 : 1
+      button.accessibilityElementsHidden = hidden
+      trackedAvatar = button
+      return UIBarButtonItem(customView: button)
     }
     return item
   }
