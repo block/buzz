@@ -89,6 +89,10 @@ impl Db {
         // Canonical timeline roots share an empty (present) root sentinel.
         // Tags are bounded before transfer; oversized/corrupt evidence stays
         // unknown, never falsely top-level/unmentioned/read.
+        // Latest comes from the unread scan, so its ID arrives no earlier than
+        // anything counted; the shallow probe answers only when the horizon
+        // holds no message. Both are newest-first by author time, so the deeper
+        // one finds the same greatest author time whenever the probe finds any.
         let rows = sqlx::query(
             r#"WITH roster AS MATERIALIZED (
                 SELECT c.id,c.name,c.channel_type::text AS channel_type,
@@ -100,17 +104,19 @@ impl Db {
                     AND ($9::uuid[] IS NULL OR c.id=ANY($9))
                 ORDER BY c.id LIMIT $4
              )
-             SELECT r.*, latest.latest_message_id, latest.latest_message_at,
-                (latest.latest_message_id IS NOT NULL OR latest.candidates <= $5-1) AS latest_message_complete,
+             SELECT r.*, COALESCE(e.latest_message_id, latest.latest_message_id) AS latest_message_id,
+                COALESCE(e.latest_message_at, latest.latest_message_at) AS latest_message_at,
+                (COALESCE(e.latest_message_id, latest.latest_message_id) IS NOT NULL
+                    OR latest.candidates <= $5-1) AS latest_message_complete,
                 e.scanned,COALESCE(e.evidence,'[]'::jsonb) AS evidence FROM roster r
              LEFT JOIN LATERAL (
                 WITH candidates AS MATERIALIZED (
-                    SELECT id,created_at,kind,deleted_at FROM events
+                    SELECT id,created_at,received_at,kind,deleted_at FROM events
                     WHERE community_id=$1 AND channel_id=r.id
                     ORDER BY created_at DESC,id LIMIT $5
                 )
                 SELECT count(*) AS candidates,
-                    (array_agg(encode(id,'hex') ORDER BY created_at DESC,id)
+                    (array_agg(encode(id,'hex') ORDER BY received_at DESC,id)
                         FILTER (WHERE kind=ANY($6) AND deleted_at IS NULL))[1] AS latest_message_id,
                     (array_agg(extract(epoch FROM created_at)::bigint ORDER BY created_at DESC,id)
                         FILTER (WHERE kind=ANY($6) AND deleted_at IS NULL))[1] AS latest_message_at
@@ -120,13 +126,13 @@ impl Db {
                 AND cf.channel_id=r.id AND cf.root_id=''::bytea
              LEFT JOIN LATERAL (
                 WITH candidates AS MATERIALIZED (
-                    SELECT id,pubkey,created_at,deleted_at,kind,tags
+                    SELECT id,pubkey,created_at,received_at,deleted_at,kind,tags
                     FROM events WHERE community_id=$1 AND channel_id=r.id AND created_at >= $7
                     ORDER BY created_at DESC,id LIMIT $8
                 ), classified AS (
                     SELECT e.*, tm.root_event_id AS root, tm.parent_event_id AS parent,
                         COALESCE(tm.root_event_id<>e.id,false) AS is_reply,
-                        COALESCE(extract(epoch FROM e.created_at)::bigint <=
+                        COALESCE(e.received_at <=
                             CASE WHEN tm.root_event_id IS NOT NULL AND tm.root_event_id<>e.id
                                 THEN GREATEST(tf.through_timestamp, cf.threads_through_timestamp)
                                 ELSE cf.through_timestamp END,false) AS covered
@@ -159,14 +165,22 @@ impl Db {
                              FROM jsonb_array_elements(tags) t(tag)
                              WHERE tag->>0 IN ('p','broadcast','e')) ELSE NULL END AS facts,
                         count(*) AS n,
-                        extract(epoch FROM max(created_at))::bigint AS newest_at,
-                        (array_agg(encode(id,'hex') ORDER BY created_at DESC,id))[1] AS newest_id
+                        (extract(epoch FROM max(received_at))*1000000)::bigint AS newest_arrival,
+                        (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS newest_id,
+                        (array_agg(extract(epoch FROM created_at)::bigint
+                            ORDER BY received_at DESC,id))[1] AS newest_at
                     FROM classified
                     WHERE NOT covered OR root IS NULL
                     GROUP BY 1,2,3,4,5
+                ), scan AS (
+                    SELECT count(*) AS scanned,
+                        (array_agg(encode(id,'hex') ORDER BY received_at DESC,id)
+                            FILTER (WHERE kind=ANY($6) AND deleted_at IS NULL))[1] AS latest_message_id,
+                        max(extract(epoch FROM created_at)::bigint)
+                            FILTER (WHERE kind=ANY($6) AND deleted_at IS NULL) AS latest_message_at
+                    FROM candidates
                 )
-                SELECT (SELECT count(*) FROM candidates) AS scanned,
-                    jsonb_agg(to_jsonb(grouped)) AS evidence FROM grouped
+                SELECT scan.*, (SELECT jsonb_agg(to_jsonb(grouped)) FROM grouped) AS evidence FROM scan
              ) e ON true ORDER BY r.id"#,
         ).bind(community.as_uuid()).bind(actor_bytes.as_slice()).bind(after)
             .bind((limit+1) as i64).bind((MAX_CHANNEL_SCAN+1) as i64)
@@ -228,12 +242,13 @@ impl Db {
                 let replies = Replies {
                     n,
                     newest: (
-                        e["newest_at"].as_i64().ok_or_else(invalid_newest)?,
+                        e["newest_arrival"].as_i64().ok_or_else(invalid_newest)?,
                         e["newest_id"]
                             .as_str()
                             .ok_or_else(invalid_newest)?
                             .to_owned(),
                     ),
+                    newest_at: e["newest_at"].as_i64().ok_or_else(invalid_newest)?,
                 };
                 // A directed reply counts whatever its conversation. Any other
                 // reply counts only in one of the actor's conversations.
@@ -293,7 +308,7 @@ impl Db {
                     root_id: hex::encode(root),
                     unread: ReadCount::from_evidence(thread.n, complete),
                     latest_reply_id: thread.newest.1,
-                    latest_reply_at: thread.newest.0,
+                    latest_reply_at: thread.newest_at,
                 });
             }
             channel.unread = ReadCount::from_evidence(unread, complete);
@@ -318,8 +333,10 @@ impl Db {
 /// thread's counted total.
 struct Replies {
     n: u32,
-    /// Newest of them: (author seconds, lowercase hex ID).
+    /// Last of them to arrive: (arrival microseconds, lowercase hex ID).
     newest: (i64, String),
+    /// Its author seconds.
+    newest_at: i64,
 }
 
 /// Add replies that count to their thread.
@@ -331,11 +348,12 @@ fn count(threads: &mut HashMap<Vec<u8>, Replies>, root: Vec<u8>, replies: Replie
         Entry::Occupied(mut slot) => {
             let thread = slot.get_mut();
             thread.n += replies.n;
-            // Newest first; equal author times break toward the smaller ID.
+            // Latest arrival first; equal arrivals break toward the smaller ID.
             if (replies.newest.0, Reverse(&replies.newest.1))
                 > (thread.newest.0, Reverse(&thread.newest.1))
             {
                 thread.newest = replies.newest;
+                thread.newest_at = replies.newest_at;
             }
         }
     }

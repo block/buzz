@@ -59,7 +59,7 @@ impl Db {
                 };
             // A thread's effective prefix includes the channel's whole-channel cut,
             // exactly as the sidebar projection counts it.
-            let prefix: Option<i64> = sqlx::query_scalar(
+            let prefix: Option<DateTime<Utc>> = sqlx::query_scalar(
                 "SELECT GREATEST(
                     (SELECT through_timestamp FROM personal_read_frontiers
                      WHERE community_id=$1 AND actor=$2 AND channel_id=$3 AND root_id=$4),
@@ -79,7 +79,7 @@ impl Db {
                 .filter_map(|id| writes::event_id(id))
                 .collect();
             let rows = sqlx::query(
-                "SELECT encode(e.id,'hex') AS id,e.kind,e.created_at,
+                "SELECT encode(e.id,'hex') AS id,e.kind,e.created_at,e.received_at,
                     e.deleted_at IS NOT NULL AS deleted,e.pubkey=$3 AS own,
                     CASE WHEN octet_length(e.tags::text)<=8192 THEN e.tags ELSE NULL END AS tags,
                     tm.root_event_id,tm.parent_event_id,c.channel_type::text AS channel_type
@@ -118,6 +118,7 @@ impl Db {
                             MessageReadState::Unavailable
                         } else {
                             let created: DateTime<Utc> = row.try_get("created_at")?;
+                            let received: DateTime<Utc> = row.try_get("received_at")?;
                             let kind: i32 = row.try_get("kind")?;
                             if !classification::eligible(
                                 kind,
@@ -127,7 +128,7 @@ impl Db {
                                 account.cutoff_ms,
                             ) {
                                 MessageReadState::NotCounted
-                            } else if prefix.is_some_and(|p| created.timestamp() <= p) {
+                            } else if prefix.is_some_and(|p| received <= p) {
                                 MessageReadState::Read
                             } else {
                                 let reason = classification::reason(
@@ -168,15 +169,12 @@ impl Db {
                     state,
                 });
             }
-            contexts.push(ContextState::Available {
-                through_timestamp: prefix,
-                messages,
-            });
+            contexts.push(ContextState::Available { messages });
         }
         let targets: Vec<_> = pending.iter().map(|(.., key)| key.clone()).collect();
         let members = participation::resolve(&mut tx, community, &actor_bytes, &targets).await?;
         for (context, message, key) in pending {
-            if let ContextState::Available { messages, .. } = &mut contexts[context] {
+            if let ContextState::Available { messages } = &mut contexts[context] {
                 settle(&mut messages[message].state, members.get(&key).copied());
             }
         }

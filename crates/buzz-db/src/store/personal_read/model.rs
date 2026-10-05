@@ -20,7 +20,7 @@ pub struct ReadTarget {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadIntent {
-    /// Advance a context through one fixed message, including equal times.
+    /// Advance a context through one fixed message, including equal arrivals.
     MarkThrough {
         /// Channel or canonical thread being marked.
         target: ReadTarget,
@@ -28,7 +28,7 @@ pub enum ReadIntent {
         message_id: String,
     },
     /// Advance the channel timeline and every thread in it through one fixed
-    /// message's author time. The anchor may be a reply; ancestry is irrelevant.
+    /// message's arrival time. The anchor may be a reply; ancestry is irrelevant.
     MarkChannelRead {
         /// Channel being marked, including all of its threads.
         channel_id: Uuid,
@@ -119,11 +119,14 @@ pub struct ChannelReadSummary {
     /// messages. This is not Desktop notification eligibility: follows and
     /// mutes do not change this count.
     pub attention: ReadCount,
-    /// Latest eligible nondeleted event ID, independent of read progress, author,
-    /// and the unread-tracking horizon.
+    /// Last eligible nondeleted event to arrive, inside the unread horizon when
+    /// any is, whatever its author or read progress: marking through it reads
+    /// the row.
     /// None proves absence only when latest_message_complete is true.
     pub latest_message_id: Option<String>,
-    /// Author time (Unix seconds) of latest_message_id; None exactly when it is None.
+    /// Display activity: the greatest author time (Unix seconds) among eligible
+    /// nondeleted events, not necessarily latest_message_id's own. None exactly
+    /// when it is None.
     pub latest_message_at: Option<i64>,
     /// Whether the latest lookup found a result or exhausted channel history.
     /// False means the bounded probe found none, but an unexamined tail remains.
@@ -149,7 +152,7 @@ pub struct ThreadReadSummary {
     pub root_id: String,
     /// Unread replies in this thread (same definition as the row count).
     pub unread: ReadCount,
-    /// Newest observed unread reply: a valid thread mark_through anchor.
+    /// Last observed unread reply to arrive: marking through it reads the thread.
     pub latest_reply_id: String,
     /// Author time (Unix seconds) of latest_reply_id.
     pub latest_reply_at: i64,
@@ -238,8 +241,6 @@ pub enum ContextState {
     Unknown,
     /// Context authority at the response snapshot.
     Available {
-        /// Fixed author-time prefix; null means no read progress.
-        through_timestamp: Option<i64>,
         /// Bounded explicit selectors, in request order.
         messages: Vec<ContextMessage>,
     },

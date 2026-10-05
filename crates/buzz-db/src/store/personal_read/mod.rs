@@ -1,7 +1,8 @@
 //! Private, signer-owned accessory read progress, separate from NIP-RS events.
 //!
-//! Timestamp prefixes and the unread horizon both use author time. Only fixed
-//! context intents advance prefixes, never a query scan cap.
+//! A frontier is the relay arrival time of the message a context was read
+//! through; the unread horizon alone uses author time. Only fixed context
+//! intents advance frontiers, never a query scan cap.
 
 mod classification;
 mod context;
@@ -23,3 +24,6 @@ mod projection_postgres_tests;
 
 #[cfg(test)]
 mod threads_postgres_tests;
+
+#[cfg(test)]
+mod arrival_postgres_tests;

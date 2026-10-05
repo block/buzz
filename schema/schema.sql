@@ -194,8 +194,9 @@ CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
     WHERE okta_user_id IS NOT NULL;
 
 -- Private accessory read progress. Never included in Nostr event queries.
--- Cutoffs and frontiers are both signed event time. An empty root_id denotes a
--- channel frontier.
+-- A frontier is the relay arrival time (events.received_at) of the message a
+-- context was read through; the unread cutoff alone is signed event time. An
+-- empty root_id denotes a channel frontier.
 CREATE TABLE personal_read_accounts (
     community_id UUID NOT NULL REFERENCES communities(id),
     actor BYTEA NOT NULL CHECK (octet_length(actor) = 32),
@@ -207,11 +208,10 @@ CREATE TABLE personal_read_frontiers (
     actor BYTEA NOT NULL,
     channel_id UUID NOT NULL,
     root_id BYTEA NOT NULL DEFAULT ''::bytea CHECK (octet_length(root_id) IN (0, 32)),
-    through_timestamp BIGINT NOT NULL CHECK (through_timestamp >= 0),
+    through_timestamp TIMESTAMPTZ NOT NULL,
     -- Whole-channel cut covering every thread; channel rows only.
-    threads_through_timestamp BIGINT
-        CHECK (threads_through_timestamp IS NULL
-            OR (threads_through_timestamp >= 0 AND root_id = ''::bytea)),
+    threads_through_timestamp TIMESTAMPTZ
+        CHECK (threads_through_timestamp IS NULL OR root_id = ''::bytea),
     PRIMARY KEY (community_id, actor, channel_id, root_id),
     FOREIGN KEY (community_id, actor)
         REFERENCES personal_read_accounts (community_id, actor) ON DELETE CASCADE,

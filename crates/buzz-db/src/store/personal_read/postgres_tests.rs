@@ -573,33 +573,41 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
             IntentOutcome::Applied
         );
     }
-    let earlier = EventBuilder::new(Kind::Custom(9), "earlier")
+    // Arrives after `event`; its earlier author time must not matter.
+    let later = EventBuilder::new(Kind::Custom(9), "later")
         .custom_created_at(nostr::Timestamp::from(event.created_at.as_secs() - 10))
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &earlier, Some(channel))
+    db.insert_event(community, &later, Some(channel))
         .await
         .unwrap();
-    let earlier = ReadIntent::MarkThrough {
-        target,
-        message_id: earlier.id.to_hex(),
-    };
-    assert_eq!(
-        db.apply_personal_read_intent(community, &actor.public_key(), &earlier)
-            .await
-            .unwrap(),
-        IntentOutcome::Applied,
-        "an earlier anchor applies without moving the frontier back"
-    );
-    let frontier: i64 = sqlx::query_scalar(
-        "SELECT through_timestamp FROM personal_read_frontiers WHERE community_id=$1 AND actor=$2",
+    for (anchor, why) in [
+        (&later, "a later arrival advances the frontier"),
+        (&event, "an earlier anchor applies without moving it back"),
+    ] {
+        let intent = ReadIntent::MarkThrough {
+            target: target.clone(),
+            message_id: anchor.id.to_hex(),
+        };
+        assert_eq!(
+            db.apply_personal_read_intent(community, &actor.public_key(), &intent)
+                .await
+                .unwrap(),
+            IntentOutcome::Applied,
+            "{why}"
+        );
+    }
+    let at_later_arrival: bool = sqlx::query_scalar(
+        "SELECT f.through_timestamp=e.received_at FROM personal_read_frontiers f, events e
+         WHERE f.community_id=$1 AND f.actor=$2 AND e.community_id=$1 AND e.id=$3",
     )
     .bind(community.as_uuid())
     .bind(actor.public_key().to_bytes().as_slice())
+    .bind(later.id.as_bytes().as_slice())
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(frontier, event.created_at.as_secs() as i64);
+    assert!(at_later_arrival);
     let stranger = Keys::generate();
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM personal_read_frontiers WHERE community_id=$1 AND actor=$2",
@@ -998,9 +1006,9 @@ async fn personal_read_covered_corruption_requires_canonical_matching_frontier()
         .unwrap();
     assert!(matches!(page.channels[0].unread, ReadCount::Unknown));
     sqlx::query("INSERT INTO personal_read_frontiers (community_id,actor,channel_id,root_id,through_timestamp)
-        VALUES ($1,$2,$3,$4,$5)")
+        VALUES ($1,$2,$3,$4,now())")
         .bind(community.as_uuid()).bind(actor.public_key().to_bytes().as_slice()).bind(channel)
-        .bind(root.id.as_bytes().as_slice()).bind(root.created_at.as_secs() as i64)
+        .bind(root.id.as_bytes().as_slice())
         .execute(&pool).await.unwrap();
     let page = db
         .personal_read_sidebar(
@@ -1021,7 +1029,7 @@ async fn personal_read_covered_corruption_requires_canonical_matching_frontier()
         ReadCount::Exact { value: 0 }
     ));
     // Removing canonical metadata must not let a channel frontier hide unknown
-    // ancestry/corruption, even though both timestamp frontiers cover the row.
+    // ancestry/corruption, even though both frontiers cover the row.
     sqlx::query("DELETE FROM thread_metadata WHERE community_id=$1 AND event_id=$2")
         .bind(community.as_uuid())
         .bind(reply.id.as_bytes().as_slice())

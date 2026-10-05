@@ -165,14 +165,14 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
     );
     assert!(row.threads.items.is_empty() && row.threads.complete);
 
-    // Late-arriving backdated reply is covered; a newer reply is not.
-    reply(&db, &pool, community, channel, &root, base + 5, vec![]).await;
+    // A reply that arrives after the cut is unread, however far backdated.
+    let late = reply(&db, &pool, community, channel, &root, base + 5, vec![]).await;
     let newer = reply(&db, &pool, community, channel, &root, base + 40, vec![]).await;
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(exact(&row.unread), Some(1));
+    assert_eq!(exact(&row.unread), Some(2));
     assert_eq!(row.threads.items[0].latest_reply_id, newer.id.to_hex());
 
-    // Contexts report and apply the same effective thread prefix.
+    // Contexts apply the same effective thread frontier.
     let page = db
         .personal_read_contexts(
             community,
@@ -183,15 +183,16 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
                     channel_id: channel,
                     root_id: Some(root.id.to_hex()),
                 },
-                message_ids: vec![second.id.to_hex(), newer.id.to_hex()],
+                message_ids: vec![second.id.to_hex(), late.id.to_hex(), newer.id.to_hex()],
             }],
         )
         .await
         .unwrap();
     let wire = serde_json::to_value(&page).unwrap();
-    assert_eq!(wire["contexts"][0]["through_timestamp"], (base + 30) as i64);
+    assert!(wire["contexts"][0].get("through_timestamp").is_none());
     assert_eq!(wire["contexts"][0]["messages"][0]["status"], "read");
     assert_eq!(wire["contexts"][0]["messages"][1]["status"], "unread");
+    assert_eq!(wire["contexts"][0]["messages"][2]["status"], "unread");
 }
 
 #[tokio::test]
@@ -199,7 +200,7 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
 async fn mark_channel_read_validates_anchor_without_ancestry_and_stays_independent() {
     let (db, pool, community, channel, actor, root) = fixture().await;
     let base = root.created_at.as_secs();
-    // Unresolved ancestry blocks ordinary marks, but not a time-only cut.
+    // Unresolved ancestry blocks ordinary marks, but not an arrival-only cut.
     let orphan_parent = "ab".repeat(32);
     let orphan = post(
         &db,
@@ -274,7 +275,7 @@ async fn mark_channel_read_validates_anchor_without_ancestry_and_stays_independe
         .await,
         IntentOutcome::Applied
     );
-    let cuts: Vec<Option<i64>> = sqlx::query_scalar(
+    let cuts: Vec<Option<chrono::DateTime<chrono::Utc>>> = sqlx::query_scalar(
         "SELECT threads_through_timestamp FROM personal_read_frontiers WHERE community_id=$1 AND actor=$2",
     )
     .bind(community.as_uuid())
@@ -286,7 +287,7 @@ async fn mark_channel_read_validates_anchor_without_ancestry_and_stays_independe
 
     // The schema admits the cut on channel rows only.
     let thread_cut = sqlx::query(
-        "UPDATE personal_read_frontiers SET threads_through_timestamp=1
+        "UPDATE personal_read_frontiers SET threads_through_timestamp=now()
          WHERE community_id=$1 AND actor=$2",
     )
     .bind(community.as_uuid())
@@ -308,7 +309,7 @@ async fn mark_channel_read_validates_anchor_without_ancestry_and_stays_independe
         IntentOutcome::Applied
     );
     assert!(sqlx::query(
-        "UPDATE personal_read_frontiers SET threads_through_timestamp=1
+        "UPDATE personal_read_frontiers SET threads_through_timestamp=now()
          WHERE community_id=$1 AND actor=$2 AND root_id<>''::bytea",
     )
     .bind(community.as_uuid())
@@ -376,23 +377,13 @@ async fn thread_summaries_order_cap_anchor_and_sum_to_reply_unread() {
         },
     )
     .await;
-    // Threads 0 and 1 tie on newest reply time; thread 2 has two equal-time
-    // replies and one directed reply.
+    // Threads 0 and 1 tie on newest reply time; thread 2 has one directed
+    // reply and two that arrive last, together.
     let mut anchors = Vec::new();
     for (i, root) in roots.iter().enumerate() {
         let at = base + 100 + [50, 50, 40, 30, 20, 10][i];
         anchors.push(reply(&db, &pool, community, channel, root, at, vec![]).await);
     }
-    let twin = reply(
-        &db,
-        &pool,
-        community,
-        channel,
-        &roots[2],
-        base + 140,
-        vec![],
-    )
-    .await;
     reply(
         &db,
         &pool,
@@ -403,6 +394,24 @@ async fn thread_summaries_order_cap_anchor_and_sum_to_reply_unread() {
         vec![Tag::parse(["p", &actor.public_key().to_hex()]).unwrap()],
     )
     .await;
+    let twin = reply(
+        &db,
+        &pool,
+        community,
+        channel,
+        &roots[2],
+        base + 140,
+        vec![],
+    )
+    .await;
+    sqlx::query(
+        "UPDATE events SET received_at=(SELECT received_at FROM events WHERE id=$1) WHERE id=$2",
+    )
+    .bind(twin.id.as_bytes().as_slice())
+    .bind(anchors[2].id.as_bytes().as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(exact(&row.unread), Some(8));
@@ -431,10 +440,11 @@ async fn thread_summaries_order_cap_anchor_and_sum_to_reply_unread() {
     assert_eq!(
         third.latest_reply_id,
         std::cmp::min(anchors[2].id.to_hex(), twin.id.to_hex()),
-        "equal reply times break toward the smaller ID"
+        "equal arrivals break toward the smaller ID"
     );
-    let newest = std::cmp::min(anchors[0].id.to_hex(), anchors[1].id.to_hex());
-    assert_eq!(row.latest_message_id, Some(newest));
+    // The row's anchor is its last arrival; its activity is the greatest
+    // author time, another message's.
+    assert_eq!(row.latest_message_id.as_ref(), Some(&third.latest_reply_id));
     assert_eq!(row.latest_message_at, Some((base + 150) as i64));
 
     // Reading one listed thread through its anchor completes the list.

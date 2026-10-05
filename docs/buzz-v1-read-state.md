@@ -51,12 +51,14 @@ Unknown request fields are rejected. Never turn a transport failure into read.
 `GET /buzz/v1/me/sidebar?limit=20&cursor=<exclusive-channel-uuid>` returns
 `account`, `channels`, and `next_cursor`. Omit the cursor on the first request.
 Each channel includes identity/name/type, archived and hidden flags, `unread`,
-`attention`, `latest_message_id`, `latest_message_at` (its author time in
-seconds; null exactly when the ID is null), `latest_message_complete`, and
-`threads`. Only joined, nondeleted channels are listed. Hidden/archived
-presentation remains client-owned. Each page has a writer-consistent snapshot;
-separate pages do not share a snapshot, and an unfinished traversal cannot prove
-channel removal.
+`attention`, `latest_message_id` (the last eligible message to arrive: the
+row's read anchor, see [Order](#order)), `latest_message_at` (the greatest
+author time among eligible messages, in seconds: display activity, not
+necessarily that message's own time; null exactly when the ID is null),
+`latest_message_complete`, and `threads`. Only joined, nondeleted channels are
+listed. Hidden/archived presentation remains client-owned. Each page has a
+writer-consistent snapshot; separate pages do not share a snapshot, and an
+unfinished traversal cannot prove channel removal.
 
 `GET /buzz/v1/me/sidebar?channel_ids=<uuid>,<uuid>` refreshes 1–20 unique
 channels in one snapshot, ordered by ID with `next_cursor: null`. It cannot be
@@ -73,9 +75,10 @@ Absence says nothing else about access to an open channel.
 
 Items are canonical roots with unread replies that count (see below), ordered
 by `latest_reply_at` descending, then `root_id`; at most 5. `latest_reply_id` is
-the newest such reply (equal times prefer the smaller ID) and a valid thread
-`mark_through` anchor. Replies that do not count are filtered out before the
-count, the newest reply and the cap are chosen. `unread` uses the row's
+the last such reply to arrive (equal arrivals prefer the smaller ID), so a
+thread `mark_through` at it reads every reply listed; `latest_reply_at` is its
+author time. Replies that do not count are filtered out before the count, the
+latest reply and the cap are chosen. `unread` uses the row's
 definition; every counted reply is also attention, so items carry no separate
 attention count. `complete=true` means the unread window was exhausted, no
 evidence had unresolved ancestry, unusable tags or undecided membership, and no
@@ -117,19 +120,20 @@ lower bounds or unknown. The sidebar counts a broadcast reply without asking
 which of the two reasons applies. This is not Desktop notification policy:
 follows and mutes do not affect these counts.
 
-The unread horizon defaults to 30 days (`BUZZ_V1_RETENTION_SECONDS`) and, like
-every frontier, is measured in author time (`created_at`): a message counts
-while its author time is at or after `account.cutoff_ms`. It filters
-unread/attention, not latest activity, event storage or frontier state. One
-clock has three consequences:
+The unread horizon defaults to 30 days (`BUZZ_V1_RETENTION_SECONDS`) and is
+measured in author time (`created_at`): a message counts while its author time
+is at or after `account.cutoff_ms`. It filters unread/attention, not latest
+activity, event storage or frontier state. Frontiers use a different clock,
+relay arrival (see [Order](#order)). Three consequences:
 
 - A message accepted late with an author time beyond the horizon (an import, a
   backfill, a long-offline sender) is excluded under the current horizon,
-  however recently the relay accepted it. It can still be latest.
+  however recently the relay accepted it. It can still be latest when the
+  horizon holds no message.
 - Unread expires at author time plus the horizon, so a future-dated author
   time extends how long a message counts.
-- Horizon and frontier order messages identically, so a context's unread set
-  is one author-time range: after the frontier and at or after the cutoff.
+- A context's unread set is two tests, not one range: arrived after the
+  frontier, and author time at or after the cutoff.
 
 A later configuration expansion can change counts without having lost progress.
 Latest activity is independent of actor and frontiers. A null latest ID proves
@@ -148,9 +152,8 @@ global export of frontiers. Example decoded `targets`:
 
 Omitting `root_id` selects the channel timeline. The result contains `account`
 and one `contexts` entry per request entry, in order. Context status is
-`available` (with nullable `through_timestamp` and `messages`), `unknown`, or
-`unavailable`. A thread context's `through_timestamp` is its effective prefix,
-including any whole-channel cut. Message status is `read`, `not_counted`,
+`available` (with `messages`), `unknown`, or `unavailable`. A thread context's
+frontier includes any whole-channel cut. Message status is `read`, `not_counted`,
 `unread` (with `reason`), `unknown`, or `unavailable`. Wrong-context, missing
 and forbidden selectors share unavailable. Status is decided in this order:
 ancestry and context; eligibility (`not_counted` for own, deleted, other kinds
@@ -181,21 +184,49 @@ not assert a client has refreshed. Retry the same operands, never substitute
 latest. Keep pending intent durably on the client until its outcome is resolved.
 
 A mark-through validates a fixed message and advances its context's monotone
-second-resolution author-time prefix. Equal-time messages and later-arriving
-backdated messages at/below it are covered. Channel and thread frontiers never
-inherit in either direction. Opening a view is not itself a reading action;
-client dwell/focus policy determines when to send an actual observed anchor.
-Old or deleted valid anchors may advance a frontier.
+frontier to that message's relay arrival (see [Order](#order)). Channel and
+thread frontiers never inherit in either direction. Opening a view is not
+itself a reading action; client dwell/focus policy determines when to send an
+actual observed anchor. Old or deleted valid anchors may advance a frontier.
 
 `mark_channel_read` is the one whole-channel cut: it advances the channel
 timeline and every thread in that channel, including unlisted ones, through the
-anchor's author time. The anchor must be an accessible eligible-kind message in
+anchor's arrival. The anchor must be an accessible eligible-kind message in
 the channel, top-level or reply, deleted or not; ancestry is not checked. A
 reply is read at or below the greater of its thread frontier and this cut. An
-anchor that no longer exists is `blocked`. `latest_message_id` is a natural
-anchor. A null ID with `latest_message_complete=false` does not prove empty
-history; it only leaves the client without an anchor. Thread marks and channel `mark_through`
-never set the cut.
+anchor that no longer exists is `blocked`. `latest_message_id` is the anchor
+that reads the whole row. A null ID with `latest_message_complete=false` does
+not prove empty history; it only leaves the client without an anchor. Thread
+marks and channel `mark_through` never set the cut.
+
+### Order
+
+A frontier is the relay arrival time (`events.received_at`) of the message a
+context was read through, never its author time, which the sender chooses and
+the relay accepts up to 15 minutes either way. Everything that arrived at or
+before the anchor is read, whatever its author time. A message that arrives
+later is unread even when backdated, and a future-dated anchor reads nothing
+that arrives after it.
+
+The order is the relay's and is not exposed: no response carries a frontier,
+and no field lets a client compute what a mark will cover. Send the anchors the
+user actually saw, let the relay take the greatest, and ask a context which
+messages are read. Do not compare author times, IDs or local receipt order to
+drop one pending anchor in favor of another.
+
+Arrival is the accepting relay process's clock, read just before the insert, at
+microsecond resolution. Three limits follow, none of which strands a badge:
+
+- It is not commit order. An insert that commits after a later-stamped message
+  was already marked read lands read.
+- Relay processes with different clocks can stamp out of true order by their
+  skew.
+- Messages with the identical stamp are read together.
+
+`latest_message_id` is the last message to arrive among those the unread count
+examined: the 4,096 most recent events by author time inside the horizon. So
+marking through it reads everything counted. When the horizon holds no message,
+it is the last to arrive among the channel's 256 most recent events.
 
 There is no import of earlier client read state: an account starts with no
 frontiers, and the horizon bounds what that can show as unread. Manual unread

@@ -82,7 +82,7 @@ async fn access(
 
 struct Message {
     id: Vec<u8>,
-    timestamp: i64,
+    received_at: DateTime<Utc>,
     root: Option<Vec<u8>>,
 }
 
@@ -96,7 +96,7 @@ async fn message(
     kinds: Option<&[i32]>,
 ) -> Result<Option<Message>> {
     let row = sqlx::query(
-        "SELECT e.id, e.created_at, e.tags, tm.root_event_id
+        "SELECT e.id, e.received_at, e.tags, tm.root_event_id
          FROM events e LEFT JOIN thread_metadata tm ON tm.community_id=e.community_id
              AND tm.event_created_at=e.created_at AND tm.event_id=e.id AND tm.channel_id=e.channel_id
          WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3
@@ -104,7 +104,7 @@ async fn message(
          LIMIT 1",
     ).bind(community.as_uuid()).bind(channel).bind(id).bind(kinds).fetch_optional(&mut *conn).await?;
     row.map(|row| {
-        let timestamp: DateTime<Utc> = row.try_get("created_at")?;
+        let received_at: DateTime<Utc> = row.try_get("received_at")?;
         let id: Vec<u8> = row.try_get("id")?;
         let root: Option<Vec<u8>> = row.try_get("root_event_id")?;
         let tags: serde_json::Value = row.try_get("tags")?;
@@ -119,22 +119,22 @@ async fn message(
         }
         Ok(Message {
             id,
-            timestamp: timestamp.timestamp(),
+            received_at,
             root,
         })
     })
     .transpose()
 }
 
-/// An eligible-kind message's author time, deleted or not, without tags.
-async fn anchor_timestamp(
+/// An eligible-kind message's arrival time, deleted or not, without tags.
+async fn anchor_received_at(
     conn: &mut PgConnection,
     community: CommunityId,
     channel: Uuid,
     id: &[u8],
-) -> Result<Option<i64>> {
-    let created: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT created_at FROM events
+) -> Result<Option<DateTime<Utc>>> {
+    Ok(sqlx::query_scalar(
+        "SELECT received_at FROM events
          WHERE community_id=$1 AND channel_id=$2 AND id=$3 AND kind=ANY($4) LIMIT 1",
     )
     .bind(community.as_uuid())
@@ -142,8 +142,7 @@ async fn anchor_timestamp(
     .bind(id)
     .bind(ELIGIBLE_KINDS.as_slice())
     .fetch_optional(conn)
-    .await?;
-    Ok(created.map(|t| t.timestamp()))
+    .await?)
 }
 
 pub(super) async fn valid_target(
@@ -182,14 +181,14 @@ async fn frontier(
     actor: &[u8],
     target: &ReadTarget,
     root: &[u8],
-    timestamp: i64,
+    through: DateTime<Utc>,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO personal_read_frontiers
          (community_id, actor, channel_id, root_id, through_timestamp) VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
          SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, EXCLUDED.through_timestamp)",
-    ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root).bind(timestamp)
+    ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root).bind(through)
         .execute(&mut *conn).await?;
     Ok(())
 }
@@ -225,7 +224,7 @@ pub(super) async fn apply(
             {
                 return Ok(IntentOutcome::Blocked);
             }
-            frontier(conn, community, actor, target, &root, msg.timestamp).await?;
+            frontier(conn, community, actor, target, &root, msg.received_at).await?;
         }
         ReadIntent::MarkChannelRead {
             channel_id,
@@ -237,9 +236,9 @@ pub(super) async fn apply(
             if !access(conn, community, actor, *channel_id).await? {
                 return Ok(IntentOutcome::Blocked);
             }
-            // Only the anchor's time matters: ancestry cannot change which
+            // Only the anchor's arrival matters: ancestry cannot change which
             // messages a whole-channel cut covers.
-            let Some(timestamp) = anchor_timestamp(conn, community, *channel_id, &id).await? else {
+            let Some(through) = anchor_received_at(conn, community, *channel_id, &id).await? else {
                 return Ok(IntentOutcome::Blocked);
             };
             sqlx::query(
@@ -248,7 +247,7 @@ pub(super) async fn apply(
                  ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
                  SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, $4),
                     threads_through_timestamp=GREATEST(personal_read_frontiers.threads_through_timestamp, $4)",
-            ).bind(community.as_uuid()).bind(actor).bind(channel_id).bind(timestamp)
+            ).bind(community.as_uuid()).bind(actor).bind(channel_id).bind(through)
                 .execute(&mut *conn).await?;
         }
     }
