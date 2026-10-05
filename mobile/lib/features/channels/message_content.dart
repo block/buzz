@@ -29,10 +29,12 @@ import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_only.dart';
 import 'channels_provider.dart';
 import 'media_viewer_page.dart';
+import 'message_content/details_blocks.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
 import 'voice_note_attachment.dart';
 
+part 'message_content/details_section.dart';
 part 'message_content/media_carousel.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
@@ -86,6 +88,10 @@ String _safeDownloadedFilename(String filename) {
 /// and media-aware markdown images/videos.
 class MessageContent extends HookConsumerWidget {
   final String content;
+
+  /// Event id of the message, when there is one. Keys reader-local state such
+  /// as which collapsible sections are open, so it survives in-place edits.
+  final String? messageId;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
   /// Keys are lowercase pubkeys, values are display names.
@@ -146,6 +152,7 @@ class MessageContent extends HookConsumerWidget {
   const MessageContent({
     super.key,
     required this.content,
+    this.messageId,
     this.mentionNames = const {},
     this.mentionLabels = const {},
     this.agentMentionPubkeys = const {},
@@ -313,41 +320,53 @@ class MessageContent extends HookConsumerWidget {
       onChannelTap: resolvedChannelTap,
     );
 
+    Widget buildMarkdown(String text) => GptMarkdown(
+      text,
+      style: style,
+      followLinkColor: false,
+      // normalizeBareLinks() already turns bare URLs into Markdown links;
+      // gpt_markdown 1.2.0 autolinks by default, so both would run.
+      autolink: false,
+      codeBuilder: (context, name, code, closed) =>
+          _MessageCodeBlock(name: name, code: code),
+      linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
+        context,
+        ref,
+        linkText,
+        url,
+        imetaByUrl[url],
+        linkStyle,
+        style,
+        resolvedChannelTap,
+        resolvedChannelNames,
+      ),
+      imageBuilder: (context, imageUrl, _, _) => _buildMedia(
+        context,
+        imageUrl,
+        imetaByUrl[imageUrl],
+        onReply: onMediaReply == null ? null : mediaReply,
+        onMore: onMediaMore == null ? null : mediaMore,
+      ),
+      textAlign: textAlign,
+      maxLines: maxLines,
+      inlineComponents: inlineComponents,
+    );
+
+    // Compact previews (maxLines) show section titles and bodies inline.
+    final segments = maxLines == null
+        ? splitDetailsBlocks(finalContent)
+        : [DetailsText(flattenDetailsBlocks(finalContent))];
     final markdown = KeyedSubtree(
       key: ValueKey(
         '$finalContent\u0000$mentionPresentationKey\u0000$channelPresentationKey',
       ),
-      child: GptMarkdown(
-        finalContent,
-        style: style,
-        followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
-        autolink: false,
-        codeBuilder: (context, name, code, closed) =>
-            _MessageCodeBlock(name: name, code: code),
-        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-          context,
-          ref,
-          linkText,
-          url,
-          imetaByUrl[url],
-          linkStyle,
-          style,
-          resolvedChannelTap,
-          resolvedChannelNames,
-        ),
-        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-          context,
-          imageUrl,
-          imetaByUrl[imageUrl],
-          onReply: onMediaReply == null ? null : mediaReply,
-          onMore: onMediaMore == null ? null : mediaMore,
-        ),
-        textAlign: textAlign,
-        maxLines: maxLines,
-        inlineComponents: inlineComponents,
-      ),
+      child: segments.length == 1 && segments.single is DetailsText
+          ? buildMarkdown((segments.single as DetailsText).text)
+          : _MessageDetailsContent(
+              segments: segments,
+              messageId: messageId,
+              buildMarkdown: buildMarkdown,
+            ),
     );
     if (trailingGallery == null) return markdown;
 
