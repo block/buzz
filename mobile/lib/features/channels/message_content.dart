@@ -320,7 +320,11 @@ class MessageContent extends HookConsumerWidget {
       onChannelTap: resolvedChannelTap,
     );
 
-    Widget buildMarkdown(String text, {TextStyle? textStyle}) => GptMarkdown(
+    Widget buildMarkdown(
+      String text, {
+      TextStyle? textStyle,
+      bool plain = false,
+    }) => GptMarkdown(
       text,
       style: textStyle ?? style,
       followLinkColor: false,
@@ -349,7 +353,7 @@ class MessageContent extends HookConsumerWidget {
       ),
       textAlign: textAlign,
       maxLines: maxLines,
-      inlineComponents: inlineComponents,
+      inlineComponents: plain ? null : inlineComponents,
     );
 
     // Compact previews (maxLines) show section titles and bodies inline.

@@ -41,7 +41,8 @@ class _MessageDetailsContent extends StatelessWidget {
 
   /// Nesting level of [segments], bounding how deep their bodies may nest.
   final int depth;
-  final Widget Function(String markdown, {TextStyle? textStyle}) buildMarkdown;
+  final Widget Function(String markdown, {TextStyle? textStyle, bool plain})
+  buildMarkdown;
 
   const _MessageDetailsContent({
     required this.segments,
@@ -84,7 +85,8 @@ class _MessageDetailsSection extends HookConsumerWidget {
   final TextStyle? titleStyle;
   final String keyPrefix;
   final int depth;
-  final Widget Function(String markdown, {TextStyle? textStyle}) buildMarkdown;
+  final Widget Function(String markdown, {TextStyle? textStyle, bool plain})
+  buildMarkdown;
 
   const _MessageDetailsSection({
     required this.block,
@@ -155,6 +157,8 @@ class _MessageDetailsSection extends HookConsumerWidget {
                             block.level > 0
                                 ? '${'#' * block.level} ${block.titleMarkdown}'
                                 : block.titleMarkdown,
+                            // Mentions and emoji as text, as on desktop.
+                            plain: true,
                             textStyle: block.level > 0
                                 ? null
                                 : titleStyle?.copyWith(

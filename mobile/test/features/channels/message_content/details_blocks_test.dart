@@ -163,4 +163,21 @@ void main() {
       );
     }
   });
+
+  test('long constructs in titles still flatten', () {
+    final url = 'https://media.example/${'a' * 600}?sig=${'b' * 200}';
+    expect(plainDetailsTitle('![lock]($url)'), 'lock');
+    expect(
+      plainDetailsTitle('[docs]($url) **${'c' * 400}**'),
+      'docs ${'c' * 400}',
+    );
+  });
+
+  test('a message full of hostile titles stays bounded', () {
+    final section = ':::details ${'[' * maxDetailsTitleLength}\nx\n:::\n';
+    final content = section * (64 * 1024 ~/ section.length);
+    final watch = Stopwatch()..start();
+    splitDetailsBlocks(content);
+    expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+  });
 }

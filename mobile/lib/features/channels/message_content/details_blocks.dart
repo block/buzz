@@ -82,6 +82,9 @@ List<DetailsSegment> splitDetailsBlocks(String content, {int depth = 0}) {
         .group(1)!;
     final heading = _headingRe.firstMatch(raw);
     if (heading != null) raw = raw.substring(heading.end);
+    if (raw.length > maxDetailsTitleLength) {
+      raw = raw.substring(0, maxDetailsTitleLength);
+    }
     final title = plainDetailsTitle(raw);
     final titleMarkdown = title == detailsFallbackTitle
         ? title
@@ -140,17 +143,16 @@ String? normalizeMarkerLine(String line) {
   return ':::details $heading$mark${title.substring(heading.length)}$mark';
 }
 
-// Title sanitizers. Every repeat is capped, so each match attempt scans a
-// bounded window and a hostile 64 KiB title stays linear on the UI isolate.
-final _imageRe = RegExp(
-  r'!\[([^\]\n]{0,300})\]\((?:[^()\n]|\([^()\n]{0,300}\)){0,300}\)',
-);
-final _linkRe = RegExp(
-  r'\[([^\]\n]{0,300})\]\((?:[^()\n]|\([^()\n]{0,300}\)){0,300}\)',
-);
-final _autolinkRe = RegExp(r'<(https?://[^>\s]{1,300})>');
-final _emphasisRe = RegExp(r'(\*\*|__|~~|`|\*)(.{1,300}?)\1');
-final _underscoreRe = RegExp(r'(?<!\w)_(.{1,300}?)_(?!\w)');
+/// Longest title the sanitizers read. Each title costs at most this squared,
+/// so a hostile 64 KiB message stays bounded on the UI isolate; real titles
+/// (including signed media URLs) fit well within it.
+const maxDetailsTitleLength = 1000;
+
+final _imageRe = RegExp(r'!\[([^\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)');
+final _linkRe = RegExp(r'\[([^\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)');
+final _autolinkRe = RegExp(r'<(https?://[^>\s]+)>');
+final _emphasisRe = RegExp(r'(\*\*|__|~~|`|\*)(.+?)\1');
+final _underscoreRe = RegExp(r'(?<!\w)_(.+?)_(?!\w)');
 
 /// Images become their alt text, links their text, autolinks their URL,
 /// as desktop's plain text does.
@@ -167,7 +169,7 @@ const detailsFallbackTitle = 'Details';
 
 /// Best-effort markdown-to-text for titles, matching desktop's plain text:
 /// images become alt text, link text kept, autolinks, code and emphasis
-/// unwrapped. Linear in the title length (the sanitizer repeats are capped).
+/// unwrapped.
 String plainDetailsTitle(String markdown) {
   final title = _flattenLinks(markdown)
       .replaceAllMapped(_emphasisRe, (m) => m[2]!)
