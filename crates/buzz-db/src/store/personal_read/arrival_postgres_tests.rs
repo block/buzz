@@ -389,3 +389,80 @@ async fn latest_message_behind_a_full_probe_of_reactions_is_found() {
     assert!(row.latest_message_complete);
     assert_eq!(exact(&row.unread), Some(1));
 }
+
+/// Store `event` as having arrived at exactly `seconds` plus `micros`. Built
+/// from integers, never a float, so microsecond order cannot hinge on rounding.
+async fn arrive_exact(
+    pool: &PgPool,
+    community: CommunityId,
+    event: &nostr::Event,
+    seconds: i64,
+    micros: u32,
+) {
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, micros * 1_000).unwrap();
+    let updated = sqlx::query("UPDATE events SET received_at=$3 WHERE community_id=$1 AND id=$2")
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(updated, 1, "arrival must land on exactly one stored event");
+    let stored: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT received_at FROM events WHERE community_id=$1 AND id=$2")
+            .bind(community.as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, at, "received_at must keep microseconds");
+}
+
+/// Two messages with the same author time arriving within one second; marks
+/// the one at `pick` and returns both channel states.
+async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, Option<u32>) {
+    let (db, pool, community, channel, actor, first) = fixture().await;
+    let now = first.created_at.as_secs();
+    let second = post(&db, &pool, community, channel, now, now, vec![]).await;
+    let arrived = now as i64 - 30;
+    arrive_exact(&pool, community, &first, arrived, micros[0]).await;
+    arrive_exact(&pool, community, &second, arrived, micros[1]).await;
+    let both = [&first, &second];
+    apply(
+        &db,
+        community,
+        &actor,
+        mark_through(channel, None, &both[pick].id.to_hex()),
+    )
+    .await;
+    (
+        states(&db, community, &actor, channel, &both).await,
+        exact(&sidebar(&db, community, &actor).await.unread),
+    )
+}
+
+/// Mid-second stamps, so truncating or rounding the frontier to whole seconds
+/// either reads the later message or leaves the anchor unread.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn arrivals_one_microsecond_apart_in_the_same_second_are_ordered() {
+    assert_eq!(
+        mark_within_one_second([500_000, 500_001], 0).await,
+        (vec!["read".to_owned(), "unread".to_owned()], Some(1))
+    );
+}
+
+/// The Order section: everything that arrived at or before the anchor is read,
+/// so an identical stamp reads both, whichever is marked.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn marking_either_of_two_identical_arrivals_reads_both() {
+    for pick in [0, 1] {
+        assert_eq!(
+            mark_within_one_second([500_000, 500_000], pick).await,
+            (vec!["read".to_owned(), "read".to_owned()], Some(0)),
+            "marked index {pick}"
+        );
+    }
+}
