@@ -47,6 +47,8 @@ pub mod feed;
 pub mod git_repo;
 /// Deployment-wide leader election over session advisory locks.
 pub mod leader_lock;
+/// Batched authoritative access-state reads for live connections.
+pub mod live_authorization;
 /// Compact viewer membership projections.
 pub mod membership_snapshot;
 /// Community moderation: reports, bans/timeouts, audit actions.
