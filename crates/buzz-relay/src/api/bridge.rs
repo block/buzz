@@ -27,6 +27,10 @@ use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_
 mod thread_roots;
 mod thread_window;
 
+#[cfg(test)]
+#[path = "bridge/workflow_webhook_postgres_tests.rs"]
+mod workflow_webhook_postgres_tests;
+
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
@@ -2394,7 +2398,11 @@ pub struct WebhookQuery {
 /// Webhook trigger endpoint. No user auth — the webhook secret authenticates the caller.
 ///
 /// Prefers `X-Webhook-Secret` header over `?secret=` query param (headers aren't logged
-/// by most proxies). Returns 202 Accepted; execution is async.
+/// by most proxies). Returns 202 Accepted; execution is async. A run is admitted
+/// when its `workflow_runs` row is inserted; immediately before that insert,
+/// admission checks the workflow owner's active ban in the host-bound community.
+/// This point-in-time check does not cancel already-created runs, and a
+/// concurrent ban committed after the lookup can race with row insertion.
 pub async fn workflow_webhook(
     State(state): State<Arc<AppState>>,
     Path(id_str): Path<String>,
@@ -2509,6 +2517,21 @@ pub async fn workflow_webhook(
         .check_owner_authority(community_id, wf_channel_id, &workflow.owner_pubkey, &def)
         .await
         .map_err(|_| not_found("workflow not found"))?;
+
+    // The workflow_runs insert is the admission boundary. This is the last
+    // authorization gate before it. The restriction read is authoritative and
+    // tenant-scoped; lookup failures deny admission just like an active ban. It
+    // is intentionally a point-in-time check rather than a transaction with ban
+    // writes, so a ban racing after this read may follow the run insertion. Runs
+    // already inserted are unaffected.
+    let restrictions = state
+        .db
+        .moderation_restriction_state(community_id, &workflow.owner_pubkey)
+        .await
+        .map_err(|_| not_found("workflow not found"))?;
+    if restrictions.banned {
+        return Err(not_found("workflow not found"));
+    }
 
     let run_id = state
         .db
