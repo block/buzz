@@ -409,6 +409,18 @@ class _FakeChannelActions extends ChannelActions {
 }
 
 void main() {
+  // Some sheets build the app lifecycle, which listens for network changes.
+  // That listen is asynchronous, so a missing plugin fails whichever test
+  // happens to be running. Flutter documents mock handlers as cleared after
+  // each test, so install it before every test.
+  setUp(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('dev.fluttercommunity.plus/connectivity_status'),
+          (_) async => null,
+        );
+  });
+
   testWidgets(
     'message long press keeps taps and scrolling while repeated holds win',
     (tester) async {
