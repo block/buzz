@@ -143,8 +143,10 @@ Content-Type: application/json
 
 - `relay_url` selects an adapter-configured relay; the adapter never fetches it.
   Clients MUST send it in the canonical form `wss://host[:port]`, with the
-  scheme and host in lowercase, the default port omitted, and no trailing slash,
-  path, query, or fragment. Adapters MUST compare it against that exact form.
+  scheme in lowercase, the host as its lowercase ASCII (A-label) form with no
+  trailing dot, the default port omitted, and no trailing slash, path, query, or
+  fragment. Adapters MUST configure relays in this canonical form and MUST
+  compare `relay_url` against it exactly.
   An unknown relay MUST be rejected with 403 `authorization_denied`.
 - `nostr_pubkey` is the lowercase hex key the client will authenticate to the
   relay with. The NIP-98 event MUST be signed by this key, use kind `27235`,
@@ -180,6 +182,9 @@ community the relay resolves from the connection's `Host`. The assertion's
 `nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay
 rejects any other key. Clients MUST reject a response whose `nostr_pubkey`
 differs from the key sent in the request.
+A client that rejects a `200` response, including one it cannot parse, MUST
+treat it as a refusal: keep the session, show it as refused, and not retry
+automatically.
 
 Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 
@@ -195,9 +200,10 @@ Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 | 429 | `rate_limited` | Too many requests | Keep the session, retry with bounded backoff |
 | 503 | `issuance_unavailable` | The adapter could not issue an assertion | Keep the session, retry with bounded backoff |
 
-429 and 503 retry with bounded backoff whatever the `error` code. Any other
-status, or a 400/401/403/413 with a code this contract doesn't define, is a
-refusal: keep the session, show it as refused, don't retry automatically.
+Clients MUST retry 429 and 503 with bounded backoff whatever the `error` code.
+Clients MUST treat any other status, or a 400/401/403/413 with a code this
+contract does not define, as a refusal: keep the session, show it as refused,
+and not retry automatically.
 
 A missing session is always 401 `session_required`, never 400. Network failures
 are handled like 429 and 503: keep the session and retry with bounded backoff.
