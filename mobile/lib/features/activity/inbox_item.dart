@@ -113,20 +113,18 @@ class InboxItem {
     return null;
   }
 
-  /// The event the row should deep-link to: the oldest event in the group
-  /// newer than [readAt] (oldest unread), falling back to the latest event.
-  FeedItem deepLinkTarget(int? readAt) {
-    if (readAt != null) {
-      FeedItem? oldestUnread;
-      for (final candidate in groupItems) {
-        if (candidate.createdAt <= readAt) continue;
-        if (oldestUnread == null ||
-            candidate.createdAt < oldestUnread.createdAt) {
-          oldestUnread = candidate;
-        }
+  /// The event the row should deep-link to: the oldest grouped event that
+  /// [isRead] rejects (oldest unread), falling back to the latest event.
+  FeedItem deepLinkTarget(bool Function(FeedItem event) isRead) {
+    FeedItem? oldestUnread;
+    for (final candidate in groupItems) {
+      if (isRead(candidate)) continue;
+      if (oldestUnread == null ||
+          candidate.createdAt < oldestUnread.createdAt) {
+        oldestUnread = candidate;
       }
-      if (oldestUnread != null) return oldestUnread;
     }
+    if (oldestUnread != null) return oldestUnread;
     return item;
   }
 }

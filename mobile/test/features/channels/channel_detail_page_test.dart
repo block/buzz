@@ -2239,9 +2239,15 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 300));
 
-      // One catch-up mark reads the thread. The replies need no marks of
-      // their own, and the covered channel page does not read meanwhile.
-      expect(readState.markedContexts, {'thread-activity:root': 1102});
+      // A catch-up mark reads the thread. Each visible reply keeps its own
+      // mark too, as in `buzz-app`: the thread mark reads a reply only while
+      // its root is loaded. The covered channel page does not read meanwhile.
+      expect(readState.markedContexts, {
+        'thread-activity:root': 1102,
+        'msg:reply0': 1100,
+        'msg:reply1': 1101,
+        'msg:reply2': 1102,
+      });
     });
 
     testWidgets('shows forum posts view for forum channels', (tester) async {

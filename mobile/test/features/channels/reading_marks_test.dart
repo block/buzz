@@ -1,6 +1,8 @@
 import 'package:buzz/features/channels/reading_marks.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _channel = 'channel-1';
@@ -41,6 +43,8 @@ Map<String, int> _marks({
   List<TimelineMessage> visible = const [],
   TimelineMessage? bottom,
   String? threadRootId,
+  bool isRootThread = true,
+  int now = 10000,
 }) => readingMarks(
   readState: readState ?? _state(),
   channelId: _channel,
@@ -50,6 +54,8 @@ Map<String, int> _marks({
   visible: visible,
   bottom: bottom,
   threadRootId: threadRootId,
+  isRootThread: isRootThread,
+  now: now,
 );
 
 void main() {
@@ -62,12 +68,24 @@ void main() {
       });
     });
 
-    test('catch-up time includes newer loaded replies', () {
+    test('catch-up cuts at the bottom row, not a newer reply', () {
+      // A top-level message created at 200 that arrives late must stay
+      // unread, so the cut cannot move up to the reply at 300.
       final a = _msg('a', 100);
       final reply = _msg('r', 300, parentId: 'a', rootId: 'a');
       expect(_marks(loaded: [a, reply], visible: [a], bottom: a), {
-        'activity:$_channel': 300,
+        'activity:$_channel': 100,
       });
+    });
+
+    test('catch-up never passes the current time', () {
+      // A sender clock ahead of this one must not read messages that have
+      // not arrived yet.
+      final future = _msg('f', 20000);
+      expect(
+        _marks(loaded: [future], visible: [future], bottom: future, now: 10000),
+        {'activity:$_channel': 10000, 'msg:f': 20000},
+      );
     });
 
     test('a newer top-level message means the bottom is not live', () {
@@ -201,7 +219,9 @@ void main() {
           bottom: mention,
           threadRootId: 'root',
         ),
-        {'thread-activity:root': 200},
+        // Thread catch-up reads a reply only while its root is loaded, so
+        // each visible reply keeps its own mark, as in `buzz-app`.
+        {'thread-activity:root': 200, 'msg:r1': 100, 'msg:r2': 200},
       );
     });
 
@@ -215,7 +235,7 @@ void main() {
           bottom: r1,
           threadRootId: 'root',
         ),
-        {'thread-activity:root': 100},
+        {'thread-activity:root': 100, 'msg:r1': 100},
       );
     });
 
@@ -242,7 +262,7 @@ void main() {
       );
     });
 
-    test('an existing thread mark already reads the replies', () {
+    test('a thread mark replaces catch-up but not reply marks', () {
       final r1 = reply('r1', 100);
       expect(
         _marks(
@@ -252,8 +272,75 @@ void main() {
           bottom: r1,
           threadRootId: 'root',
         ),
-        isEmpty,
+        {'msg:r1': 100},
       );
     });
+
+    test('a nested thread head does not catch up the whole thread', () {
+      // Opened on a nested reply, the page shows one branch. An older
+      // mention in another branch must stay unread.
+      final branch = _msg('b1', 100, parentId: 'root', rootId: 'root');
+      final nested = _msg('n1', 200, parentId: 'b1', rootId: 'root');
+      expect(
+        _marks(
+          loaded: [root, branch, nested],
+          visible: [nested],
+          bottom: nested,
+          threadRootId: 'root',
+          isRootThread: false,
+        ),
+        {'msg:n1': 200},
+      );
+    });
+  });
+
+  group('readingContentKey', () {
+    test('ignores a rebuilt list with the same messages', () {
+      final a = _msg('a', 100);
+      final b = _msg('b', 200);
+      expect(readingContentKey([a, b]), readingContentKey([a, b].toList()));
+      expect(readingContentKey([a, b]), isNot(readingContentKey([a])));
+      expect(
+        readingContentKey([a, b]),
+        isNot(readingContentKey([a, _msg('c', 300)])),
+      );
+    });
+  });
+
+  testWidgets('the dwell fires while the page rebuilds every 200 ms', (
+    tester,
+  ) async {
+    // A typing indicator or stream rebuilds the page with a new message
+    // list. The dwell must still finish while the messages stay the same.
+    final positions = ValueNotifier<Object?>(null);
+    addTearDown(positions.dispose);
+    final tick = ValueNotifier<int>(0);
+    addTearDown(tick.dispose);
+    final a = _msg('a', 100);
+    var fired = 0;
+    await tester.pumpWidget(
+      ValueListenableBuilder<int>(
+        valueListenable: tick,
+        builder: (_, _, _) => HookBuilder(
+          builder: (_) {
+            final messages = [a];
+            useReadingDwell(
+              positions: positions,
+              active: true,
+              onDwell: () => fired++,
+              keys: [readingContentKey(messages)],
+            );
+            return const SizedBox();
+          },
+        ),
+      ),
+    );
+    // Rebuild at 200, 400 and 600 ms. A restarted dwell would not finish.
+    for (var i = 0; i < 3; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+      tick.value++;
+      await tester.pump();
+    }
+    expect(fired, 1);
   });
 }

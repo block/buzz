@@ -8,7 +8,6 @@ import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'timeline_message.dart';
 import 'unread_badge/is_high_priority_event.dart';
-import 'unread_badge/observed_unread_event.dart';
 
 /// How long a row must stay fully visible before it counts as read. This is
 /// the same dwell the web and desktop app (`buzz-app`) uses.
@@ -21,8 +20,10 @@ const readingDwell = Duration(milliseconds: 300);
 ///   `activity:<channel>` and a thread writes `thread-activity:<root>`. These
 ///   catch-up marks read ordinary messages and that thread's replies. They do
 ///   not read mentions, broadcasts or DMs.
-/// - Each fully visible message that no mark reads yet gets its own `msg:`
-///   mark. Messages the catch-up mark reads do not need one.
+/// - Each fully visible message gets its own `msg:` mark unless its own mark,
+///   the channel mark, or (for an ordinary top-level message) `activity:`
+///   already reads it. A thread mark never counts here: a reply finds its
+///   thread only while the root is loaded, so `buzz-app` keeps reply marks.
 /// - Automatic reading never writes the channel mark. Only an explicit
 ///   Mark read does that.
 ///
@@ -30,7 +31,9 @@ const readingDwell = Duration(milliseconds: 300);
 /// replies. [visible] is the messages fully visible for the whole dwell.
 /// [bottom] is the newest message when its bottom edge is visible at the
 /// bottom of the list; otherwise null. Set [threadRootId] when reading a
-/// thread. The result maps each read-state context to its new time.
+/// thread, and [isRootThread] when its head is the thread root rather than a
+/// nested reply. [now] is the current Unix time in seconds; it defaults to
+/// the clock. The result maps each read-state context to its new time.
 Map<String, int> readingMarks({
   required ReadStateState readState,
   required String channelId,
@@ -40,18 +43,23 @@ Map<String, int> readingMarks({
   required Iterable<TimelineMessage> visible,
   TimelineMessage? bottom,
   String? threadRootId,
+  bool isRootThread = true,
+  int? now,
 }) {
   final marks = <String, int>{};
   int? markerOf(String contextId) =>
       maxReadAt([marks[contextId], readState.effectiveTimestamp(contextId)]);
 
-  if (bottom != null) {
+  // A nested thread view shows only one branch, so reaching its bottom does
+  // not read the whole thread.
+  if (bottom != null && (threadRootId == null || isRootThread)) {
     final catchUp = _catchUpMark(
       channelId: channelId,
       loaded: loaded,
       bottom: bottom,
       threadRootId: threadRootId,
       markerOf: markerOf,
+      now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     if (catchUp != null) marks[catchUp.key] = catchUp.value;
   }
@@ -62,11 +70,16 @@ Map<String, int> readingMarks({
     final contextId = msgContextKey(message.id);
     // Automatic reading keeps a message the reader marked unread.
     if (readState.isForcedUnread(contextId)) continue;
-    final readAt = observedUnreadEventReadAt(
-      _observed(message, isDm: isDm, currentPubkey: self ?? ''),
-      channelId,
-      markerOf,
+    final ordinary = readByChannelCatchUp(
+      isDm: isDm,
+      isReply: message.parentId != null && !_isBroadcast(message),
+      highPriority: self == null || isHighPriorityEvent(message.tags, self),
     );
+    final readAt = maxReadAt([
+      markerOf(contextId),
+      markerOf(channelId),
+      if (ordinary) markerOf(activityContextKey(channelId)),
+    ]);
     if (readAt != null && readAt >= message.createdAt) continue;
     marks[contextId] = message.createdAt;
   }
@@ -80,6 +93,7 @@ MapEntry<String, int>? _catchUpMark({
   required TimelineMessage bottom,
   required String? threadRootId,
   required int? Function(String contextId) markerOf,
+  required int now,
 }) {
   // A loaded message newer than the bottom row means the list does not show
   // the live bottom, for example after a jump into history.
@@ -92,15 +106,10 @@ MapEntry<String, int>? _catchUpMark({
   );
   if (!showsNewest) return null;
 
-  // Replies can be newer than the newest top-level message. `activity:`
-  // never reads replies, so a time that includes them is safe. `buzz-app`
-  // does the same.
-  var cut = bottom.createdAt;
-  if (threadRootId == null) {
-    for (final message in loaded) {
-      if (message.createdAt > cut) cut = message.createdAt;
-    }
-  }
+  // Cut at the bottom row. A newer reply's time would also read a top-level
+  // message that arrives late with an earlier time. A clock ahead of now, on
+  // this device or the sender's, must not read messages before they arrive.
+  final cut = bottom.createdAt < now ? bottom.createdAt : now;
   final key = threadRootId != null
       ? threadActivityContextKey(threadRootId)
       : activityContextKey(channelId);
@@ -113,30 +122,28 @@ MapEntry<String, int>? _catchUpMark({
   return MapEntry(key, cut);
 }
 
-/// Describes [message] the way the unread badge does, so this policy and
-/// the unread display agree on which marks read it.
-ObservedUnreadEvent _observed(
-  TimelineMessage message, {
-  required bool isDm,
-  required String currentPubkey,
-}) {
-  final broadcast = _isBroadcast(message);
-  return makeObservedUnreadEvent(
-    id: message.id,
-    createdAt: message.createdAt,
-    rootId: broadcast ? null : _threadRootOf(message),
-    highPriority: isDm || isHighPriorityEvent(message.tags, currentPubkey),
-    channelType: isDm ? 'dm' : null,
-    isThreadedReply: message.parentId != null && !broadcast,
-  );
-}
-
 String? _threadRootOf(TimelineMessage message) =>
     message.parentId == null ? null : message.rootId ?? message.parentId;
 
 bool _isBroadcast(TimelineMessage message) => message.tags.any(
   (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
 );
+
+/// A stable dwell key for [messages]. Pages rebuild a new message list on
+/// every frame that touches them, such as a typing indicator, so the list
+/// itself would restart the dwell each time. This changes only when a
+/// message arrives, leaves, or moves the newest time.
+(int, int, String?) readingContentKey(Iterable<TimelineMessage> messages) {
+  var count = 0;
+  TimelineMessage? newest;
+  for (final message in messages) {
+    count++;
+    if (newest == null || message.createdAt > newest.createdAt) {
+      newest = message;
+    }
+  }
+  return (count, newest?.createdAt ?? 0, newest?.id);
+}
 
 /// Whether the app is in the foreground. Null means the platform has not
 /// reported a state yet, which only happens before the first frame and in

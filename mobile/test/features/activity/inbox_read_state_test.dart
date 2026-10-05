@@ -30,52 +30,38 @@ int? Function(String) markers(Map<String, int> map) =>
     (contextId) => map[contextId];
 
 void main() {
-  group('resolveInboxItemReadAt', () {
-    test('channel rows use the channel marker', () {
-      final row = buildInboxItems([item(id: 'a')]).single;
-      expect(resolveInboxItemReadAt(row, markerOf: markers({'ch1': 42})), 42);
-    });
-
-    test('thread rows use max of thread and msg markers', () {
-      final row = buildInboxItems([
-        item(id: 'a', tags: replyTags('root1', 'root1')),
-      ]).single;
+  group('inboxEventReadAt', () {
+    test('a top-level event uses the channel and its own mark', () {
+      final event = item(id: 'a', createdAt: 60);
+      expect(inboxEventReadAt(event, markerOf: markers({'ch1': 42})), 42);
       expect(
-        resolveInboxItemReadAt(
-          row,
-          markerOf: markers({'thread:root1': 10, 'msg:a': 25}),
-        ),
-        25,
-      );
-    });
-
-    test('channel rows also use the newest event message marker', () {
-      final row = buildInboxItems([item(id: 'a', createdAt: 60)]).single;
-      expect(
-        resolveInboxItemReadAt(
-          row,
-          markerOf: markers({'ch1': 42, 'msg:a': 60}),
-        ),
+        inboxEventReadAt(event, markerOf: markers({'ch1': 42, 'msg:a': 60})),
         60,
       );
     });
 
-    test('thread rows also use the thread catch-up marker', () {
-      final row = buildInboxItems([
-        item(id: 'a', tags: replyTags('root1', 'root1')),
-      ]).single;
+    test('a reply also uses its thread marks', () {
+      final event = item(id: 'a', tags: replyTags('root1', 'root1'));
       expect(
-        resolveInboxItemReadAt(
-          row,
+        inboxEventReadAt(
+          event,
           markerOf: markers({'thread:root1': 10, 'thread-activity:root1': 30}),
         ),
         30,
       );
     });
 
-    test('channel-less rows have no marker', () {
-      final row = buildInboxItems([item(id: 'a', channelId: null)]).single;
-      expect(resolveInboxItemReadAt(row, markerOf: markers({})), isNull);
+    test('channel catch-up never reads an Activity event', () {
+      final event = item(id: 'a', createdAt: 60, category: 'activity');
+      expect(
+        inboxEventReadAt(event, markerOf: markers({'activity:ch1': 99})),
+        isNull,
+      );
+    });
+
+    test('an event without a channel has no marker', () {
+      final event = item(id: 'a', channelId: null);
+      expect(inboxEventReadAt(event, markerOf: markers({})), isNull);
     });
   });
 
@@ -100,6 +86,37 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('a channel mention read by its own mark is done', () {
+      // Reading a channel writes `msg:` for a mention, not the channel mark.
+      final row = buildInboxItems([item(id: 'm', createdAt: 50)]).single;
+      expect(
+        isInboxItemDone(
+          row,
+          markerOf: markers({'ch1': 10, 'msg:m': 50}),
+          localUnreadOverrides: const {},
+          localDoneSet: const {},
+        ),
+        isTrue,
+      );
+    });
+
+    test('a thread mention needs every grouped reply read', () {
+      final row = buildInboxItems([
+        item(id: 'r1', createdAt: 40, tags: replyTags('root1', 'root1')),
+        item(id: 'r2', createdAt: 50, tags: replyTags('root1', 'r1')),
+      ]).single;
+      bool done(Map<String, int> marks) => isInboxItemDone(
+        row,
+        markerOf: markers(marks),
+        localUnreadOverrides: const {},
+        localDoneSet: const {},
+      );
+      // Seeing only the newest reply leaves the older mention unread.
+      expect(done({'msg:r2': 50}), isFalse);
+      expect(done({'msg:r1': 40, 'msg:r2': 50}), isTrue);
+      expect(done({'thread-activity:root1': 50}), isTrue);
     });
 
     test('a local unread override always wins', () {

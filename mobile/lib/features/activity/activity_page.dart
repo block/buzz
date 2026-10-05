@@ -253,8 +253,9 @@ class ActivityPage extends HookConsumerWidget {
 
       // Deep-link to the represented message: oldest unread in the group,
       // falling back to the latest event.
-      final readAt = resolveInboxItemReadAt(item, markerOf: markerOf);
-      final target = item.deepLinkTarget(readAt);
+      final target = item.deepLinkTarget(
+        (event) => isInboxEventRead(event, markerOf: markerOf),
+      );
       final thread = threadReferenceOf(target.tags);
       final threadRootId = isBroadcastReply(target.tags)
           ? null

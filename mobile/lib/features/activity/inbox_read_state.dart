@@ -1,39 +1,48 @@
 import '../../shared/read_state/read_state_format.dart';
+import 'feed_item.dart';
 import 'inbox_item.dart';
 
-/// Resolves the effective NIP-RS read marker for one inbox row, based on
-/// desktop's `resolveInboxItemReadAt`:
-/// - thread rows use `max(thread:<root>, thread-activity:<root>, msg:<id>)`
-/// - channel rows use `max(<channel>, msg:<id>)`
-/// - rows with no channel have no marker (caller falls back to local state)
+/// The newest read marker that reads one grouped [event], following the
+/// unread badge's `observedUnreadEventReadAt`: the channel mark, the
+/// event's own `msg:` mark, and for a thread reply `thread:<root>` and
+/// `thread-activity:<root>`. Returns null for an event with no channel.
 ///
-/// `<id>` is the row's newest event. Reading a channel or thread marks
-/// mentions and DMs with `msg:` and thread replies with `thread-activity:`,
-/// not with the channel or `thread:` marker, so those marks count too.
-int? resolveInboxItemReadAt(
-  InboxItem item, {
+/// `activity:<channel>` never counts here. Activity rows hold only mentions,
+/// needs-action and agent events addressed to the reader, and DM messages,
+/// and that catch-up mark reads none of those.
+int? inboxEventReadAt(
+  FeedItem event, {
   required int? Function(String contextId) markerOf,
 }) {
-  final channelId = item.item.channelId;
-  final threadRootId = item.threadRootId;
-  if (threadRootId != null) {
-    return maxReadAt([
-      markerOf(threadContextKey(threadRootId)),
-      markerOf(threadActivityContextKey(threadRootId)),
-      markerOf(msgContextKey(item.item.id)),
-    ]);
-  }
+  final channelId = event.channelId;
   if (channelId == null) return null;
+  final rootId = isThreadReply(event.tags)
+      ? threadReferenceOf(event.tags).rootId
+      : null;
   return maxReadAt([
     markerOf(channelId),
-    markerOf(msgContextKey(item.item.id)),
+    markerOf(msgContextKey(event.id)),
+    if (rootId != null) ...[
+      markerOf(threadContextKey(rootId)),
+      markerOf(threadActivityContextKey(rootId)),
+    ],
   ]);
 }
 
-/// Whether the row is read ("done"), mirroring desktop's
-/// `useHomeInboxReadState` projection: a local unread override always wins;
-/// otherwise the row is done when no grouped activity is newer than the
-/// shared read marker; channel-less rows fall back to the local done set.
+/// Whether the marks read one grouped [event].
+bool isInboxEventRead(
+  FeedItem event, {
+  required int? Function(String contextId) markerOf,
+}) {
+  final readAt = inboxEventReadAt(event, markerOf: markerOf);
+  return readAt != null && event.createdAt <= readAt;
+}
+
+/// Whether the row is read ("done"): a local unread override always wins;
+/// otherwise the row is done when the marks read every grouped event. Each
+/// event is checked on its own, because reading a channel marks mentions
+/// with per-message marks, so reading the newest says nothing about the
+/// rest. Channel-less rows fall back to the local done set.
 bool isInboxItemDone(
   InboxItem item, {
   required int? Function(String contextId) markerOf,
@@ -43,12 +52,15 @@ bool isInboxItemDone(
   final ids = groupedInboxItemIds(item);
   if (ids.any(localUnreadOverrides.contains)) return false;
 
-  final readAt = resolveInboxItemReadAt(item, markerOf: markerOf);
-  if (readAt != null) return item.latestActivityAt <= readAt;
-
-  if (item.threadRootId != null || item.item.channelId != null) return false;
-  return localDoneSet.contains(item.id);
+  if (item.item.channelId == null) return localDoneSet.contains(item.id);
+  return _groupedEvents(
+    item,
+  ).every((event) => isInboxEventRead(event, markerOf: markerOf));
 }
+
+Iterable<FeedItem> _groupedEvents(InboxItem item) => {
+  for (final event in [item.item, ...item.groupItems]) event.id: event,
+}.values;
 
 /// All event ids identified with the row — desktop's `getGroupedInboxItemIds`.
 List<String> groupedInboxItemIds(InboxItem item) {

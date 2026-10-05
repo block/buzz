@@ -601,7 +601,7 @@ class _MessageList extends HookConsumerWidget {
           appInUse &&
           (ModalRoute.of(context)?.isCurrent ?? true),
       onDwell: readVisibleRows,
-      keys: [channelId, allMessages],
+      keys: [channelId, readingContentKey(allMessages)],
     );
 
     useEffect(() {
