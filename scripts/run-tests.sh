@@ -78,6 +78,9 @@ ensure_infra() {
 run_unit_tests() {
   section "Unit Tests (no infra required)"
 
+  run_test_step "community-ban route inventory" \
+    python3 scripts/check-community-ban-route-inventory.py
+
   run_test_step "buzz-core tests" \
     cargo test -p buzz-core --lib -- --nocapture
 
