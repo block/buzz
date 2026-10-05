@@ -253,129 +253,138 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
       );
     }
 
+    final ios = defaultTargetPlatform == TargetPlatform.iOS;
+    final header = ios
+        ? SizedBox(
+            height: frostedAppBarHeight(context),
+            child: IosNavigationBar(
+              title: '',
+              leading: IosNavigationAction(
+                label: 'Close community switcher',
+                symbol: 'xmark',
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+              actions: [
+                IosNavigationAction(
+                  label: isEditing.value ? 'Done' : 'Edit',
+                  onPressed: () => isEditing.value = !isEditing.value,
+                ),
+              ],
+            ),
+          )
+        : Padding(
+            padding: const EdgeInsets.all(Grid.xxs),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: 'Close community switcher',
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(LucideIcons.x),
+                ),
+                const Spacer(),
+                TextButton(
+                  key: const Key('community-switcher-edit'),
+                  onPressed: () => isEditing.value = !isEditing.value,
+                  child: Text(isEditing.value ? 'Done' : 'Edit'),
+                ),
+              ],
+            ),
+          );
+    final body = SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        Grid.gutter,
+        Grid.xs,
+        Grid.gutter,
+        Grid.md,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: Column(
+            children: [
+              Text(
+                'Switch Community',
+                key: const Key('community-switcher-title'),
+                textAlign: TextAlign.center,
+                style: context.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: Grid.md),
+              if (error.value != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Grid.xs),
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      error.value!,
+                      style: TextStyle(color: context.colors.error),
+                    ),
+                  ),
+                ),
+              communitiesAsync.when(
+                loading: () => const Center(
+                  child: BuzzLoadingIndicator(
+                    size: 40,
+                    semanticLabel: 'Loading communities',
+                  ),
+                ),
+                error: (e, _) => Text('Error loading communities: $e'),
+                data: (communities) => _CommunityGrid(
+                  children: [
+                    for (final community in communities)
+                      _CommunityGridTile(
+                        community: community,
+                        // Keep the current-community marker stable
+                        // while the selected avatar leaves the grid.
+                        isActive:
+                            community.id ==
+                            (flight.value == null
+                                ? activeId
+                                : flight.value!.previousCommunityId),
+                        isEditing: isEditing.value,
+                        hidden: flight.value?.community.id == community.id,
+                        onSelect: selectCommunity,
+                        onRemove: () => _confirmRemoveCommunity(
+                          context,
+                          ref,
+                          community,
+                          closeSheetAfterRemoval: community.id == activeId,
+                        ),
+                      ),
+                    _CommunityGridAdd(onTap: addCommunity),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
     final surface = Material(
       key: const Key('community-switcher-page'),
       color: context.colors.surface,
       child: SafeArea(
-        top: defaultTargetPlatform != TargetPlatform.iOS,
-        child: Column(
-          children: [
-            if (defaultTargetPlatform == TargetPlatform.iOS)
-              SizedBox(
-                height: frostedAppBarHeight(context),
-                child: IosNavigationBar(
-                  title: '',
-                  leading: IosNavigationAction(
-                    label: 'Close community switcher',
-                    symbol: 'xmark',
-                    onPressed: () => Navigator.of(context).pop(),
+        top: !ios,
+        child: ios
+            ? Stack(
+                children: [
+                  Positioned.fill(
+                    top: frostedAppBarHeight(context),
+                    child: body,
                   ),
-                  actions: [
-                    IosNavigationAction(
-                      label: isEditing.value ? 'Done' : 'Edit',
-                      onPressed: () => isEditing.value = !isEditing.value,
-                    ),
-                  ],
-                ),
+                  // Paint the native bar last, as in FrostedScaffold. Painting
+                  // Flutter content after a UIKit view can hide that content
+                  // during this route's opacity/scale composition on iOS.
+                  Positioned(top: 0, left: 0, right: 0, child: header),
+                ],
               )
-            else
-              Padding(
-                padding: const EdgeInsets.all(Grid.xxs),
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: 'Close community switcher',
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(LucideIcons.x),
-                    ),
-                    const Spacer(),
-                    TextButton(
-                      key: const Key('community-switcher-edit'),
-                      onPressed: () => isEditing.value = !isEditing.value,
-                      child: Text(isEditing.value ? 'Done' : 'Edit'),
-                    ),
-                  ],
-                ),
+            : Column(
+                children: [
+                  header,
+                  Expanded(child: body),
+                ],
               ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(
-                  Grid.gutter,
-                  Grid.xs,
-                  Grid.gutter,
-                  Grid.md,
-                ),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 440),
-                    child: Column(
-                      children: [
-                        Text(
-                          'Switch Community',
-                          key: const Key('community-switcher-title'),
-                          textAlign: TextAlign.center,
-                          style: context.textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: Grid.md),
-                        if (error.value != null)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: Grid.xs),
-                            child: Semantics(
-                              liveRegion: true,
-                              child: Text(
-                                error.value!,
-                                style: TextStyle(color: context.colors.error),
-                              ),
-                            ),
-                          ),
-                        communitiesAsync.when(
-                          loading: () => const Center(
-                            child: BuzzLoadingIndicator(
-                              size: 40,
-                              semanticLabel: 'Loading communities',
-                            ),
-                          ),
-                          error: (e, _) =>
-                              Text('Error loading communities: $e'),
-                          data: (communities) => _CommunityGrid(
-                            children: [
-                              for (final community in communities)
-                                _CommunityGridTile(
-                                  community: community,
-                                  // Keep the current-community marker stable
-                                  // while the selected avatar leaves the grid.
-                                  isActive:
-                                      community.id ==
-                                      (flight.value == null
-                                          ? activeId
-                                          : flight.value!.previousCommunityId),
-                                  isEditing: isEditing.value,
-                                  hidden:
-                                      flight.value?.community.id ==
-                                      community.id,
-                                  onSelect: selectCommunity,
-                                  onRemove: () => _confirmRemoveCommunity(
-                                    context,
-                                    ref,
-                                    community,
-                                    closeSheetAfterRemoval:
-                                        community.id == activeId,
-                                  ),
-                                ),
-                              _CommunityGridAdd(onTap: addCommunity),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
 
