@@ -3388,8 +3388,9 @@ async fn ingest_event_inner(
         None
     };
 
-    // Pre-validate kind:0 content before storage so we don't store an event
-    // whose profile sync will silently fail in the side-effect handler.
+    // Pre-validate kind:0 content before storage: the `users` projection is
+    // written in the same transaction as the event, and a non-JSON profile
+    // would otherwise be stored with every projected column cleared.
     if kind_u32 == KIND_PROFILE
         && serde_json::from_str::<serde_json::Value>(&event.content).is_err()
     {
@@ -3639,6 +3640,26 @@ async fn ingest_event_inner(
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
+    } else if kind_u32 == KIND_PROFILE {
+        // Kind-0 is a NIP-16 replaceable event whose accepted head also owns
+        // the `users` projection (name, display_name, avatar, about, NIP-05,
+        // metadata_event_id). Both commit in one transaction so a stored
+        // profile can never be left without its searchable row (the former
+        // post-storage side effect could fail after the event was durable).
+        let projection = buzz_db::ProfileProjection::from_kind0_event(&event, tenant.host());
+        let outcome = state
+            .db
+            .replace_profile_event(tenant.community(), &event, &projection)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?;
+        if outcome.user_created {
+            metrics::counter!(
+                "buzz_users_created_total",
+                "community" => tenant.host().to_owned()
+            )
+            .increment(1);
+        }
+        (outcome.event, outcome.was_inserted)
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.

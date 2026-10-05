@@ -78,6 +78,8 @@ pub mod thread_window;
 pub mod usage;
 /// User profile persistence.
 pub mod user;
+/// Kind-0 profile projection into `users` and its backfill.
+pub mod user_profile;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
 

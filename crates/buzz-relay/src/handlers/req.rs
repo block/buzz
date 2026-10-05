@@ -866,6 +866,54 @@ async fn handle_search_req(
             continue; // NIP-01: limit 0 means "no results from this filter"
         }
 
+        if state.config.profile_search_users_table && is_profile_only_filter(filter) {
+            // People search: the `users` projection is the row source and each
+            // hit hydrates to its current kind-0 head. Kind-0 heads are global
+            // (no `h` tag), so a scope without global access or a channel-bound
+            // filter can never match one — skip the query rather than broaden.
+            if !include_global || filter_has_h_tag(filter) {
+                continue;
+            }
+            let events = match profile_search_events(
+                &state.db,
+                tenant.community(),
+                filter,
+                &search_text,
+                limit,
+                0,
+            )
+            .await
+            {
+                Ok(events) => events,
+                Err(e) if e.is_statement_cancelled() => {
+                    warn!(sub_id = %sub_id, "users-backed profile search timed out: {e}");
+                    close_timed_out_subscription(sub_id, owner, conn, state).await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(sub_id = %sub_id, "users-backed profile search failed: {e}");
+                    continue;
+                }
+            };
+            emit_search_read_trace(sub_id, &events, state, trace_state).await;
+            let post_filter = profile_search_post_filter(filter);
+            for stored in &events {
+                if !filters_match(std::slice::from_ref(&post_filter), stored) {
+                    continue;
+                }
+                if !event_visible_to_reader(&stored.event, reader_pubkey_bytes) {
+                    continue;
+                }
+                if !seen_ids.insert(stored.event.id) {
+                    continue;
+                }
+                if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
+                    return;
+                }
+            }
+            continue;
+        }
+
         // Push as many NIP-01 constraints into the FTS query as possible so
         // post-filtering is a correction step, not the primary filter.
         //
@@ -1004,46 +1052,7 @@ async fn handle_search_req(
                     }
                 };
 
-                // Conformance read-seam emit (search lane). Same (B)
-                // projection + missing-lookup guard-rail as the
-                // non-search path — see `record_read_by_id_rows`. The
-                // `filter_channel` is `None`: search at the abstract
-                // level isn't bound to a single channel filter, the
-                // per-row `channel_id` carries the channel identity
-                // honestly.
-                // Same `enabled()` gate as the non-search lane: skip the
-                // trace-only `channels` lookup when nothing observes the emit.
-                if let Some(state_snap) = trace_state.filter(|_| state.tracer.enabled()) {
-                    let row_channels: Vec<Option<uuid::Uuid>> =
-                        events.iter().map(|e| e.channel_id).collect();
-                    let distinct: Vec<uuid::Uuid> = {
-                        let mut s: std::collections::BTreeSet<uuid::Uuid> =
-                            std::collections::BTreeSet::new();
-                        for c in row_channels.iter().flatten() {
-                            s.insert(*c);
-                        }
-                        s.into_iter().collect()
-                    };
-                    let channel_communities =
-                        match state.db.communities_of_channels(&distinct).await {
-                            Ok(m) => m,
-                            Err(e) => {
-                                warn!(
-                                    sub_id = %sub_id,
-                                    error_kind = %e.kind(),
-                                    "conformance row-community lookup failed"
-                                );
-                                std::collections::HashMap::new()
-                            }
-                        };
-                    crate::conformance::record_read_by_id_rows(
-                        &state.tracer,
-                        state_snap,
-                        None,
-                        &row_channels,
-                        &channel_communities,
-                    );
-                }
+                emit_search_read_trace(sub_id, &events, state, trace_state).await;
 
                 let event_map: std::collections::HashMap<[u8; 32], &buzz_core::StoredEvent> =
                     events
@@ -1099,6 +1108,131 @@ async fn handle_search_req(
         None if queued => access.served(),
         None => {}
     }
+}
+
+/// Conformance read-seam emit (search lane). Same (B) projection +
+/// missing-lookup guard-rail as the non-search path — see
+/// `record_read_by_id_rows`. The `filter_channel` is `None`: search at the
+/// abstract level isn't bound to a single channel filter, the per-row
+/// `channel_id` carries the channel identity honestly. Same `enabled()` gate
+/// as the non-search lane: skip the trace-only `channels` lookup when nothing
+/// observes the emit.
+async fn emit_search_read_trace(
+    sub_id: &str,
+    events: &[buzz_core::StoredEvent],
+    state: &AppState,
+    trace_state: Option<&crate::conformance::AbstractState>,
+) {
+    let Some(state_snap) = trace_state.filter(|_| state.tracer.enabled()) else {
+        return;
+    };
+    let row_channels: Vec<Option<uuid::Uuid>> = events.iter().map(|e| e.channel_id).collect();
+    let distinct: Vec<uuid::Uuid> = row_channels
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let channel_communities = match state.db.communities_of_channels(&distinct).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                sub_id = %sub_id,
+                error_kind = %e.kind(),
+                "conformance row-community lookup failed"
+            );
+            std::collections::HashMap::new()
+        }
+    };
+    crate::conformance::record_read_by_id_rows(
+        &state.tracer,
+        state_snap,
+        None,
+        &row_channels,
+        &channel_communities,
+    );
+}
+
+/// `kinds` is present, non-empty, and contains only kind 0 — the shape the
+/// desktop and mobile people pickers send (`{"kinds":[0],"search":…}`).
+pub(crate) fn is_profile_only_filter(filter: &Filter) -> bool {
+    filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| !kinds.is_empty() && kinds.iter().all(|k| k.as_u16() == 0))
+}
+
+/// Whether the filter carries at least one `#h` value.
+pub(crate) fn filter_has_h_tag(filter: &Filter) -> bool {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    filter
+        .generic_tags
+        .get(&h_tag)
+        .is_some_and(|values| !values.is_empty())
+}
+
+/// The NIP-01 post-filter for a `users`-backed profile search.
+///
+/// `since` and `until` are cleared because they are no-ops on this path (see
+/// [`profile_search_events`]); everything else — `authors`, `ids`, `kinds`,
+/// tag filters — still applies to the hydrated head.
+pub(crate) fn profile_search_post_filter(filter: &Filter) -> Filter {
+    let mut post_filter = filter.clone();
+    post_filter.since = None;
+    post_filter.until = None;
+    post_filter
+}
+
+/// Serve a `kinds == [0]` NIP-50 search from the `users` projection.
+///
+/// Runs `search_users` for the filter's text and `authors`, hydrates each hit
+/// to that pubkey's *current* kind-0 head, and returns the heads in `users`
+/// rank order (exact > prefix > contains on `name`/`display_name`, then
+/// NIP-05, then pubkey). A hit whose pubkey has no live head (never published
+/// one, or it was deleted) is dropped — a stale row never stands in for it.
+///
+/// `search_mode`, `since`, and `until` are deliberately no-ops here. The
+/// `users` table holds one row per pubkey with no event timestamps, and its
+/// LIKE match is already substring semantics, so the prefix/full-text
+/// distinction has nothing to act on. `limit`/`offset` page the ranked
+/// `users` rows, so a page counts people, not events. See
+/// `docs/profile-search-users-table.md`.
+pub(crate) async fn profile_search_events(
+    db: &buzz_db::Db,
+    community: buzz_core::tenant::CommunityId,
+    filter: &Filter,
+    search_text: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<buzz_core::StoredEvent>, buzz_db::DbError> {
+    // Same `authors` treatment as the FTS path: an empty set means "any".
+    let authors: Option<Vec<Vec<u8>>> = filter
+        .authors
+        .as_ref()
+        .filter(|authors| !authors.is_empty())
+        .map(|authors| authors.iter().map(|a| a.to_bytes().to_vec()).collect());
+    let params = buzz_db::SearchUsersParams {
+        query: search_text,
+        authors: authors.as_deref(),
+        limit,
+        offset,
+    };
+    let hits = db.search_users(community, &params).await?;
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pubkeys: Vec<Vec<u8>> = hits.into_iter().map(|hit| hit.pubkey).collect();
+    let mut heads: std::collections::HashMap<Vec<u8>, buzz_core::StoredEvent> = db
+        .get_current_profile_events(community, &pubkeys)
+        .await?
+        .into_iter()
+        .map(|stored| (stored.event.pubkey.to_bytes().to_vec(), stored))
+        .collect();
+    Ok(pubkeys
+        .iter()
+        .filter_map(|pubkey| heads.remove(pubkey))
+        .collect())
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -4380,5 +4514,263 @@ mod tests {
         async fn history_timeout_retirement_survives_expiry() {
             super::history_timeout_retirement_survives_expiry_body().await;
         }
+    }
+}
+
+/// `users`-backed people search, bound to the production REQ seam
+/// (`handle_req` → `handle_search_req`) with `profile_search_users_table`
+/// flipped per test. Kind-0 writes go through `Db::replace_profile_event`,
+/// the same call the ingest kind-0 branch makes.
+#[cfg(test)]
+mod profile_search_postgres_tests {
+    use std::sync::Arc;
+
+    use axum::extract::ws::Message as WsMessage;
+    use nostr::{EventBuilder, Filter, Keys, Kind, Timestamp};
+    use tokio::sync::mpsc;
+
+    use super::handle_req;
+    use crate::connection::{AuthState, ConnectionState};
+    use crate::state::AppState;
+
+    struct Fixture {
+        state: Arc<AppState>,
+        tenant: buzz_core::tenant::TenantContext,
+    }
+
+    async fn fixture(profile_search_users_table: bool) -> Fixture {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let community_id = uuid::Uuid::new_v4();
+        let host = format!("profile-search-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+        let state = crate::state::tests::test_state_with_database_pool_and(pool, |config| {
+            config.profile_search_users_table = profile_search_users_table;
+        })
+        .await;
+        let tenant = buzz_core::tenant::TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(community_id),
+            host,
+        );
+        Fixture { state, tenant }
+    }
+
+    impl Fixture {
+        /// Store a kind-0 for `keys` exactly as ingest does.
+        async fn publish_profile(
+            &self,
+            keys: &Keys,
+            content: &str,
+            created_at: u64,
+        ) -> nostr::Event {
+            let event = EventBuilder::new(Kind::Metadata, content)
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(keys)
+                .expect("sign kind-0");
+            let projection =
+                buzz_db::ProfileProjection::from_kind0_event(&event, self.tenant.host());
+            let outcome = self
+                .state
+                .db
+                .replace_profile_event(self.tenant.community(), &event, &projection)
+                .await
+                .expect("replace profile event");
+            assert!(outcome.was_inserted, "fixture kind-0 must be accepted");
+            event
+        }
+
+        /// Run a `kinds:[0]` prefix-mode search REQ as `reader` and return the
+        /// delivered events in order, asserting the subscription ends in EOSE.
+        async fn search_profiles(&self, reader: &Keys, text: &str) -> Vec<nostr::Event> {
+            let reader_bytes = reader.public_key().to_bytes().to_vec();
+            // No channels: kind-0 heads are global, so the search only needs
+            // global access (a NIP-42 session without a channel-scoped token).
+            self.state
+                .member_channels_cache
+                .insert((self.tenant.community(), reader_bytes), Vec::new());
+            let auth = AuthState::Authenticated(buzz_auth::AuthContext {
+                pubkey: reader.public_key(),
+                scopes: Vec::new(),
+                channel_ids: None,
+                auth_method: buzz_auth::AuthMethod::Nip42,
+                agent_owner_pubkey: None,
+            });
+            let crate::connection::tests::TestConn { conn, send_rx, .. } =
+                crate::connection::tests::test_conn_for_tenant(auth, None, self.tenant.clone(), 64);
+            let sub_id = format!("profile-search-{}", uuid::Uuid::new_v4());
+            let filter = Filter::new().kind(Kind::Metadata).search(text).limit(50);
+            handle_req(
+                sub_id.clone(),
+                vec![filter],
+                vec![None],
+                vec![buzz_search::SearchMode::Prefix],
+                Arc::clone(&conn),
+                Arc::clone(&self.state),
+            )
+            .await;
+            drain_search_frames(send_rx, &sub_id, &conn)
+        }
+    }
+
+    fn drain_search_frames(
+        mut send_rx: mpsc::Receiver<WsMessage>,
+        sub_id: &str,
+        conn: &ConnectionState,
+    ) -> Vec<nostr::Event> {
+        let mut events = Vec::new();
+        let mut saw_eose = false;
+        while let Ok(frame) = send_rx.try_recv() {
+            let WsMessage::Text(text) = frame else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON frame");
+            let frame_type = value[0].as_str().unwrap_or_default();
+            assert_eq!(
+                value[1].as_str(),
+                Some(sub_id),
+                "frame for another sub: {text}"
+            );
+            match frame_type {
+                "EVENT" => events
+                    .push(serde_json::from_value(value[2].clone()).expect("EVENT payload parses")),
+                "EOSE" => saw_eose = true,
+                other => panic!("unexpected {other} frame on search sub: {text}"),
+            }
+        }
+        assert!(
+            saw_eose,
+            "search REQ must end in EOSE (conn {})",
+            conn.conn_id
+        );
+        events
+    }
+
+    /// Setting on: `wes` returns the exact-name profile first, the prefix
+    /// match after it, and never the profile that only mentions "wes" in
+    /// `about`. The prefix match has the newer `created_at`, so a hydration
+    /// that re-sorted by event time instead of `users` rank would fail here.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn users_backed_search_ranks_wes_first_and_drops_about_only_match() {
+        let fx = fixture(true).await;
+        let wes = Keys::generate();
+        let wesley = Keys::generate();
+        let about_only = Keys::generate();
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        fx.publish_profile(
+            &wes,
+            &format!(r#"{{"name":"wes","display_name":"Wes {unique}"}}"#),
+            1_700_000_000,
+        )
+        .await;
+        fx.publish_profile(
+            &wesley,
+            r#"{"name":"wesley-h","display_name":"Wesley Hyde"}"#,
+            1_700_000_100,
+        )
+        .await;
+        fx.publish_profile(
+            &about_only,
+            r#"{"name":"pixel","about":"talks about wes all day","picture":"https://img.example/p.png"}"#,
+            1_700_000_200,
+        )
+        .await;
+
+        let events = fx.search_profiles(&Keys::generate(), "wes").await;
+
+        let authors: Vec<_> = events.iter().map(|e| e.pubkey).collect();
+        assert_eq!(
+            authors,
+            vec![wes.public_key(), wesley.public_key()],
+            "exact name first, prefix second, about-only absent"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind == Kind::Metadata && e.verify().is_ok()),
+            "hydrated results are the signed kind-0 events"
+        );
+    }
+
+    /// Setting on: a pubkey whose head moved from `wes-…` to `alice-…` is no
+    /// longer found as Wes, and a search for Alice returns the *current* head.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn users_backed_search_hydrates_the_current_head_not_the_stale_match() {
+        let fx = fixture(true).await;
+        let keys = Keys::generate();
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let stale_name = format!("wes-{unique}");
+        let current_name = format!("alice-{unique}");
+        let stale = fx
+            .publish_profile(
+                &keys,
+                &format!(r#"{{"name":"{stale_name}"}}"#),
+                1_700_000_000,
+            )
+            .await;
+        let current = fx
+            .publish_profile(
+                &keys,
+                &format!(r#"{{"name":"{current_name}"}}"#),
+                1_700_000_001,
+            )
+            .await;
+        assert_ne!(stale.id, current.id);
+
+        let reader = Keys::generate();
+        let as_wes = fx.search_profiles(&reader, &stale_name).await;
+        assert!(
+            as_wes.is_empty(),
+            "the superseded name must not match: {as_wes:?}"
+        );
+
+        let as_alice = fx.search_profiles(&reader, &current_name).await;
+        assert_eq!(
+            as_alice.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![current.id],
+            "the current head is returned, not the stale event"
+        );
+    }
+
+    /// Setting off: the same data still goes through FTS, where the
+    /// about-only profile matches on its `about` lexeme.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fts_path_is_unchanged_when_setting_is_off() {
+        let fx = fixture(false).await;
+        let wes = Keys::generate();
+        let about_only = Keys::generate();
+        fx.publish_profile(
+            &wes,
+            r#"{"name":"wes","display_name":"Wes"}"#,
+            1_700_000_000,
+        )
+        .await;
+        fx.publish_profile(
+            &about_only,
+            r#"{"name":"pixel","about":"talks about wes all day"}"#,
+            1_700_000_200,
+        )
+        .await;
+
+        let events = fx.search_profiles(&Keys::generate(), "wes").await;
+
+        let authors: std::collections::BTreeSet<_> =
+            events.iter().map(|e| e.pubkey.to_hex()).collect();
+        assert!(
+            authors.contains(&wes.public_key().to_hex()),
+            "FTS still finds the name match: {authors:?}"
+        );
+        assert!(
+            authors.contains(&about_only.public_key().to_hex()),
+            "FTS still matches `about` text when the users path is off: {authors:?}"
+        );
     }
 }

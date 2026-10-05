@@ -1,0 +1,816 @@
+//! Kind-0 profile projection into the `users` table.
+//!
+//! A kind-0 head is the authoritative profile; `users` carries a per-pubkey
+//! projection of it (`name`, `display_name`, `avatar_url`, `about`,
+//! `nip05_handle`, `metadata_event_id`) so people search can run over a small
+//! table instead of the events partitions. The projection is written inside
+//! the kind-0 replace transaction ([`Db::replace_profile_event`]) so an
+//! accepted profile and its `users` row commit or roll back together; the
+//! batched backfill here repopulates rows that predate that seam.
+
+use buzz_core::{CommunityId, StoredEvent};
+use buzz_datastore_tracing::datastore_span;
+use sqlx::{Acquire, PgConnection, Row, Transaction};
+
+use crate::error::{DbError, Result};
+use crate::store::replaceable::event_replacement_lock_key;
+use crate::Db;
+
+/// The `users` columns one kind-0 head projects to.
+///
+/// Built once per write from the event content and the bound tenant host
+/// (NIP-05 handles are only kept when their domain is that host), then applied
+/// as absolute state: a field absent from the event clears its column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileProjection {
+    /// Raw kind-0 `name`.
+    pub name: Option<String>,
+    /// Kind-0 `display_name`, falling back to `displayName`.
+    pub display_name: Option<String>,
+    /// Kind-0 `picture`, falling back to `image`.
+    pub avatar_url: Option<String>,
+    /// Kind-0 `about`.
+    pub about: Option<String>,
+    /// Canonical `nip05` when its domain matches the tenant host; `None` otherwise.
+    pub nip05_handle: Option<String>,
+    /// Id of the kind-0 event this projection was derived from.
+    pub metadata_event_id: Vec<u8>,
+}
+
+impl ProfileProjection {
+    /// Project a kind-0 event for the community served at `host`.
+    pub fn from_kind0_event(event: &nostr::Event, host: &str) -> Self {
+        Self::from_kind0_content(&event.content, event.id.as_bytes(), host)
+    }
+
+    /// Project raw kind-0 content. Content that is not a JSON object clears
+    /// every field; ingest rejects such events before storage, so this arm is
+    /// only reachable for historical rows the backfill revisits.
+    pub fn from_kind0_content(content: &str, event_id: &[u8], host: &str) -> Self {
+        let content: serde_json::Value =
+            serde_json::from_str(content).unwrap_or(serde_json::Value::Null);
+        // First non-empty string among the candidate keys. Empty strings count
+        // as absent so `nip05_handle`'s UNIQUE index never collides on "".
+        let field = |keys: &[&str]| -> Option<String> {
+            keys.iter()
+                .filter_map(|key| content.get(*key).and_then(|v| v.as_str()))
+                .find(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let nip05_handle = field(&["nip05"])
+            .and_then(|raw| buzz_core::nip05::canonicalize_nip05(&raw, host).ok())
+            .map(fit_varchar);
+        Self {
+            name: field(&["name"]).map(fit_varchar),
+            display_name: field(&["display_name", "displayName"]).map(fit_varchar),
+            avatar_url: field(&["picture", "image"]),
+            about: field(&["about"]),
+            nip05_handle,
+            metadata_event_id: event_id.to_vec(),
+        }
+    }
+}
+
+/// Width of the `VARCHAR(255)` label columns on `users`.
+const VARCHAR_LABEL_CHARS: usize = 255;
+
+/// Clip a label to the column width. The projection is a search index over
+/// the kind-0 head, not the head itself, so an oversized `name` must shorten
+/// rather than fail the write and reject the profile event with it.
+/// PostgreSQL measures `VARCHAR(n)` in characters, so clip on chars.
+fn fit_varchar(value: String) -> String {
+    match value.char_indices().nth(VARCHAR_LABEL_CHARS) {
+        Some((byte_index, _)) => value[..byte_index].to_owned(),
+        None => value,
+    }
+}
+
+/// Outcome of a kind-0 replace that also projected into `users`.
+#[derive(Debug, Clone)]
+pub struct ProfileReplaceOutcome {
+    /// The stored event (the incoming event echoed back on stale/duplicate writes).
+    pub event: StoredEvent,
+    /// `true` when the event became the live head; `false` for stale and duplicate writes.
+    pub was_inserted: bool,
+    /// `true` when the projection created the `users` row rather than updating it.
+    pub user_created: bool,
+}
+
+/// One community's backfill progress as seen by the precheck.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileBackfillPrecheck {
+    /// The community the counts belong to.
+    pub community_id: CommunityId,
+    /// Its bound host.
+    pub host: String,
+    /// Distinct pubkeys with a live, channel-less kind-0 head.
+    pub kind0_publishers: i64,
+    /// Rows in `users` for the community.
+    pub users_rows: i64,
+    /// Publishers whose `users.metadata_event_id` is not their current head
+    /// (missing row included). Zero means the projection is complete.
+    pub unprojected_publishers: i64,
+}
+
+/// Result of one [`Db::backfill_profiles_batch`] call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileBackfillBatch {
+    /// Publishers visited in this batch; zero means the scan is complete.
+    pub scanned: usize,
+    /// Visited publishers that still had a live head and were projected.
+    pub projected: usize,
+    /// `users` rows created (rather than updated) by this batch.
+    pub created: usize,
+    /// Cursor for the next batch: the last pubkey visited.
+    pub last_pubkey: Option<Vec<u8>>,
+}
+
+fn is_unique_violation(error: &DbError) -> bool {
+    matches!(error, DbError::Sqlx(sqlx::Error::Database(db)) if db.is_unique_violation())
+}
+
+/// Upsert the projection for `pubkey` inside the caller's transaction.
+///
+/// Returns `true` when the `users` row was created. A NIP-05 handle another
+/// user already holds (partial unique index `idx_users_nip05`) is written
+/// inside a savepoint so the violation cannot abort the surrounding event
+/// transaction; the retry keeps the row's existing handle, mirroring the
+/// pre-transactional side effect that retried without the contested value.
+pub(crate) async fn upsert_profile_in_transaction(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    profile: &ProfileProjection,
+) -> Result<bool> {
+    let mut savepoint = conn.begin().await?;
+    match upsert_profile_on(&mut savepoint, community_id, pubkey, profile, true).await {
+        Ok(created) => {
+            savepoint.commit().await?;
+            Ok(created)
+        }
+        Err(error) if is_unique_violation(&error) => {
+            savepoint.rollback().await?;
+            tracing::warn!(
+                pubkey = %hex::encode(pubkey),
+                "kind:0 NIP-05 handle contested, projecting profile without it"
+            );
+            upsert_profile_on(conn, community_id, pubkey, profile, false).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn upsert_profile_on(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    profile: &ProfileProjection,
+    write_nip05: bool,
+) -> Result<bool> {
+    // `xmax = 0` on the returned row distinguishes INSERT from the UPDATE arm.
+    let sql = if write_nip05 {
+        "INSERT INTO users (community_id, pubkey, name, display_name, avatar_url, about, \
+                            nip05_handle, metadata_event_id, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET \
+             name = EXCLUDED.name, display_name = EXCLUDED.display_name, \
+             avatar_url = EXCLUDED.avatar_url, about = EXCLUDED.about, \
+             nip05_handle = EXCLUDED.nip05_handle, \
+             metadata_event_id = EXCLUDED.metadata_event_id, updated_at = NOW() \
+         RETURNING (xmax = 0) AS created"
+    } else {
+        "INSERT INTO users (community_id, pubkey, name, display_name, avatar_url, about, \
+                            nip05_handle, metadata_event_id, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, NULL, $8, NOW()) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET \
+             name = EXCLUDED.name, display_name = EXCLUDED.display_name, \
+             avatar_url = EXCLUDED.avatar_url, about = EXCLUDED.about, \
+             nip05_handle = users.nip05_handle, \
+             metadata_event_id = EXCLUDED.metadata_event_id, updated_at = NOW() \
+         RETURNING (xmax = 0) AS created"
+    };
+    let row = sqlx::query(sql)
+        .bind(community_id.as_uuid())
+        .bind(pubkey)
+        .bind(profile.name.as_deref())
+        .bind(profile.display_name.as_deref())
+        .bind(profile.avatar_url.as_deref())
+        .bind(profile.about.as_deref())
+        .bind(profile.nip05_handle.as_deref())
+        .bind(profile.metadata_event_id.as_slice())
+        .fetch_one(conn)
+        .await?;
+    Ok(row.try_get::<bool, _>("created")?)
+}
+
+/// Each pubkey's current channel-less kind-0 head, resolved like the replace
+/// path does: newest `created_at`, lowest `id` on a tie, live rows only.
+async fn current_profile_events_on(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+) -> Result<Vec<StoredEvent>> {
+    if pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (pubkey) \
+                id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events \
+         WHERE community_id = $1 AND kind = 0 AND channel_id IS NULL AND deleted_at IS NULL \
+           AND pubkey = ANY($2) \
+         ORDER BY pubkey, created_at DESC, id ASC",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkeys)
+    .fetch_all(conn)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(event) = crate::event::row_to_stored_event(row)? {
+            out.push(event);
+        }
+    }
+    Ok(out)
+}
+
+impl Db {
+    /// Current kind-0 head for each of `pubkeys` (at most one event per pubkey,
+    /// in no particular order). Pubkeys without a live head are absent.
+    #[datastore_span(name = "get_current_profile_events", system = "postgresql")]
+    pub async fn get_current_profile_events(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<StoredEvent>> {
+        if pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        current_profile_events_on(&mut conn, community_id, pubkeys).await
+    }
+
+    /// Per-community projection progress for every live community: how many
+    /// kind-0 publishers exist, how many `users` rows, and how many publishers
+    /// still lack a row projected from their current head.
+    #[datastore_span(name = "profile_backfill_precheck", system = "postgresql")]
+    pub async fn profile_backfill_precheck(&self) -> Result<Vec<ProfileBackfillPrecheck>> {
+        let mut conn = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
+        let rows = sqlx::query(
+            "SELECT c.id, c.host, \
+                    (SELECT COUNT(DISTINCT e.pubkey) FROM events e \
+                      WHERE e.community_id = c.id AND e.kind = 0 \
+                        AND e.channel_id IS NULL AND e.deleted_at IS NULL) AS kind0_publishers, \
+                    (SELECT COUNT(*) FROM users u WHERE u.community_id = c.id) AS users_rows, \
+                    (SELECT COUNT(*) FROM ( \
+                        SELECT DISTINCT ON (e.pubkey) e.pubkey, e.id FROM events e \
+                         WHERE e.community_id = c.id AND e.kind = 0 \
+                           AND e.channel_id IS NULL AND e.deleted_at IS NULL \
+                         ORDER BY e.pubkey, e.created_at DESC, e.id ASC) h \
+                      LEFT JOIN users u ON u.community_id = c.id AND u.pubkey = h.pubkey \
+                     WHERE u.metadata_event_id IS DISTINCT FROM h.id) AS unprojected_publishers \
+             FROM communities c \
+             WHERE c.deleted_at IS NULL \
+             ORDER BY c.host",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProfileBackfillPrecheck {
+                    community_id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                    kind0_publishers: row.try_get("kind0_publishers")?,
+                    users_rows: row.try_get("users_rows")?,
+                    unprojected_publishers: row.try_get("unprojected_publishers")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Project one batch of kind-0 publishers (pubkey order, after
+    /// `after_pubkey`) into `users` for the community served at `host`.
+    ///
+    /// Each batch is one transaction that takes the same per-pubkey advisory
+    /// lock as [`Db::replace_addressable_event`] before reading the head, so a
+    /// concurrent profile replace can never be overwritten with an older
+    /// projection. Idempotent: re-running converges on the current heads.
+    #[datastore_span(name = "backfill_profiles_batch", system = "postgresql")]
+    pub async fn backfill_profiles_batch(
+        &self,
+        community_id: CommunityId,
+        host: &str,
+        after_pubkey: Option<&[u8]>,
+        batch_size: u32,
+    ) -> Result<ProfileBackfillBatch> {
+        let batch_size = i64::from(batch_size.clamp(1, 1_000));
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
+        let mut tx = Transaction::begin(connection, None).await?;
+
+        let pubkeys: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT DISTINCT pubkey FROM events \
+             WHERE community_id = $1 AND kind = 0 AND channel_id IS NULL AND deleted_at IS NULL \
+               AND pubkey > $2 \
+             ORDER BY pubkey LIMIT $3",
+        )
+        .bind(community_id.as_uuid())
+        .bind(after_pubkey.unwrap_or(&[]))
+        .bind(batch_size)
+        .fetch_all(&mut *tx)
+        .await?;
+        if pubkeys.is_empty() {
+            tx.rollback().await?;
+            return Ok(ProfileBackfillBatch::default());
+        }
+
+        // Pubkey order matches the page order, and the replace path holds one
+        // lock per transaction, so the two can wait on each other but never
+        // form a cycle.
+        for pubkey in &pubkeys {
+            let key = event_replacement_lock_key(community_id, 0, pubkey, None);
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(key)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        let heads = current_profile_events_on(&mut tx, community_id, &pubkeys).await?;
+        let mut created = 0usize;
+        for head in &heads {
+            let projection = ProfileProjection::from_kind0_event(&head.event, host);
+            let pubkey = head.event.pubkey.to_bytes();
+            if upsert_profile_in_transaction(&mut tx, community_id, &pubkey, &projection).await? {
+                created += 1;
+            }
+        }
+        tx.commit().await?;
+
+        Ok(ProfileBackfillBatch {
+            scanned: pubkeys.len(),
+            projected: heads.len(),
+            created,
+            last_pubkey: pubkeys.last().cloned(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn projection(content: &str) -> ProfileProjection {
+        ProfileProjection::from_kind0_content(content, &[7u8; 32], "buzz.example")
+    }
+
+    #[test]
+    fn projection_keeps_name_and_display_name_separate() {
+        let p = projection(r#"{"name":"wes","display_name":"Wes Anderson"}"#);
+        assert_eq!(p.name.as_deref(), Some("wes"));
+        assert_eq!(p.display_name.as_deref(), Some("Wes Anderson"));
+        assert_eq!(p.metadata_event_id, vec![7u8; 32]);
+    }
+
+    #[test]
+    fn projection_falls_back_to_camel_case_display_name_only() {
+        let p = projection(r#"{"name":"wes","displayName":"Wesley"}"#);
+        assert_eq!(p.display_name.as_deref(), Some("Wesley"));
+        let name_only = projection(r#"{"name":"wes"}"#);
+        assert_eq!(name_only.display_name, None, "`name` is not a display_name");
+        assert_eq!(name_only.name.as_deref(), Some("wes"));
+    }
+
+    /// `users.name`/`display_name` are `VARCHAR(255)`; an oversized label is
+    /// clipped on a char boundary instead of failing the kind-0 write.
+    #[test]
+    fn projection_clips_labels_to_the_column_width_on_char_boundaries() {
+        let long_name = "é".repeat(300);
+        let p = projection(&format!(
+            r#"{{"name":"{long_name}","about":"{long_name}"}}"#
+        ));
+        let name = p.name.expect("name kept");
+        assert_eq!(name.chars().count(), 255);
+        assert!(name.chars().all(|c| c == 'é'), "clip must not split a char");
+        assert_eq!(
+            p.about.as_deref().map(|s| s.chars().count()),
+            Some(300),
+            "TEXT columns are not clipped"
+        );
+        let short = projection(r#"{"name":"wes"}"#);
+        assert_eq!(short.name.as_deref(), Some("wes"));
+    }
+
+    #[test]
+    fn projection_treats_empty_strings_as_absent() {
+        let p = projection(r#"{"name":"","display_name":"","picture":"","about":"","nip05":""}"#);
+        assert_eq!(
+            p,
+            ProfileProjection {
+                metadata_event_id: vec![7u8; 32],
+                ..empty()
+            }
+        );
+    }
+
+    #[test]
+    fn projection_keeps_only_on_host_nip05_handles() {
+        let on_host = projection(r#"{"nip05":"Wes@Buzz.example"}"#);
+        assert_eq!(on_host.nip05_handle.as_deref(), Some("wes@buzz.example"));
+        let off_host = projection(r#"{"nip05":"wes@elsewhere.example"}"#);
+        assert_eq!(off_host.nip05_handle, None);
+        let malformed = projection(r#"{"nip05":"not-a-handle"}"#);
+        assert_eq!(malformed.nip05_handle, None);
+    }
+
+    #[test]
+    fn projection_prefers_picture_over_image() {
+        let p = projection(r#"{"picture":"https://a/p.png","image":"https://a/i.png"}"#);
+        assert_eq!(p.avatar_url.as_deref(), Some("https://a/p.png"));
+        let image = projection(r#"{"image":"https://a/i.png"}"#);
+        assert_eq!(image.avatar_url.as_deref(), Some("https://a/i.png"));
+    }
+
+    #[test]
+    fn projection_of_non_object_content_clears_every_field() {
+        assert_eq!(
+            projection("not json"),
+            ProfileProjection {
+                metadata_event_id: vec![7u8; 32],
+                ..empty()
+            }
+        );
+    }
+
+    fn empty() -> ProfileProjection {
+        ProfileProjection {
+            name: None,
+            display_name: None,
+            avatar_url: None,
+            about: None,
+            nip05_handle: None,
+            metadata_event_id: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use sqlx::PgPool;
+
+    async fn setup_db() -> Db {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        Db::from_pool(pool)
+    }
+
+    async fn make_community(pool: &PgPool) -> (CommunityId, String) {
+        let id = uuid::Uuid::new_v4();
+        let host = format!("profile-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        (CommunityId::from_uuid(id), host)
+    }
+
+    fn kind0(keys: &Keys, content: &str, created_at: u64) -> nostr::Event {
+        EventBuilder::new(Kind::Metadata, content)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign kind:0")
+    }
+
+    async fn users_row(
+        pool: &PgPool,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Option<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<Vec<u8>>,
+    )> {
+        sqlx::query_as(
+            "SELECT name, display_name, avatar_url, about, nip05_handle, metadata_event_id \
+             FROM users WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .fetch_optional(pool)
+        .await
+        .expect("read users row")
+    }
+
+    async fn replace_profile(
+        db: &Db,
+        community: CommunityId,
+        host: &str,
+        event: &nostr::Event,
+    ) -> ProfileReplaceOutcome {
+        db.replace_profile_event(
+            community,
+            event,
+            &ProfileProjection::from_kind0_event(event, host),
+        )
+        .await
+        .expect("replace profile event")
+    }
+
+    /// The projection is written by the replace transaction itself: name,
+    /// display_name, and metadata_event_id land as separate columns, a newer
+    /// head rewrites them as absolute state, and a stale head changes nothing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replace_profile_event_projects_name_display_name_and_metadata_event_id() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_bytes();
+
+        let first = kind0(
+            &keys,
+            &format!(
+                r#"{{"name":"wes","display_name":"Wes Anderson","picture":"https://a/p.png","about":"hi","nip05":"Wes@{host}"}}"#
+            ),
+            1_700_000_010,
+        );
+        let outcome = replace_profile(&db, community, &host, &first).await;
+        assert!(outcome.was_inserted, "first head must be accepted");
+        assert!(outcome.user_created, "no users row existed yet");
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey).await,
+            Some((
+                Some("wes".into()),
+                Some("Wes Anderson".into()),
+                Some("https://a/p.png".into()),
+                Some("hi".into()),
+                Some(format!("wes@{host}")),
+                Some(first.id.as_bytes().to_vec()),
+            ))
+        );
+
+        let newer = kind0(&keys, r#"{"displayName":"Wesley"}"#, 1_700_000_020);
+        let outcome = replace_profile(&db, community, &host, &newer).await;
+        assert!(outcome.was_inserted);
+        assert!(!outcome.user_created, "row already existed");
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey).await,
+            Some((
+                None,
+                Some("Wesley".into()),
+                None,
+                None,
+                None,
+                Some(newer.id.as_bytes().to_vec()),
+            )),
+            "kind:0 is absolute state: absent fields clear, displayName fills display_name"
+        );
+
+        let stale = kind0(&keys, r#"{"name":"stale"}"#, 1_700_000_015);
+        let outcome = replace_profile(&db, community, &host, &stale).await;
+        assert!(!outcome.was_inserted, "older head must be rejected");
+        assert!(!outcome.user_created);
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey)
+                .await
+                .and_then(|row| row.5),
+            Some(newer.id.as_bytes().to_vec()),
+            "a stale write must not touch the projection"
+        );
+    }
+
+    /// A handle another user already holds is dropped from the projection
+    /// (the row keeps whatever handle it had) and the event is still accepted.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replace_profile_event_keeps_existing_handle_when_nip05_is_contested() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let holder = Keys::generate();
+        let claimant = Keys::generate();
+        let claimant_pubkey = claimant.public_key().to_bytes();
+
+        replace_profile(
+            &db,
+            community,
+            &host,
+            &kind0(
+                &holder,
+                &format!(r#"{{"nip05":"shared@{host}"}}"#),
+                1_700_000_010,
+            ),
+        )
+        .await;
+        let own = kind0(
+            &claimant,
+            &format!(r#"{{"name":"claimant","nip05":"claimant@{host}"}}"#),
+            1_700_000_011,
+        );
+        replace_profile(&db, community, &host, &own).await;
+
+        let contested = kind0(
+            &claimant,
+            &format!(r#"{{"name":"renamed","nip05":"shared@{host}"}}"#),
+            1_700_000_012,
+        );
+        let outcome = replace_profile(&db, community, &host, &contested).await;
+        assert!(outcome.was_inserted, "the event itself is still accepted");
+
+        let row = users_row(&db.pool, community, &claimant_pubkey)
+            .await
+            .expect("claimant row");
+        assert_eq!(
+            row.0.as_deref(),
+            Some("renamed"),
+            "other fields still project"
+        );
+        assert_eq!(
+            row.4,
+            Some(format!("claimant@{host}")),
+            "the contested handle is not taken; the existing one is kept"
+        );
+        assert_eq!(row.5, Some(contested.id.as_bytes().to_vec()));
+        assert_eq!(
+            users_row(&db.pool, community, &holder.public_key().to_bytes())
+                .await
+                .and_then(|row| row.4),
+            Some(format!("shared@{host}")),
+            "the holder keeps the handle"
+        );
+    }
+
+    /// Heads written without a projection (as every kind-0 did before this
+    /// seam) are picked up by the batched backfill, which pages by pubkey,
+    /// uses the current head rather than a superseded row, and converges the
+    /// precheck's `unprojected_publishers` to zero.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn backfill_projects_current_heads_and_precheck_converges() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let mut keys: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+        keys.sort_by_key(|k| k.public_key().to_bytes());
+
+        for (i, k) in keys.iter().enumerate() {
+            db.replace_addressable_event(
+                community,
+                &kind0(k, &format!(r#"{{"name":"stale-{i}"}}"#), 1_700_000_000),
+                None,
+            )
+            .await
+            .expect("stale head");
+            db.replace_addressable_event(
+                community,
+                &kind0(k, &format!(r#"{{"name":"current-{i}"}}"#), 1_700_000_100),
+                None,
+            )
+            .await
+            .expect("current head");
+        }
+        // One publisher already has a bare row (as AUTH creates them); the
+        // others have none.
+        crate::user::ensure_user(&db.pool, community, &keys[1].public_key().to_bytes())
+            .await
+            .expect("ensure user");
+
+        let before = precheck_for(&db, community).await;
+        assert_eq!(
+            (
+                before.kind0_publishers,
+                before.users_rows,
+                before.unprojected_publishers
+            ),
+            (3, 1, 3),
+            "before the backfill every publisher is unprojected: {before:?}"
+        );
+
+        let first = db
+            .backfill_profiles_batch(community, &host, None, 2)
+            .await
+            .expect("first batch");
+        assert_eq!(first.scanned, 2);
+        assert_eq!(first.projected, 2);
+        assert_eq!(first.created, 1, "keys[1] already had a row");
+        assert_eq!(
+            first.last_pubkey.as_deref(),
+            Some(keys[1].public_key().to_bytes().as_slice())
+        );
+
+        let second = db
+            .backfill_profiles_batch(community, &host, first.last_pubkey.as_deref(), 2)
+            .await
+            .expect("second batch");
+        assert_eq!(
+            (second.scanned, second.projected, second.created),
+            (1, 1, 1)
+        );
+
+        let done = db
+            .backfill_profiles_batch(community, &host, second.last_pubkey.as_deref(), 2)
+            .await
+            .expect("terminal batch");
+        assert_eq!(done, ProfileBackfillBatch::default(), "scan is complete");
+
+        for (i, k) in keys.iter().enumerate() {
+            let row = users_row(&db.pool, community, &k.public_key().to_bytes())
+                .await
+                .expect("projected row");
+            assert_eq!(row.0.as_deref(), Some(format!("current-{i}").as_str()));
+            let head = db
+                .get_current_profile_events(community, &[k.public_key().to_bytes().to_vec()])
+                .await
+                .expect("head");
+            assert_eq!(
+                row.5.as_deref(),
+                Some(head[0].event.id.as_bytes().as_slice())
+            );
+        }
+        let after = precheck_for(&db, community).await;
+        assert_eq!(
+            (
+                after.kind0_publishers,
+                after.users_rows,
+                after.unprojected_publishers
+            ),
+            (3, 3, 0),
+            "after the backfill nothing is left to project: {after:?}"
+        );
+    }
+
+    /// Hydration returns exactly one live head per pubkey — the newest — and
+    /// nothing for pubkeys without a live kind-0.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_current_profile_events_returns_one_live_head_per_pubkey() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let a = Keys::generate();
+        let b = Keys::generate();
+        let none = Keys::generate();
+
+        replace_profile(
+            &db,
+            community,
+            &host,
+            &kind0(&a, r#"{"name":"a1"}"#, 1_700_000_010),
+        )
+        .await;
+        let a_head = kind0(&a, r#"{"name":"a2"}"#, 1_700_000_020);
+        replace_profile(&db, community, &host, &a_head).await;
+        let b_head = kind0(&b, r#"{"name":"b"}"#, 1_700_000_010);
+        replace_profile(&db, community, &host, &b_head).await;
+
+        let mut heads = db
+            .get_current_profile_events(
+                community,
+                &[
+                    a.public_key().to_bytes().to_vec(),
+                    b.public_key().to_bytes().to_vec(),
+                    none.public_key().to_bytes().to_vec(),
+                ],
+            )
+            .await
+            .expect("heads");
+        heads.sort_by_key(|e| e.event.pubkey.to_bytes());
+        let mut expected = vec![a_head.id, b_head.id];
+        expected.sort_by_key(|id| {
+            if *id == a_head.id {
+                a.public_key().to_bytes()
+            } else {
+                b.public_key().to_bytes()
+            }
+        });
+        assert_eq!(
+            heads.iter().map(|e| e.event.id).collect::<Vec<_>>(),
+            expected,
+            "one newest live head per pubkey, none for an unknown pubkey"
+        );
+    }
+
+    async fn precheck_for(db: &Db, community: CommunityId) -> ProfileBackfillPrecheck {
+        db.profile_backfill_precheck()
+            .await
+            .expect("precheck")
+            .into_iter()
+            .find(|row| row.community_id == community)
+            .expect("community in precheck")
+    }
+}

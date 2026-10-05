@@ -134,6 +134,26 @@ enum Command {
         #[command(subcommand)]
         command: user_deletions::UserDeletionsCommand,
     },
+    /// Repopulate the `users` profile projection (`name`, `display_name`,
+    /// `nip05_handle`, `about`, `avatar_url`, `metadata_event_id`) from each
+    /// pubkey's latest non-deleted kind:0 in the configured community.
+    ///
+    /// Idempotent and safe while the relay serves traffic: each batch takes the
+    /// same per-pubkey lock live kind:0 replaces use, so a concurrent profile
+    /// update is never overwritten with an older head. Run with `--precheck`
+    /// first (and again afterwards) to compare distinct kind:0 publishers with
+    /// projected `users` rows for every community; enable
+    /// `BUZZ_PROFILE_SEARCH_USERS_TABLE` only once `unprojected` reads 0.
+    BackfillUserProfiles {
+        /// Report kind:0 publishers vs projected `users` rows per community
+        /// (all communities, read-only) instead of writing anything.
+        #[arg(long)]
+        precheck: bool,
+
+        /// Pubkeys projected per transaction (1..=1000).
+        #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        batch_size: u32,
+    },
     /// Emit missing kind:39000/39001/39002 channel discovery events, or
     /// republish only a targeted channel's kind:39002 roster.
     ///
@@ -213,6 +233,10 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::Deletions { command } => deletions::run(command).await,
         Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
+        Command::BackfillUserProfiles {
+            precheck,
+            batch_size,
+        } => cmd_backfill_user_profiles(precheck, batch_size).await,
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
@@ -600,6 +624,75 @@ async fn cmd_list_members() -> Result<i32> {
         );
     }
 
+    Ok(0)
+}
+
+/// `backfill-user-profiles`: precheck every community, or project the
+/// configured community's current kind:0 heads into `users` in batches.
+async fn cmd_backfill_user_profiles(precheck: bool, batch_size: u32) -> Result<i32> {
+    let db = connect_db().await?;
+
+    if precheck {
+        let report = db.profile_backfill_precheck().await?;
+        if report.is_empty() {
+            println!("(no live communities)");
+            return Ok(0);
+        }
+        println!(
+            "{:<48} {:>18} {:>12} {:>12}",
+            "host", "kind0_publishers", "users_rows", "unprojected"
+        );
+        println!("{}", "-".repeat(94));
+        let mut unprojected_total = 0;
+        for row in &report {
+            unprojected_total += row.unprojected_publishers;
+            println!(
+                "{:<48} {:>18} {:>12} {:>12}",
+                row.host, row.kind0_publishers, row.users_rows, row.unprojected_publishers
+            );
+        }
+        if unprojected_total > 0 {
+            println!(
+                "\n{unprojected_total} publisher(s) still need projecting; run \
+                 `buzz-admin backfill-user-profiles` against each affected community."
+            );
+        }
+        return Ok(0);
+    }
+
+    let tenant = resolve_admin_tenant(&db).await?;
+    let started = Instant::now();
+    let mut cursor: Option<Vec<u8>> = None;
+    let mut totals = buzz_db::ProfileBackfillBatch::default();
+    loop {
+        let batch = db
+            .backfill_profiles_batch(
+                tenant.community(),
+                tenant.host(),
+                cursor.as_deref(),
+                batch_size,
+            )
+            .await?;
+        if batch.scanned == 0 {
+            break;
+        }
+        totals.scanned += batch.scanned;
+        totals.projected += batch.projected;
+        totals.created += batch.created;
+        println!(
+            "batch: scanned={} projected={} created={} (total scanned {})",
+            batch.scanned, batch.projected, batch.created, totals.scanned
+        );
+        cursor = batch.last_pubkey;
+    }
+    println!(
+        "backfill complete for {}: scanned={} projected={} created={} in {:.1}s",
+        tenant.host(),
+        totals.scanned,
+        totals.projected,
+        totals.created,
+        started.elapsed().as_secs_f64()
+    );
     Ok(0)
 }
 
@@ -1085,5 +1178,40 @@ mod tests {
             assert_eq!(serde_json::to_value(outcome).unwrap(), name);
             assert_eq!(partition_audit_exit_code(outcome), code, "{name}");
         }
+    }
+
+    #[test]
+    fn parses_backfill_user_profiles_defaults_and_overrides() {
+        let cli = Cli::try_parse_from(["buzz-admin", "backfill-user-profiles"])
+            .expect("parse backfill-user-profiles");
+        assert!(matches!(
+            cli.command,
+            Command::BackfillUserProfiles {
+                precheck: false,
+                batch_size: 500
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "backfill-user-profiles",
+            "--precheck",
+            "--batch-size",
+            "50",
+        ])
+        .expect("parse backfill-user-profiles overrides");
+        assert!(matches!(
+            cli.command,
+            Command::BackfillUserProfiles {
+                precheck: true,
+                batch_size: 50
+            }
+        ));
+
+        assert!(
+            Cli::try_parse_from(["buzz-admin", "backfill-user-profiles", "--batch-size", "0"])
+                .is_err(),
+            "batch size must be at least 1"
+        );
     }
 }

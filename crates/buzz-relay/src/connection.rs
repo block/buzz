@@ -1662,14 +1662,37 @@ pub(crate) mod tests {
         community: buzz_core::tenant::CommunityId,
         deadline: Option<chrono::DateTime<chrono::Utc>>,
     ) -> TestConn {
-        let (send_tx, send_rx) = mpsc::channel(4);
+        let tenant = TenantContext::resolved(community, "test.local".to_string());
+        build_test_conn(auth, nip_fi_assertion, tenant, deadline, 4)
+    }
+
+    /// [`test_conn`] bound to a caller-chosen tenant, with `send_capacity`
+    /// data frames of outbound buffer (tests that read frames only after the
+    /// handler returns size it to the expected frame count).
+    pub(crate) fn test_conn_for_tenant(
+        auth: AuthState,
+        nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
+        tenant: TenantContext,
+        send_capacity: usize,
+    ) -> TestConn {
+        build_test_conn(auth, nip_fi_assertion, tenant, None, send_capacity)
+    }
+
+    fn build_test_conn(
+        auth: AuthState,
+        nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
+        tenant: TenantContext,
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
+        send_capacity: usize,
+    ) -> TestConn {
+        let (send_tx, send_rx) = mpsc::channel(send_capacity);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let conn = ConnectionState {
             refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
-            tenant: TenantContext::resolved(community, "test.local".to_string()),
+            tenant,
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
             auth_state: StdMutex::new(auth),
             subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

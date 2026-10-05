@@ -3476,11 +3476,21 @@ pub(crate) mod tests {
     /// lifecycle tests use this to hold the sole connection as a deterministic
     /// barrier while AUTH waits in the real database acquisition path.
     pub(crate) async fn test_state_with_database_pool(pool: sqlx::PgPool) -> Arc<AppState> {
+        test_state_with_database_pool_and(pool, |_| {}).await
+    }
+
+    /// [`test_state_with_database_pool`] with a hook to adjust the config
+    /// (flip a feature flag, say) before the state is built.
+    pub(crate) async fn test_state_with_database_pool_and(
+        pool: sqlx::PgPool,
+        configure: impl FnOnce(&mut crate::config::Config),
+    ) -> Arc<AppState> {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.read_database_url = None;
+        configure(&mut config);
         build_test_state(config, pool).await
     }
 

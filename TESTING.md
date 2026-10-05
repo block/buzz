@@ -424,6 +424,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |
 | `BUZZ_WEB_DIR`                  | unset (source), `/srv/buzz/web` (container) | Directory containing the invite landing bundle; the production container enables it so `/invite/{code}` always works |
 | `BUZZ_SERVE_GIT_WEB_GUI`        | `false`                     | Set to `true` or `1` to expose the bundled Git repository browser at `/` and `/repos/...`; invite routes do not depend on this flag |
+| `BUZZ_PROFILE_SEARCH_USERS_TABLE` | `false`                   | Set to `true` or `1` to serve `kinds:[0]` NIP-50 searches from the `users` projection (hydrated to each pubkey's current kind:0) instead of Postgres FTS. `search_mode`, `since`, and `until` are no-ops on that path. Enable only after `buzz-admin backfill-user-profiles --precheck` reports 0 unprojected publishers — see [docs/profile-search-users-table.md](docs/profile-search-users-table.md) |
 
 CLI-side, only two matter for testing:
 

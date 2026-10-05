@@ -269,7 +269,9 @@ async fn upload_attribution(
         .await
         .ok()
         .flatten()
-        .and_then(|profile| profile.display_name)
+        // `display_name` is the kind-0 display name only; fall back to `name`
+        // so the label matches what the projection split apart.
+        .and_then(|profile| profile.display_name.or(profile.name))
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty());
 

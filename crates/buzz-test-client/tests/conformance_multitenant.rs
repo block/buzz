@@ -947,9 +947,9 @@ mod users_profiles_nip05 {
     /// Publish a kind:0 (Metadata) event via WS for `keys`, with the supplied
     /// JSON content. Returns the event id hex. Latest kind:0 per
     /// `(community_id, pubkey)` wins under NIP-01 replaceable semantics; the
-    /// relay's ingest side-effect at `crates/buzz-relay/src/handlers/side_effects.rs::handle_kind0_profile`
-    /// also syncs the parsed fields into `users` via
-    /// `update_user_profile(tenant.community(), pubkey, ...)`.
+    /// relay's kind-0 ingest branch (`crates/buzz-relay/src/handlers/ingest.rs`)
+    /// also projects the parsed fields into `users` inside the same
+    /// transaction via `Db::replace_profile_event(tenant.community(), ...)`.
     async fn publish_kind0(client: &mut BuzzTestClient, keys: &Keys, content_json: &str) -> String {
         let event = EventBuilder::new(Kind::Metadata, content_json)
             .sign_with_keys(keys)
@@ -1064,8 +1064,8 @@ mod users_profiles_nip05 {
             .expect("connect B");
         let _id_b = publish_kind0(&mut client_b, &keys, &content_b).await;
 
-        // Let the ingest side-effect settle (handle_kind0_profile is async on
-        // the DB write path).
+        // The `users` projection commits with the kind:0 itself, so the OK
+        // above already implies the row; the pause only lets fan-out settle.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // (1) Query on A: must return exactly one kind:0, whose content is
@@ -1127,14 +1127,14 @@ mod users_profiles_nip05 {
     /// answer is observable in the response, not just absent from it).
     ///
     /// Registration mechanism: kind:0 (Metadata) publish over WS with
-    /// `{"nip05":"alice@<domain>"}`. The relay's side-effect handler at
-    /// `crates/buzz-relay/src/handlers/side_effects.rs::handle_kind0_profile`
-    /// validates the handle via `crates/buzz-relay/src/api/nip05.rs::canonicalize_nip05`
-    /// against `extract_domain(state.config.relay_url)` (the relay's configured
-    /// host) and then calls `update_user_profile(tenant.community(), pubkey, ...,
-    /// Some(handle))`. The domain piece is config-pinned (e.g. `"localhost"`
-    /// for `RELAY_URL=ws://localhost:3100`); the **community** scope is what
-    /// isolates, and that's what this row exercises.
+    /// `{"nip05":"alice@<domain>"}`. The relay's kind-0 ingest branch builds a
+    /// `buzz_db::ProfileProjection`, which validates the handle via
+    /// `buzz_core::nip05::canonicalize_nip05` against the bound tenant host and
+    /// writes `users.nip05_handle` inside the replace transaction
+    /// (`Db::replace_profile_event(tenant.community(), ...)`). The domain piece
+    /// is host-pinned (e.g. `"localhost"` for `RELAY_URL=ws://localhost:3100`);
+    /// the **community** scope is what isolates, and that's what this row
+    /// exercises.
     ///
     /// Mutate-bite (would-it-fail-without-the-fix): drop `community_id = $1`
     /// from `crates/buzz-db/src/user.rs::get_user_by_nip05` (line 185 form
@@ -1193,8 +1193,8 @@ mod users_profiles_nip05 {
             .expect("connect B");
         let _ = publish_kind0(&mut client_b, &keys_b, &content_b).await;
 
-        // Let the side-effect (handle_kind0_profile → update_user_profile)
-        // settle.
+        // The `users` projection commits with the kind:0 itself; the pause
+        // only lets fan-out settle.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // (1) NIP-05 lookup on A: must resolve `alice` to A's pubkey, not B's.

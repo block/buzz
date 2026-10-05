@@ -484,6 +484,224 @@ async fn ws_search_prefix_mode_matches_partial_token() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// Run the people-picker REQ (`kinds:[0]`, `search`, `search_mode:"prefix"`)
+/// and return the delivered events in order.
+async fn ws_profile_search(client: &mut BuzzTestClient, text: &str) -> Vec<nostr::Event> {
+    let sid = sub_id("profile-search");
+    client
+        .send_raw(&serde_json::json!([
+            "REQ",
+            sid,
+            {
+                "kinds": [0],
+                "search": text,
+                "search_mode": "prefix",
+                "limit": 20,
+            }
+        ]))
+        .await
+        .expect("send profile search REQ");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect profile search until EOSE")
+}
+
+/// The same request shape over the HTTP bridge (`POST /query`), including the
+/// bridge-only `page` extension.
+async fn bridge_profile_search(keys: &Keys, text: &str, page: u32) -> Vec<serde_json::Value> {
+    let filters = serde_json::json!([{
+        "kinds": [0],
+        "search": text,
+        "search_mode": "prefix",
+        "limit": 20,
+        "page": page,
+    }]);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit bridge profile search");
+    assert!(
+        resp.status().is_success(),
+        "bridge profile search failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse bridge search response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// People search finds a profile by its kind-0 `name` and follows the current
+/// head: after the profile is replaced, the old name no longer matches and the
+/// new name returns exactly the new signed kind-0, on both the WebSocket REQ
+/// path and the HTTP bridge. Holds with `BUZZ_PROFILE_SEARCH_USERS_TABLE` on
+/// (served from the `users` projection) and off (FTS over kind-0 heads).
+#[tokio::test]
+#[ignore]
+async fn profile_search_finds_name_and_follows_current_head() {
+    let url = relay_url();
+    let wes = Keys::generate();
+    let reader = Keys::generate();
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let wes_name = format!("wes{unique}");
+    let alice_name = format!("alice{unique}");
+
+    let mut publisher = BuzzTestClient::connect(&url, &wes)
+        .await
+        .expect("connect wes");
+    let first = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "name": wes_name, "display_name": "Wes", "about": "first head" })
+            .to_string(),
+    )
+    .custom_created_at(nostr::Timestamp::now() - 10)
+    .sign_with_keys(&wes)
+    .expect("sign first kind-0");
+    let ok = publisher
+        .send_event(first.clone())
+        .await
+        .expect("send first kind-0");
+    assert!(ok.accepted, "first kind-0 rejected: {}", ok.message);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut client = BuzzTestClient::connect(&url, &reader)
+        .await
+        .expect("connect reader");
+
+    let found = ws_profile_search(&mut client, &wes_name).await;
+    assert_eq!(
+        found.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![first.id],
+        "search by kind-0 name returns the signed profile: {found:?}"
+    );
+    assert!(found
+        .iter()
+        .all(|e| e.kind == Kind::Metadata && e.verify().is_ok()));
+
+    let bridge_found = bridge_profile_search(&reader, &wes_name, 1).await;
+    assert_eq!(
+        bridge_found
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .collect::<Vec<_>>(),
+        vec![first.id.to_hex()],
+        "bridge search by kind-0 name returns the same profile"
+    );
+    assert!(
+        bridge_profile_search(&reader, &wes_name, 2)
+            .await
+            .is_empty(),
+        "page 2 of a one-person result is empty"
+    );
+
+    // Replace the head: the old name must stop matching and the new one must
+    // resolve to the current event only.
+    let second = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "name": alice_name, "display_name": "Alice" }).to_string(),
+    )
+    .sign_with_keys(&wes)
+    .expect("sign second kind-0");
+    let ok = publisher
+        .send_event(second.clone())
+        .await
+        .expect("send second kind-0");
+    assert!(ok.accepted, "second kind-0 rejected: {}", ok.message);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let stale = ws_profile_search(&mut client, &wes_name).await;
+    assert!(
+        stale.is_empty(),
+        "superseded name must not match after the head moved: {stale:?}"
+    );
+    let current = ws_profile_search(&mut client, &alice_name).await;
+    assert_eq!(
+        current.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![second.id],
+        "the current head is returned, not the stale one"
+    );
+    let bridge_current = bridge_profile_search(&reader, &alice_name, 1).await;
+    assert_eq!(
+        bridge_current
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .collect::<Vec<_>>(),
+        vec![second.id.to_hex()],
+        "bridge follows the current head too"
+    );
+
+    publisher.disconnect().await.expect("disconnect wes");
+    client.disconnect().await.expect("disconnect reader");
+}
+
+/// The observable difference between the two kind-0 search paths: text that
+/// appears only in a profile's `about` matches under FTS and does not match
+/// from the `users` projection. Set `BUZZ_E2E_PROFILE_SEARCH_USERS_TABLE=1`
+/// when the relay under test runs with `BUZZ_PROFILE_SEARCH_USERS_TABLE=true`;
+/// the test asserts whichever path the operator claims, so it is falsifiable
+/// in both modes and doubles as a rollout check that the setting took effect.
+#[tokio::test]
+#[ignore]
+async fn profile_search_about_text_matches_only_on_fts_path() {
+    let users_table = std::env::var("BUZZ_E2E_PROFILE_SEARCH_USERS_TABLE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let url = relay_url();
+    let author = Keys::generate();
+    let reader = Keys::generate();
+    let about_token = format!("abouttoken{}", uuid::Uuid::new_v4().simple());
+
+    let mut publisher = BuzzTestClient::connect(&url, &author)
+        .await
+        .expect("connect author");
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "name": "pixel", "about": format!("talks {about_token} all day") })
+            .to_string(),
+    )
+    .sign_with_keys(&author)
+    .expect("sign kind-0");
+    let ok = publisher
+        .send_event(profile.clone())
+        .await
+        .expect("send kind-0");
+    assert!(ok.accepted, "kind-0 rejected: {}", ok.message);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut client = BuzzTestClient::connect(&url, &reader)
+        .await
+        .expect("connect reader");
+    let ws_hits = ws_profile_search(&mut client, &about_token).await;
+    let bridge_hits = bridge_profile_search(&reader, &about_token, 1).await;
+
+    if users_table {
+        assert!(
+            ws_hits.is_empty() && bridge_hits.is_empty(),
+            "users path searches name/display_name/nip05/pubkey only; about matched: ws={ws_hits:?} bridge={bridge_hits:?}"
+        );
+    } else {
+        assert_eq!(
+            ws_hits.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![profile.id],
+            "FTS path matches about text over WS"
+        );
+        assert_eq!(
+            bridge_hits
+                .iter()
+                .filter_map(|e| e["id"].as_str())
+                .collect::<Vec<_>>(),
+            vec![profile.id.to_hex()],
+            "FTS path matches about text over the bridge"
+        );
+    }
+
+    publisher.disconnect().await.expect("disconnect author");
+    client.disconnect().await.expect("disconnect reader");
+}
+
 /// Subscribe with a search filter that matches nothing.
 /// Verify: EOSE received with no events.
 #[tokio::test]

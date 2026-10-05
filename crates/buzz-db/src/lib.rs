@@ -92,7 +92,7 @@ pub use store::{
     git_repo, moderation, nip_fi_binding, operator_listener, partition, personal_read,
     product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite, relay_members,
     relay_operators, reminder, replaceable, storage_accounting, thread, thread_window, usage, user,
-    user_deletion, user_deletion_fences, workflow,
+    user_deletion, user_deletion_fences, user_profile, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
@@ -110,6 +110,10 @@ pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
 pub use usage::SessionLeader;
+pub use user::{SearchUsersParams, UserProfile, UserSearchProfile};
+pub use user_profile::{
+    ProfileBackfillBatch, ProfileBackfillPrecheck, ProfileProjection, ProfileReplaceOutcome,
+};
 
 /// A value read from the database, with when its reading connection was
 /// checked out of the pool.

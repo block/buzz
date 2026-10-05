@@ -778,7 +778,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 82);
+        assert_eq!(migrations.len(), 83);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -873,6 +873,7 @@ mod postgres_tests {
         assert_eq!(migrations[52].version, 53);
         assert_eq!(migrations[53].version, 54);
         assert_eq!(migrations[54].version, 55);
+        assert_eq!(migrations[82].version, 83);
         assert!(migrations[48]
             .sql
             .as_str()
@@ -894,6 +895,10 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("idx_relay_admin_actions_direct_request"));
+        assert!(migrations[82]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE users ADD COLUMN name"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2899,6 +2904,7 @@ mod postgres_tests {
             "communities",
             "entity_deletion_stage_history",
             "user_deletion_fences",
+            "users",
         ] {
             assert_eq!(
                 columns(&desired, table).await,

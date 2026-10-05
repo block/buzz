@@ -313,6 +313,19 @@ pub struct Config {
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
 
+    /// Serve `kinds == [0]` NIP-50 searches from the `users` projection
+    /// instead of Postgres FTS over `events`.
+    ///
+    /// When `true`, a people search (`{"kinds":[0],"search":…}`) on the
+    /// WebSocket REQ path and the HTTP bridge runs `search_users` and hydrates
+    /// each hit to the pubkey's current kind-0 head; `search_mode`, `since`,
+    /// and `until` are no-ops on that path. Enable only after
+    /// `buzz-admin backfill-user-profiles --precheck` reports no unprojected
+    /// publishers — see `docs/profile-search-users-table.md`.
+    ///
+    /// Default: `false`. Set via `BUZZ_PROFILE_SEARCH_USERS_TABLE=true`.
+    pub profile_search_users_table: bool,
+
     /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
@@ -859,6 +872,10 @@ impl Config {
             .unwrap_or(false);
 
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let profile_search_users_table = std::env::var("BUZZ_PROFILE_SEARCH_USERS_TABLE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -1501,6 +1518,7 @@ impl Config {
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             allow_nip_oa_auth,
+            profile_search_users_table,
             klipy,
             media,
             media_max_concurrent_uploads,
@@ -1797,6 +1815,10 @@ mod tests {
         assert!(
             !config.allow_nip_oa_auth,
             "allow_nip_oa_auth should default to false"
+        );
+        assert!(
+            !config.profile_search_users_table,
+            "profile_search_users_table should default to false so kind-0 search stays on FTS until the users backfill has run"
         );
         assert!(
             !config.serve_git_web_gui,
@@ -2364,6 +2386,46 @@ mod tests {
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("must be valid Unicode")
         ));
+    }
+
+    #[test]
+    fn profile_search_users_table_env_accepts_true_and_one_only() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_PROFILE_SEARCH_USERS_TABLE");
+
+        let mut observed = Vec::new();
+        for value in ["true", "1", "yes", "on", "false", "0", ""] {
+            std::env::set_var("BUZZ_PROFILE_SEARCH_USERS_TABLE", value);
+            observed.push((
+                value,
+                Config::from_env()
+                    .expect("config")
+                    .profile_search_users_table,
+            ));
+        }
+        std::env::remove_var("BUZZ_PROFILE_SEARCH_USERS_TABLE");
+        let unset = Config::from_env()
+            .expect("config")
+            .profile_search_users_table;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PROFILE_SEARCH_USERS_TABLE", value);
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                ("true", true),
+                ("1", true),
+                ("yes", false),
+                ("on", false),
+                ("false", false),
+                ("0", false),
+                ("", false),
+            ],
+            "same strict `true`/`1` contract as BUZZ_ALLOW_NIP_OA_AUTH"
+        );
+        assert!(!unset, "unset keeps kind-0 search on FTS");
     }
 
     #[test]

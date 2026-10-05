@@ -26,6 +26,8 @@ pub mod invite;
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.
 pub mod network;
+/// NIP-05 handle canonicalization shared by the relay and the profile backfill.
+pub mod nip05;
 /// NIP-10 thread-marker parsing — shared `root`/`reply` marker resolver.
 pub mod nip10;
 /// Agent observer frame helpers.

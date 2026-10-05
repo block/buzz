@@ -135,12 +135,19 @@ pub(super) async fn search_members(
     let community = community_for_host(&state, &query.community_host).await?;
     let items = state
         .db
-        .search_users(community, q, limit)
+        .search_users(
+            community,
+            &buzz_db::SearchUsersParams {
+                query: q,
+                limit,
+                ..Default::default()
+            },
+        )
         .await?
         .into_iter()
         .map(|user| MemberSearchItem {
             pubkey: hex::encode(user.pubkey),
-            display_name: user.display_name,
+            display_name: user.display_name.or(user.name),
             nip05: user.nip05_handle,
             avatar_url: user.avatar_url,
         })

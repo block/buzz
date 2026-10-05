@@ -315,7 +315,10 @@ pub async fn list_dms_for_user(
         // Fetch participants for this DM.
         let member_rows = sqlx::query(
             r#"
-            SELECT cm.pubkey, cm.role::text AS role, u.display_name
+            -- `users.display_name` holds only kind-0 display_name; fall back to
+            -- `name` so the participant label matches the pre-split behaviour.
+            SELECT cm.pubkey, cm.role::text AS role,
+                   COALESCE(u.display_name, u.name) AS display_name
             FROM channel_members cm
             LEFT JOIN users u
               ON u.community_id = cm.community_id

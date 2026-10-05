@@ -18,6 +18,8 @@ CREATE TABLE users (
     metadata_event_id   BYTEA,
     agent_owner_pubkey  BYTEA,
     channel_add_policy  channel_add_policy NOT NULL DEFAULT 'anyone',
+    -- Raw kind-0 `name`; `display_name` holds `display_name`/`displayName` only.
+    name                VARCHAR(255),
     PRIMARY KEY (community_id, pubkey),
     CONSTRAINT chk_users_pubkey_len CHECK (LENGTH(pubkey) = 32),
     -- agent owner is a user in the SAME community.

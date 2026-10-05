@@ -12,7 +12,10 @@ use sqlx::Row;
 pub struct UserProfile {
     /// Raw 32-byte compressed public key.
     pub pubkey: Vec<u8>,
-    /// Human-readable display name chosen by the user.
+    /// Raw kind-0 `name` (a handle-like short name).
+    pub name: Option<String>,
+    /// Kind-0 `display_name`/`displayName`. Readers wanting a label should
+    /// fall back to `name` when this is absent.
     pub display_name: Option<String>,
     /// URL of the user's avatar image.
     pub avatar_url: Option<String>,
@@ -27,12 +30,28 @@ pub struct UserProfile {
 pub struct UserSearchProfile {
     /// Raw 32-byte compressed public key.
     pub pubkey: Vec<u8>,
-    /// Human-readable display name chosen by the user.
+    /// Raw kind-0 `name`.
+    pub name: Option<String>,
+    /// Kind-0 `display_name`/`displayName`.
     pub display_name: Option<String>,
     /// URL of the user's avatar image.
     pub avatar_url: Option<String>,
     /// NIP-05 identifier (user@domain).
     pub nip05_handle: Option<String>,
+}
+
+/// Parameters for [`search_users`].
+#[derive(Debug, Clone, Default)]
+pub struct SearchUsersParams<'a> {
+    /// Free-text query; matched case-insensitively against `name`,
+    /// `display_name`, `nip05_handle`, and the hex pubkey.
+    pub query: &'a str,
+    /// Restrict results to these pubkeys (NIP-01 `authors`); `None` means all.
+    pub authors: Option<&'a [Vec<u8>]>,
+    /// Maximum rows to return, clamped to `1..=500`.
+    pub limit: u32,
+    /// Rows to skip in rank order (the bridge's `page` extension).
+    pub offset: u32,
 }
 
 /// Ensure a user record exists for the given pubkey (upsert).
@@ -95,18 +114,9 @@ pub async fn get_user(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Option<UserProfile>> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            Vec<u8>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(
+    let row = sqlx::query_as::<_, UserProfileRow>(
         r#"
-        SELECT pubkey, display_name, avatar_url, about, nip05_handle
+        SELECT pubkey, name, display_name, avatar_url, about, nip05_handle
         FROM users
         WHERE community_id = $1 AND pubkey = $2
         "#,
@@ -116,15 +126,31 @@ pub async fn get_user(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(
-        |(pubkey, display_name, avatar_url, about, nip05_handle)| UserProfile {
+    Ok(row.map(UserProfile::from_row))
+}
+
+type UserProfileRow = (
+    Vec<u8>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+impl UserProfile {
+    fn from_row(
+        (pubkey, name, display_name, avatar_url, about, nip05_handle): UserProfileRow,
+    ) -> Self {
+        Self {
             pubkey,
+            name,
             display_name,
             avatar_url,
             about,
             nip05_handle,
-        },
-    ))
+        }
+    }
 }
 
 /// Update a user's profile fields (display_name, avatar_url, about, nip05_handle).
@@ -215,18 +241,9 @@ pub async fn get_user_by_nip05(
     domain: &str,
 ) -> Result<Option<UserProfile>> {
     let handle = format!("{}@{}", local_part, domain);
-    let row = sqlx::query_as::<
-        _,
-        (
-            Vec<u8>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(
+    let row = sqlx::query_as::<_, UserProfileRow>(
         r#"
-        SELECT pubkey, display_name, avatar_url, about, nip05_handle
+        SELECT pubkey, name, display_name, avatar_url, about, nip05_handle
         FROM users
         WHERE community_id = $1 AND LOWER(nip05_handle) = LOWER($2)
         LIMIT 1
@@ -237,15 +254,7 @@ pub async fn get_user_by_nip05(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(
-        |(pubkey, display_name, avatar_url, about, nip05_handle)| UserProfile {
-            pubkey,
-            display_name,
-            avatar_url,
-            about,
-            nip05_handle,
-        },
-    ))
+    Ok(row.map(UserProfile::from_row))
 }
 
 /// Escape SQL LIKE metacharacters (`%`, `_`, `\`) so user input is treated
@@ -260,45 +269,67 @@ pub(crate) fn escape_like(input: &str) -> String {
         .replace('_', "\\_")
 }
 
-/// Search users by display name, NIP-05 handle, or pubkey prefix.
+/// Search users by name, display name, NIP-05 handle, or pubkey prefix.
 ///
-/// Empty queries return an empty vec and do not hit the database.
+/// Results are ranked exact > prefix > contains (name/display_name before
+/// nip05 before pubkey within each tier), then by label, then by pubkey so
+/// the order is total and stable across `offset` pages. Deactivated users
+/// are excluded. Empty queries return an empty vec and do not hit the
+/// database.
 pub async fn search_users(
     pool: &PgPool,
     community_id: CommunityId,
-    query: &str,
-    limit: u32,
+    params: &SearchUsersParams<'_>,
 ) -> Result<Vec<UserSearchProfile>> {
-    let normalized = query.trim().to_lowercase();
+    let normalized = params.query.trim().to_lowercase();
     if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    if params.authors.is_some_and(|authors| authors.is_empty()) {
         return Ok(Vec::new());
     }
 
     let escaped = escape_like(&normalized);
     let contains_pattern = format!("%{escaped}%");
     let prefix_pattern = format!("{escaped}%");
-    let limit = limit.clamp(1, 500) as i64;
+    let limit = params.limit.clamp(1, 500) as i64;
+    let offset = i64::from(params.offset);
 
-    let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Vec<u8>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
-        SELECT pubkey, display_name, avatar_url, nip05_handle
+        SELECT pubkey, name, display_name, avatar_url, nip05_handle
         FROM users
         WHERE community_id = $1
-          AND (LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
+          AND deactivated_at IS NULL
+          AND ($6::bytea[] IS NULL OR pubkey = ANY($6))
+          AND (LOWER(COALESCE(name, '')) LIKE $2 ESCAPE '\'
+           OR LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
            OR LOWER(COALESCE(nip05_handle, '')) LIKE $2 ESCAPE '\'
            OR LOWER(encode(pubkey, 'hex')) LIKE $2 ESCAPE '\')
         ORDER BY
             CASE
-                WHEN LOWER(COALESCE(display_name, '')) = $3 THEN 0
+                WHEN LOWER(COALESCE(name, '')) = $3
+                  OR LOWER(COALESCE(display_name, '')) = $3 THEN 0
                 WHEN LOWER(COALESCE(nip05_handle, '')) = $3 THEN 1
                 WHEN LOWER(encode(pubkey, 'hex')) = $3 THEN 2
-                WHEN LOWER(COALESCE(display_name, '')) LIKE $4 ESCAPE '\' THEN 3
+                WHEN LOWER(COALESCE(name, '')) LIKE $4 ESCAPE '\'
+                  OR LOWER(COALESCE(display_name, '')) LIKE $4 ESCAPE '\' THEN 3
                 WHEN LOWER(COALESCE(nip05_handle, '')) LIKE $4 ESCAPE '\' THEN 4
                 WHEN LOWER(encode(pubkey, 'hex')) LIKE $4 ESCAPE '\' THEN 5
                 ELSE 6
             END,
-            COALESCE(NULLIF(display_name, ''), NULLIF(nip05_handle, ''), LOWER(encode(pubkey, 'hex')))
-        LIMIT $5
+            COALESCE(NULLIF(display_name, ''), NULLIF(name, ''), NULLIF(nip05_handle, ''), LOWER(encode(pubkey, 'hex'))),
+            pubkey
+        LIMIT $5 OFFSET $7
         "#,
     )
     .bind(community_id.as_uuid())
@@ -306,14 +337,17 @@ pub async fn search_users(
     .bind(&normalized)
     .bind(&prefix_pattern)
     .bind(limit)
+    .bind(params.authors)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(pubkey, display_name, avatar_url, nip05_handle)| UserSearchProfile {
+            |(pubkey, name, display_name, avatar_url, nip05_handle)| UserSearchProfile {
                 pubkey,
+                name,
                 display_name,
                 avatar_url,
                 nip05_handle,
@@ -647,15 +681,15 @@ impl Db {
         crate::user::get_user_by_nip05(&self.pool, community_id, local_part, domain).await
     }
 
-    /// Search users by display name, NIP-05 handle, or pubkey prefix.
+    /// Search users by name, display name, NIP-05 handle, or pubkey prefix.
+    /// See [`crate::user::search_users`] for ranking and filtering rules.
     #[datastore_span(name = "search_users", system = "postgresql")]
     pub async fn search_users(
         &self,
         community_id: CommunityId,
-        query: &str,
-        limit: u32,
+        params: &SearchUsersParams<'_>,
     ) -> Result<Vec<UserSearchProfile>> {
-        crate::user::search_users(&self.pool, community_id, query, limit).await
+        crate::user::search_users(&self.pool, community_id, params).await
     }
 
     /// Atomically set agent owner — only if no owner is currently assigned.
@@ -1022,5 +1056,214 @@ mod postgres_tests {
 
         assert_eq!(result.0, "owner_only");
         assert!(result.1.is_none(), "owner should be None when never set");
+    }
+
+    /// Seed a `users` row with the searchable columns set explicitly.
+    async fn seed_user(
+        pool: &PgPool,
+        community: CommunityId,
+        name: Option<&str>,
+        display_name: Option<&str>,
+        nip05: Option<&str>,
+    ) -> Vec<u8> {
+        let pubkey = random_pubkey();
+        sqlx::query(
+            r#"
+            INSERT INTO users (community_id, pubkey, name, display_name, nip05_handle)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(community.as_uuid())
+        .bind(&pubkey)
+        .bind(name)
+        .bind(display_name)
+        .bind(nip05)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        pubkey
+    }
+
+    async fn search(
+        db: &Db,
+        community: CommunityId,
+        params: SearchUsersParams<'_>,
+    ) -> Vec<Vec<u8>> {
+        db.search_users(community, &params)
+            .await
+            .expect("search users")
+            .into_iter()
+            .map(|profile| profile.pubkey)
+            .collect()
+    }
+
+    /// `name` is searched independently of `display_name`: a profile whose
+    /// only match is in `name` is found, and exact matches in either column
+    /// outrank prefix matches.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_matches_name_and_display_name_separately() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let name_only = seed_user(&db.pool, community, Some("wes"), None, None).await;
+        let display_prefix =
+            seed_user(&db.pool, community, Some("wh"), Some("Wesley H"), None).await;
+        let display_exact = seed_user(&db.pool, community, Some("zz"), Some("Wes"), None).await;
+        let _unrelated = seed_user(&db.pool, community, Some("alice"), Some("Alice"), None).await;
+
+        let found = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert_eq!(found.len(), 3, "both name and display_name matches surface");
+        // Both exact matches share tier 0; their relative order is by label
+        // collation, which is locale-dependent, so compare the tier as a set.
+        let first_tier: std::collections::BTreeSet<_> = found[..2].iter().cloned().collect();
+        let expected_tier: std::collections::BTreeSet<_> =
+            [display_exact, name_only].into_iter().collect();
+        assert_eq!(
+            first_tier, expected_tier,
+            "exact matches (name or display_name) fill the first tier"
+        );
+        assert_eq!(found[2], display_prefix, "prefix match ranks after exact");
+    }
+
+    /// `authors` restricts the result set to the supplied pubkeys and an
+    /// empty author list short-circuits to no rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_honours_authors_filter() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let wanted = seed_user(&db.pool, community, Some("wes-a"), None, None).await;
+        let _other = seed_user(&db.pool, community, Some("wes-b"), None, None).await;
+
+        let authors = vec![wanted.clone()];
+        let found = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                authors: Some(&authors),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await;
+        assert_eq!(found, vec![wanted]);
+
+        let none = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                authors: Some(&[]),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await;
+        assert!(none.is_empty(), "empty authors list matches nothing");
+    }
+
+    /// `offset` pages through the ranked order without repeats or gaps.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_offset_pages_in_rank_order() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        for label in ["wes-1", "wes-2", "wes-3", "wes-4", "wes-5"] {
+            seed_user(&db.pool, community, Some(label), None, None).await;
+        }
+
+        let all = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(all.len(), 5);
+
+        let page_one = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 2,
+                offset: 0,
+                ..Default::default()
+            },
+        )
+        .await;
+        let page_two = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 2,
+                offset: 2,
+                ..Default::default()
+            },
+        )
+        .await;
+        let page_three = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 2,
+                offset: 4,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let paged: Vec<Vec<u8>> = page_one
+            .into_iter()
+            .chain(page_two)
+            .chain(page_three)
+            .collect();
+        assert_eq!(paged, all, "pages concatenate to the unpaged ranking");
+    }
+
+    /// Deactivated users never appear in search results.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_excludes_deactivated_users() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let active = seed_user(&db.pool, community, Some("wes-active"), None, None).await;
+        let deactivated = seed_user(&db.pool, community, Some("wes-gone"), None, None).await;
+        sqlx::query(
+            "UPDATE users SET deactivated_at = NOW() WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&deactivated)
+        .execute(&db.pool)
+        .await
+        .expect("deactivate user");
+
+        let found = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(found, vec![active]);
     }
 }

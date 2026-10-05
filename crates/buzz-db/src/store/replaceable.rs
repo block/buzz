@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::observability::{self, LockType, TransactionOperation};
+use crate::user_profile::{ProfileProjection, ProfileReplaceOutcome};
 use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
@@ -404,6 +405,48 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        let (stored, was_inserted, _) = self
+            .replace_addressable_event_inner(community_id, event, channel_id, None)
+            .await?;
+        Ok((stored, was_inserted))
+    }
+
+    /// [`Db::replace_addressable_event`] for a user's kind-0, projecting the
+    /// accepted head into `users` in the same transaction.
+    ///
+    /// The event insert and its `users` projection commit or roll back
+    /// together, so an accepted profile can never be missing from people
+    /// search and a failed projection never leaves an unprojected head behind.
+    /// Stale and duplicate writes project nothing. The caller derives
+    /// `projection` from the event and the bound tenant host because NIP-05
+    /// canonicalization is host-scoped.
+    #[datastore_span(name = "replace_profile_event", system = "postgresql")]
+    pub async fn replace_profile_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        projection: &ProfileProjection,
+    ) -> Result<ProfileReplaceOutcome> {
+        let (stored, was_inserted, user_created) = self
+            .replace_addressable_event_inner(community_id, event, None, Some(projection))
+            .await?;
+        Ok(ProfileReplaceOutcome {
+            event: stored,
+            was_inserted,
+            user_created,
+        })
+    }
+
+    /// Shared body of the two replace entry points. The third element reports
+    /// whether a `users` row was created by the projection (always `false`
+    /// without one).
+    async fn replace_addressable_event_inner(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        projection: Option<&ProfileProjection>,
+    ) -> Result<(StoredEvent, bool, bool)> {
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;
@@ -477,6 +520,7 @@ impl Db {
                                 false,
                             ),
                             false,
+                            false,
                         ));
                     }
                 }
@@ -538,6 +582,7 @@ impl Db {
                             false,
                         ),
                         false,
+                        false,
                     ));
                 }
 
@@ -555,11 +600,27 @@ impl Db {
                 crate::insert_mentions_in_transaction(&mut tx, event, channel_id)
                     .await?;
 
+                // Same contract for the kind-0 `users` projection: it is part of
+                // the authoritative profile write, not a follow-up side effect.
+                let user_created = match projection {
+                    Some(projection) => {
+                        crate::user_profile::upsert_profile_in_transaction(
+                            tx.conn(),
+                            community_id,
+                            pubkey_bytes.as_slice(),
+                            projection,
+                        )
+                        .await?
+                    }
+                    None => false,
+                };
+
                 tx.commit().await?;
 
                 Ok((
                     StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
                     true,
+                    user_created,
                 ))
             })
             .await

@@ -2667,6 +2667,8 @@ fn search_hit_accepted(
 
 /// Handle search filters by routing to Postgres FTS, then fetching full events
 /// from DB. Supports a bridge-only `page` extension over the FTS result set.
+/// With `profile_search_users_table` on, `kinds == [0]` filters are served
+/// from the `users` projection instead (`page` then skips ranked people).
 #[allow(clippy::too_many_arguments)]
 async fn handle_bridge_search(
     state: &AppState,
@@ -2700,6 +2702,51 @@ async fn handle_bridge_search(
             implicit_channels,
             named_only,
         );
+
+        if state.config.profile_search_users_table
+            && crate::handlers::req::is_profile_only_filter(filter)
+        {
+            // People search over the `users` projection; see
+            // `profile_search_events`. The bridge always includes global
+            // events, so only a channel-bound filter can never match a head.
+            if crate::handlers::req::filter_has_h_tag(filter) {
+                continue;
+            }
+            // `page` is 1-based and counts ranked `users` rows: page N skips
+            // `(N-1) * limit` people. `search_mode` is a no-op on this path.
+            let offset = search_page.saturating_sub(1).saturating_mul(limit);
+            let profile_events = crate::handlers::req::profile_search_events(
+                &state.db,
+                tenant.community(),
+                filter,
+                &search_text,
+                limit,
+                offset,
+            )
+            .await
+            .map_err(|e| db_read_error("search fetch error", &e))?;
+            let post_filter = crate::handlers::req::profile_search_post_filter(filter);
+            for stored in &profile_events {
+                if !search_hit_accepted(
+                    &post_filter,
+                    stored,
+                    accessible_channels,
+                    reader_pubkey_hex,
+                ) {
+                    continue;
+                }
+                if !crate::handlers::req::event_visible_to_reader(&stored.event, pubkey_bytes) {
+                    continue;
+                }
+                if !seen_ids.insert(stored.event.id.to_bytes()) {
+                    continue;
+                }
+                if let Ok(v) = serde_json::to_value(&stored.event) {
+                    events.push(v);
+                }
+            }
+            continue;
+        }
 
         // Scope by channel — push the #h tag (intersected with accessible
         // channels) if present, else the community-wide scope.

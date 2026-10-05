@@ -1994,13 +1994,16 @@ pub async fn get_bot_members(
     .await?;
     let rows = sqlx::query(
         r#"
-        SELECT cm.pubkey, u.display_name, u.agent_type, u.capabilities,
+        -- `users.display_name` holds only kind-0 display_name; fall back to
+        -- `name` so the bot label matches the pre-split behaviour.
+        SELECT cm.pubkey, COALESCE(u.display_name, u.name) AS display_name,
+               u.agent_type, u.capabilities,
                COALESCE(json_agg(DISTINCT jsonb_build_object('name', c.name, 'id', c.id::text)), '[]') AS channels_json
         FROM channel_members cm
         LEFT JOIN users u ON cm.community_id = u.community_id AND cm.pubkey = u.pubkey
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.role = 'bot' AND cm.removed_at IS NULL
-        GROUP BY cm.pubkey, u.display_name, u.agent_type, u.capabilities
+        GROUP BY cm.pubkey, u.display_name, u.name, u.agent_type, u.capabilities
         LIMIT 1000
         "#,
     )
@@ -2062,8 +2065,10 @@ async fn get_users_bulk_with_operation(
         .map(|i| format!("${i}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // `users.display_name` holds only kind-0 display_name; fall back to `name`
+    // so the label matches the pre-split behaviour.
     let sql = format!(
-        "SELECT pubkey, display_name, avatar_url, nip05_handle \
+        "SELECT pubkey, COALESCE(display_name, name) AS display_name, avatar_url, nip05_handle \
          FROM users WHERE community_id = $1 AND pubkey IN ({placeholders})"
     );
 
