@@ -1998,6 +1998,52 @@ impl AppState {
         Ok(closed)
     }
 
+    /// Applies a cross-pod `DisconnectCommunity` command to local sockets.
+    ///
+    /// Both forms act only under the community row lock, so neither can close
+    /// a community that an unarchive has already restored:
+    /// - `Some(archived_at)` closes only while that exact archive transition is
+    ///   still current.
+    /// - `None` (community deletion, or archive published by a relay that
+    ///   predates the transition timestamp) closes only while the row is
+    ///   inactive, with the close reason taken from the row itself.
+    ///
+    /// Returns `None` when the fence found nothing to close.
+    pub async fn apply_community_disconnect(
+        &self,
+        community_id: CommunityId,
+        archived_at: Option<DateTime<Utc>>,
+    ) -> Result<Option<usize>, buzz_db::DbError> {
+        match archived_at {
+            Some(archived_at) => {
+                self.db
+                    .with_community_archive_fence(community_id, archived_at, || {
+                        self.community_connections
+                            .disconnect_archived_community(community_id)
+                    })
+                    .await
+            }
+            None => self.disconnect_if_inactive(community_id).await,
+        }
+    }
+
+    async fn disconnect_if_inactive(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Option<usize>, buzz_db::DbError> {
+        self.db
+            .with_inactive_community_fence(community_id, |archived_at| {
+                if archived_at.is_some() {
+                    self.community_connections
+                        .disconnect_archived_community(community_id)
+                } else {
+                    self.community_connections
+                        .disconnect_deleted_community(community_id)
+                }
+            })
+            .await
+    }
+
     /// Revalidate all communities with live sockets and cancel inactive ones.
     ///
     /// This is the durable backstop for Redis pub/sub's lossy offline-subscriber
@@ -2007,16 +2053,7 @@ impl AppState {
         let (closed, failures) = revalidate_registered_communities(
             &self.community_connections,
             |community_id| async move {
-                self.db
-                    .with_inactive_community_fence(community_id, |archived_at| {
-                        if archived_at.is_some() {
-                            self.community_connections
-                                .disconnect_archived_community(community_id)
-                        } else {
-                            self.community_connections
-                                .disconnect_deleted_community(community_id)
-                        }
-                    })
+                self.disconnect_if_inactive(community_id)
                     .await
                     .map(|disconnected| disconnected.unwrap_or(0))
             },
@@ -2555,54 +2592,63 @@ pub(crate) mod tests {
 
     #[test]
     fn community_disconnect_then_nip_fi_keeps_community_deleted_reason() {
-        // CommunityDeleted fires first, AuthorizationDenied arrives second.
-        // The slot must retain CommunityDeleted.
-        let cancel = CancellationToken::new();
-        let control = CommunityConnectionControl::new(cancel.clone());
-        let reason_rx = control.disconnect_reason();
+        // A community close fires first, AuthorizationDenied arrives second.
+        // The slot must retain the community reason, archived or deleted.
+        for reason in [
+            CommunityDisconnectReason::CommunityDeleted,
+            CommunityDisconnectReason::CommunityArchived,
+        ] {
+            let cancel = CancellationToken::new();
+            let control = CommunityConnectionControl::new(cancel.clone());
+            let reason_rx = control.disconnect_reason();
 
-        // First writer: CommunityDeleted (via disconnect_community).
-        control.disconnect_community(CommunityDisconnectReason::CommunityDeleted);
-        // Second writer: AuthorizationDenied — must be ignored (via disconnect_nip_fi).
-        control.disconnect_nip_fi();
+            // First writer: the community reason (via disconnect_community).
+            control.disconnect_community(reason);
+            // Second writer: AuthorizationDenied — must be ignored (via disconnect_nip_fi).
+            control.disconnect_nip_fi();
 
-        assert_eq!(
-            *reason_rx.borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted),
-            "CommunityDeleted (first writer) must not be clobbered by AuthorizationDenied"
-        );
+            assert_eq!(
+                *reason_rx.borrow(),
+                Some(reason),
+                "{reason:?} (first writer) must not be clobbered by AuthorizationDenied"
+            );
+        }
     }
 
     #[test]
     fn disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame() {
-        // disconnect_community fires first → wins reason → no payload (community-deleted
-        // path is intentionally payload-less).
+        // disconnect_community fires first → wins reason → no payload (community
+        // closes are intentionally payload-less).
         // disconnect_nip_fi fires second → loses reason → must NOT enqueue a denial
-        // frame against the CommunityDeleted close.
-        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+        // frame against the community close.
+        for reason in [
+            CommunityDisconnectReason::CommunityDeleted,
+            CommunityDisconnectReason::CommunityArchived,
+        ] {
+            let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
 
-        let cancel = CancellationToken::new();
-        let control = CommunityConnectionControl::new(cancel.clone());
-        control.set_terminal_frame_sender(terminal_tx);
+            let cancel = CancellationToken::new();
+            let control = CommunityConnectionControl::new(cancel.clone());
+            control.set_terminal_frame_sender(terminal_tx);
 
-        // First writer: disconnect_community.
-        control.disconnect_community(CommunityDisconnectReason::CommunityDeleted);
-        // Second writer: disconnect_nip_fi — loses reason slot.
-        control.disconnect_nip_fi();
+            // First writer: disconnect_community.
+            control.disconnect_community(reason);
+            // Second writer: disconnect_nip_fi — loses reason slot.
+            control.disconnect_nip_fi();
 
-        // Reason slot retains CommunityDeleted.
-        assert_eq!(
-            *control.disconnect_reason().borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted),
-            "CommunityDeleted must be retained when community wins reason"
-        );
+            assert_eq!(
+                *control.disconnect_reason().borrow(),
+                Some(reason),
+                "{reason:?} must be retained when community wins reason"
+            );
 
-        // No frame queued — losing deny must not send an authorization_denied payload
-        // against a community-deleted close.
-        assert!(
-            terminal_rx.try_recv().is_err(),
-            "losing disconnect_nip_fi must not enqueue a denial frame when community wins reason"
-        );
+            // No frame queued — losing deny must not send an authorization_denied
+            // payload against a community close.
+            assert!(
+                terminal_rx.try_recv().is_err(),
+                "losing disconnect_nip_fi must not enqueue a denial frame against {reason:?}"
+            );
+        }
     }
 
     #[test]

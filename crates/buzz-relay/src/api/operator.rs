@@ -2384,6 +2384,79 @@ mod postgres_tests {
         );
     }
 
+    /// A relay that predates the archive transition timestamp publishes a bare
+    /// `DisconnectCommunity`. A current relay must still apply it under the
+    /// lifecycle fence: never against a restored community, and with the
+    /// archive close reason against an archived one.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_disconnect_command_is_fenced_by_community_lifecycle() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let owner_hex = owner.public_key().to_hex();
+
+        // Active (for example, unarchived before the command arrived): keep sockets.
+        let active_cancel = CancellationToken::new();
+        let active_control = CommunityConnectionControl::new(active_cancel.clone());
+        let active_reason = active_control.disconnect_reason();
+        let _active_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, active_control);
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            None
+        );
+        assert!(
+            !active_cancel.is_cancelled(),
+            "a legacy disconnect must not close an active community"
+        );
+        assert_eq!(*active_reason.borrow(), None);
+
+        // Archived: close with the archive reason, not `community deleted`.
+        state
+            .db
+            .archive_community_owned_by(&host, &owner_hex, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            Some(1)
+        );
+        assert!(active_cancel.is_cancelled());
+        assert_eq!(
+            *active_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn unarchive_restores_admission_and_is_idempotent_without_changing_ownership() {

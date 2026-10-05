@@ -250,6 +250,12 @@ run_unit_tests() {
   run_test_step "buzz-relay archived close-reason test" \
     cargo test -p buzz-relay --lib connection::tests::send_loop_sends_policy_close_when_community_is_archived -- --exact --nocapture
 
+  run_test_step "buzz-relay community close first-writer tests" \
+    cargo test -p buzz-relay --lib state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason -- --exact --nocapture
+
+  run_test_step "buzz-relay community close suppresses losing denial frame test" \
+    cargo test -p buzz-relay --lib state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame -- --exact --nocapture
+
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
