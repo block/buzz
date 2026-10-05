@@ -379,13 +379,22 @@ async fn pairing_ws_task_inner(
 
     let pending = wait_for_eose(&mut read, "pair", Duration::from_secs(10)).await?;
     ensure_pairing_task_is_current(&context.generation, context.task_generation)?;
+    let hard_timeout = {
+        let guard = session.lock().await;
+        let active = guard.as_ref().ok_or("session gone")?;
+        if active.is_expired() {
+            return Err("Pairing session expired during connection setup".into());
+        }
+        pairing_expiry_timer(active)
+    };
+    // Readiness may have consumed part of the protocol lifetime. Expire the
+    // visible QR at that original deadline, never 130 seconds after readiness.
     if let Some(ready) = ready.take() {
         let _ = ready.send(Ok(()));
     }
     let mut read = futures_util::stream::iter(pending.into_iter().map(Ok)).chain(read);
 
     let mut code_entry = false;
-    let hard_timeout = tokio::time::sleep(Duration::from_secs(130));
     tokio::pin!(hard_timeout);
 
     loop {
@@ -655,6 +664,10 @@ fn finish_recovery(
         }
     }
     Ok(())
+}
+
+fn pairing_expiry_timer(session: &PairingSession) -> tokio::time::Sleep {
+    tokio::time::sleep_until(session.deadline().into())
 }
 
 fn pairing_task_is_current(generation: &AtomicU64, task_generation: u64) -> bool {

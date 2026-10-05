@@ -297,6 +297,61 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.storing);
       }
 
+      testWidgets('early input is submitted when desktop negotiation arrives', (
+        tester,
+      ) async {
+        final pairing = notifier.pair(pairingCode);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await pairing;
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: const PairingPage(),
+            ),
+          ),
+        );
+        final localCode = container.read(pairingProvider).sasCode;
+        final code = localCode == '111111' ? '222222' : '111111';
+        await tester.enterText(
+          find.byKey(const Key('pairing-code-input')),
+          code,
+        );
+        await tester.pump();
+        expect(
+          socket
+              .decryptedPublishedMessages(sourceSecret)
+              .where((m) => m['type'] == 'code-submit'),
+          isEmpty,
+        );
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'desktop-code'},
+        );
+        await tester.pump();
+        await tester.pump();
+        final submissions = socket
+            .decryptedPublishedMessages(sourceSecret)
+            .where((m) => m['type'] == 'code-submit')
+            .toList();
+        expect(submissions, hasLength(1));
+        expect(submissions.single['code'], code);
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        await tester.pump();
+        expect(find.text('Enter pairing code'), findsNothing);
+        expect(find.text('Protect your identity'), findsOneWidget);
+        notifier.reset();
+        await tester.pumpWidget(const SizedBox.shrink());
+      });
+
       testWidgets(
         'delayed desktop responses retain one attempt and leave code entry',
         (tester) async {

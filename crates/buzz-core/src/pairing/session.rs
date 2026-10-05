@@ -549,9 +549,15 @@ impl PairingSession {
         }
     }
 
+    /// Absolute protocol deadline. Transports must use this same deadline for
+    /// UI expiry so connection setup never adds time to an expired QR.
+    pub fn deadline(&self) -> Instant {
+        self.created_at + self.timeout
+    }
+
     /// Check if the session has expired.
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > self.timeout
+        Instant::now() >= self.deadline()
     }
 
     /// Current protocol state.

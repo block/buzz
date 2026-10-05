@@ -95,6 +95,21 @@ class _SasVerificationView extends HookConsumerWidget {
       }
     }
 
+    useEffect(() {
+      if (verifyDesktopCode == null) return null;
+      var active = true;
+      // Negotiation can arrive after the user typed a code under legacy SAS
+      // rules. Re-evaluate that input against the source-only desktop code.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!active || !context.mounted) return;
+        rejectedCode.value = null;
+        mismatch.value = false;
+        codeAccepted.value = false;
+        checkCode(controller.text);
+      });
+      return () => active = false;
+    }, [verifyDesktopCode != null]);
+
     final showProtection = codeAccepted.value && !sendsIdentityToDesktop;
 
     final verificationContent = Column(

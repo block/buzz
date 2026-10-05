@@ -170,3 +170,27 @@ fn legacy_capabilities_never_enable_automatic_release() {
         assert_eq!(source.start_desktop_code().is_ok(), enabled);
     }
 }
+
+#[test]
+fn readiness_delay_and_late_scan_share_the_original_deadline() {
+    let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+    // Simulate the maximum 35-second readiness wait without sleeping.
+    source.created_at = Instant::now() - Duration::from_secs(35);
+    let deadline = source.deadline();
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    assert!(remaining <= Duration::from_secs(85));
+    assert!(remaining > Duration::from_secs(84));
+    // A scan 84 seconds after readiness still has one second to be accepted.
+    source.created_at -= Duration::from_secs(84);
+    let (_, offer) = PairingSession::new_target(&qr).unwrap();
+    assert!(source.handle_offer(&offer).is_ok());
+    assert!(!source.is_expired());
+    // The transport deadline and protocol expiry both end the original window.
+    source.created_at -= Duration::from_secs(2);
+    assert!(source.deadline() < Instant::now());
+    assert!(source.is_expired());
+    assert!(matches!(
+        source.confirm_sas(),
+        Err(PairingError::SessionExpired)
+    ));
+}

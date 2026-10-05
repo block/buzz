@@ -161,3 +161,17 @@ fn terminal_worker_clears_secret_but_stale_worker_cannot_touch_replacement() {
     assert!(context.take_payload().is_err());
     assert!(pairing.payload.lock().unwrap().is_some());
 }
+
+#[tokio::test(start_paused = true)]
+async fn slow_readiness_does_not_extend_the_visible_qr_past_protocol_expiry() {
+    let (session, _) = PairingSession::new_source("wss://relay.test".into());
+    let deadline = tokio::time::Instant::from_std(session.deadline());
+    tokio::time::advance(Duration::from_secs(35)).await;
+    let expiry = super::pairing_expiry_timer(&session);
+    tokio::pin!(expiry);
+    assert_eq!(expiry.deadline(), deadline);
+    tokio::time::advance(Duration::from_secs(84)).await;
+    assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(futures_util::poll!(expiry.as_mut()).is_ready());
+}
