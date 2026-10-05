@@ -144,7 +144,7 @@ class FrostedAppBar extends StatelessWidget {
   /// surrounding scroll scope reports content beneath the controls.
   final bool frosted;
 
-  /// Keeps the Flutter backdrop and divider stable regardless of scroll state.
+  /// Keeps the backdrop stable regardless of scroll state on both platforms.
   /// Conversation headers use this while their timeline and composer resize.
   final bool alwaysFrosted;
 
@@ -285,6 +285,7 @@ class FrostedAppBar extends StatelessWidget {
                   titlePresenceColor: nativeTitlePresenceColor,
                   onTitlePressed: onNativeTitlePressed,
                   largeTitle: nativeLargeTitle,
+                  alwaysFrosted: alwaysFrosted,
                   foregroundColor: iconColor,
                   leading: nativeLeading ?? _nativeAction(leading),
                   onBack:

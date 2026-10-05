@@ -116,6 +116,7 @@ class IosNavigationBar extends HookConsumerWidget {
     this.titlePresenceColor,
     this.onTitlePressed,
     this.largeTitle = false,
+    this.alwaysFrosted = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -132,6 +133,9 @@ class IosNavigationBar extends HookConsumerWidget {
   final Color? titlePresenceColor;
   final VoidCallback? onTitlePressed;
   final bool largeTitle;
+
+  /// Keeps the navigation backdrop visible before the first scroll update.
+  final bool alwaysFrosted;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -229,6 +233,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
+      'alwaysFrosted': alwaysFrosted,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [

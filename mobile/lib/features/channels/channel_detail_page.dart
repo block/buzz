@@ -601,9 +601,6 @@ class ChannelDetailPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         alwaysFrosted: true,
         nativeViewSuppressed: messageActionBackdropActive,
-        nativeEphemeralLabel: ephemeralChannelDisplay(
-          resolvedChannel,
-        )?.tooltipLabel,
         nativeTitle:
             dmHeader?.label ??
             resolveDmChannelDisplayLabel(

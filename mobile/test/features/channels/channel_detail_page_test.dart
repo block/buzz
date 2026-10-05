@@ -10166,9 +10166,7 @@ void main() {
     });
 
     for (final dm in [false, true]) {
-      testWidgets('native ephemeral header retains expiry disclosure dm=$dm', (
-        tester,
-      ) async {
+      testWidgets('native temporary title omits clock dm=$dm', (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
         Channel conversation({int? ttlSeconds, DateTime? deadline}) => Channel(
@@ -10204,10 +10202,7 @@ void main() {
           ),
         );
         Map payload = view.creationParams! as Map;
-        expect(
-          payload['ephemeralLabel'],
-          'Ephemeral channel. Cleans up after 1 hour of inactivity.',
-        );
+        expect(payload['ephemeralLabel'], isNull);
         const bridge = MethodChannel('buzz/ios_navigation_bar/297');
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
@@ -10229,10 +10224,7 @@ void main() {
         );
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
-        expect(
-          payload['ephemeralLabel'],
-          'Ephemeral channel. Cleanup is due now.',
-        );
+        expect(payload['ephemeralLabel'], isNull);
         current = conversation();
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
