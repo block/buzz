@@ -66,7 +66,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import type { EffortModels } from "./effortPicker";
+import { type EffortOptions, effortChoices } from "./effortPicker";
 import {
   useAcpCommandsQuery,
   useBakedBuildEnvKeysQuery,
@@ -115,16 +115,15 @@ type AgentDefinitionDialogProps = {
   ) => Promise<unknown>;
   /** Publishes saved changes when the edited agent is shared in the catalog. */
   publishCatalogUpdatesOnSave?: boolean;
-  /** Receives the effort model chain (`effortChoices` inputs) to render. */
-  createRunSection?: (
-    runtimeId: string,
-    models: EffortModels,
-  ) => React.ReactNode;
+  /** Receives the effort levels allowed by the model the form will create. */
+  createRunSection?: (effortOptions: EffortOptions) => React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
 };
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
+  /** Create mode: the effort levels shown to `createRunSection`. */
+  effortOptions?: EffortOptions;
 };
 export function AgentDefinitionDialog({
   open,
@@ -381,7 +380,7 @@ export function AgentDefinitionDialog({
       );
       return;
     }
-    await onSubmit(baseInput, { publishCatalogUpdates: false });
+    await onSubmit(baseInput, { publishCatalogUpdates: false, effortOptions });
   }
 
   function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
@@ -618,15 +617,17 @@ export function AgentDefinitionDialog({
       {runtimeWarningText} Visit Settings &gt; Agents to set it up.
     </p>
   ) : null;
-  // Built every render, not only while Advanced is open: the callback also
-  // tracks which effort levels the submitted model allows.
-  const createRunSectionNode =
-    isCreateMode &&
-    createRunSection?.(runtime, [
+  const effortOptions = effortChoices({
+    runtimeId: runtime,
+    models: [
       model,
       globalConfig.model, // build/provider fallbacks never reach Claude
       agentDefaultModel,
-    ]);
+    ],
+    sessionApplies: false,
+  });
+  const createRunSectionNode =
+    isCreateMode && createRunSection?.(effortOptions);
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
