@@ -66,9 +66,12 @@ principal to restrict. Invite claim is also pre-membership, but it carries a
 verified NIP-98 principal and remains restriction-enforced: it is the sole
 row marked pending in the inventory until BUZZ-268 qualifies the updated
 v1/v2 lifecycle:
-retain valid unexpired v1 codes, mint only v2, reject banned claimants and
-owners transactionally, permanently invalidate v2 on issuer ban, and honor the
-optional absolute invalid-after boundary for v1. Legacy v1 codes have no issuer
+retain valid unexpired v1 codes and mint only v2, with a 72-hour default and
+30-day maximum lifetime. Both formats reject banned claimants and owners
+transactionally, and issuer bans permanently invalidate v2. For v1, an unset
+operator `invalid_after` uses natural expiry; when set, the code rejects at or
+after that absolute boundary, while an earlier code expiry still takes effect.
+That operator boundary does not affect v2. Legacy v1 codes have no issuer
 identity, so issuer-specific revocation remains limited until a verified fleet
 drain or security approval. Relay-operator APIs, deployment-admin APIs,
 NIP-FI commands, the localhost Git hook, and the gated mesh test endpoint use
