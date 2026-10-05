@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
 import { PersonaModelCombobox } from "./PersonaModelCombobox";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 import {
@@ -16,12 +17,18 @@ type PersonaModelFieldProps = {
   disabled: boolean;
   isExplicitModelRequired: boolean;
   model: string;
+  /** True while discovery is in flight (#2261). */
+  modelDiscoveryLoading?: boolean;
+  /** Progressive status-line copy only (not the control). */
+  modelDiscoveryLoadingMessage?: string | null;
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   modelDropdownOptions: readonly PersonaDropdownOption[];
   showSharedComputeAutoHint: boolean;
   modelSelectValue: string;
   onCustomModelChange: (value: string) => void;
   onModelValueChange: (value: string) => void;
+  /** Re-run discovery after timeout / empty / path failure (#2261). */
+  onRetryModelDiscovery?: () => void;
   showCustomModelInput: boolean;
   transition: React.ComponentProps<typeof motion.div>["transition"];
 };
@@ -30,12 +37,15 @@ export function PersonaModelField({
   disabled,
   isExplicitModelRequired,
   model,
+  modelDiscoveryLoading = false,
+  modelDiscoveryLoadingMessage = null,
   modelDiscoveryStatus,
   modelDropdownOptions,
   modelSelectValue,
   showSharedComputeAutoHint,
   onCustomModelChange,
   onModelValueChange,
+  onRetryModelDiscovery,
   showCustomModelInput,
   transition,
 }: PersonaModelFieldProps) {
@@ -96,20 +106,14 @@ export function PersonaModelField({
             available, otherwise it chooses one available model.
           </p>
         ) : null}
-        {modelDiscoveryStatus ? (
-          <p
-            aria-live="polite"
-            className={cn(
-              "text-xs",
-              modelDiscoveryStatus.tone === "warning"
-                ? "text-warning"
-                : "text-muted-foreground",
-            )}
-            data-testid="persona-model-discovery-status"
-          >
-            {modelDiscoveryStatus.message}
-          </p>
-        ) : null}
+        <ModelDiscoveryStatusLine
+          disabled={disabled}
+          loading={modelDiscoveryLoading}
+          loadingMessage={modelDiscoveryLoadingMessage}
+          onRetry={onRetryModelDiscovery}
+          status={modelDiscoveryStatus}
+          testId="persona-model-discovery-status"
+        />
       </div>
     </motion.div>
   );

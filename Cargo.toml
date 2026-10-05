@@ -72,7 +72,7 @@ kube = { version = "2.0", default-features = false, features = ["client", "rustl
 k8s-openapi = { version = "0.26", features = ["v1_31"] }
 
 # Nostr
-nostr = { version = "0.44", features = ["nip44", "nip98"] }
+nostr = { version = "0.44.7", features = ["nip44", "nip98"] }
 
 # Serialization
 serde       = { version = "1", features = ["derive"] }

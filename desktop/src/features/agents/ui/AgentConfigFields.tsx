@@ -5,6 +5,7 @@
  * (onboarding setup step). The parent manages load/save state; this component is
  * purely presentational and calls onConfigChange on every user edit.
  */
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -366,6 +367,8 @@ export function AgentConfigFields({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    modelDiscoveryLoadingMessage,
+    retryModelDiscovery,
     modelDiscoverySuccessfulEmpty,
   } = usePersonaModelDiscovery({
     envVars: config.env_vars,
@@ -830,6 +833,12 @@ export function AgentConfigFields({
             modelDiscoveryStatus={
               dependentFieldsDisabled ? null : modelDiscoveryStatus
             }
+            modelDiscoveryLoadingMessage={
+              dependentFieldsDisabled ? null : modelDiscoveryLoadingMessage
+            }
+            onRetryModelDiscovery={
+              dependentFieldsDisabled ? undefined : retryModelDiscovery
+            }
             onIsCustomModelEditingChange={onCustomModelEditingChange}
             onModelChange={handleModelChange}
             placeholderClassName={placeholderClassName}
@@ -839,16 +848,30 @@ export function AgentConfigFields({
             labelClassName={fieldLabelClassName}
             selectClassName={selectClassName}
             showCustomModelOption={showCustomModelOption}
-            showStatusMessage={shouldShowModelStatusMessage(
-              showDescriptions,
-              dependentFieldsDisabled ? null : modelDiscoveryStatus,
-            )}
+            showStatusMessage={
+              shouldShowModelStatusMessage(
+                showDescriptions,
+                dependentFieldsDisabled ? null : modelDiscoveryStatus,
+              ) ||
+              (!dependentFieldsDisabled &&
+                modelDiscoveryLoadingMessage !== null)
+            }
             testId="global-agent-model"
             useCustomSelect={useCustomSelect}
             useChevronIcon={useChevronSelectIcon}
             usePersonaInputStyle={progressiveDefaults}
           />
         </div>
+      ) : null}
+
+      {!modelControlVisible &&
+      !dependentFieldsDisabled &&
+      modelDiscoveryLoading ? (
+        <ModelDiscoveryStatusLine
+          loading
+          loadingMessage={modelDiscoveryLoadingMessage}
+          status={null}
+        />
       ) : null}
 
       {/* Thinking / Effort */}

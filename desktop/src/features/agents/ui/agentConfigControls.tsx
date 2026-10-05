@@ -26,7 +26,11 @@ import {
   type PersonaModelOption,
 } from "./agentConfigOptions";
 import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
-import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
+import {
+  MODEL_DISCOVERY_LOADING_SHORT,
+  type PersonaModelDiscoveryStatus,
+} from "./personaModelDiscoveryStatus";
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
 
 export const MODEL_NO_MODELS_VALUE = "__no_models__";
 
@@ -346,9 +350,11 @@ export function AgentModelField({
   isRequired,
   model,
   modelDiscoveryLoading,
+  modelDiscoveryLoadingMessage = null,
   modelDiscoveryStatus,
   onIsCustomModelEditingChange,
   onModelChange,
+  onRetryModelDiscovery,
   placeholder = "Select model",
   placeholderClassName,
   provider,
@@ -380,9 +386,13 @@ export function AgentModelField({
   isRequired: boolean;
   model: string;
   modelDiscoveryLoading: boolean;
+  /** Progressive loading copy from {@link usePersonaModelDiscovery}. */
+  modelDiscoveryLoadingMessage?: string | null;
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   onIsCustomModelEditingChange: (value: boolean) => void;
   onModelChange: (value: string) => void;
+  /** Re-run discovery after a timeout / empty / path failure. */
+  onRetryModelDiscovery?: () => void;
   /** Trigger placeholder shown when there is no selected model option. */
   placeholder?: string;
   /** Optional class override for placeholder text. */
@@ -489,16 +499,22 @@ export function AgentModelField({
     onModelChange(nextValue);
   };
 
+  // Discovery in flight with no catalog yet: force SHORT label on the control
+  // (trigger + option). The long progressive sentence must never enter the
+  // pill — it truncates and duplicated the under-field note (#2261 screenshot).
+  const controlShowsLoading =
+    modelDiscoveryLoading && discoveredModelOptions === null;
+
   const modelOptions: AgentDropdownOption[] = [
     ...effectiveModelOptions.map((option) => ({
       label: option.label,
       value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
     })),
-    ...(modelDiscoveryLoading && discoveredModelOptions === null
+    ...(controlShowsLoading
       ? [
           {
             disabled: true,
-            label: "Loading models...",
+            label: MODEL_DISCOVERY_LOADING_SHORT,
             value: MODEL_DISCOVERY_LOADING_VALUE,
           },
         ]
@@ -520,7 +536,7 @@ export function AgentModelField({
     discoveredModelOptions === null &&
     trimmedModel.length === 0 &&
     !isCustomModelEditing
-      ? "Loading models..."
+      ? MODEL_DISCOVERY_LOADING_SHORT
       : placeholder;
   const statusMessage = resolveModelFieldStatusMessage({
     discoveredModelOptions,
@@ -539,6 +555,9 @@ export function AgentModelField({
       options={modelOptions}
       placeholder={restingPlaceholder}
       placeholderClassName={placeholderClassName}
+      selectedLabel={
+        controlShowsLoading ? MODEL_DISCOVERY_LOADING_SHORT : undefined
+      }
       searchable
       testId={testId ?? id}
       value={modelSelectValue}
@@ -554,7 +573,13 @@ export function AgentModelField({
       disabled={selectDisabled}
       id={id}
       onChange={(event) => handleModelSelectChange(event.target.value)}
-      value={modelSelectValue}
+      value={
+        controlShowsLoading &&
+        trimmedModel.length === 0 &&
+        !isCustomModelEditing
+          ? MODEL_DISCOVERY_LOADING_VALUE
+          : modelSelectValue
+      }
     >
       {modelOptions.map((option) => (
         <option
@@ -599,8 +624,18 @@ export function AgentModelField({
           value={model}
         />
       ) : null}
-      {showStatusMessage && statusMessage ? (
-        <p className="text-xs text-muted-foreground">{statusMessage}</p>
+      {showStatusMessage ? (
+        modelDiscoveryLoading || modelDiscoveryStatus ? (
+          <ModelDiscoveryStatusLine
+            disabled={disabled}
+            loading={modelDiscoveryLoading}
+            loadingMessage={modelDiscoveryLoadingMessage}
+            onRetry={onRetryModelDiscovery}
+            status={modelDiscoveryStatus}
+          />
+        ) : statusMessage ? (
+          <p className="text-xs text-muted-foreground">{statusMessage}</p>
+        ) : null
       ) : null}
     </div>
   );

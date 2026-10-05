@@ -88,7 +88,6 @@ import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
-import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
@@ -434,6 +433,8 @@ export function AgentInstanceEditDialog({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    modelDiscoveryLoadingMessage,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -859,11 +860,6 @@ export function AgentInstanceEditDialog({
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
   });
-  const modelStatusMessage = resolveModelFieldStatusMessage({
-    discoveredModelOptions,
-    loading: modelDiscoveryLoading,
-    status: modelDiscoveryStatus,
-  });
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
@@ -1102,7 +1098,10 @@ export function AgentInstanceEditDialog({
               showCustomModelInput={showCustomModelInput}
               model={model}
               onModelChange={setModel}
-              modelStatusMessage={modelStatusMessage}
+              discoveredModelOptions={discoveredModelOptions}
+              modelDiscoveryStatus={modelDiscoveryStatus}
+              modelDiscoveryLoadingMessage={modelDiscoveryLoadingMessage}
+              onRetryModelDiscovery={retryModelDiscovery}
             />
 
             <EffortPickerField

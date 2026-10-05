@@ -1,7 +1,41 @@
 export type PersonaModelDiscoveryStatus = {
   message: string;
   tone: "muted" | "warning";
+  /**
+   * When true, the model field should offer a Retry control that re-runs
+   * discovery (timeouts, empty catalogs, path failures). Credential-missing
+   * states stay non-retryable — the user needs to fill a field first.
+   */
+  retryable?: boolean;
 };
+
+/**
+ * After this many ms of discovery, surface the long status-line note under
+ * the Model field. Until then the control alone shows
+ * {@link MODEL_DISCOVERY_LOADING_SHORT} — no duplicate under-field copy.
+ * See #2261.
+ */
+export const MODEL_DISCOVERY_SLOW_MS = 10_000;
+
+/**
+ * Short label for the model **control** (closed trigger / disabled option).
+ * Never put the long progressive sentence in the control — it truncates.
+ */
+export const MODEL_DISCOVERY_LOADING_SHORT = "Loading models…";
+
+/**
+ * Long status-line copy for a slow model probe, or `null` before the
+ * slow phase so the under-field line stays empty (control already shows
+ * {@link MODEL_DISCOVERY_LOADING_SHORT}).
+ *
+ * @param slow - true once discovery has been in flight ≥ {@link MODEL_DISCOVERY_SLOW_MS}
+ */
+export function formatModelDiscoveryLoadingMessage(
+  slow: boolean,
+): string | null {
+  if (!slow) return null;
+  return "Still loading models… the first launch can take longer.";
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -41,6 +75,31 @@ function isEmptySharedComputeError(message: string): boolean {
   );
 }
 
+/** True when stderr/IPC text indicates the ACP models probe hit its budget. */
+export function isModelDiscoveryTimeoutError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  // buzz-acp: `error: agent timed out (10s)` / `(45s)`
+  // desktop: `buzz-acp models failed (exit N): ... timed out ...`
+  if (normalized.includes("timed out")) return true;
+  if (normalized.includes("timeout") && normalized.includes("agent")) {
+    return true;
+  }
+  return false;
+}
+
+function isProgramNotFoundError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("program not found") ||
+    normalized.includes("the system cannot find the file") ||
+    normalized.includes("enoent") ||
+    (normalized.includes("not found") &&
+      (normalized.includes("codex") ||
+        normalized.includes("claude") ||
+        normalized.includes("agent")))
+  );
+}
+
 export function formatModelDiscoveryErrorStatus(
   error: unknown,
   provider: string,
@@ -54,6 +113,7 @@ export function formatModelDiscoveryErrorStatus(
         message:
           "Buzz is waiting for the relay's member roster. Try again shortly; if this persists, check the relay's membership configuration.",
         tone: "warning",
+        retryable: true,
       };
     }
 
@@ -62,6 +122,7 @@ export function formatModelDiscoveryErrorStatus(
         message:
           "No members are sharing compute right now. On a member machine, open Settings > Compute, choose a model, and turn on Share this machine.",
         tone: "warning",
+        retryable: true,
       };
     }
 
@@ -78,6 +139,7 @@ export function formatModelDiscoveryErrorStatus(
         message:
           "Buzz received an invalid shared compute status. Check the member machine, then try again.",
         tone: "warning",
+        retryable: true,
       };
     }
 
@@ -85,6 +147,7 @@ export function formatModelDiscoveryErrorStatus(
       message:
         "Buzz couldn't check shared compute through the relay. Check your relay connection and try again.",
       tone: "warning",
+      retryable: true,
     };
   }
 
@@ -134,11 +197,36 @@ export function formatModelDiscoveryErrorStatus(
     return databricksStatus;
   }
 
+  // An unavailable runtime has no discovery key; Retry would do nothing.
+  if (message.toLowerCase().includes("runtime not available")) {
+    return {
+      message:
+        "This agent runtime is not available. Install or reinstall it in Settings > Agents.",
+      tone: "warning",
+    };
+  }
+  if (isModelDiscoveryTimeoutError(message)) {
+    return {
+      message:
+        "Model discovery timed out. The first launch can take longer. Retry to load models again.",
+      tone: "warning",
+      retryable: true,
+    };
+  }
+  if (isProgramNotFoundError(message)) {
+    return {
+      message:
+        "Could not find the agent harness on PATH. Install or reinstall it, ensure its install directory is on PATH, then retry.",
+      tone: "warning",
+      retryable: true,
+    };
+  }
   return {
     message: `Using built-in model options. Could not load live models for ${providerObjectLabel(
       provider,
     )}.`,
     tone: "warning",
+    retryable: true,
   };
 }
 
