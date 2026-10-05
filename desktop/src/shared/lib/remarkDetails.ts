@@ -100,8 +100,7 @@ function isOpenMarker(node: Node): boolean {
   return (
     text !== null &&
     /^:::details[ \t]/.test(text) &&
-    !node.children.some((child: Node) => child.type === "break") &&
-    summaryTitle(node) !== ""
+    !node.children.some((child: Node) => child.type === "break")
   );
 }
 
@@ -110,12 +109,16 @@ function isCloseMarker(node: Node): boolean {
   return text !== null && node.children.length === 1 && CLOSE_RE.test(text);
 }
 
+/** Shown when a title has no text of its own, e.g. `:::details [](url)`. */
+export const DETAILS_FALLBACK_TITLE = "Details";
+
 /** Plain-text title: the marker paragraph minus its `:::details ` prefix.
  * Plain so the disclosure control holds no links or other controls. */
 function summaryTitle(marker: Node): string {
-  return plainText(marker.children as Node[])
+  const title = plainText(marker.children as Node[])
     .replace(/^:::details[ \t]+/, "")
     .trim();
+  return title || DETAILS_FALLBACK_TITLE;
 }
 
 function plainText(nodes: Node[]): string {
@@ -128,8 +131,7 @@ function plainText(nodes: Node[]): string {
     .join("");
 }
 
-/** `skipped` frames are openers past the depth limit; they stay text. */
-type Frame = { marker: Node; children: Node[]; skipped: boolean };
+type Frame = { marker: Node; children: Node[] };
 
 export default function remarkDetails() {
   return (
@@ -139,24 +141,29 @@ export default function remarkDetails() {
     const occurrences = new Map<string, number>();
     const root: Node[] = [];
     const stack: Frame[] = [];
-    let depth = 0;
+    // Openers past the depth limit, still waiting for their closers. They
+    // and their closers stay text in place, so the work stays linear.
+    let skipped = 0;
     const target = () => stack[stack.length - 1]?.children ?? root;
 
     for (const child of tree.children as Node[]) {
       if (isOpenMarker(child)) {
-        const skipped = depth >= MAX_DETAILS_DEPTH;
-        if (!skipped) depth += 1;
-        stack.push({ marker: child, children: [], skipped });
+        if (stack.length >= MAX_DETAILS_DEPTH) {
+          skipped += 1;
+          target().push(child);
+        } else {
+          stack.push({ marker: child, children: [] });
+        }
+        continue;
+      }
+      if (skipped > 0 && isCloseMarker(child)) {
+        skipped -= 1;
+        target().push(child);
         continue;
       }
       const frame = stack[stack.length - 1];
       if (frame && isCloseMarker(child)) {
         stack.pop();
-        if (frame.skipped) {
-          target().push(frame.marker, ...frame.children, child);
-          continue;
-        }
-        depth -= 1;
         const title = summaryTitle(frame.marker);
         const occurrence = occurrences.get(title) ?? 0;
         occurrences.set(title, occurrence + 1);

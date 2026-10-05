@@ -102,12 +102,22 @@ String flattenDetailsBlocks(String content) {
   return text;
 }
 
-/// Best-effort markdown-to-text for titles: link text, code and emphasis
-/// markers are unwrapped.
-String plainDetailsTitle(String markdown) => markdown
-    .replaceAllMapped(RegExp(r'!?\[([^\]]*)\]\([^)]*\)'), (m) => m[1]!)
-    .replaceAllMapped(RegExp(r'(\*\*|__|~~|`|\*)(.+?)\1'), (m) => m[2]!)
-    .trim();
+/// Shown when a title has no text of its own, e.g. `:::details [](url)`.
+const detailsFallbackTitle = 'Details';
+
+/// Best-effort markdown-to-text for titles, matching desktop's plain text:
+/// images dropped, link text kept, autolinks, code and emphasis unwrapped.
+String plainDetailsTitle(String markdown) {
+  final title = markdown
+      .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '')
+      .replaceAllMapped(RegExp(r'\[([^\]]*)\]\([^)]*\)'), (m) => m[1]!)
+      .replaceAllMapped(RegExp(r'<(https?://[^>\s]+)>'), (m) => m[1]!)
+      .replaceAllMapped(RegExp(r'(\*\*|__|~~|`|\*)(.+?)\1'), (m) => m[2]!)
+      .replaceAllMapped(RegExp(r'(?<!\w)_(.+?)_(?!\w)'), (m) => m[1]!)
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  return title.isEmpty ? detailsFallbackTitle : title;
+}
 
 String _stripCr(String line) =>
     line.endsWith('\r') ? line.substring(0, line.length - 1) : line;

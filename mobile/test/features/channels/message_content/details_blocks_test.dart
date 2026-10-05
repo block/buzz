@@ -111,4 +111,11 @@ void main() {
     ).whereType<DetailsBlock>().single;
     expect(block.title, 'docs now');
   });
+
+  test('title text matches desktop plain text', () {
+    expect(plainDetailsTitle('_italic_ snake_case'), 'italic snake_case');
+    expect(plainDetailsTitle('Icon ![lock](https://x/y.png)'), 'Icon');
+    expect(plainDetailsTitle('<https://example.com>'), 'https://example.com');
+    expect(plainDetailsTitle('[](https://example.com)'), detailsFallbackTitle);
+  });
 }

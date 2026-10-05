@@ -4,7 +4,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { renderCachedMarkdown } from "../ui/markdown/nodeCache.ts";
-import { MAX_DETAILS_DEPTH, prepareDetailsBlocks } from "./remarkDetails.ts";
+import remarkDetails, {
+  MAX_DETAILS_DEPTH,
+  prepareDetailsBlocks,
+} from "./remarkDetails.ts";
 
 // Runs the production parser (nodeCache.ts); `details` and `summary` stand in
 // for the MarkdownDetails components and expose the section key.
@@ -108,4 +111,33 @@ test("remarkDetails: an info-string line does not close a fence", () => {
 test("remarkDetails: recognises markers with CRLF line endings", () => {
   const html = render("Board\r\n:::details A\r\nx\r\n:::\r\nAfter");
   assert.match(html, /<section data-key="0:A"><h6>A<\/h6><p>x<\/p><\/section>/);
+});
+
+test("remarkDetails: stays linear on blank-separated hostile nesting", () => {
+  const levels = 3000;
+  const content = `${":::details x\n\n".repeat(levels)}${":::\n\n".repeat(levels)}`;
+  assert.ok(content.length < 64 * 1024);
+  assert.equal(render(content).match(/<section/g)?.length, MAX_DETAILS_DEPTH);
+
+  // Past the message size limit, so only linear work finishes in time: the
+  // quadratic unwind this guards against would copy ~2 * 10^10 nodes here.
+  const paragraph = (value) => ({
+    type: "paragraph",
+    children: [{ type: "text", value }],
+  });
+  const deep = 200_000;
+  const tree = {
+    type: "root",
+    children: [
+      ...Array.from({ length: deep }, () => paragraph(":::details x")),
+      ...Array.from({ length: deep }, () => paragraph(":::")),
+    ],
+  };
+  remarkDetails()(tree);
+  assert.equal(tree.children.length, 1);
+});
+
+test("remarkDetails: falls back to a title when the title has no text", () => {
+  const html = render(":::details [](https://example.com)\nsecret\n:::");
+  assert.match(html, /<h6>Details<\/h6><p>secret<\/p>/);
 });
