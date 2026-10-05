@@ -1347,12 +1347,19 @@ fn strip_cfg_test_items(source: &str) -> String {
         let mut depth = 0_isize;
         for line in lines.by_ref().skip_while(|line| line.starts_with("#[")) {
             depth += line.matches('{').count() as isize - line.matches('}').count() as isize;
-            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            // Any `//` may start the trailing comment (an earlier one can sit
+            // inside a string such as `"https://…"`), so try every prefix. A
+            // false match inside a string only ends the item early, which
+            // scans more lines and can never hide production code.
             let item_end = depth <= 0
-                && [line, code].iter().any(|text| {
-                    let text = text.trim_end();
-                    text.ends_with(';') || text.ends_with('}')
-                });
+                && line
+                    .match_indices("//")
+                    .map(|(at, _)| &line[..at])
+                    .chain([line])
+                    .any(|text| {
+                        let text = text.trim_end();
+                        text.ends_with(';') || text.ends_with('}')
+                    });
             if item_end || line == "}" || line == "};" {
                 break;
             }
@@ -1422,6 +1429,11 @@ pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sql
         ("struct X;", "struct X"),
         ("fn helper() {} // test helper", "fn helper"),
         ("const BRACES: &str = \"{}\"; // fixture", "BRACES"),
+        (
+            "const URL: &str = \"https://relay.test\"; // fixture",
+            "relay.test",
+        ),
+        ("fn u() -> &'static str { \"ws://x\" } // c", "ws://x"),
     ] {
         let production = strip_cfg_test_items(&format!("#[cfg(test)]\n{test_item}\n{raw_opener}"));
         assert!(
