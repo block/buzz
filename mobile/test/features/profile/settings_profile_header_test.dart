@@ -7,16 +7,18 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -240,7 +242,7 @@ void main() {
 
     expect(container.read(profileAvatarHandoffProvider), isNull);
   });
-  testWidgets('uses a bounded icon for an unresolved status shortcode', (
+  testWidgets('keeps the avatar unbadged while showing the current status', (
     tester,
   ) async {
     const missingShortcode = ':very_long_missing_custom_emoji:';
@@ -266,16 +268,87 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(Hero), findsNothing);
-    final badge = find.byType(MaskedAvatarBadge);
+    expect(find.byType(MaskedAvatarBadge), findsNothing);
+    expect(find.text('$missingShortcode Focusing'), findsOneWidget);
     expect(
-      find.descendant(of: badge, matching: find.text(missingShortcode)),
-      findsNothing,
-    );
-    expect(
-      find.descendant(of: badge, matching: find.byIcon(LucideIcons.smile)),
-      findsOneWidget,
+      tester.getSize(find.byKey(const ValueKey('settings-profile-avatar'))),
+      const Size(128, 128),
     );
   });
+
+  for (final scenario in [
+    (emoji: '🎯', text: 'Focusing', resolved: false),
+    (emoji: ':party_parrot:', text: '', resolved: true),
+    (emoji: ':party_parrot:', text: 'Celebrating', resolved: true),
+    (emoji: ':unknown:', text: '', resolved: false),
+  ]) {
+    testWidgets('preserves status ${scenario.emoji} ${scenario.text}', (
+      tester,
+    ) async {
+      final client = http_testing.MockClient(
+        (_) async => http.Response.bytes(_transparentPng, 200),
+      );
+      addTearDown(client.close);
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            profileProvider.overrideWith(_FakeProfileNotifier.new),
+            presenceProvider.overrideWith(
+              () => _FakePresenceNotifier('online'),
+            ),
+            userStatusProvider.overrideWith(
+              () => _FakeUserStatusNotifier(
+                UserStatus(
+                  emoji: scenario.emoji,
+                  text: scenario.text,
+                  updatedAt: 1,
+                ),
+              ),
+            ),
+            customEmojiListProvider.overrideWithValue(const [
+              CustomEmoji(
+                shortcode: 'party_parrot',
+                url: 'https://relay.example/parrot.png',
+              ),
+            ]),
+            mediaHttpClientProvider.overrideWithValue(client),
+          ],
+          child: const SettingsProfileHeader(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      if (scenario.resolved) {
+        final image = tester.widget<CustomEmojiImage>(
+          find.byType(CustomEmojiImage),
+        );
+        expect(image.shortcode, 'party_parrot');
+        expect(image.url, 'https://relay.example/parrot.png');
+        expect(find.text(':party_parrot:'), findsNothing);
+        if (scenario.text.isNotEmpty) {
+          expect(find.textContaining(scenario.text), findsOneWidget);
+        }
+      } else {
+        expect(find.byType(CustomEmojiImage), findsNothing);
+        expect(
+          find.text(
+            [
+              scenario.emoji,
+              scenario.text,
+            ].where((s) => s.isNotEmpty).join(' '),
+          ),
+          findsOneWidget,
+        );
+      }
+      expect(find.byType(MaskedAvatarBadge), findsNothing);
+      await tester.tap(
+        scenario.resolved
+            ? find.byType(CustomEmojiImage)
+            : find.textContaining(scenario.emoji),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Set a status'), findsOneWidget);
+    });
+  }
 
   testWidgets(
     'keeps text-only status visible beside a changeable presence pill',
@@ -337,10 +410,27 @@ void main() {
       final presenceTarget = find.byKey(
         const ValueKey('settings-presence-target'),
       );
+      final haptics = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            haptics.add(call.arguments);
+          }
+          return null;
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        );
+      });
       final targetRect = tester.getRect(presenceTarget);
       await tester.tapAt(Offset(targetRect.center.dx, targetRect.bottom - 1));
       await tester.pump();
 
+      expect(haptics, contains('HapticFeedbackType.selectionClick'));
       final scale = tester.widget<ScaleTransition>(
         find.byKey(const ValueKey('activity-popover-scale')),
       );

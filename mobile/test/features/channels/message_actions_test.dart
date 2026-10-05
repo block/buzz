@@ -1,3 +1,5 @@
+import 'package:buzz/shared/widgets/sheet_action_section.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
@@ -1883,7 +1885,30 @@ void main() {
 
       expect(find.text('Delete message'), findsOneWidget);
       expect(find.text('Delete upload'), findsNothing);
+      expect(find.byType(AppListCard), findsNWidgets(2));
+      expect(
+        find.descendant(
+          of: find.byType(SheetActionSection),
+          matching: find.byType(ListTile),
+        ),
+        findsNWidgets(4),
+      );
     });
+  });
+
+  testWidgets('image sheet omits message deletion without permission', (
+    tester,
+  ) async {
+    await _pumpImageSheet(tester, message: _message(), canManageMessage: false);
+    expect(find.byType(AppListCard), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(SheetActionSection),
+        matching: find.byType(ListTile),
+      ),
+      findsNWidgets(3),
+    );
+    expect(find.text('Delete message'), findsNothing);
   });
 
   group('downloadedImageFilename', () {

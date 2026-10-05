@@ -35,6 +35,7 @@ class CommunityInvitePage extends ConsumerWidget {
       useUtilitySurfaceTheme: true,
       appBar: const FrostedAppBar(
         centerTitle: true,
+        nativeLargeTitle: true,
         title: Text('Invite to community'),
       ),
       body: roleAsync.when(
@@ -65,7 +66,7 @@ class _CommunityInviteBody extends StatelessWidget {
     return ListView(
       padding: EdgeInsets.fromLTRB(
         0,
-        frostedAppBarHeight(context) + Grid.xs,
+        frostedAppBarHeight(context, nativeLargeTitle: true) + Grid.xs,
         0,
         Grid.lg,
       ),

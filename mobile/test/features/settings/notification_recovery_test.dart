@@ -101,7 +101,6 @@ void main() {
             theme: AppTheme.light(),
             home: SettingsPage(
               profileHeader: const SizedBox.shrink(),
-              invitePageBuilder: (_) => const SizedBox.shrink(),
               identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
             ),
           ),

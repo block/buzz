@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -24,6 +25,7 @@ class PulsePage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final active = useState(PulseTab.everyone);
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final currentPubkey = ref.watch(myPubkeyProvider);
     final contactsAsync = currentPubkey == null
         ? const AsyncValue<List<ContactEntry>>.data([])
@@ -55,8 +57,11 @@ class PulsePage extends HookConsumerWidget {
         reactions.asData?.value ?? const <String, PulseReactionState>{};
 
     return FrostedScaffold(
+      // Reset the native collapse state together with the new timeline.
+      key: isIos ? ValueKey(active.value) : null,
+      nativePinnedBody: true,
       resizeToAvoidBottomInset: true,
-      appBar: const FrostedAppBar(title: Text('Pulse')),
+      appBar: const FrostedAppBar(nativeLargeTitle: true, title: Text('Pulse')),
       floatingActionButton: FloatingActionButton(
         heroTag: 'pulse-compose-fab',
         onPressed: () => Navigator.of(context).push(

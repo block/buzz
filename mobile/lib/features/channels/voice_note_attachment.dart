@@ -10,6 +10,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/skeleton.dart';
 import 'voice_note_play_pause_icon.dart';
 import 'voice_note_recording.dart';
 import 'voice_note_waveform.dart';
@@ -200,23 +201,33 @@ class VoiceNoteAttachment extends HookConsumerWidget {
               children: [
                 AnimatedBuilder(
                   animation: progressAnimation,
-                  builder: (context, _) => VoiceNoteWaveform(
-                    samples: samples,
-                    progress: progressAnimation.value,
-                    height: 24,
-                    onSeek: (fraction) {
-                      animateProgressFrom(fraction);
-                      unawaited(
-                        player.seek(
-                          Duration(
-                            milliseconds:
-                                (resolvedDuration.inMilliseconds * fraction)
-                                    .round(),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+                  builder: (context, _) {
+                    final waveformWidget = VoiceNoteWaveform(
+                      samples: samples,
+                      progress: progressAnimation.value,
+                      height: 24,
+                      onSeek: state.isLoading
+                          ? null
+                          : (fraction) {
+                              animateProgressFrom(fraction);
+                              unawaited(
+                                player.seek(
+                                  Duration(
+                                    milliseconds:
+                                        (resolvedDuration.inMilliseconds *
+                                                fraction)
+                                            .round(),
+                                  ),
+                                ),
+                              );
+                            },
+                    );
+                    return state.isLoading
+                        ? ExcludeSemantics(
+                            child: SkeletonShimmer(child: waveformWidget),
+                          )
+                        : waveformWidget;
+                  },
                 ),
                 Text(
                   key: const ValueKey('voice-note-duration'),

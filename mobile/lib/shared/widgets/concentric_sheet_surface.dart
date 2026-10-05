@@ -26,6 +26,7 @@ class ConcentricSheetSurface extends HookWidget {
     ),
     this.providesSheetSurface = true,
     this.usesGlass = false,
+    this.glassTintColor,
     this.minimumRadius = Radii.dialog,
     this.contentClipRadius,
     super.key,
@@ -39,6 +40,9 @@ class ConcentricSheetSurface extends HookWidget {
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
+
+  /// Optional tint applied to the native Liquid Glass material.
+  final Color? glassTintColor;
   final double minimumRadius;
   final double? contentClipRadius;
 
@@ -80,6 +84,7 @@ class ConcentricSheetSurface extends HookWidget {
       await channel.invokeMethod<void>('updateColors', <String, Object?>{
         'color': surfaceColor.toARGB32(),
         'backdropColor': backdropColor?.toARGB32(),
+        'glassTintColor': glassTintColor?.toARGB32(),
       });
     } on MissingPluginException {
       // The platform view may have been disposed while its theme was changing.
@@ -142,6 +147,7 @@ class ConcentricSheetSurface extends HookWidget {
         nativeSurfaceChannel.value,
         surfaceColor,
         backdropColor,
+        glassTintColor,
       ],
     );
     useEffect(
@@ -199,6 +205,8 @@ class ConcentricSheetSurface extends HookWidget {
                       'minimumRadius': minimumRadius,
                       'corners': corners.name,
                       'usesGlass': usesGlass,
+                      if (glassTintColor case final tint?)
+                        'glassTintColor': tint.toARGB32(),
                       'brightness': brightness.name,
                     },
                     creationParamsCodec: const StandardMessageCodec(),

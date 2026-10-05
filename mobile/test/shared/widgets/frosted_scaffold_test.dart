@@ -67,43 +67,116 @@ void main() {
     );
   });
 
-  testWidgets('page divider appears only after content scrolls under header', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.light(),
-        home: FrostedScaffold(
-          appBar: const FrostedAppBar(title: Text('Theme')),
-          body: ListView.builder(
-            key: const ValueKey('page-scroll-view'),
-            padding: const EdgeInsets.only(top: 57),
-            itemCount: 40,
-            itemBuilder: (_, index) =>
-                SizedBox(height: 48, child: Text('Theme option $index')),
+  for (final reverse in [false, true]) {
+    testWidgets(
+      'composer scrolling preserves timeline frost reverse=$reverse',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final timeline = ScrollController(
+          initialScrollOffset: reverse ? 0 : 120,
+        );
+        addTearDown(timeline.dispose);
+        final composer = TextEditingController();
+        addTearDown(composer.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: FrostedScaffold(
+              appBar: const FrostedAppBar(title: Text('Conversation')),
+              body: Column(
+                children: [
+                  Expanded(
+                    child: ListView.builder(
+                      reverse: reverse,
+                      controller: timeline,
+                      itemCount: 40,
+                      itemBuilder: (_, index) =>
+                          SizedBox(height: 48, child: Text('Message $index')),
+                    ),
+                  ),
+                  SizedBox(
+                    height: 100,
+                    child: TextField(
+                      controller: composer,
+                      minLines: 1,
+                      maxLines: 3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsOneWidget);
+        await tester.tap(find.byType(TextField));
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.enterText(
+          find.byType(TextField),
+          'One\nTwo\nThree\nFour\nFive',
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsOneWidget);
+        expect(_appBarBorder(tester)?.bottom.color.a, greaterThan(0));
+        timeline.jumpTo(reverse ? timeline.position.maxScrollExtent : 0);
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsNothing);
+        await tester.enterText(
+          find.byType(TextField),
+          'One\nTwo\nThree\nFour\nFive',
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BackdropFilter), findsNothing);
+      },
+    );
+  }
+
+  testWidgets(
+    'page frost and divider appear only while content scrolls under header',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: FrostedScaffold(
+            appBar: const FrostedAppBar(title: Text('Theme')),
+            body: ListView.builder(
+              key: const ValueKey('page-scroll-view'),
+              padding: const EdgeInsets.only(top: 57),
+              itemCount: 40,
+              itemBuilder: (_, index) =>
+                  SizedBox(height: 48, child: Text('Theme option $index')),
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    expect(_appBarBorder(tester)?.bottom.color.a, 0);
+      expect(_appBarBorder(tester)?.bottom.color.a, 0);
+      expect(find.byType(BackdropFilter), findsNothing);
 
-    await tester.drag(
-      find.byKey(const ValueKey('page-scroll-view')),
-      const Offset(0, -120),
-    );
-    await tester.pumpAndSettle();
+      await tester.drag(
+        find.byKey(const ValueKey('page-scroll-view')),
+        const Offset(0, -120),
+      );
+      await tester.pumpAndSettle();
 
-    final border = _appBarBorder(tester);
-    expect(border, isNotNull);
-    expect(border!.bottom.color.a, greaterThan(0));
+      final border = _appBarBorder(tester);
+      expect(border, isNotNull);
+      expect(border!.bottom.color.a, greaterThan(0));
+      expect(find.byType(BackdropFilter), findsOneWidget);
 
-    await tester.drag(
-      find.byKey(const ValueKey('page-scroll-view')),
-      const Offset(0, 500),
-    );
-    await tester.pumpAndSettle();
+      await tester.drag(
+        find.byKey(const ValueKey('page-scroll-view')),
+        const Offset(0, 500),
+      );
+      await tester.pumpAndSettle();
 
-    expect(_appBarBorder(tester)?.bottom.color.a, 0);
-  });
+      expect(_appBarBorder(tester)?.bottom.color.a, 0);
+      expect(find.byType(BackdropFilter), findsNothing);
+    },
+  );
 }

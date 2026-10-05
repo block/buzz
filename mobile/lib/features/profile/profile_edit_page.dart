@@ -274,6 +274,7 @@ class ProfileEditPage extends HookConsumerWidget {
         ? avatarDraft.value
         : null;
     final avatarHandoff = ref.watch(profileAvatarHandoffProvider);
+    final pageTitle = isEditingAvatar.value ? 'Edit Photo' : 'Profile';
 
     return PopScope(
       canPop: !isEditingAvatar.value,
@@ -286,15 +287,13 @@ class ProfileEditPage extends HookConsumerWidget {
         useUtilitySurfaceTheme: true,
         resizeToAvoidBottomInset: isEditingAvatar.value ? false : null,
         appBar: FrostedAppBar(
+          nativeTitle: pageTitle,
           centerTitle: true,
           title: AnimatedSwitcher(
             duration: reduceMotion
                 ? const Duration(milliseconds: 120)
                 : const Duration(milliseconds: 220),
-            child: Text(
-              isEditingAvatar.value ? 'Edit Photo' : 'Profile',
-              key: ValueKey(isEditingAvatar.value),
-            ),
+            child: Text(pageTitle, key: ValueKey(isEditingAvatar.value)),
           ),
           leading: isEditingAvatar.value
               ? defaultTargetPlatform == TargetPlatform.iOS

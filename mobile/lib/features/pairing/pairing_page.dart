@@ -2,8 +2,9 @@ import 'dart:async';
 import 'dart:math' show sqrt2;
 import 'dart:ui' show ImageFilter;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import '../../shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -91,37 +92,63 @@ class PairingPage extends HookConsumerWidget {
                 : SystemUiOverlayStyle.dark)
             .copyWith(statusBarColor: Colors.transparent);
     final pairingAppBar = addingCommunity
-        ? AppBar(
-            foregroundColor: context._onboardingInk,
-            systemOverlayStyle: onboardingSystemOverlayStyle,
-            leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
-                ? Grid.quarter + iosGlassChannelHeaderLeadingWidth
-                : null,
-            leading: Theme.of(context).platform == TargetPlatform.iOS
-                ? Padding(
-                    padding: const EdgeInsets.only(left: Grid.quarter),
-                    child: IosGlassNavigationButton(
-                      key: const ValueKey('pairing-ios-glass-back'),
-                      icon: IosGlassNavigationIcon.back,
-                      semanticLabel: 'Back',
-                      onPressed: () => Navigator.of(context).maybePop(),
-                      width: iosGlassChannelHeaderLeadingWidth,
-                      buttonCenterX: iosGlassChannelHeaderButtonCenterX,
-                      foregroundColor: context._onboardingInk,
-                    ),
-                  )
-                : IconButton(
-                    icon: const Icon(LucideIcons.arrowLeft),
-                    tooltip: 'Back',
-                    onPressed: () => Navigator.of(context).pop(),
+        ? defaultTargetPlatform == TargetPlatform.iOS
+              ? PreferredSize(
+                  preferredSize: const Size.fromHeight(44),
+                  child: Stack(
+                    children: [
+                      FrostedAppBar(
+                        nativeTitle: identityRecoveryOnly
+                            ? 'Send to Desktop'
+                            : '',
+                        frosted: false,
+                        showBottomDivider: false,
+                        iconColor: context._onboardingInk,
+
+                        title: identityRecoveryOnly
+                            ? const Text('Send to Desktop')
+                            : null,
+                      ),
+                    ],
                   ),
-            title: Text(
-              identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
-              style: context.textTheme.titleMedium?.copyWith(
-                color: context._onboardingInk,
-              ),
-            ),
-          )
+                )
+              : AppBar(
+                  backgroundColor: Colors.transparent,
+                  surfaceTintColor: Colors.transparent,
+                  elevation: 0,
+                  scrolledUnderElevation: 0,
+                  foregroundColor: context._onboardingInk,
+                  systemOverlayStyle: onboardingSystemOverlayStyle,
+                  leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
+                      ? Grid.quarter + iosGlassChannelHeaderLeadingWidth
+                      : null,
+                  leading: Theme.of(context).platform == TargetPlatform.iOS
+                      ? Padding(
+                          padding: const EdgeInsets.only(left: Grid.quarter),
+                          child: IosGlassNavigationButton(
+                            key: const ValueKey('pairing-ios-glass-back'),
+                            icon: IosGlassNavigationIcon.back,
+                            semanticLabel: 'Back',
+                            onPressed: () => Navigator.of(context).maybePop(),
+                            width: iosGlassChannelHeaderLeadingWidth,
+                            buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                            foregroundColor: context._onboardingInk,
+                          ),
+                        )
+                      : IconButton(
+                          icon: const Icon(LucideIcons.arrowLeft),
+                          tooltip: 'Back',
+                          onPressed: () => Navigator.of(context).pop(),
+                        ),
+                  title: identityRecoveryOnly
+                      ? Text(
+                          'Send to Desktop',
+                          style: context.textTheme.titleMedium?.copyWith(
+                            color: context._onboardingInk,
+                          ),
+                        )
+                      : null,
+                )
         : null;
 
     final pairingScaffold = isVerifyingSas
