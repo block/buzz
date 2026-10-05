@@ -183,6 +183,7 @@ Widget _buildComposeBar({
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
+  Future<List<ChannelMember>> Function()? loadMembers,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
@@ -224,9 +225,9 @@ Widget _buildComposeBar({
         ),
       photoLibraryProvider.overrideWithValue(photoLibrary),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => membersFuture ?? Future.value(members)),
+      channelMembersProvider('channel-1').overrideWith(
+        (ref) => loadMembers?.call() ?? membersFuture ?? Future.value(members),
+      ),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -4532,6 +4533,200 @@ void main() {
       },
     );
 
+    group('outside-person sends', () {
+      const maryJane = UserProfile(
+        pubkey:
+            'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        displayName: 'Mary Jane',
+      );
+      ChannelMember member(String pubkey) => ChannelMember(
+        pubkey: pubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+      );
+
+      Future<void> mentionMaryAndSend(WidgetTester tester) async {
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mary Jane'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'hello @Mary Jane');
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('a stale DM participant is sent as a reference', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            // Current membership no longer has Mary; the DM metadata lags.
+            members: [member(signer.public), member('1' * 64)],
+            channels: [
+              _makeCurrentChannel(
+                channelType: 'dm',
+                participantPubkeys: [signer.public, '1' * 64, maryJane.pubkey],
+              ),
+            ],
+            searchPeople: (query) async => [maryJane],
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await mentionMaryAndSend(tester);
+
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(sentRecipients, isNot(contains(maryJane.pubkey)));
+        expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+      });
+
+      testWidgets('a DM without membership uses its participants and sends', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            loadMembers: () => Future.error(StateError('relay down')),
+            channels: [
+              _makeCurrentChannel(
+                channelType: 'dm',
+                participantPubkeys: [signer.public, '1' * 64],
+              ),
+            ],
+            searchPeople: (query) async => [maryJane],
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await mentionMaryAndSend(tester);
+
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(sentRecipients, isNotNull);
+        expect(sentRecipients, isNot(contains(maryJane.pubkey)));
+        expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+      });
+
+      testWidgets('a failed member check keeps the draft and Retry sends', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        var membersReady = false;
+        var sendCount = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            loadMembers: () async {
+              if (!membersReady) throw StateError('relay down');
+              return [member(signer.public), member(maryJane.pubkey)];
+            },
+            channels: [_makeCurrentChannel()],
+            searchPeople: (query) async => [maryJane],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {
+              sendCount++;
+            },
+          ),
+        );
+        await mentionMaryAndSend(tester);
+
+        expect(sendCount, 0);
+        expect(
+          find.text('Message not sent: could not check who is in this channel'),
+          findsOneWidget,
+        );
+        final field = tester.widget<TextField>(find.byType(TextField));
+        expect(field.controller!.text, 'hello @Mary Jane');
+
+        // The membership comes back, as after the relay's own retry.
+        membersReady = true;
+        ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        ).invalidate(channelMembersProvider('channel-1'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Retry'));
+        await tester.pumpAndSettle();
+
+        expect(sendCount, 1);
+        expect(find.byType(AlertDialog), findsNothing);
+      });
+
+      testWidgets('Invite after a community switch adds nobody', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        final publishedEvents = <Map<String, dynamic>>[];
+        var sendCount = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [member(signer.public)],
+            channels: [_makeCurrentChannel()],
+            searchPeople: (query) async => [maryJane],
+            relayConfig: () => _SwitchableRelayConfigNotifier(
+              RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+            ),
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {
+              sendCount++;
+            },
+          ),
+        );
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        final session = container.read(relaySessionProvider.notifier);
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+          ),
+        );
+
+        await mentionMaryAndSend(tester);
+        expect(find.byType(AlertDialog), findsOneWidget);
+
+        // The community changes while the question is open.
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://other.example', nsec: signer.nsec);
+        await tester.pump();
+        // The session reconnects to the new community, so an add sent now
+        // would land there.
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+          ),
+        );
+        await _inviteOutside(tester);
+        await tester.pumpAndSettle();
+
+        expect(
+          publishedEvents.where((event) => event['kind'] == 9000),
+          isEmpty,
+        );
+        expect(sendCount, 0);
+      });
+    });
+
     testWidgets('sends a non-member in a DM as a reference without asking', (
       tester,
     ) async {
@@ -5809,8 +6004,10 @@ String _suggestionAvatarInitial(WidgetTester tester, String labelText) {
 Channel _makeCurrentChannel({
   String channelType = 'stream',
   String visibility = 'open',
+  List<String> participantPubkeys = const [],
 }) {
   return Channel(
+    participantPubkeys: participantPubkeys,
     id: 'channel-1',
     name: 'current',
     channelType: channelType,

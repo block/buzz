@@ -529,11 +529,26 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
     channelsProvider.future,
   )).firstWhere((candidate) => candidate.id == channelId);
 
-  final members = await ref.read(channelMembersProvider(channelId).future);
+  // A DM decides who is inside it the way its send does: by current
+  // membership, or by the channel metadata when membership is unavailable.
+  // A channel needs its membership; a failure here reaches the send, which
+  // reports it and keeps the draft.
+  List<ChannelMember> members;
+  if (channel.isDm) {
+    try {
+      members = await ref.read(channelMembersProvider(channelId).future);
+    } catch (_) {
+      members = const [];
+    }
+  } else {
+    members = await ref.read(channelMembersProvider(channelId).future);
+  }
   final memberPubkeys = {
-    for (final member in members) member.pubkey.toLowerCase(),
     if (channel.isDm)
-      for (final pubkey in channel.participantPubkeys) pubkey.toLowerCase(),
+      for (final pubkey in dmParticipantPubkeys(channel, members))
+        pubkey.toLowerCase()
+    else
+      for (final member in members) member.pubkey.toLowerCase(),
   };
   String? selfRole;
   if (currentPubkey != null) {

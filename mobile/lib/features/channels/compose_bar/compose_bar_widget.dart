@@ -556,12 +556,33 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
-      final scan = await _scanNonMemberMentions(
-        ref,
-        channelId: channelId,
-        selectedMentions: selectedMentions,
-        currentPubkey: currentPubkey,
-      );
+      // Read before any await. These actions belong to this community and
+      // refuse to run after a switch, so an Invite answered after a switch
+      // cannot add people in the new community.
+      final channelActions = ref.read(channelActionsProvider);
+      final _NonMemberMentionScan scan;
+      try {
+        scan = await _scanNonMemberMentions(
+          ref,
+          channelId: channelId,
+          selectedMentions: selectedMentions,
+          currentPubkey: currentPubkey,
+        );
+      } catch (_) {
+        // Nothing was sent and the draft is untouched, so Retry sends it again.
+        messenger?.showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Message not sent: could not check who is in this channel',
+            ),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: () => unawaited(send()),
+            ),
+          ),
+        );
+        return;
+      }
 
       // Mentioning anyone outside the channel, person or agent, prompts
       // "Invite" / "Do nothing" (portable mention rules, section 7). Nobody
@@ -583,7 +604,6 @@ class ComposeBar extends HookConsumerWidget {
       }
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
-      final channelActions = ref.read(channelActionsProvider);
 
       // An add that was refused doesn't block the message: it is reported and
       // the un-added mentions are demoted to reference tags so the send lands.
