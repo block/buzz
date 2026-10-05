@@ -783,15 +783,15 @@ pub(crate) fn classify_runtime(
 
 /// The oldest `codex-acp` version supported by Buzz managed agents.
 ///
-/// Older 1.x adapters are detected successfully, but can still bundle a Codex runtime
-/// that cannot use newer models. Adapter 1.6.2 bundles Codex 0.148.x, which rejects
-/// GPT-6 Astra even when the separately installed Codex CLI has been updated.
-/// Published adapter 1.10.0 depends on `@openai/codex ^0.153.3`.
+/// Older adapters are detected successfully, but can still bundle a Codex runtime
+/// whose model catalog and provider support lag behind the separately installed
+/// Codex CLI. Adapter 1.13.1 bundles Codex 0.156.1, which rejects models accepted
+/// by terminal Codex 0.160.0. Published adapter 2.1.1 depends on Codex ^0.159.1.
 ///
 /// Bump policy: raise this only when a newer adapter fixes a defect that breaks managed
 /// agents, and only to a version already published on npm — every user below the floor is
 /// offered a reinstall on their next discovery pass.
-pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 10, 0);
+pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (2, 1, 1);
 
 /// Probe the full version of a `codex-acp` binary by running `--version`.
 ///
