@@ -66,6 +66,45 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Relay metadata is optional for ordinary channel delivery. Bound the
+/// best-effort NIP-11 lookup independently so a wedged HTTP future can never
+/// prevent channel discovery and subscriptions from starting.
+const RELAY_SELF_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn relay_self_with_timeout<F>(future: F, timeout: Duration) -> Option<String>
+where
+    F: std::future::Future<Output = Option<String>>,
+{
+    tokio::time::timeout(timeout, future).await.ok().flatten()
+}
+
+#[cfg(test)]
+mod relay_self_timeout_tests {
+    use super::relay_self_with_timeout;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn returns_available_relay_key() {
+        let key = "a".repeat(64);
+        let result = relay_self_with_timeout(
+            std::future::ready(Some(key.clone())),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result, Some(key));
+    }
+
+    #[tokio::test]
+    async fn timeout_degrades_to_no_relay_key() {
+        let result = relay_self_with_timeout(
+            std::future::pending::<Option<String>>(),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(result, None);
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -2029,7 +2068,8 @@ async fn tokio_main() -> Result<()> {
     // messages in the inbound author gate. Best-effort: `None` simply means
     // workflow messages get no attributed-author exemption (pre-fix behavior),
     // so a fetch failure degrades gracefully instead of blocking startup.
-    let relay_self: Option<String> = relay.rest_client().fetch_relay_self().await;
+    let relay_self: Option<String> =
+        relay_self_with_timeout(relay.rest_client().fetch_relay_self(), RELAY_SELF_TIMEOUT).await;
     match &relay_self {
         Some(pk) => tracing::info!("relay self pubkey: {pk}"),
         None => tracing::warn!(
