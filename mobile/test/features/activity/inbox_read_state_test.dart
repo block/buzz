@@ -49,6 +49,30 @@ void main() {
       );
     });
 
+    test('channel rows also use the newest event message marker', () {
+      final row = buildInboxItems([item(id: 'a', createdAt: 60)]).single;
+      expect(
+        resolveInboxItemReadAt(
+          row,
+          markerOf: markers({'ch1': 42, 'msg:a': 60}),
+        ),
+        60,
+      );
+    });
+
+    test('thread rows also use the thread catch-up marker', () {
+      final row = buildInboxItems([
+        item(id: 'a', tags: replyTags('root1', 'root1')),
+      ]).single;
+      expect(
+        resolveInboxItemReadAt(
+          row,
+          markerOf: markers({'thread:root1': 10, 'thread-activity:root1': 30}),
+        ),
+        30,
+      );
+    });
+
     test('channel-less rows have no marker', () {
       final row = buildInboxItems([item(id: 'a', channelId: null)]).single;
       expect(resolveInboxItemReadAt(row, markerOf: markers({})), isNull);

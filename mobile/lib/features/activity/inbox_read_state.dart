@@ -1,11 +1,15 @@
 import '../../shared/read_state/read_state_format.dart';
 import 'inbox_item.dart';
 
-/// Resolves the effective NIP-RS read marker for one inbox row, mirroring
+/// Resolves the effective NIP-RS read marker for one inbox row, based on
 /// desktop's `resolveInboxItemReadAt`:
-/// - thread rows use `max(thread:<root>, msg:<id>)`
-/// - channel rows use the channel context marker
+/// - thread rows use `max(thread:<root>, thread-activity:<root>, msg:<id>)`
+/// - channel rows use `max(<channel>, msg:<id>)`
 /// - rows with no channel have no marker (caller falls back to local state)
+///
+/// `<id>` is the row's newest event. Reading a channel or thread marks
+/// mentions and DMs with `msg:` and thread replies with `thread-activity:`,
+/// not with the channel or `thread:` marker, so those marks count too.
 int? resolveInboxItemReadAt(
   InboxItem item, {
   required int? Function(String contextId) markerOf,
@@ -15,10 +19,15 @@ int? resolveInboxItemReadAt(
   if (threadRootId != null) {
     return maxReadAt([
       markerOf(threadContextKey(threadRootId)),
+      markerOf(threadActivityContextKey(threadRootId)),
       markerOf(msgContextKey(item.item.id)),
     ]);
   }
-  return channelId == null ? null : markerOf(channelId);
+  if (channelId == null) return null;
+  return maxReadAt([
+    markerOf(channelId),
+    markerOf(msgContextKey(item.item.id)),
+  ]);
 }
 
 /// Whether the row is read ("done"), mirroring desktop's

@@ -2093,7 +2093,9 @@ void main() {
       expect(find.byType(SkeletonReveal), findsNothing);
     });
 
-    testWidgets('defers read-state mark until after build', (tester) async {
+    testWidgets('reading the bottom writes the catch-up mark after the dwell', (
+      tester,
+    ) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -2125,9 +2127,121 @@ void main() {
 
       expect(tester.takeException(), isNull);
       await tester.pump();
+      // Opening the channel does not read it; holding still at the bottom
+      // does, without moving the channel mark.
+      expect(readState.markedContexts, isEmpty);
 
-      expect(readState.markedContexts, {_channelId: 1200});
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, {'activity:$_channelId': 1200});
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('reading away from the bottom marks only visible rows', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'm$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          initialMessageId: 'm5',
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final marked = readState.markedContexts;
+      expect(marked['msg:m5'], 1005);
+      expect(marked.keys.where((key) => !key.startsWith('msg:')), isEmpty);
+      // Rows below the viewport are not read.
+      expect(marked, isNot(contains('msg:m30')));
+      expect(marked, isNot(contains('msg:m39')));
+    });
+
+    testWidgets('reading a thread tail writes the thread catch-up mark', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 3; i++)
+          _textMsg(
+            id: 'reply$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          threadReplies: {'root': replies},
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(readState.markedContexts, {'activity:$_channelId': 1000});
+      readState.markedContexts.clear();
+
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root, ...replies]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // One catch-up mark reads the thread. The replies need no marks of
+      // their own, and the covered channel page does not read meanwhile.
+      expect(readState.markedContexts, {'thread-activity:root': 1102});
     });
 
     testWidgets('shows forum posts view for forum channels', (tester) async {

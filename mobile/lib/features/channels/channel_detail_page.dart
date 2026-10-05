@@ -78,6 +78,7 @@ import 'small_avatar.dart';
 import 'sticky_date_header.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
@@ -204,31 +205,6 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
     unsubscribe();
     rethrow;
   }
-}
-
-int? _channelReadTimestamp({
-  required Channel channel,
-  required AsyncValue<List<NostrEvent>> messagesState,
-}) {
-  if (channel.isForum) {
-    return dateTimeToUnixSeconds(channel.lastMessageAt);
-  }
-
-  final events = messagesState.value;
-  if (events != null && events.isNotEmpty) {
-    var latest = 0;
-    for (final event in events) {
-      if (event.threadReference.parentId != null) continue;
-      if (event.createdAt > latest) {
-        latest = event.createdAt;
-      }
-    }
-    if (latest > 0) {
-      return latest;
-    }
-  }
-
-  return dateTimeToUnixSeconds(channel.lastMessageAt);
 }
 
 bool _isOneToOneAgentDm(Channel channel, Set<String> agentPubkeys) {
@@ -512,10 +488,12 @@ class ChannelDetailPage extends HookConsumerWidget {
         !messagesNotifier.hasLoadedMessages;
     final appBarTitleContentHeight = _twoLineAppBarTitleContentHeight(context);
 
-    final readTimestamp = _channelReadTimestamp(
-      channel: resolvedChannel,
-      messagesState: messagesState,
-    );
+    // A forum has no timeline to read row by row, so opening it reads the
+    // channel. Message timelines write their read marks while the reader
+    // looks at rows; see `readingMarks`.
+    final forumReadTimestamp = resolvedChannel.isForum
+        ? dateTimeToUnixSeconds(resolvedChannel.lastMessageAt)
+        : null;
 
     useEffect(() {
       final session = ref.read(relaySessionProvider.notifier);
@@ -546,18 +524,18 @@ class ChannelDetailPage extends HookConsumerWidget {
     );
 
     useEffect(() {
-      if (!readState.isReady || readTimestamp == null) {
+      if (!readState.isReady || forumReadTimestamp == null) {
         return null;
       }
       return deferReadStateUpdate(context, () {
         ref
             .read(readStateProvider.notifier)
-            .markContextRead(channel.id, readTimestamp);
+            .markContextRead(channel.id, forumReadTimestamp);
         ref
             .read(channelsProvider.notifier)
-            .clearObservedUnreadCoveredByRead(channel.id, readTimestamp);
+            .clearObservedUnreadCoveredByRead(channel.id, forumReadTimestamp);
       });
-    }, [channel.id, readState.isReady, readTimestamp]);
+    }, [channel.id, readState.isReady, forumReadTimestamp]);
 
     final dmHeader = resolvedChannel.isDm
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
@@ -766,6 +744,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                                       initialOldestOrdinaryUnreadMessageId !=
                                           null),
                               channelId: channel.id,
+                              isDm: resolvedChannel.isDm,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
                               isArchived: resolvedChannel.isArchived,
