@@ -474,6 +474,65 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testLargeTitleHandoffFadesAndCanReverseBeforeFinishing() async throws {
+    guard !UIAccessibility.isReduceMotionEnabled else {
+      throw XCTSkip("The system has disabled transition animation")
+    }
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let messenger = NavigationTestMessenger()
+    let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 180),
+      viewIdentifier: 999992, arguments: ["title": "Home", "largeTitle": true])
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let metrics = try XCTUnwrap(messenger.metrics)
+    let expanded = try XCTUnwrap(metrics["expandedHeight"] as? Double)
+    let compact = try XCTUnwrap(metrics["compactHeight"] as? Double)
+    let boundary = expanded - compact
+
+    func labels(in view: UIView) -> [UILabel] {
+      let own = (view as? UILabel).map { [$0] } ?? []
+      return own + view.subviews.flatMap { labels(in: $0) }
+    }
+    func visibleOpacity(of view: UIView) -> Float {
+      guard !view.isHidden else { return 0 }
+      let opacity = view.layer.presentation()?.opacity ?? Float(view.alpha)
+      return opacity * (view.superview.map { visibleOpacity(of: $0) } ?? 1)
+    }
+    let title = try XCTUnwrap(labels(in: navigation.view)
+      .filter { $0.text == "Home" }.max { $0.font.pointSize < $1.font.pointSize })
+    let initialTitleY = title.convert(title.bounds, to: parent.view).minY
+    messenger.scroll(to: boundary - 2)
+    XCTAssertEqual(visibleOpacity(of: title), 1, accuracy: 0.01)
+    messenger.scroll(to: boundary)
+    try await Task.sleep(nanoseconds: 60_000_000)
+    let transitions = (navigation.view.layer.animationKeys() ?? []).compactMap {
+      navigation.view.layer.animation(forKey: $0) as? CATransition
+    }
+    XCTAssertFalse(transitions.isEmpty, "The native header must crossfade at the title boundary")
+    // Reverse while the handoff is still active; the final state must match
+    // the latest gesture rather than the previous animation's destination.
+    messenger.scroll(to: boundary - 2)
+    try await Task.sleep(nanoseconds: 240_000_000)
+    XCTAssertEqual(visibleOpacity(of: title), 1, accuracy: 0.01)
+    messenger.scroll(to: boundary)
+    try await Task.sleep(nanoseconds: 240_000_000)
+    XCTAssertEqual(visibleOpacity(of: title), 0, accuracy: 0.01)
+    XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
+    messenger.scroll(to: 0)
+    try await Task.sleep(nanoseconds: 240_000_000)
+    XCTAssertEqual(visibleOpacity(of: title), 1, accuracy: 0.01)
+    XCTAssertEqual(navigation.navigationBar.frame.height, expanded, accuracy: 0.5)
+    XCTAssertEqual(title.convert(title.bounds, to: parent.view).minY, initialTitleY, accuracy: 0.5)
+  }
+
+  @MainActor
   func testNativeNavigationTitleExpandsAgainAtTop() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()

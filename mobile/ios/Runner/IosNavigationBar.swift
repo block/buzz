@@ -214,6 +214,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var alwaysFrosted = false
   private var usesSystemScrollEdge = false
   private var expandedBarHeight: CGFloat = 0
+  private var titleIsCollapsed: Bool?
   private var measuredWidth: CGFloat = 0
   private var measuredSafeTop: CGFloat = -1
   private var measuredCategory: UIContentSizeCategory?
@@ -355,7 +356,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     bar.standardAppearance = appearance
     bar.scrollEdgeAppearance = appearance
     bar.compactAppearance = appearance
-    if bar.prefersLargeTitles != largeTitle { measuredWidth = 0 }
+    if bar.prefersLargeTitles != largeTitle {
+      measuredWidth = 0
+      titleIsCollapsed = nil
+    }
     bar.prefersLargeTitles = largeTitle
     // Conversations request a stable backdrop from the first frame, including
     // loading/empty timelines. Other pages retain their scroll-edge treatment.
@@ -418,6 +422,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let safeTop = navigation.view.safeAreaInsets.top
     guard measuredWidth != container.bounds.width || measuredSafeTop != safeTop || measuredCategory != category else { return }
     measuring = true
+    titleIsCollapsed = nil
     defer { measuring = false }
     let bar = navigation.navigationBar
     let large = bar.prefersLargeTitles
@@ -467,9 +472,34 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // makes the system edge ready before Flutter's first scroll notification.
     let contentBehindBar = usesSystemScrollEdge && alwaysFrosted && !navigation.navigationBar.prefersLargeTitles
     let desired = CGPoint(x: 0, y: contentBehindBar ? offset : -topInset + offset)
+    let compactHeight = (metrics?["compactHeight"] as? CGFloat) ?? navigation.navigationBar.frame.height
+    let collapsed = offset >= max(0, expandedBarHeight - compactHeight)
+    let animateHandoff = navigation.navigationBar.prefersLargeTitles
+      && titleIsCollapsed != nil && titleIsCollapsed != collapsed
+      && !UIAccessibility.isReduceMotionEnabled
+    titleIsCollapsed = collapsed
     if abs(scroll.contentOffset.y - desired.y) > 0.1 {
-      scroll.setContentOffset(desired, animated: false)
-      navigation.view.layoutIfNeeded()
+      let update = {
+        scroll.setContentOffset(desired, animated: false)
+        self.navigation.view.layoutIfNeeded()
+        // Expanding changes UIKit's inset and can compensate the offset.
+        // Restore the gesture position after that layout adjustment.
+        if abs(scroll.contentOffset.y - desired.y) > 0.1 {
+          scroll.setContentOffset(desired, animated: false)
+          self.navigation.view.layoutIfNeeded()
+        }
+      }
+      if animateHandoff {
+        // Programmatic offsets otherwise switch UIKit's title visibility in
+        // one frame. Crossfade the native header only at that boundary. Keep
+        // scroll geometry immediate so inset adjustments cannot animate it
+        // away from Flutter's position. The status fade is a separate sibling.
+        UIView.transition(with: navigation.view, duration: 0.18,
+                          options: [.transitionCrossDissolve, .beginFromCurrentState, .allowUserInteraction],
+                          animations: { UIView.performWithoutAnimation(update) })
+      } else {
+        UIView.performWithoutAnimation(update)
+      }
     }
   }
 
