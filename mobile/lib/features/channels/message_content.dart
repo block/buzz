@@ -8,7 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -441,7 +441,7 @@ class MessageContent extends HookConsumerWidget {
     final isCanonicalBuzzLabel = isBuzzLink && text == url;
     final buzzPresentation = switch (buzzLink) {
       ChannelDeepLink(:final channelId) => (
-        icon: LucideIcons.hash,
+        icon: BuzzIcons.hash,
         label:
             _channelNameForId(resolvedChannelNames, channelId) ??
             channelId.substring(0, math.min(8, channelId.length)),
@@ -450,7 +450,7 @@ class MessageContent extends HookConsumerWidget {
         interactive: true,
       ),
       MessageDeepLink(:final channelId, :final messageId) => (
-        icon: LucideIcons.messageSquare,
+        icon: BuzzIcons.messageSquare,
         label:
             '${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))} · ${messageId.substring(0, math.min(8, messageId.length))}',
         semanticLabel:
@@ -459,9 +459,9 @@ class MessageContent extends HookConsumerWidget {
       ),
       EntityDeepLink(:final type, :final repository, :final eventId) => (
         icon: switch (type) {
-          'repo' => LucideIcons.folderGit2,
-          'pr' => LucideIcons.gitPullRequest,
-          _ => LucideIcons.circleDot,
+          'repo' => BuzzIcons.folderGit2,
+          'pr' => BuzzIcons.gitPullRequest,
+          _ => BuzzIcons.circleDot,
         },
         label: type == 'repo'
             ? repository
@@ -621,7 +621,7 @@ class _MessageImagePreview extends HookConsumerWidget {
                     ? child
                     : const MediaLoadingPlaceholder(label: 'Loading image'),
                 errorBuilder: (_, _, _) => _MediaPreviewFallback(
-                  icon: LucideIcons.imageOff,
+                  icon: BuzzIcons.imageOff,
                   label: 'Image unavailable',
                 ),
               ),
@@ -803,7 +803,7 @@ class _MessageCodeBlock extends HookWidget {
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     icon: Icon(
-                      isCopied.value ? LucideIcons.check : LucideIcons.copy,
+                      isCopied.value ? BuzzIcons.check : BuzzIcons.copy,
                       size: 14,
                       color: isCopied.value
                           ? context.colors.primary
@@ -935,7 +935,7 @@ class _MentionPill extends StatelessWidget {
         children: [
           if (isAgent) ...[
             Icon(
-              LucideIcons.bot,
+              BuzzIcons.bot,
               size: fontSize * 0.95,
               color: context.colors.primary,
             ),

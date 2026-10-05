@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -301,7 +301,7 @@ class _PresencePill extends StatelessWidget {
                             ),
                             if (option == effectivePresence)
                               Icon(
-                                LucideIcons.check,
+                                BuzzIcons.check,
                                 size: 16,
                                 color: context.colors.primary,
                               ),

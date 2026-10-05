@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -268,7 +268,7 @@ class _MemberTile extends ConsumerWidget {
             ),
       trailing: showMenu
           ? IconButton(
-              icon: const Icon(LucideIcons.ellipsis, size: 18),
+              icon: const Icon(BuzzIcons.ellipsis, size: 18),
               onPressed: () => _showMemberActions(
                 context,
                 ref,
@@ -311,7 +311,7 @@ class _MemberTile extends ConsumerWidget {
                 children: [
                   ListTile(
                     leading: Icon(
-                      LucideIcons.activity,
+                      BuzzIcons.activity,
                       size: 18,
                       color: context.colors.primary,
                     ),
@@ -348,7 +348,7 @@ class _MemberTile extends ConsumerWidget {
                 children: [
                   ListTile(
                     leading: Icon(
-                      LucideIcons.userMinus,
+                      BuzzIcons.userMinus,
                       size: 18,
                       color: context.colors.error,
                     ),

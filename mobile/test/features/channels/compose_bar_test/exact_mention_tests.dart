@@ -195,7 +195,7 @@ void exactMentionTests() {
           }
         }
       }
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       if (scenario == 'non-member human') {
         expect(
@@ -276,14 +276,14 @@ void exactMentionTests() {
       expect(controller.text, '@Scout ');
       await pick(tester, '@Scout @', last: true);
       expect(controller.text, '@Scout @Scout ($second) ');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [first, second]);
       await pick(tester, '@');
       await pick(tester, '@Scout @', last: true);
       await tester.enterText(find.byType(TextField), '@Scout ($second) ');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [second]);
     },
@@ -298,7 +298,7 @@ void exactMentionTests() {
     ], (_, keys, {mediaTags = const []}) async => sent = keys);
     await tester.enterText(find.byType(TextField), '@Scout ($second)');
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(LucideIcons.arrowUp));
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
     expect(sent, isEmpty);
   });
@@ -316,7 +316,7 @@ void exactMentionTests() {
     });
     await tester.enterText(find.byType(TextField), '@Scout hello');
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(LucideIcons.arrowUp));
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
     expect(sent, isFalse);
     expect(

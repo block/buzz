@@ -74,7 +74,7 @@ class _InviteLinkSection extends HookConsumerWidget {
                 child: Builder(
                   builder: (buttonContext) => BuzzActionTile(
                     key: const Key('community-invite-share-link'),
-                    icon: LucideIcons.share2,
+                    icon: BuzzIcons.share2,
                     label: 'Share',
                     isEnabled: invite.value != null,
                     onTap: () => share(buttonContext),
@@ -85,7 +85,7 @@ class _InviteLinkSection extends HookConsumerWidget {
               Expanded(
                 child: BuzzActionTile(
                   key: const Key('community-invite-copy-link'),
-                  icon: LucideIcons.copy,
+                  icon: BuzzIcons.copy,
                   label: 'Copy',
                   isEnabled: invite.value != null,
                   onTap: () => copyToClipboard(
@@ -218,7 +218,7 @@ class _InviteOptionSheet<T> extends StatelessWidget {
                   title: option.label,
                   trailing: option.value == value
                       ? Icon(
-                          LucideIcons.check,
+                          BuzzIcons.check,
                           size: 18,
                           color: context.colors.primary,
                         )
@@ -243,7 +243,7 @@ class _InviteRowChevron extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Icon(
-      LucideIcons.chevronRight,
+      BuzzIcons.chevronRight,
       size: 18,
       color: context.colors.onSurfaceVariant,
     );

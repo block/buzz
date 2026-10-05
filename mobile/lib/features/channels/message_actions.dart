@@ -10,7 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:share_plus/share_plus.dart';
@@ -202,7 +202,7 @@ Future<void> showMessageActions({
                       children: [
                         // Export: take the content out of the conversation.
                         ListTile(
-                          leading: const Icon(LucideIcons.copy),
+                          leading: const Icon(BuzzIcons.copy),
                           title: const Text('Copy text'),
                           onTap: () {
                             Navigator.of(sheetContext).pop();
@@ -218,7 +218,7 @@ Future<void> showMessageActions({
                     SheetActionSection(
                       children: [
                         ListTile(
-                          leading: const Icon(LucideIcons.pencil),
+                          leading: const Icon(BuzzIcons.pencil),
                           title: const Text('Edit message'),
                           onTap: () {
                             Navigator.of(sheetContext).pop();
@@ -232,7 +232,7 @@ Future<void> showMessageActions({
                         ),
                         ListTile(
                           leading: Icon(
-                            LucideIcons.trash2,
+                            BuzzIcons.trash2,
                             color: sheetContext.colors.error,
                           ),
                           title: Text(
@@ -293,7 +293,7 @@ void showImageActions({
                 SheetActionSection(
                   children: [
                     ListTile(
-                      leading: const Icon(LucideIcons.download),
+                      leading: const Icon(BuzzIcons.download),
                       title: const Text('Save image'),
                       onTap: () {
                         Navigator.of(sheetContext).pop();
@@ -301,7 +301,7 @@ void showImageActions({
                       },
                     ),
                     ListTile(
-                      leading: const Icon(LucideIcons.share2),
+                      leading: const Icon(BuzzIcons.share2),
                       title: const Text('Share image'),
                       onTap: () {
                         final renderBox =
@@ -322,7 +322,7 @@ void showImageActions({
                       },
                     ),
                     ListTile(
-                      leading: const Icon(LucideIcons.link2),
+                      leading: const Icon(BuzzIcons.link2),
                       title: const Text('Copy image link'),
                       onTap: () {
                         Navigator.of(sheetContext).pop();
@@ -340,7 +340,7 @@ void showImageActions({
                     children: [
                       ListTile(
                         leading: Icon(
-                          LucideIcons.trash2,
+                          BuzzIcons.trash2,
                           color: sheetContext.colors.error,
                         ),
                         title: Text(
@@ -522,7 +522,7 @@ class _MarkReadUnreadTile extends ConsumerWidget {
     );
 
     return ListTile(
-      leading: Icon(unread ? LucideIcons.mailCheck : LucideIcons.mailOpen),
+      leading: Icon(unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
         Navigator.of(context).pop();
@@ -563,7 +563,7 @@ class _FollowThreadTile extends ConsumerWidget {
     final following = follows.isFollowing(rootId);
 
     return ListTile(
-      leading: Icon(following ? LucideIcons.bellOff : LucideIcons.bellRing),
+      leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {
         Navigator.of(context).pop();
@@ -608,7 +608,7 @@ class _FastActionsRow extends ConsumerWidget {
     final tiles = <Widget>[
       if (messages != null)
         _FastActionTile(
-          icon: LucideIcons.messageSquareReply,
+          icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
           onTap: () {
             Navigator.of(context).pop();
@@ -627,7 +627,7 @@ class _FastActionsRow extends ConsumerWidget {
           },
         ),
       _FastActionTile(
-        icon: LucideIcons.link2,
+        icon: BuzzIcons.link2,
         label: 'Copy link',
         onTap: () {
           Navigator.of(context).pop();
@@ -640,7 +640,7 @@ class _FastActionsRow extends ConsumerWidget {
       ),
       if (canRemind)
         _FastActionTile(
-          icon: LucideIcons.clock,
+          icon: BuzzIcons.clock,
           label: 'Remind me',
           onTap: () {
             final rootContext = Navigator.of(

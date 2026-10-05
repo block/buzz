@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 import '../widgets/sheet_action_section.dart';
@@ -61,7 +61,7 @@ void showRemindMeLaterSheet({
                   children: [
                     for (final preset in reminderTimePresets)
                       ListTile(
-                        leading: const Icon(LucideIcons.clock),
+                        leading: const Icon(BuzzIcons.clock),
                         title: Text(preset.label),
                         onTap: () {
                           Navigator.of(sheetContext).pop();
@@ -73,7 +73,7 @@ void showRemindMeLaterSheet({
                 SheetActionSection(
                   children: [
                     ListTile(
-                      leading: const Icon(LucideIcons.calendarClock),
+                      leading: const Icon(BuzzIcons.calendarClock),
                       title: const Text('Pick a date & time'),
                       onTap: () async {
                         final navigator = Navigator.of(sheetContext);

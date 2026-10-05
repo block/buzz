@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -180,7 +180,7 @@ class VoiceNoteAttachment extends HookConsumerWidget {
                         )
                       : state.hasError && isRemote
                       ? Icon(
-                          LucideIcons.refreshCcw,
+                          BuzzIcons.refreshCcw,
                           key: const ValueKey('voice-note-retry-icon'),
                           size: 18,
                           color: context.colors.onSecondaryContainer,
@@ -271,7 +271,7 @@ class VoiceNoteAttachment extends HookConsumerWidget {
                   padding: EdgeInsets.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                icon: const Icon(LucideIcons.x, size: 18),
+                icon: const Icon(BuzzIcons.x, size: 18),
               ),
             ),
           ],

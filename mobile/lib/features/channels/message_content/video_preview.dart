@@ -101,7 +101,7 @@ class _MessageVideoPreview extends HookConsumerWidget {
                         ? child
                         : const MediaLoadingPlaceholder(label: 'Loading video'),
                     errorBuilder: (_, _, _) => const _MediaPreviewFallback(
-                      icon: LucideIcons.video,
+                      icon: BuzzIcons.video,
                       label: 'Video preview unavailable',
                     ),
                   )
@@ -117,7 +117,7 @@ class _MessageVideoPreview extends HookConsumerWidget {
                       }
                       if (frame == null) {
                         return const _MediaPreviewFallback(
-                          icon: LucideIcons.video,
+                          icon: BuzzIcons.video,
                           label: 'Video attachment',
                         );
                       }
@@ -143,7 +143,7 @@ class _MessageVideoPreview extends HookConsumerWidget {
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(
-                      LucideIcons.play,
+                      BuzzIcons.play,
                       color: Colors.white,
                       size: 24,
                     ),

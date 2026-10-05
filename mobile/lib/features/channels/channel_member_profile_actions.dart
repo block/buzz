@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -144,13 +144,13 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             if (!member.isBot) ...[
               if (member.role != 'admin')
                 AppListRow(
-                  icon: LucideIcons.shieldCheck,
+                  icon: BuzzIcons.shieldCheck,
                   title: 'Make channel admin',
                   onTap: busy.value ? null : () => perform(role: 'admin'),
                 ),
               if (member.role == 'admin' || member.role == 'guest')
                 AppListRow(
-                  icon: LucideIcons.user,
+                  icon: BuzzIcons.user,
                   title: member.role == 'guest'
                       ? 'Make member'
                       : 'Change to member',
@@ -158,7 +158,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
                 ),
             ],
             AppListRow(
-              icon: LucideIcons.userMinus,
+              icon: BuzzIcons.userMinus,
               title: 'Remove from channel',
               titleColor: context.colors.error,
               onTap: busy.value ? null : () => perform(),

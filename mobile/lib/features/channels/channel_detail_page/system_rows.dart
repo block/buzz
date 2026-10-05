@@ -560,7 +560,7 @@ Widget _systemEventAvatar(
       shape: BoxShape.circle,
     ),
     child: Icon(
-      LucideIcons.arrowLeftRight,
+      BuzzIcons.arrowLeftRight,
       size: 12,
       color: context.colors.onSurfaceVariant,
     ),

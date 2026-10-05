@@ -437,7 +437,7 @@ class _ThemePreviewCloseButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(LucideIcons.x, size: 22),
+        icon: const Icon(BuzzIcons.x, size: 22),
       ),
     );
   }
@@ -558,9 +558,9 @@ class _AppearanceCycleAction extends StatelessWidget {
   final VoidCallback onTap;
 
   IconData get _icon => switch (mode) {
-    ThemeMode.light => LucideIcons.sun,
-    ThemeMode.dark => LucideIcons.moon,
-    ThemeMode.system => LucideIcons.sunMoon,
+    ThemeMode.light => BuzzIcons.sun,
+    ThemeMode.dark => BuzzIcons.moon,
+    ThemeMode.system => BuzzIcons.sunMoon,
   };
 
   IosGlassNavigationIcon get _iosIcon => switch (mode) {

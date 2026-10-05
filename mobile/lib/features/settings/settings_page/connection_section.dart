@@ -112,7 +112,7 @@ class _IdentityRow extends StatelessWidget {
       child: AppListRow(
         title: 'Copy public key (npub)',
         trailing: Icon(
-          LucideIcons.copy,
+          BuzzIcons.copy,
           size: 18,
           color: context.colors.onSurfaceVariant,
         ),

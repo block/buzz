@@ -76,6 +76,9 @@ flutter:
     # desktop uses. Do not hand-edit.
     - assets/emoji/emoji-data.json
   fonts:
+    - family: BuzzTabler
+      fonts:
+        - asset: assets/fonts/TablerIcons.ttf
     - family: Inter
       fonts:
         - asset: assets/fonts/InterVariable.ttf
