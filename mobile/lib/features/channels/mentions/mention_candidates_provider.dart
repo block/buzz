@@ -27,6 +27,11 @@ const mentionSearchDebounce = Duration(milliseconds: 200);
 /// keystrokes dispose the stale family member so its request never fires.
 final mentionUserSearchProvider = FutureProvider.autoDispose
     .family<List<UserProfile>, String>((ref, query) async {
+      // The session notifier is stable across communities, and two
+      // communities can share a signing key. Watching the relay config
+      // restarts the search at a community switch, so a late result or
+      // error from the old community never reaches the new one.
+      ref.watch(relayConfigProvider);
       final trimmed = query.trim();
       if (trimmed.isEmpty) return const [];
 
@@ -75,7 +80,8 @@ typedef MentionChooserArgs = ({String channelId, String query, int opening});
 
 /// The last finished directory search for each chooser opening. A new query
 /// keeps showing its still-matching people while its own search runs.
-/// Nothing here outlives the relay session, and a new opening starts empty.
+/// Nothing here outlives the relay session or the community, and a new
+/// opening starts empty.
 class _SettledSearches {
   final _pages = <(String, int), List<UserProfile>>{};
 
@@ -95,6 +101,7 @@ class _SettledSearches {
 
 final _settledSearchesProvider = Provider<_SettledSearches>((ref) {
   ref.watch(relaySessionProvider.select((s) => s.status));
+  ref.watch(relayConfigProvider);
   return _SettledSearches();
 });
 
