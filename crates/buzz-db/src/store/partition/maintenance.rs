@@ -7,9 +7,9 @@
 //!
 //! 1. holds a schema-scoped advisory lock, so concurrent relays produce one
 //!    winner and `skipped_locked` losers;
-//! 2. locks the parent, then foreign-key counterparts, then the catch-all, in
-//!    the order writers take them, waiting only on the parent and failing fast
-//!    on any other contention;
+//! 2. locks the parent, then foreign-key counterparts read under the parent
+//!    lock, then the catch-all, in the order writers take them, waiting only on
+//!    the parent and failing fast on any other contention;
 //! 3. re-audits under those locks and refuses if the plan changed; and
 //! 4. re-audits the changed catalog and verifies index and constraint
 //!    inheritance before commit.
@@ -570,6 +570,7 @@ async fn apply_change(
         return Ok(LockedAttempt::Refused(collision_message(&name)));
     }
 
+    // Refuse an unproven lock set before taking any lock.
     let parent = maintenance_parent(&mut transaction, table).await?;
     if let Some(reason) = parent.refusal {
         transaction.rollback().await?;
@@ -587,10 +588,23 @@ async fn apply_change(
         ),
     )
     .await?;
+    // Read the foreign keys again under the parent lock. The read above can
+    // miss one committed while this transaction waited on the parent, and
+    // attaching would then wait on its table while holding the parent. Adding
+    // or dropping a foreign key on or to the parent needs a lock that
+    // conflicts with this one, so the set cannot change from here on.
+    let parent = maintenance_parent(&mut transaction, table).await?;
+    if let Some(reason) = parent.refusal {
+        transaction.rollback().await?;
+        return Ok(LockedAttempt::Refused(reason));
+    }
     // Attaching a partition adds its foreign key under SHARE ROW EXCLUSIVE on
     // each referenced table. Taking that mode up front still admits readers and
     // the `FOR KEY SHARE` checks of other writers, and fails at once rather
     // than queue the counterpart's own writers behind this transaction.
+    // Dropping the catch-all removes only its inherited foreign key and check
+    // triggers, which lock the catch-all itself, never the referenced table
+    // (lock probes on PostgreSQL 16 and 17), so no stronger mode is needed.
     for counterpart in &parent.counterparts {
         lock(
             &mut transaction,

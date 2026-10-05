@@ -328,7 +328,8 @@ mod postgres_tests {
 
     use super::*;
     use crate::store::partition::tests::postgres_tests::{
-        catalog_snapshot, create_child, drop_schema, fixed_now, scratch_pool, seed_parents,
+        catalog_snapshot, create_child, drop_schema, fixed_now, scratch_pool,
+        scratch_pool_with_max_connections, seed_parents,
     };
 
     /// The repaired incident layout for both managed parents, optionally with
@@ -644,6 +645,89 @@ mod postgres_tests {
                 .expect("maintenance task")
                 .expect("advance after the writer commits"),
         );
+        drop_schema(&admin, &schema).await;
+    }
+
+    async fn wait_until_blocked_by(admin: &PgPool, pid: i32, waiters: i64) {
+        for _ in 0..100 {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            )
+            .bind(pid)
+            .fetch_one(admin)
+            .await
+            .expect("count blocked backends");
+            if blocked >= waiters {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("{waiters} backends never queued behind {pid}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn foreign_key_committed_while_waiting_on_the_parent_is_locked_nowait() {
+        let (pool, admin, schema) = scratch_pool_with_max_connections(6).await;
+        seed_repaired_layout(&pool, true).await;
+        sqlx::query("CREATE TABLE reviewers (id UUID PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create new counterpart");
+        // An in-flight migration adds a foreign key that maintenance's
+        // pre-lock read cannot see yet.
+        let mut migration = hold_lock(
+            &pool,
+            "ALTER TABLE events ADD FOREIGN KEY (community_id) REFERENCES reviewers(id)",
+        )
+        .await;
+        let migration_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *migration)
+            .await
+            .expect("migration backend pid");
+        // A writer on the new counterpart queues behind the migration and is
+        // granted its lock when the migration commits.
+        let (release_writer, writer_released) = tokio::sync::oneshot::channel::<()>();
+        let writer = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut writer = pool.begin().await.expect("begin counterpart writer");
+                sqlx::query("INSERT INTO reviewers(id) VALUES (gen_random_uuid())")
+                    .execute(&mut *writer)
+                    .await
+                    .expect("counterpart writer insert");
+                let _ = writer_released.await;
+                writer
+                    .rollback()
+                    .await
+                    .expect("roll back counterpart writer");
+            }
+        });
+        wait_until_blocked_by(&admin, migration_pid, 1).await;
+        let maintenance = tokio::spawn({
+            let pool = pool.clone();
+            async move { maintain(&pool).await }
+        });
+        wait_until_blocked_by(&admin, migration_pid, 2).await;
+
+        let started = Instant::now();
+        migration.commit().await.expect("commit migration");
+        let result = maintenance.await.expect("maintenance task");
+        let elapsed = started.elapsed();
+
+        // The parent-locked read finds the new counterpart and fails on it at
+        // once, instead of attaching against it under the parent lock until
+        // the lock timeout.
+        assert!(
+            matches!(result, Err(DbError::InvalidData(ref message))
+                if message.contains("events lock_timeout") && !message.contains("delivery_log")),
+            "{result:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+
+        release_writer.send(()).expect("release counterpart writer");
+        writer.await.expect("counterpart writer task");
+        assert_advanced(&maintain(&pool).await.expect("advance after release"));
         drop_schema(&admin, &schema).await;
     }
 
