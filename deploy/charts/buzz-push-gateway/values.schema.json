@@ -87,7 +87,7 @@
       ],
       "properties": {
         "enabled": {
-          "const": true
+          "type": "boolean"
         },
         "apnsEgressCidrs": {
           "type": "array",
@@ -146,8 +146,45 @@
               }
             }
           ]
+        },
+        "externalPolicyName": {
+          "type": "string",
+          "description": "Name of the replacement runtime NetworkPolicy supplied by the parent chart. Required when the upstream policy is disabled.",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "maxLength": 63
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "externalPolicyName"
+            ],
+            "properties": {
+              "externalPolicyName": {
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "externalPolicyName": {
+                "maxLength": 0
+              }
+            }
+          }
+        }
+      ]
     },
     "podMonitor": {
       "type": "object",
@@ -247,6 +284,28 @@
           }
         }
       }
+    },
+    "podLabels": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "app.kubernetes.io/name",
+            "app.kubernetes.io/instance",
+            "app.kubernetes.io/component"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "serviceAccountName": {
+      "type": "string"
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 60
     }
   },
   "$defs": {
