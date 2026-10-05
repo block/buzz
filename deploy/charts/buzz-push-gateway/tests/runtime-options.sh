@@ -49,3 +49,16 @@ done
 for name in "$long_name"x .runtime runtime. runtime..example Runtime runtime.-example; do
   reject --set networkPolicy.enabled=false --set-string "networkPolicy.externalPolicyName=$name"
 done
+
+# Parent policy owns scrape access in external mode. Internal policy retains its guard.
+helm template push "$chart" --set networkPolicy.enabled=false \
+  --set networkPolicy.externalPolicyName=platform-runtime \
+  --set podMonitor.enabled=true >"$out/external-monitor.yaml"
+env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out/external-monitor.yaml" <<'RUBY'
+resources = YAML.load_stream(File.read(ARGV[0])).compact
+raise 'PodMonitor missing in external mode' unless resources.any? { |r| r['kind'] == 'PodMonitor' }
+policies = resources.select { |r| r['kind'] == 'NetworkPolicy' }
+raise 'external mode must retain only migration policy' unless policies.map { |r| r['metadata']['name'] } == ['push-buzz-push-gateway-migration']
+RUBY
+reject --set podMonitor.enabled=true
+reject --set podMonitor.enabled=true --set networkPolicy.monitoring.enabled=true

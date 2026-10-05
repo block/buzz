@@ -379,7 +379,7 @@
   ],
   "allOf": [
     {
-      "$comment": "A PodMonitor requires scoped 8081 ingress. External scrapers such as Datadog may enable that ingress without rendering a PodMonitor.",
+      "$comment": "A PodMonitor requires scoped 8081 ingress when this chart owns the runtime policy. In external-policy mode the named parent policy owns scrape access.",
       "if": {
         "properties": {
           "podMonitor": {
@@ -391,10 +391,21 @@
             "required": [
               "enabled"
             ]
+          },
+          "networkPolicy": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
           }
         },
         "required": [
-          "podMonitor"
+          "podMonitor",
+          "networkPolicy"
         ]
       },
       "then": {
