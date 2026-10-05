@@ -34,11 +34,12 @@ not grant access to the owner's personal state. Relay membership, bans and
 resource access are enforced; moderation timeouts do not prohibit reading.
 
 Responses produced by the v1 handlers are `Cache-Control: private, no-store`.
-Application errors (including NIP-98 failures with NIP-FI Off) use
+Application errors (including NIP-98 failures with NIP-FI Off or Shadow) use
 `{"error":{"code":"invalid_request","request_id":"..."}}`, with 400 invalid,
 401 unauthorized/replay, 403 forbidden, 404 unavailable capability/host/path,
 429 rate limited or 503 temporarily unavailable. Application 429/503 errors
-include `Retry-After`. When NIP-FI is not Off, admission failures instead preserve
+include `Retry-After`. When NIP-FI restricts (Enforce or DenyProtected),
+admission failures instead preserve
 the shared [NIP-FI HTTP denial contract](nips/NIP-FI.md): status, fixed plaintext
 body, `Content-Type` and (for 401) `WWW-Authenticate: Nostr`. The v1 handler adds
 `private, no-store` without changing those fields, unlike the bridge's direct
