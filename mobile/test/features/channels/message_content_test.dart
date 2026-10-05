@@ -1,4 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:http/testing.dart';
+import 'package:buzz/shared/widgets/media_loading_placeholder.dart';
+import 'package:buzz/shared/widgets/skeleton.dart';
 import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
@@ -123,6 +127,20 @@ class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
     required Map<String, String> Function() headers,
     required Duration fallbackDuration,
   }) async {}
+}
+
+class _ReadyTransitionVoiceNotePlayer extends _LoadingVoiceNotePlayer {
+  bool loading = true;
+  @override
+  VoiceNotePlaybackState get state => VoiceNotePlaybackState(
+    isLoading: loading,
+    canCancelLoading: loading,
+    duration: const Duration(seconds: 3),
+  );
+  void finishLoading() {
+    loading = false;
+    notifyListeners();
+  }
 }
 
 class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
@@ -1070,6 +1088,91 @@ void main() {
     });
 
     group('media attachments', () {
+      testWidgets('reserves image metadata dimensions while bytes load', (
+        tester,
+      ) async {
+        const url = 'https://example.com/content-shaped-loading.png';
+        final response = Completer<http.Response>();
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![image]($url)',
+              channelNames: {'general': 'general-id'},
+              tags: [
+                ['imeta', 'url $url', 'm image/png', 'dim 1200x2400'],
+              ],
+            ),
+            disableAnimations: true,
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(baseUrl: 'https://example.com', nsec: null),
+              ),
+              mediaHttpClientProvider.overrideWithValue(
+                MockClient((_) => response.future),
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+        final preview = find.byKey(
+          const ValueKey('message-media-image-preview:$url'),
+        );
+        final before = tester.getSize(preview);
+        expect(before.height, 240);
+        expect(before.width, 120);
+        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
+        response.complete(
+          http.Response.bytes(
+            base64Decode(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=',
+            ),
+            200,
+          ),
+        );
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
+        expect(tester.getSize(preview), before);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('keeps video loading and decoded frame the same size', (
+        tester,
+      ) async {
+        final frame = Completer<LoadedVideoPreviewFrame?>();
+        const url = 'https://example.com/loading-video.mp4';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video]($url)',
+              channelNames: {'general': 'general-id'},
+              tags: [
+                ['imeta', 'url $url', 'm video/mp4', 'dim 1920x1080'],
+              ],
+            ),
+            disableAnimations: true,
+            videoPreviewFrameLoader: (_) => frame.future,
+          ),
+        );
+        final preview = find.byKey(
+          const ValueKey('message-media-video-preview:$url'),
+        );
+        final before = tester.getSize(preview);
+        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
+        frame.complete(
+          LoadedVideoPreviewFrame(
+            child: const ColoredBox(color: Colors.black),
+            aspectRatio: 16 / 9,
+            dispose: () async {},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
+        expect(tester.getSize(preview), before);
+      });
+
       testWidgets('uses the shared Buzz loader while a voice note loads', (
         tester,
       ) async {
@@ -1098,6 +1201,20 @@ void main() {
         );
         await tester.pump();
 
+        expect(
+          find.descendant(
+            of: find.byType(SkeletonShimmer),
+            matching: find.byType(VoiceNoteWaveform),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<VoiceNoteWaveform>(find.byType(VoiceNoteWaveform))
+              .onSeek,
+          isNull,
+        );
+        expect(find.text('0:03'), findsOneWidget);
         expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
         final spinner = find.byType(BuzzLoadingIndicator);
         expect(tester.getSize(spinner), const Size.square(18));
@@ -1113,6 +1230,43 @@ void main() {
         );
         expect(find.bySemanticsLabel('Loading voice note'), findsNothing);
       });
+
+      testWidgets(
+        'voice waveform semantics return only when playback is ready',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+
+          final player = _ReadyTransitionVoiceNotePlayer();
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.remote(
+                url: 'https://example.com/voice.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+          expect(find.bySemanticsLabel('Voice note waveform'), findsNothing);
+          player.finishLoading();
+          await tester.pumpAndSettle();
+          final node = tester.getSemantics(
+            find.bySemanticsLabel('Voice note waveform'),
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.increase),
+            isTrue,
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.decrease),
+            isTrue,
+          );
+          semantics.dispose();
+        },
+      );
 
       testWidgets('routes repeated loading-control taps through toggle', (
         tester,
@@ -2178,7 +2332,7 @@ Photos
       });
 
       testWidgets(
-        'keeps no-dim image previews max-bounded without fixed crop',
+        'reserves no-dim image bounds without cropping decoded content',
         (tester) async {
           _setSurfaceSize(tester, const Size(400, 800));
           addTearDown(() {
@@ -2215,8 +2369,8 @@ Photos
           );
 
           expect(preview.constraints, isNotNull);
-          expect(preview.constraints!.minWidth, 0);
-          expect(preview.constraints!.minHeight, 0);
+          expect(preview.constraints!.minWidth, closeTo(288, 0.1));
+          expect(preview.constraints!.minHeight, closeTo(240, 0.1));
           expect(preview.constraints!.maxWidth, closeTo(288, 0.1));
           expect(preview.constraints!.maxHeight, closeTo(240, 0.1));
           expect(image.fit, BoxFit.contain);

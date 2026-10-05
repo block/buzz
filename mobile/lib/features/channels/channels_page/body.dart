@@ -5,7 +5,6 @@ class _ChannelsBody extends StatelessWidget {
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
   final SessionStatus sessionStatus;
-  final bool showConnectionSkeleton;
   final ValueChanged<bool> onReadyChanged;
   final String? currentPubkey;
   final double topSectionHeight;
@@ -19,7 +18,6 @@ class _ChannelsBody extends StatelessWidget {
     required this.channelsAsync,
     required this.showError,
     required this.sessionStatus,
-    required this.showConnectionSkeleton,
     required this.onReadyChanged,
     required this.currentPubkey,
     required this.topSectionHeight,
@@ -33,8 +31,7 @@ class _ChannelsBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final barHeight = topSectionHeight;
     final loadedChannels = channels;
-    final loading =
-        showConnectionSkeleton || (loadedChannels == null && !showError);
+    final loading = loadedChannels == null && !showError;
     final content = showError && channelsAsync.hasError
         ? Padding(
             padding: EdgeInsets.only(top: barHeight),
@@ -80,11 +77,16 @@ class _ChannelsBody extends StatelessWidget {
     return SkeletonReveal(
       onReadyChanged: onReadyChanged,
       loading: loading,
+      loadingSemanticsKey: const Key('channels-connection-skeleton'),
+      loadingLabel: switch (sessionStatus) {
+        SessionStatus.connecting => 'Connecting',
+        SessionStatus.reconnecting => 'Reconnecting',
+        _ => 'Loading',
+      },
       shimmerEnabled: sessionStatus != SessionStatus.disconnected,
       skeleton: _ChannelsSkeleton(
         channels: loadedChannels,
         topInset: barHeight,
-        status: sessionStatus,
       ),
       content: content,
     );

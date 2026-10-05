@@ -11,6 +11,13 @@ class SkeletonReveal extends HookWidget {
   final Widget content;
   final bool shimmerEnabled;
 
+  /// Current status announced independently of the retained visual snapshot.
+  final String? loadingLabel;
+  final Key? loadingSemanticsKey;
+
+  /// Live viewport insets, such as a measured composer dock.
+  final EdgeInsets skeletonPadding;
+
   /// Reports when loaded content has finished its reveal and layout frame.
   final ValueChanged<bool>? onReadyChanged;
 
@@ -19,6 +26,9 @@ class SkeletonReveal extends HookWidget {
     required this.skeleton,
     required this.content,
     this.shimmerEnabled = true,
+    this.loadingLabel,
+    this.loadingSemanticsKey,
+    this.skeletonPadding = EdgeInsets.zero,
     this.onReadyChanged,
     super.key,
   });
@@ -31,6 +41,12 @@ class SkeletonReveal extends HookWidget {
       initialValue: loading ? 0 : 1,
     );
     final previousLoading = usePrevious(loading);
+    // Keep one placeholder layout for the entire loading cycle, including
+    // its outgoing fade. Newly arrived metadata belongs to the content layer.
+    final loadingSkeleton = useRef(skeleton);
+    if (loading && previousLoading != true) {
+      loadingSkeleton.value = skeleton;
+    }
 
     useEffect(() {
       if (reducedMotion || previousLoading == null) {
@@ -109,9 +125,18 @@ class SkeletonReveal extends HookWidget {
                 child: IgnorePointer(
                   child: ExcludeSemantics(
                     excluding: !loading,
-                    child: SkeletonShimmer(
-                      enabled: loading && shimmerEnabled,
-                      child: skeleton,
+                    child: Semantics(
+                      key: loadingSemanticsKey,
+                      label: loadingLabel,
+                      liveRegion: loadingLabel != null,
+                      excludeSemantics: loadingLabel != null,
+                      child: Padding(
+                        padding: skeletonPadding,
+                        child: SkeletonShimmer(
+                          enabled: loading && shimmerEnabled,
+                          child: loadingSkeleton.value,
+                        ),
+                      ),
                     ),
                   ),
                 ),

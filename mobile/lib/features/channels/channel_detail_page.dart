@@ -34,6 +34,7 @@ import '../profile/profile_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
+import '../forum/forum_provider.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
@@ -64,6 +65,7 @@ import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
+import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
@@ -600,6 +602,19 @@ class ChannelDetailPage extends HookConsumerWidget {
         ? dmHeader?.presenceLabel
         : headerMemberLabel;
 
+    final timelineMessages = resolvedChannel.isForum
+        ? <TimelineMessage>[]
+        : formatTimeline(
+            messagesState.value ?? const [],
+            currentPubkey: currentPubkey,
+          );
+    final timelineEntries = buildMainTimelineEntries(
+      timelineMessages,
+      relaySummaries: ref
+          .read(channelMessagesProvider(channel.id).notifier)
+          .threadSummaries,
+    );
+
     return FrostedScaffold(
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
@@ -671,7 +686,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                             channel: resolvedChannel,
                             currentPubkey: currentPubkey,
                           ),
-                          if (showConnectionSkeleton.value)
+                          if (showConnectionSkeleton.value &&
+                              ref.watch(forumPostsProvider(channel.id)).value ==
+                                  null)
                             Positioned(
                               top:
                                   frostedAppBarHeight(
@@ -682,6 +699,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                                   Grid.xs,
                               left: Grid.gutter,
                               right: Grid.gutter,
+                              bottom: 0,
                               child: _ForumConnectionSkeleton(
                                 status: sessionStatus,
                               ),
@@ -689,6 +707,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                         ],
                       )
                     : SkeletonReveal(
+                        key: ValueKey('message-loading:${channel.id}'),
                         loading:
                             showInitialConnectionSkeleton ||
                             showConnectionSkeleton.value ||
@@ -696,10 +715,26 @@ class ChannelDetailPage extends HookConsumerWidget {
                         shimmerEnabled:
                             sessionStatus != SessionStatus.disconnected,
                         skeleton: _MessageTimelineSkeleton(
+                          messages: timelineEntries
+                              .map((entry) => entry.message)
+                              .toList(),
                           appBarTitleContentHeight: appBarTitleContentHeight,
-                          status: sessionStatus,
+                        ),
+                        loadingSemanticsKey: const Key(
+                          'channel-detail-connection-skeleton',
+                        ),
+                        loadingLabel: switch (sessionStatus) {
+                          SessionStatus.connecting => 'Connecting',
+                          SessionStatus.reconnecting => 'Reconnecting',
+                          _ => 'Loading',
+                        },
+                        skeletonPadding: EdgeInsets.only(
+                          bottom: showsComposer ? composerDockHeight.value : 0,
                         ),
                         content: messagesState.when(
+                          skipLoadingOnReload:
+                              messagesState.hasValue && !messagesState.hasError,
+                          skipLoadingOnRefresh: !messagesState.hasError,
                           loading: SizedBox.shrink,
                           error: (e, _) => Padding(
                             padding: EdgeInsets.only(
@@ -716,22 +751,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                             ),
                           ),
                           data: (events) {
-                            final messages = formatTimeline(
-                              events,
-                              currentPubkey: currentPubkey,
-                            );
-                            final summaries = ref
-                                .read(
-                                  channelMessagesProvider(channel.id).notifier,
-                                )
-                                .threadSummaries;
-                            final entries = buildMainTimelineEntries(
-                              messages,
-                              relaySummaries: summaries,
-                            );
                             return _MessageList(
-                              entries: entries,
-                              allMessages: messages,
+                              entries: timelineEntries,
+                              allMessages: timelineMessages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
                               initialThreadRouteBehavior:

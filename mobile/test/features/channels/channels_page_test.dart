@@ -894,7 +894,7 @@ void main() {
     expect(profileRect.center.dy, communityRect.center.dy);
   });
 
-  testWidgets('reveals channel content from same-slot reconnect skeletons', (
+  testWidgets('keeps cached channels visible while reconnecting', (
     tester,
   ) async {
     final relaySession = _ReconnectingRelaySession();
@@ -907,59 +907,53 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pump();
-
-    final skeleton = find.byKey(const Key('channels-connection-skeleton'));
-    expect(skeleton, findsOneWidget);
-    expect(
-      find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
-      findsWidgets,
-    );
-    expect(
-      find.descendant(
-        of: skeleton,
-        matching: find.byType(CircularProgressIndicator),
-      ),
-      findsNothing,
-    );
-    expect(
-      tester
-          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
-          .opacity,
-      1,
-    );
-    expect(
-      tester
-          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
-          .opacity,
-      0,
-    );
-
-    relaySession.connect();
-    await tester.pump();
-    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
     expect(
       tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
       isFalse,
     );
-    await tester.pump(const Duration(milliseconds: 200));
-
     expect(
       tester
-          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
+          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
           .opacity,
-      closeTo(0.5, 0.01),
+      1,
+    );
+    expect(find.text('general'), findsOneWidget);
+    relaySession.connect();
+    await tester.pumpAndSettle();
+    expect(find.text('general'), findsOneWidget);
+  });
+
+  testWidgets('keeps a fetched empty channel list visible during reconnect', (
+    tester,
+  ) async {
+    final relaySession = _ReconnectingRelaySession(
+      initialStatus: SessionStatus.connected,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(const [])),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No conversations yet'), findsOneWidget);
+    relaySession.setReconnecting();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(
+      tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+      isFalse,
     );
     expect(
       tester
           .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
           .opacity,
-      closeTo(0.5, 0.01),
+      1,
     );
-
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('general'), findsOneWidget);
+    expect(find.text('No conversations yet'), findsOneWidget);
   });
 
   testWidgets('announces neutral loading outside connection transitions', (

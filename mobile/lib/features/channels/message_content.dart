@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/widgets/media_loading_placeholder.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
@@ -31,15 +32,15 @@ import 'channels_provider.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
+import 'message_gallery.dart';
+import 'message_gallery_frame.dart';
+import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
-
-const _messageMediaMaxInlineWidth = 320.0;
-const _messageMediaMaxImageHeight = 240.0;
 
 typedef OpenDownloadedFile =
     Future<void> Function(
@@ -220,7 +221,7 @@ class MessageContent extends HookConsumerWidget {
     ].join('\u0001');
     final imetaByUrl = parseImetaTags(tags);
     final trailingGallery = maxLines == null
-        ? _extractTrailingImageGallery(content, imetaByUrl)
+        ? extractTrailingImageGallery(content, imetaByUrl)
         : null;
     final markdownContent = trailingGallery?.content ?? content;
     final customEmoji = _mergeCustomEmoji(
@@ -586,7 +587,7 @@ class _MessageImagePreview extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final heroTag = useMemoized(() => Object());
     final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
-    final previewDecodeWidth = layout.width ?? _messageMediaMaxWidth(context);
+    final previewDecodeWidth = layout.width ?? messageMediaMaxWidth(context);
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -606,7 +607,6 @@ class _MessageImagePreview extends HookConsumerWidget {
           backgroundColor: context.colors.surfaceContainerHighest,
           width: layout.width,
           height: layout.height,
-          constraints: layout.constraints,
           child: MediaViewerHero(
             tag: heroTag,
             child: ClipRRect(
@@ -616,6 +616,10 @@ class _MessageImagePreview extends HookConsumerWidget {
                 decodeWidth: previewDecodeWidth,
                 fit: layout.fit,
                 semanticLabel: semanticLabel,
+                frameBuilder: (context, child, frame, synchronous) =>
+                    frame != null || synchronous
+                    ? child
+                    : const MediaLoadingPlaceholder(label: 'Loading image'),
                 errorBuilder: (_, _, _) => _MediaPreviewFallback(
                   icon: LucideIcons.imageOff,
                   label: 'Image unavailable',
@@ -634,7 +638,6 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
   final Color backgroundColor;
   final double? width;
   final double? height;
-  final BoxConstraints? constraints;
   final Widget child;
 
   const _MessageMediaPreviewFrame({
@@ -642,21 +645,17 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
     required this.backgroundColor,
     this.width,
     this.height,
-    this.constraints,
     required this.child,
   });
 
   @override
   Widget build(BuildContext context) {
-    final resolvedWidth = constraints == null
-        ? (width ?? _messageMediaMaxWidth(context))
-        : width;
+    final resolvedWidth = width ?? messageMediaMaxWidth(context);
 
     return Container(
       key: previewKey,
       width: resolvedWidth,
       height: height,
-      constraints: constraints,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: backgroundColor,
@@ -668,60 +667,24 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
   }
 }
 
-double _messageMediaMaxWidth(BuildContext context) {
-  return math
-      .min(MediaQuery.sizeOf(context).width * 0.72, _messageMediaMaxInlineWidth)
-      .toDouble();
-}
-
 _ImagePreviewLayout _resolveImagePreviewLayout(
   BuildContext context,
   double? aspectRatio,
 ) {
-  if (aspectRatio == null) {
-    return _ImagePreviewLayout(
-      constraints: BoxConstraints(
-        maxWidth: _messageMediaMaxWidth(context),
-        maxHeight: _messageMediaMaxImageHeight,
-      ),
-      fit: BoxFit.contain,
-    );
-  }
-
-  final previewSize = _imagePreviewSize(context, aspectRatio);
+  final previewSize = messageImagePreviewSize(context, aspectRatio);
   return _ImagePreviewLayout(
     width: previewSize.width,
     height: previewSize.height,
-    fit: BoxFit.cover,
+    fit: aspectRatio == null ? BoxFit.contain : BoxFit.cover,
   );
-}
-
-Size _imagePreviewSize(BuildContext context, double? aspectRatio) {
-  final maxWidth = _messageMediaMaxWidth(context);
-  final safeAspectRatio = (aspectRatio ?? 1.0).clamp(0.2, 4.0).toDouble();
-
-  var width = maxWidth;
-  var height = width / safeAspectRatio;
-  if (height > _messageMediaMaxImageHeight) {
-    height = _messageMediaMaxImageHeight;
-    width = height * safeAspectRatio;
-  }
-
-  return Size(width, height);
 }
 
 class _ImagePreviewLayout {
   final double? width;
   final double? height;
-  final BoxConstraints? constraints;
   final BoxFit fit;
 
-  const _ImagePreviewLayout({
-    this.width,
-    this.height,
-    this.constraints,
-    required this.fit,
-  });
+  const _ImagePreviewLayout({this.width, this.height, required this.fit});
 }
 
 class _MediaPreviewFallback extends StatelessWidget {
