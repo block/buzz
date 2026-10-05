@@ -125,9 +125,10 @@ pub struct EventQuery {
     /// defense-in-depth catches any residual mismatch.
     pub shared_gated_reader: Option<Vec<u8>>,
     /// Author-only visibility reader for [`query_events`]: exclude foreign
-    /// [`AUTHOR_ONLY_KINDS`] before ordering, offset and limit. The SQL
-    /// `count_events` path ignores it, so callers must keep their existing
-    /// fallback gate; COUNT fallbacks built on `query_events` do apply it.
+    /// [`AUTHOR_ONLY_KINDS`] before ordering, offset and limit. Ignored for
+    /// `#p` reads (see `build_query_events_sql`) and by the SQL
+    /// `count_events` path, so callers must keep their per-event check and
+    /// existing fallback gate; COUNT fallbacks built on `query_events` apply it.
     pub author_only_reader: Option<Vec<u8>>,
 }
 
@@ -681,7 +682,15 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     }
 
     let kinds = q.kinds.as_deref().filter(|k| !k.is_empty());
-    match (kinds, q.author_only_reader.as_ref()) {
+    // A `#p` read is driven by `event_mentions`, which has no author column,
+    // so no index can skip foreign private rows that mention the reader.
+    // Filtering them before LIMIT would read every such row (anyone can write
+    // them), so `#p` reads keep the bounded page-then-check path instead.
+    let author_only_reader = q
+        .author_only_reader
+        .as_ref()
+        .filter(|_| q.p_tag_hex.is_none());
+    match (kinds, author_only_reader) {
         // Author-only visibility belongs before pagination, like shared-gated
         // visibility; relay result checks remain defense in depth. With
         // explicit kinds, split them so Postgres sees `public kinds OR the
@@ -2664,6 +2673,14 @@ mod e_tag_filter_shape_tests {
             kindless.contains("AND (kind NOT IN ($2, $3, $4) OR pubkey = $5)"),
             "{kindless}"
         );
+
+        let mut mentions = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+        mentions.kinds = Some(vec![30300, 1]);
+        mentions.p_tag_hex = Some("ab".repeat(32));
+        mentions.author_only_reader = Some(vec![1; 32]);
+        let mentions = build_query_events_sql(&mentions).sql().as_str().to_owned();
+        assert!(!mentions.contains("pubkey = $"), "{mentions}");
+        assert!(!mentions.contains("NOT IN"), "{mentions}");
     }
 
     #[test]
