@@ -195,9 +195,9 @@ Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`:
 | 429 | `rate_limited` | Too many requests | Keep the session, retry with bounded backoff |
 | 503 | `issuance_unavailable` | The adapter could not issue an assertion | Keep the session, retry with bounded backoff |
 
-A response with an HTTP status or `error` code not defined by this contract is
-treated as a refusal: clients MUST keep the session, show the request as refused,
-and not retry automatically.
+429 and 503 retry with bounded backoff whatever the `error` code. Any other
+status, or a 400/401/403/413 with a code this contract doesn't define, is a
+refusal: keep the session, show it as refused, don't retry automatically.
 
 A missing session is always 401 `session_required`, never 400. Network failures
 are handled like 429 and 503: keep the session and retry with bounded backoff.
