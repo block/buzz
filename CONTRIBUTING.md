@@ -86,6 +86,7 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Flutter | 3.47.7+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
 | Xcode | 27.1 recommended; 26 supported | Required for iOS builds; see [iOS toolchain setup](mobile/README.md#ios-toolchain) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
+| PostgreSQL | 16+ | `docker-compose.yml` runs 17 and CI runs 16. The kind-0 (profile) search SQL uses `pg_input_is_valid`, which is PostgreSQL 16+; the relay logs a startup warning on older servers |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |

@@ -132,32 +132,131 @@ fn is_unique_violation(error: &DbError) -> bool {
 /// Upsert the projection for `pubkey` inside the caller's transaction.
 ///
 /// Returns `true` when the `users` row was created. A NIP-05 handle another
-/// user already holds (partial unique index `idx_users_nip05`) is written
+/// row already holds (partial unique index `idx_users_nip05`) is written
 /// inside a savepoint so the violation cannot abort the surrounding event
-/// transaction; the retry keeps the row's existing handle, mirroring the
-/// pre-transactional side effect that retried without the contested value.
+/// transaction. The conflict is then judged against the holder's current
+/// kind-0 head, not its row: a holder whose head still carries the handle
+/// keeps it and this row projects without it (NIP-05 resolution is
+/// identity-bearing, so a live claim is never displaced); a holder whose head
+/// no longer carries it — a row that predates the projection seam, or was
+/// left behind when its owner moved on — is stale and releases it, so the
+/// claim lands in this pass instead of waiting for the holder to be
+/// re-projected and the claimant to be written again.
 pub(crate) async fn upsert_profile_in_transaction(
     conn: &mut PgConnection,
     community_id: CommunityId,
     pubkey: &[u8],
     profile: &ProfileProjection,
 ) -> Result<bool> {
+    if let Some(created) =
+        try_upsert_profile_with_handle(conn, community_id, pubkey, profile).await?
+    {
+        return Ok(created);
+    }
+    if let Some(handle) = profile.nip05_handle.as_deref() {
+        if release_stale_nip05_holder(conn, community_id, pubkey, handle).await? {
+            if let Some(created) =
+                try_upsert_profile_with_handle(conn, community_id, pubkey, profile).await?
+            {
+                return Ok(created);
+            }
+        }
+    }
+    tracing::warn!(
+        pubkey = %hex::encode(pubkey),
+        "kind:0 NIP-05 handle contested, projecting profile without it"
+    );
+    upsert_profile_on(conn, community_id, pubkey, profile, false).await
+}
+
+/// One attempt to write the full projection under a savepoint. `Ok(None)`
+/// means the NIP-05 unique index rejected it and the savepoint was rolled
+/// back, leaving the surrounding transaction usable.
+async fn try_upsert_profile_with_handle(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    profile: &ProfileProjection,
+) -> Result<Option<bool>> {
     let mut savepoint = conn.begin().await?;
     match upsert_profile_on(&mut savepoint, community_id, pubkey, profile, true).await {
         Ok(created) => {
             savepoint.commit().await?;
-            Ok(created)
+            Ok(Some(created))
         }
         Err(error) if is_unique_violation(&error) => {
             savepoint.rollback().await?;
-            tracing::warn!(
-                pubkey = %hex::encode(pubkey),
-                "kind:0 NIP-05 handle contested, projecting profile without it"
-            );
-            upsert_profile_on(conn, community_id, pubkey, profile, false).await
+            Ok(None)
         }
         Err(error) => Err(error),
     }
+}
+
+/// Clear `handle` from the row that holds it when its owner's current kind-0
+/// head no longer claims it. Returns `true` when the handle was released.
+///
+/// The holder's head is read under the holder's own replace lock so the
+/// comparison cannot race a profile the holder is publishing right now. The
+/// lock is taken with `pg_try_advisory_xact_lock`: the caller already holds
+/// its own replace lock (and the backfill holds one per batch pubkey), so a
+/// blocking acquire could cycle with a holder doing the same thing in the
+/// other direction. A holder mid-replace is simply treated as contested.
+async fn release_stale_nip05_holder(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    claimant: &[u8],
+    handle: &str,
+) -> Result<bool> {
+    let holder: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM users \
+         WHERE community_id = $1 AND LOWER(nip05_handle) = LOWER($2) AND pubkey <> $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(handle)
+    .bind(claimant)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(holder) = holder else {
+        return Ok(false);
+    };
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(event_replacement_lock_key(community_id, 0, &holder, None))
+        .fetch_one(&mut *conn)
+        .await?;
+    if !locked {
+        return Ok(false);
+    }
+    // The projection only keeps handles on the tenant host, so the handle's
+    // own domain is that host; project the holder's head against it.
+    let host = handle.rsplit_once('@').map_or(handle, |(_, domain)| domain);
+    let heads =
+        current_profile_events_on(conn, community_id, std::slice::from_ref(&holder)).await?;
+    let still_claimed = heads.first().is_some_and(|head| {
+        ProfileProjection::from_kind0_event(&head.event, host)
+            .nip05_handle
+            .is_some_and(|current| current.eq_ignore_ascii_case(handle))
+    });
+    if still_claimed {
+        return Ok(false);
+    }
+    let released = sqlx::query(
+        "UPDATE users SET nip05_handle = NULL, updated_at = NOW() \
+         WHERE community_id = $1 AND pubkey = $2 AND LOWER(nip05_handle) = LOWER($3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&holder)
+    .bind(handle)
+    .execute(conn)
+    .await?
+    .rows_affected();
+    if released == 1 {
+        tracing::info!(
+            holder = %hex::encode(&holder),
+            claimant = %hex::encode(claimant),
+            "released a NIP-05 handle from a stale users row"
+        );
+    }
+    Ok(released == 1)
 }
 
 async fn upsert_profile_on(
@@ -302,7 +401,10 @@ impl Db {
     /// Each batch is one transaction that takes the same per-pubkey advisory
     /// lock as [`Db::replace_addressable_event`] before reading the head, so a
     /// concurrent profile replace can never be overwritten with an older
-    /// projection. Idempotent: re-running converges on the current heads.
+    /// projection. One pass converges: a NIP-05 handle still held by a stale
+    /// row is released when its claimant is projected, whichever batch each
+    /// of them lands in (see [`upsert_profile_in_transaction`]), and
+    /// re-running is a no-op over current heads.
     #[datastore_span(name = "backfill_profiles_batch", system = "postgresql")]
     pub async fn backfill_profiles_batch(
         &self,
@@ -752,6 +854,159 @@ mod postgres_tests {
             ),
             (3, 3, 0),
             "after the backfill nothing is left to project: {after:?}"
+        );
+    }
+
+    /// Review scenario: `a`'s row still holds `x@host` from a head that has
+    /// since moved to `y@host` without being re-projected, and `b`'s current
+    /// head claims `x@host`. With `b` visited first (batch size 1, `b` sorts
+    /// below `a`), the old fallback projected `b` without the handle and left
+    /// it for a second pass; now the stale holder releases it and one pass
+    /// converges, across batches.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn backfill_releases_a_stale_nip05_holder_in_one_pass() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let mut keys: Vec<Keys> = (0..2).map(|_| Keys::generate()).collect();
+        keys.sort_by_key(|k| k.public_key().to_bytes());
+        let (b, a) = (&keys[0], &keys[1]);
+        let a_pubkey = a.public_key().to_bytes();
+        let b_pubkey = b.public_key().to_bytes();
+
+        let a_stale = kind0(a, &format!(r#"{{"nip05":"x@{host}"}}"#), 1_700_000_010);
+        replace_profile(&db, community, &host, &a_stale).await;
+        // `a` moves on, but the way every kind-0 landed before the seam: the
+        // head changes and the row does not follow.
+        let a_head = kind0(a, &format!(r#"{{"nip05":"y@{host}"}}"#), 1_700_000_020);
+        db.replace_addressable_event(community, &a_head, None)
+            .await
+            .expect("a's current head");
+        let b_head = kind0(
+            b,
+            &format!(r#"{{"name":"b","nip05":"x@{host}"}}"#),
+            1_700_000_030,
+        );
+        db.replace_addressable_event(community, &b_head, None)
+            .await
+            .expect("b's head");
+
+        let before = precheck_for(&db, community).await;
+        assert_eq!(
+            (before.users_rows, before.unprojected_publishers),
+            (1, 2),
+            "{before:?}"
+        );
+
+        let first = db
+            .backfill_profiles_batch(community, &host, None, 1)
+            .await
+            .expect("batch with b");
+        assert_eq!((first.scanned, first.projected, first.created), (1, 1, 1));
+        assert_eq!(first.last_pubkey.as_deref(), Some(b_pubkey.as_slice()));
+        let b_row = users_row(&db.pool, community, &b_pubkey)
+            .await
+            .expect("b row");
+        assert_eq!(
+            (b_row.4, b_row.5),
+            (
+                Some(format!("x@{host}")),
+                Some(b_head.id.as_bytes().to_vec())
+            ),
+            "b takes the handle in the batch that projects it"
+        );
+        let a_row = users_row(&db.pool, community, &a_pubkey)
+            .await
+            .expect("a row");
+        assert_eq!(
+            (a_row.4, a_row.5),
+            (None, Some(a_stale.id.as_bytes().to_vec())),
+            "only the handle is released from a's row; its own batch re-projects the rest"
+        );
+
+        let second = db
+            .backfill_profiles_batch(community, &host, first.last_pubkey.as_deref(), 1)
+            .await
+            .expect("batch with a");
+        assert_eq!(
+            (second.scanned, second.projected, second.created),
+            (1, 1, 0)
+        );
+        let a_row = users_row(&db.pool, community, &a_pubkey)
+            .await
+            .expect("a row");
+        assert_eq!(
+            (a_row.4, a_row.5),
+            (
+                Some(format!("y@{host}")),
+                Some(a_head.id.as_bytes().to_vec())
+            )
+        );
+
+        let done = db
+            .backfill_profiles_batch(community, &host, second.last_pubkey.as_deref(), 1)
+            .await
+            .expect("terminal batch");
+        assert_eq!(done, ProfileBackfillBatch::default());
+        let after = precheck_for(&db, community).await;
+        assert_eq!(
+            (after.users_rows, after.unprojected_publishers),
+            (2, 0),
+            "one pass converged: {after:?}"
+        );
+    }
+
+    /// The same release applies to a live publish: a profile claiming a handle
+    /// whose row-holder's head has moved on takes it immediately, and only
+    /// the handle leaves the holder's row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replace_profile_event_takes_a_handle_from_a_stale_holder() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let holder = Keys::generate();
+        let claimant = Keys::generate();
+        let holder_pubkey = holder.public_key().to_bytes();
+
+        let stale = kind0(
+            &holder,
+            &format!(r#"{{"name":"holder","nip05":"x@{host}"}}"#),
+            1_700_000_010,
+        );
+        replace_profile(&db, community, &host, &stale).await;
+        db.replace_addressable_event(
+            community,
+            &kind0(&holder, r#"{"name":"holder"}"#, 1_700_000_020),
+            None,
+        )
+        .await
+        .expect("holder's current head drops the handle without re-projecting");
+
+        let claim = kind0(
+            &claimant,
+            &format!(r#"{{"name":"claimant","nip05":"x@{host}"}}"#),
+            1_700_000_030,
+        );
+        let outcome = replace_profile(&db, community, &host, &claim).await;
+        assert!(outcome.was_inserted);
+        assert_eq!(
+            users_row(&db.pool, community, &claimant.public_key().to_bytes())
+                .await
+                .and_then(|row| row.4),
+            Some(format!("x@{host}")),
+            "the claimant takes the handle on its first write"
+        );
+        assert_eq!(
+            users_row(&db.pool, community, &holder_pubkey).await,
+            Some((
+                Some("holder".into()),
+                None,
+                None,
+                None,
+                None,
+                Some(stale.id.as_bytes().to_vec()),
+            )),
+            "the stale holder loses only the handle"
         );
     }
 

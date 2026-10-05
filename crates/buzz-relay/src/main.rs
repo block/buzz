@@ -858,6 +858,21 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         replica = config.read_database_url.is_some(),
         "Search service ready (Postgres FTS)"
     );
+    // The kind-0 search SQL needs PostgreSQL 16 (`pg_input_is_valid`). Warn
+    // rather than refuse to start: the rest of the relay runs on older
+    // servers, but every `kinds:[0]` search would fail until the server is
+    // upgraded, and an operator should see that here, not in the first
+    // profile lookup's 500.
+    match search.server_version_num().await {
+        Ok(version) => {
+            if let Some(shortfall) = buzz_search::server_version_shortfall(version) {
+                tracing::warn!(server_version_num = version, "{shortfall}");
+            }
+        }
+        Err(e) => tracing::warn!(
+            "Could not read PostgreSQL server_version_num for the search floor check: {e}"
+        ),
+    }
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));

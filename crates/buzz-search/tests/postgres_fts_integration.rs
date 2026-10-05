@@ -2926,3 +2926,21 @@ async fn cancel_signals_only_the_named_backend() {
     );
     teardown(pool, &schema).await;
 }
+
+/// The lane's server must satisfy the floor the relay warns about at startup;
+/// a lane that fell below it would make every kind-0 test above fail with
+/// `undefined_function` on `pg_input_is_valid`, so pin the probe itself.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn server_version_probe_reads_a_server_at_or_above_the_floor() {
+    let (pool, schema) = setup().await;
+    let svc = SearchService::new(pool.clone());
+    let version = svc.server_version_num().await.expect("server_version_num");
+    assert!(
+        version >= buzz_search::MIN_SERVER_VERSION_NUM,
+        "lane server {version} is below the floor {}",
+        buzz_search::MIN_SERVER_VERSION_NUM
+    );
+    assert_eq!(buzz_search::server_version_shortfall(version), None);
+    teardown(pool, &schema).await;
+}

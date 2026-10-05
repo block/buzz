@@ -279,11 +279,12 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// select list and ORDER BY gain a name-match term:
 /// ```sql
 /// SELECT ..., <profile name fields as tsvector> @@ $q AS name_match
-/// FROM (SELECT DISTINCT ON (pubkey) id, kind, pubkey, channel_id, created_at, content, search_tsv
+/// FROM (SELECT DISTINCT ON (pubkey) id, created_at
 ///       FROM events
 ///       WHERE community_id = $ctx AND deleted_at IS NULL AND kind = 0 [AND authors]
-///       ORDER BY pubkey, created_at DESC, id) AS events
-/// WHERE search_tsv @@ $q
+///       ORDER BY pubkey, created_at DESC, id) AS heads
+///      JOIN events USING (id, created_at)
+/// WHERE community_id = $ctx AND deleted_at IS NULL AND search_tsv @@ $q
 ///   [+ channel scope, since, until]
 /// ORDER BY name_match DESC,
 ///          [search_tsv @@ websearch_to_tsquery('simple', $text) DESC,]  -- prefix mode, ≤ 2 chars
@@ -382,24 +383,29 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         // one that does not, resurfacing a name its owner has since changed.
         // The fences below then apply to the head alone, as they would on a
         // store that held one row per person, and page slots count people.
-        qb.push(
-            "(SELECT DISTINCT ON (pubkey) \
-               id, kind, pubkey, channel_id, created_at, content, search_tsv \
-             FROM events WHERE community_id = ",
-        );
+        //
+        // The subquery carries only its sort key; the payload row is joined
+        // back through the community-scoped id index, so the per-pubkey sort
+        // never spools `content` or `search_tsv` (an inline avatar can make a
+        // kind-0 row several KB) and the join leaves the planner free to drive
+        // from the GIN probe when the text predicate is the more selective side.
+        qb.push("(SELECT DISTINCT ON (pubkey) id, created_at FROM events WHERE community_id = ");
         qb.push_bind(*query.community.as_uuid());
         qb.push(" AND deleted_at IS NULL AND kind = 0");
         push_authors(&mut qb, query.authors.as_deref());
-        qb.push(" ORDER BY pubkey, created_at DESC, id) AS events WHERE ");
+        qb.push(
+            " ORDER BY pubkey, created_at DESC, id) AS heads \
+             JOIN events USING (id, created_at)",
+        );
     } else {
         if rank_window.is_some() {
             qb.push("(SELECT id, kind, pubkey, channel_id, created_at, search_tsv FROM ");
         }
-        qb.push("events WHERE community_id = ");
-        qb.push_bind(*query.community.as_uuid());
-        qb.push(" AND deleted_at IS NULL AND ");
+        qb.push("events");
     }
-    qb.push("search_tsv @@ ");
+    qb.push(" WHERE community_id = ");
+    qb.push_bind(*query.community.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ ");
     qb.push_bind(&tsquery);
     qb.push("::tsquery");
 

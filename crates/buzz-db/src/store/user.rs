@@ -271,6 +271,14 @@ pub(crate) fn escape_like(input: &str) -> String {
 
 /// Search users by name, display name, NIP-05 handle, or pubkey prefix.
 ///
+/// Only rows projected from a live kind-0 head (`metadata_event_id IS NOT
+/// NULL`) are candidates: a row `ensure_user` created for a pubkey that only
+/// authenticated can never hydrate to a profile event, so it must not take a
+/// `limit`/`offset` slot. Names and handles match as substrings; the hex
+/// pubkey matches as a prefix only, because a one- or two-character typeahead
+/// query drawn from `[0-9a-f]` would otherwise substring-match a large share
+/// of every pubkey in the community.
+///
 /// Results are ranked exact > prefix > contains (name/display_name before
 /// nip05 before pubkey within each tier), then by label, then by pubkey so
 /// the order is total and stable across `offset` pages. Deactivated users
@@ -310,11 +318,12 @@ pub async fn search_users(
         FROM users
         WHERE community_id = $1
           AND deactivated_at IS NULL
+          AND metadata_event_id IS NOT NULL
           AND ($6::bytea[] IS NULL OR pubkey = ANY($6))
           AND (LOWER(COALESCE(name, '')) LIKE $2 ESCAPE '\'
            OR LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
            OR LOWER(COALESCE(nip05_handle, '')) LIKE $2 ESCAPE '\'
-           OR LOWER(encode(pubkey, 'hex')) LIKE $2 ESCAPE '\')
+           OR LOWER(encode(pubkey, 'hex')) LIKE $4 ESCAPE '\')
         ORDER BY
             CASE
                 WHEN LOWER(COALESCE(name, '')) = $3
@@ -1058,7 +1067,37 @@ mod postgres_tests {
         assert!(result.1.is_none(), "owner should be None when never set");
     }
 
-    /// Seed a `users` row with the searchable columns set explicitly.
+    /// Seed a `users` row with the searchable columns set explicitly. `head`
+    /// is the kind-0 id the row was projected from; `None` is a row only
+    /// `ensure_user` created (a pubkey that authenticated without a profile).
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_user_row(
+        pool: &PgPool,
+        community: CommunityId,
+        pubkey: &[u8],
+        name: Option<&str>,
+        display_name: Option<&str>,
+        nip05: Option<&str>,
+        head: Option<&[u8]>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO users (community_id, pubkey, name, display_name, nip05_handle, metadata_event_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .bind(name)
+        .bind(display_name)
+        .bind(nip05)
+        .bind(head)
+        .execute(pool)
+        .await
+        .expect("seed user");
+    }
+
+    /// A projected `users` row for a fresh random pubkey.
     async fn seed_user(
         pool: &PgPool,
         community: CommunityId,
@@ -1067,20 +1106,17 @@ mod postgres_tests {
         nip05: Option<&str>,
     ) -> Vec<u8> {
         let pubkey = random_pubkey();
-        sqlx::query(
-            r#"
-            INSERT INTO users (community_id, pubkey, name, display_name, nip05_handle)
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
+        let head = random_pubkey();
+        seed_user_row(
+            pool,
+            community,
+            &pubkey,
+            name,
+            display_name,
+            nip05,
+            Some(&head),
         )
-        .bind(community.as_uuid())
-        .bind(&pubkey)
-        .bind(name)
-        .bind(display_name)
-        .bind(nip05)
-        .execute(pool)
-        .await
-        .expect("seed user");
+        .await;
         pubkey
     }
 
@@ -1265,5 +1301,107 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(found, vec![active]);
+    }
+
+    /// A row without a projected head (AUTH created it; no kind-0 yet) can
+    /// never hydrate to an event, so it must not take a page slot. Here it
+    /// would have outranked the only real match: a pubkey-prefix hit sorts in
+    /// tier 5, ahead of a name that merely contains the query (tier 6).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_skips_rows_without_a_projected_head() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let gabby = seed_user(&db.pool, community, Some("Gabby"), None, None).await;
+        let mut headless = random_pubkey();
+        headless[0] = 0xab;
+        seed_user_row(&db.pool, community, &headless, None, None, None, None).await;
+
+        let first_slot = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "ab",
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            first_slot,
+            vec![gabby.clone()],
+            "the headless row must not take the first slot"
+        );
+        let all = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "ab",
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(all, vec![gabby], "the headless row is never a result");
+    }
+
+    /// The hex pubkey matches as a prefix only: a one-character query finds
+    /// the pubkeys that start with it, not every pubkey that contains it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_users_matches_pubkey_hex_by_prefix_only() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let mut leading = random_pubkey();
+        leading[0] = 0xa0;
+        seed_user_row(
+            &db.pool,
+            community,
+            &leading,
+            Some("zed"),
+            None,
+            None,
+            Some(&random_pubkey()),
+        )
+        .await;
+        let mut inner = random_pubkey();
+        inner[0] = 0x1a;
+        seed_user_row(
+            &db.pool,
+            community,
+            &inner,
+            Some("zoe"),
+            None,
+            None,
+            Some(&random_pubkey()),
+        )
+        .await;
+
+        let one_char = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "a",
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            one_char,
+            vec![leading],
+            "`1a…` contains `a` but does not start with it"
+        );
+        let two_chars = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "1a",
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(two_chars, vec![inner]);
     }
 }

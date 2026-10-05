@@ -37,19 +37,35 @@ The projection is written **inside the kind-0 replace transaction**
 (`Db::replace_profile_event`): an accepted profile and its `users` row commit
 or roll back together. The previous implementation wrote the row as a
 post-storage side effect, so a failure after the event was durable left the
-profile unsearchable with no retry record. A contested NIP-05 handle (another
-user already owns it) is written back without the handle, under a savepoint,
-so the rest of the profile still lands.
+profile unsearchable with no retry record. Every kind-0 write path uses this
+seam, including the relay's own "`<host>` Moderation" profile (re-published
+with every moderation notice), so the relay's own writes never add an
+unprojected publisher.
+
+A NIP-05 handle another row already holds is written under a savepoint and
+then resolved against the **holder's current kind-0 head**, not its row. A
+holder whose head still carries the handle keeps it, and the new profile
+projects without it (NIP-05 resolution is identity-bearing, so a live claim is
+never displaced). A holder whose head no longer carries it — a row that
+predates this seam, or was left behind when its owner moved on — is stale and
+releases the handle, so the claim lands on the first write. The holder's head
+is read under the holder's own replace lock; a holder mid-replace is treated
+as contested and the claimant's next write or backfill pass picks it up.
 
 ## Semantics on the `users` path
 
 With the setting on, a filter whose `kinds` is non-empty and all `0`:
 
-- runs `search_users` over `name`, `display_name`, `nip05_handle`, and the hex
-  pubkey, case-insensitively, substring match;
+- runs `search_users` over `name`, `display_name`, and `nip05_handle` as a
+  case-insensitive substring match, and over the hex pubkey as a prefix match
+  only (a one- or two-character query drawn from `[0-9a-f]` would otherwise
+  substring-match a large share of every pubkey);
 - ranks exact > prefix > contains (name/display_name before NIP-05 before
   pubkey within each tier), then by label, then by pubkey, so paging is total
   and stable;
+- considers only rows projected from a live head (`metadata_event_id IS NOT
+  NULL`). A row `ensure_user` created for a pubkey that only authenticated can
+  never hydrate to a kind-0, so it does not consume a `limit`/`offset` slot;
 - honours `authors` (`pubkey = ANY(...)`; an empty list means any author, as on
   the FTS path);
 - excludes deactivated users (`deactivated_at IS NOT NULL`);
@@ -103,8 +119,19 @@ kind-0 but no projected row vanish from search. The order is:
    Each batch is one transaction over up to `--batch-size` pubkeys. It takes
    the same per-pubkey advisory lock live kind-0 replaces use, so running it
    while the relay serves traffic never overwrites a newer profile with an
-   older head. Re-running is idempotent.
-4. **Re-run the precheck** until every community reads `unprojected 0`.
+   older head. One pass converges: a handle still held by a stale row is
+   released when its claimant is projected, whichever batch each lands in,
+   so a publisher is never left without a handle its head claims. Re-running
+   is a no-op over current heads. The one exception is a holder that was
+   mid-replace when its claimant was visited; that claimant is projected
+   without the handle and picks it up on its next publish or backfill pass.
+   Moderation profiles published by builds that predate this seam are
+   ordinary unprojected publishers and are projected like any other.
+4. **Re-run the precheck.** It should read `unprojected 0` for every
+   community after a single pass; a non-zero count means kind-0 heads landed
+   through a path that bypassed the projection (file a bug), not that another
+   pass is due. Relay traffic does not move the count either: its moderation
+   profile is projected when it is published.
 5. **Enable** the setting on the relay (`BUZZ_PROFILE_SEARCH_USERS_TABLE=true`;
    in the Helm deployment, via `relay.extraEnv`) and restart.
 

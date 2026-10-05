@@ -156,7 +156,7 @@ pub async fn send_moderation_notice(
     //    `?`-propagated), a `was_created`-gated retry would skip it forever and
     //    leave the thread permanently undiscoverable — a notice delivered into a
     //    channel no client can render. Notices are rare; unconditional re-emit is
-    //    cheap and `replace_addressable_event` makes it idempotent.
+    //    cheap and the replaceable-event store makes it idempotent.
     if let Err(e) = publish_moderation_profile(tenant, state, &relay_pubkey_hex).await {
         warn!(error = %e, "moderation profile publish failed (continuing)");
     }
@@ -236,15 +236,28 @@ async fn publish_moderation_profile(
         .map_err(|e| anyhow::anyhow!("failed to sign moderation profile: {e}"))?;
 
     // kind:0 is a replaceable event; store globally (channel_id = None) like
-    // every other user profile so it is resolvable by any client.
-    let (stored, was_inserted) = state
+    // every other user profile so it is resolvable by any client, and through
+    // the same seam as ingest: the accepted head projects into `users` in the
+    // same transaction, so the relay's identity is searchable like any other
+    // publisher and a notice never leaves it behind as an unprojected head
+    // for `buzz-admin backfill-user-profiles --precheck`.
+    let projection = buzz_db::ProfileProjection::from_kind0_event(&event, tenant.host());
+    let outcome = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .replace_profile_event(tenant.community(), &event, &projection)
         .await
         .map_err(|e| anyhow::anyhow!("moderation notice write failed: {}", e.kind()))?;
-    if was_inserted {
-        let kind_u32 = event_kind_u32(&stored.event);
-        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
+    if outcome.was_inserted {
+        let kind_u32 = event_kind_u32(&outcome.event.event);
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &outcome.event,
+            kind_u32,
+            relay_pubkey_hex,
+            None,
+        )
+        .await;
     }
     Ok(())
 }
@@ -415,5 +428,102 @@ mod tests {
         .body(&t);
         assert!(body.contains("took action on your content"));
         assert!(body.contains("Off-topic."));
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+
+    async fn precheck(state: &AppState, tenant: &TenantContext) -> (i64, i64, i64) {
+        let row = state
+            .db
+            .profile_backfill_precheck()
+            .await
+            .expect("precheck")
+            .into_iter()
+            .find(|row| row.community_id == tenant.community())
+            .expect("community in precheck");
+        (
+            row.kind0_publishers,
+            row.users_rows,
+            row.unprojected_publishers,
+        )
+    }
+
+    async fn users_row(
+        state: &AppState,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+    ) -> Option<(Option<String>, Option<Vec<u8>>)> {
+        sqlx::query_as(
+            "SELECT name, metadata_event_id FROM users WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(pubkey)
+        .fetch_optional(state.db.pool())
+        .await
+        .expect("read users row")
+    }
+
+    /// The relay's own kind-0 goes through the projection seam, so publishing
+    /// it (on every notice send, and again after a restart — including one
+    /// that rotates the relay key) never leaves
+    /// `backfill-user-profiles --precheck` with an unprojected publisher.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn moderation_profile_is_projected_so_precheck_reads_zero() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let community_id = Uuid::new_v4();
+        let host = format!("moderation-profile-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+        let tenant = TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(community_id),
+            host.clone(),
+        );
+        let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+        let relay_hex = state.relay_keypair.public_key().to_hex();
+        let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+
+        publish_moderation_profile(&tenant, &state, &relay_hex)
+            .await
+            .expect("publish moderation profile");
+        assert_eq!(precheck(&state, &tenant).await, (1, 1, 0));
+        let head = state
+            .db
+            .get_current_profile_events(tenant.community(), &[relay_pubkey.to_vec()])
+            .await
+            .expect("relay head");
+        assert_eq!(
+            users_row(&state, &tenant, &relay_pubkey).await,
+            Some((
+                Some(format!("{host} Moderation")),
+                Some(head[0].event.id.as_bytes().to_vec()),
+            )),
+            "the users row is the projection of the published head"
+        );
+
+        // Same key again (the next notice, or a restart with the pinned relay
+        // key): the newer head replaces the old one and the row follows it.
+        publish_moderation_profile(&tenant, &state, &relay_hex)
+            .await
+            .expect("republish moderation profile");
+        assert_eq!(precheck(&state, &tenant).await, (1, 1, 0));
+
+        // A restart without the pinned key publishes under a fresh identity;
+        // that publisher is projected too.
+        let restarted = crate::state::tests::test_state_with_database_pool(pool).await;
+        let restarted_hex = restarted.relay_keypair.public_key().to_hex();
+        publish_moderation_profile(&tenant, &restarted, &restarted_hex)
+            .await
+            .expect("publish after restart");
+        assert_eq!(precheck(&restarted, &tenant).await, (2, 2, 0));
     }
 }
