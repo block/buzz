@@ -11,7 +11,10 @@
  * then turns the marker paragraphs into a custom node rendered as a
  * disclosure by `markdown.tsx`. Markers are recognised only at column 0,
  * outside fenced code, in matched pairs and at most `MAX_DETAILS_DEPTH`
- * deep; anything else stays text. Mobile mirrors these rules in
+ * deep; anything else stays text. A marker line wrapped in emphasis as a
+ * whole (`**:::details Title**`, `**:::**`, what the composer sends with bold
+ * switched on) still counts. A title may carry inline formatting and start
+ * with `#`..`######` to render as a heading. Mobile mirrors these rules in
  * `details_blocks.dart`.
  */
 
@@ -25,6 +28,22 @@ export const MAX_DETAILS_DEPTH = 4;
 
 const OPEN_RE = /^:::details[ \t]+\S.*$/;
 const CLOSE_RE = /^:::[ \t]*$/;
+const WRAPPED_RE = /^(\*\*|__|\*|_)(:::.*?)\1[ \t]*$/;
+const HEADING_RE = /^(#{1,6})[ \t]+/;
+
+/** The marker a line stands for, with a whole-line emphasis wrapper moved
+ * into the title (`**:::details X**` → `:::details **X**`), or null. */
+export function normalizeMarkerLine(line: string): string | null {
+  if (OPEN_RE.test(line) || CLOSE_RE.test(line)) return line;
+  const wrapped = WRAPPED_RE.exec(line);
+  if (!wrapped) return null;
+  const [, mark, inner] = wrapped;
+  if (CLOSE_RE.test(inner)) return ":::";
+  if (!OPEN_RE.test(inner)) return null;
+  const title = inner.replace(/^:::details[ \t]+/, "");
+  const heading = HEADING_RE.exec(title)?.[0] ?? "";
+  return `:::details ${heading}${mark}${title.slice(heading.length)}${mark}`;
+}
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
@@ -55,13 +74,15 @@ function matchedMarkerLines(lines: string[]): Set<number> {
   let fence: string | null = null;
 
   lines.forEach((rawLine, index) => {
-    const line = rawLine.replace(/\r$/, "");
+    const raw = rawLine.replace(/\r$/, "");
     if (fence) {
-      if (closesFence(line, fence)) fence = null;
+      if (closesFence(raw, fence)) fence = null;
       return;
     }
-    fence = fenceOpen(line);
+    fence = fenceOpen(raw);
     if (fence) return;
+    const line = normalizeMarkerLine(raw);
+    if (line === null) return;
     if (OPEN_RE.test(line)) {
       const allowed = depth < MAX_DETAILS_DEPTH;
       open.push(allowed ? index : -1);
@@ -85,7 +106,11 @@ export function prepareDetailsBlocks(content: string): string {
   const matched = matchedMarkerLines(lines);
   if (matched.size === 0) return content;
   return lines
-    .map((line, index) => (matched.has(index) ? `\n${line}\n` : line))
+    .map((line, index) =>
+      matched.has(index)
+        ? `\n${normalizeMarkerLine(line.replace(/\r$/, ""))}\n`
+        : line,
+    )
     .join("\n");
 }
 
@@ -112,13 +137,55 @@ function isCloseMarker(node: Node): boolean {
 /** Shown when a title has no text of its own, e.g. `:::details [](url)`. */
 export const DETAILS_FALLBACK_TITLE = "Details";
 
-/** Plain-text title: the marker paragraph minus its `:::details ` prefix.
- * Plain so the disclosure control holds no links or other controls. */
-function summaryTitle(marker: Node): string {
-  const title = plainText(marker.children as Node[])
-    .replace(/^:::details[ \t]+/, "")
-    .trim();
-  return title || DETAILS_FALLBACK_TITLE;
+/** Inline formatting a title keeps; links, mentions and other controls
+ * become their text, so the disclosure button is the only control. */
+const TITLE_NODE_TYPES = new Set([
+  "text",
+  "strong",
+  "emphasis",
+  "delete",
+  "inlineCode",
+]);
+
+function sanitizeTitle(nodes: Node[]): Node[] {
+  return nodes.map((node) => {
+    if (!TITLE_NODE_TYPES.has(node.type)) {
+      return { type: "text", value: plainText([node]) };
+    }
+    return Array.isArray(node.children)
+      ? { ...node, children: sanitizeTitle(node.children) }
+      : node;
+  });
+}
+
+type Summary = { children: Node[]; level: number; text: string };
+
+/** Title of a marker paragraph: inline nodes after `:::details `, an
+ * optional heading level, and its plain text (the section key). */
+function summaryOf(marker: Node): Summary {
+  // Earlier plugins may split the leading text (e.g. `##` read as a channel
+  // link); flatten and rejoin it so the prefix and heading hashes are read
+  // from one node.
+  const merged: Node[] = [];
+  for (const node of sanitizeTitle(marker.children as Node[])) {
+    const last = merged[merged.length - 1];
+    if (node.type === "text" && last?.type === "text") {
+      merged[merged.length - 1] = { ...last, value: last.value + node.value };
+    } else {
+      merged.push(node);
+    }
+  }
+  const [first, ...rest] = merged;
+  let value = String(first.value).replace(/^:::details[ \t]+/, "");
+  const heading = HEADING_RE.exec(value);
+  if (heading) value = value.slice(heading[0].length);
+  let children = value ? [{ ...first, value }, ...rest] : rest;
+  let text = plainText(children).trim();
+  if (!text) {
+    text = DETAILS_FALLBACK_TITLE;
+    children = [{ type: "text", value: text }];
+  }
+  return { children, level: heading ? heading[1].length : 0, text };
 }
 
 function plainText(nodes: Node[]): string {
@@ -126,7 +193,9 @@ function plainText(nodes: Node[]): string {
     .map((node) =>
       typeof node.value === "string"
         ? node.value
-        : plainText((node.children as Node[] | undefined) ?? []),
+        : node.type === "image"
+          ? String(node.alt ?? "")
+          : plainText((node.children as Node[] | undefined) ?? []),
     )
     .join("");
 }
@@ -164,17 +233,25 @@ export default function remarkDetails() {
       const frame = stack[stack.length - 1];
       if (frame && isCloseMarker(child)) {
         stack.pop();
-        const title = summaryTitle(frame.marker);
+        const { children, level, text: title } = summaryOf(frame.marker);
         const occurrence = occurrences.get(title) ?? 0;
         occurrences.set(title, occurrence + 1);
+        const summary = {
+          type: "detailsSummary",
+          children,
+          data: {
+            hName: "summary",
+            hProperties: level > 0 ? { "data-heading": "" } : {},
+          },
+        };
         target().push({
           type: "details",
           children: [
-            {
-              type: "detailsSummary",
-              children: [{ type: "text", value: title }],
-              data: { hName: "summary" },
-            },
+            // A heading title keeps the message's heading style, with the
+            // toggle inside it (the WAI-ARIA accordion pattern).
+            level > 0
+              ? { type: "heading", depth: level, children: [summary] }
+              : summary,
             ...frame.children,
           ],
           data: {

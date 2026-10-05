@@ -111,7 +111,6 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
     remarkPlugins: [
       remarkGfm,
       ...(input.hardLineBreaks === false ? [] : [remarkBreaks]),
-      remarkDetails,
       remarkSpoilers,
       remarkChannelDeepLinks,
       remarkMessageLinks,
@@ -119,6 +118,9 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
       [remarkMentions, { mentionNames: input.mentionNames }],
       [remarkChannelLinks, { channelNames: input.channelNames }],
       [remarkCustomEmoji, { customEmoji: input.customEmoji }],
+      // Last, so it sees the mention, link and emoji nodes it flattens out
+      // of section titles.
+      remarkDetails,
       // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
     ] as any[],
     rehypePlugins,

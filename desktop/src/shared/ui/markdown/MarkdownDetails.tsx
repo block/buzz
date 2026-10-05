@@ -48,11 +48,11 @@ export function MarkdownDetails({
   );
 
   // Compact previews (and other read-only surfaces) show the section inline,
-  // like mobile previews do.
+  // like mobile previews do; the summary renders as plain emphasis.
   if (!interactive) {
     return (
       <div className={BODY_CLASS} data-details="">
-        <p className="font-medium">{summary}</p>
+        {summary}
         {body}
       </div>
     );
@@ -72,6 +72,11 @@ export function MarkdownDetails({
   );
 }
 
+type DetailsToggle = { open: boolean; toggle: () => void };
+
+/** Lets the summary, possibly nested in a heading, own the toggle button. */
+const DetailsToggleContext = React.createContext<DetailsToggle | null>(null);
+
 function DetailsDisclosure({
   body,
   storeKey,
@@ -85,28 +90,22 @@ function DetailsDisclosure({
     () => storeKey !== null && openSections.has(storeKey),
   );
 
-  const toggle = () => {
-    if (storeKey !== null) rememberOpen(storeKey, !open);
-    setOpen(!open);
-  };
+  const toggle = React.useMemo<DetailsToggle>(
+    () => ({
+      open,
+      toggle: () => {
+        if (storeKey !== null) rememberOpen(storeKey, !open);
+        setOpen(!open);
+      },
+    }),
+    [open, storeKey],
+  );
 
   return (
     <div data-details="" data-open={open ? "true" : "false"}>
-      <button
-        aria-expanded={open}
-        className="flex cursor-pointer items-center gap-1 text-left font-medium hover:underline"
-        onClick={toggle}
-        type="button"
-      >
-        <ChevronRight
-          aria-hidden="true"
-          className={cn(
-            "size-4 shrink-0 transition-transform motion-reduce:transition-none",
-            open && "rotate-90",
-          )}
-        />
-        <span>{summary}</span>
-      </button>
+      <DetailsToggleContext.Provider value={toggle}>
+        {summary}
+      </DetailsToggleContext.Provider>
       {open ? (
         <div className={cn("mt-1.5 pl-5", BODY_CLASS)}>{body}</div>
       ) : null}
@@ -114,12 +113,34 @@ function DetailsDisclosure({
   );
 }
 
-/** The summary is plain text (see `remarkDetails`); it renders inside the
- * disclosure button. */
+/** The section title (inline formatting only, see `remarkDetails`): the
+ * disclosure button, or plain emphasis on read-only surfaces. */
 export function MarkdownDetailsSummary({
   children,
+  ...props
 }: {
   children?: React.ReactNode;
+  "data-heading"?: string;
 }) {
-  return <>{children}</>;
+  const details = React.useContext(DetailsToggleContext);
+  // Heading titles keep the heading's own weight.
+  const weight = props["data-heading"] != null ? "" : "font-medium";
+  if (!details) return <span className={weight}>{children}</span>;
+  return (
+    <button
+      aria-expanded={details.open}
+      className="inline-flex cursor-pointer items-center gap-1 text-left hover:underline"
+      onClick={details.toggle}
+      type="button"
+    >
+      <ChevronRight
+        aria-hidden="true"
+        className={cn(
+          "size-4 shrink-0 transition-transform motion-reduce:transition-none",
+          details.open && "rotate-90",
+        )}
+      />
+      <span className={weight}>{children}</span>
+    </button>
+  );
 }

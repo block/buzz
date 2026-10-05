@@ -320,9 +320,9 @@ class MessageContent extends HookConsumerWidget {
       onChannelTap: resolvedChannelTap,
     );
 
-    Widget buildMarkdown(String text) => GptMarkdown(
+    Widget buildMarkdown(String text, {TextStyle? textStyle}) => GptMarkdown(
       text,
-      style: style,
+      style: textStyle ?? style,
       followLinkColor: false,
       // normalizeBareLinks() already turns bare URLs into Markdown links;
       // gpt_markdown 1.2.0 autolinks by default, so both would run.

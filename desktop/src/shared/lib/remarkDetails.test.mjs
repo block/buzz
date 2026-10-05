@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { renderCachedMarkdown } from "../ui/markdown/nodeCache.ts";
 import remarkDetails, {
   MAX_DETAILS_DEPTH,
+  normalizeMarkerLine,
   prepareDetailsBlocks,
 } from "./remarkDetails.ts";
 
@@ -78,10 +79,41 @@ test("prepareDetailsBlocks: leaves content without markers untouched", () => {
   assert.equal(prepareDetailsBlocks(content), content);
 });
 
-test("remarkDetails: renders the summary as plain text", () => {
+test("remarkDetails: keeps title formatting but flattens links", () => {
   const html = render(":::details [docs](https://example.com) **now**\nx\n:::");
-  assert.match(html, /<h6>docs now<\/h6>/);
+  assert.match(html, /<h6>docs <strong>now<\/strong><\/h6>/);
   assert.doesNotMatch(html, /<a /);
+  assert.match(html, /data-key="0:docs now"/);
+});
+
+test("remarkDetails: a heading title renders the summary inside a heading", () => {
+  const html = render(":::details ## Waiting (2)\n- one\n:::");
+  assert.match(
+    html,
+    /<section data-key="0:Waiting \(2\)"><h2><h6>Waiting \(2\)<\/h6><\/h2>/,
+  );
+});
+
+test("remarkDetails: accepts marker lines the composer wrapped in bold", () => {
+  // What the desktop composer sends with bold switched on.
+  const html = render(
+    "**:::details Bold (2)**\n**- one**\n**- two**\n**:::**\nAfter",
+  );
+  assert.match(
+    html,
+    /<section data-key="0:Bold \(2\)"><h6><strong>Bold \(2\)<\/strong><\/h6>/,
+  );
+  assert.match(html, /<p>After<\/p>/);
+  assert.doesNotMatch(html, /:::/);
+});
+
+test("normalizeMarkerLine: moves a wrapper into the title, after a heading", () => {
+  assert.equal(
+    normalizeMarkerLine("**:::details ## X**"),
+    ":::details ## **X**",
+  );
+  assert.equal(normalizeMarkerLine("_:::_"), ":::");
+  assert.equal(normalizeMarkerLine("**text**"), null);
 });
 
 test("remarkDetails: markers past the depth limit stay text", () => {

@@ -118,4 +118,28 @@ void main() {
     expect(plainDetailsTitle('<https://example.com>'), 'https://example.com');
     expect(plainDetailsTitle('[](https://example.com)'), detailsFallbackTitle);
   });
+
+  test('accepts marker lines the composer wrapped in bold', () {
+    final segments = splitDetailsBlocks(
+      '**:::details Bold (2)**\n**- one**\n**:::**\nAfter',
+    );
+    final block = segments.whereType<DetailsBlock>().single;
+    expect(block.title, 'Bold (2)');
+    expect(block.titleMarkdown, '**Bold (2)**');
+    expect(block.body, '**- one**');
+    expect((segments.last as DetailsText).text, 'After');
+    expect(normalizeMarkerLine('**:::details ## X**'), ':::details ## **X**');
+    expect(normalizeMarkerLine('_:::_'), ':::');
+    expect(normalizeMarkerLine('**text**'), isNull);
+  });
+
+  test('a heading title carries its level and keeps formatting', () {
+    final block = splitDetailsBlocks(
+      ':::details ## [docs](https://x) **now**\nx\n:::',
+    ).whereType<DetailsBlock>().single;
+    expect(block.level, 2);
+    expect(block.title, 'docs now');
+    expect(block.titleMarkdown, 'docs **now**');
+    expect(block.key, '0:docs now');
+  });
 }

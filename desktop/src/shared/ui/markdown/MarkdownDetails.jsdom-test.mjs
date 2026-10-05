@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import {
   clearOpenMarkdownSections,
   MarkdownDetails,
+  MarkdownDetailsSummary,
 } from "./MarkdownDetails.tsx";
 import { MarkdownRuntimeContext } from "./runtimeContext.ts";
 
@@ -36,7 +37,7 @@ function section({ messageId = "event-1", detailsKey, title, interactive }) {
     React.createElement(
       MarkdownDetails,
       { detailsKey, interactive },
-      React.createElement("summary", { key: "s" }, title),
+      React.createElement(MarkdownDetailsSummary, { key: "s" }, title),
       React.createElement("p", { key: "b" }, `${title} body`),
     ),
   );
@@ -86,4 +87,34 @@ test("MarkdownDetails: read-only surfaces show title and body inline", () => {
   const view = mount({ detailsKey: "0:A", title: "A", interactive: false });
   assert.equal(view.container.querySelector("button"), null);
   assert.match(view.container.textContent, /A body/);
+});
+
+test("MarkdownDetails: a heading title keeps the toggle inside the heading", () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  roots.push({ root, container });
+  act(() =>
+    root.render(
+      React.createElement(
+        MarkdownDetails,
+        { detailsKey: "0:H", interactive: true },
+        React.createElement(
+          "h2",
+          { key: "h" },
+          React.createElement(
+            MarkdownDetailsSummary,
+            { "data-heading": "" },
+            "H",
+          ),
+        ),
+        React.createElement("p", { key: "b" }, "H body"),
+      ),
+    ),
+  );
+  const button = container.querySelector("h2 > button");
+  assert.ok(button);
+  act(() => fireEvent.click(button));
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  assert.match(container.textContent, /H body/);
 });

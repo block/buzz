@@ -32,6 +32,16 @@ Widget _app(ValueNotifier<String> content, {String? messageId = 'event-1'}) =>
       ),
     );
 
+/// Taps the section toggle; the title text itself is inert by design.
+Future<void> _tapTitle(WidgetTester tester, String title) => tester.tap(
+  find
+      .ancestor(
+        of: find.textContaining(title, findRichText: true),
+        matching: find.byType(InkWell),
+      )
+      .first,
+);
+
 bool _shows(String text) =>
     find.textContaining(text, findRichText: true).evaluate().isNotEmpty;
 
@@ -45,7 +55,7 @@ void main() {
     expect(_shows('model routing pilot'), isFalse);
     expect(_shows(':::'), isFalse);
 
-    await tester.tap(find.textContaining('Fleet working', findRichText: true));
+    await _tapTitle(tester, 'Fleet working');
     await tester.pump();
 
     expect(_shows('model routing pilot'), isTrue);
@@ -77,7 +87,7 @@ void main() {
   ) async {
     final content = ValueNotifier(_board);
     await tester.pumpWidget(_app(content));
-    await tester.tap(find.textContaining('Fleet working', findRichText: true));
+    await _tapTitle(tester, 'Fleet working');
     await tester.pump();
 
     content.value = _board.replaceFirst(
@@ -88,5 +98,17 @@ void main() {
 
     expect(_shows('openclaw upgrade done'), isTrue);
     expect(_shows('personal website'), isFalse);
+  });
+
+  testWidgets('a bold-composed heading section opens on tap', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        ValueNotifier('**:::details ## Heading (1)**\n**- three**\n**:::**'),
+      ),
+    );
+    expect(_shows('three'), isFalse);
+    await _tapTitle(tester, 'Heading');
+    await tester.pump();
+    expect(_shows('three'), isTrue);
   });
 }

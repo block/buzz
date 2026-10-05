@@ -8,7 +8,10 @@
 ///
 /// Mirrors desktop's `remarkDetails`: markers count only at column 0,
 /// outside fenced code, in matched pairs and at most [maxDetailsDepth] deep.
-/// Anything else stays text.
+/// Anything else stays text. A marker line wrapped in emphasis as a whole
+/// (`**:::details Title**`, `**:::**`, what the composer sends with bold
+/// switched on) still counts. A title may carry inline formatting and start
+/// with `#`..`######` to render as a heading.
 library;
 
 /// Deeper markers stay text, which bounds nesting on hostile input.
@@ -16,6 +19,8 @@ const maxDetailsDepth = 4;
 
 final _openRe = RegExp(r'^:::details[ \t]+(\S.*)$');
 final _closeRe = RegExp(r'^:::[ \t]*$');
+final _wrappedRe = RegExp(r'^(\*\*|__|\*|_)(:::.*?)\1[ \t]*$');
+final _headingRe = RegExp(r'^(#{1,6})[ \t]+');
 final _fenceOpenRe = RegExp(r'^ {0,3}(`{3,}|~{3,})(.*)$');
 final _fenceCloseRe = RegExp(r'^ {0,3}(`{3,}|~{3,})[ \t]*$');
 
@@ -31,8 +36,15 @@ class DetailsText extends DetailsSegment {
 
 /// A top-level section. [body] may itself contain nested sections.
 class DetailsBlock extends DetailsSegment {
-  /// Plain text, so the disclosure control holds no links or other controls.
+  /// Plain text: the accessible label and the section key.
   final String title;
+
+  /// Title with inline formatting only; links and images flattened, so the
+  /// disclosure control holds no other controls.
+  final String titleMarkdown;
+
+  /// Heading level 1-6, or 0 for a plain title.
+  final int level;
   final String body;
 
   /// Stable within the message: occurrence index plus title, so repeated
@@ -42,6 +54,8 @@ class DetailsBlock extends DetailsSegment {
 
   const DetailsBlock({
     required this.title,
+    required this.titleMarkdown,
+    required this.level,
     required this.body,
     required this.key,
   });
@@ -63,14 +77,22 @@ List<DetailsSegment> splitDetailsBlocks(String content, {int depth = 0}) {
     if (open > cursor) {
       segments.add(DetailsText(lines.sublist(cursor, open).join('\n')));
     }
-    final title = plainDetailsTitle(
-      _openRe.firstMatch(_stripCr(lines[open]))!.group(1)!,
-    );
+    var raw = _openRe
+        .firstMatch(normalizeMarkerLine(_stripCr(lines[open]))!)!
+        .group(1)!;
+    final heading = _headingRe.firstMatch(raw);
+    if (heading != null) raw = raw.substring(heading.end);
+    final title = plainDetailsTitle(raw);
+    final titleMarkdown = title == detailsFallbackTitle
+        ? title
+        : _inlineTitleMarkdown(raw);
     final occurrence = occurrences[title] ?? 0;
     occurrences[title] = occurrence + 1;
     segments.add(
       DetailsBlock(
         title: title,
+        titleMarkdown: titleMarkdown,
+        level: heading == null ? 0 : heading[1]!.length,
         body: lines.sublist(open + 1, close).join('\n'),
         key: '$occurrence:$title',
       ),
@@ -94,13 +116,36 @@ String flattenDetailsBlocks(String content) {
         .map(
           (segment) => switch (segment) {
             DetailsText(:final text) => text,
-            DetailsBlock(:final title, :final body) => '$title\n$body',
+            DetailsBlock(:final titleMarkdown, :final level, :final body) =>
+              '${level > 0 ? '${'#' * level} ' : ''}$titleMarkdown\n$body',
           },
         )
         .join('\n');
   }
   return text;
 }
+
+/// The marker a line stands for, with a whole-line emphasis wrapper moved
+/// into the title (`**:::details X**` → `:::details **X**`), or null.
+String? normalizeMarkerLine(String line) {
+  if (_openRe.hasMatch(line) || _closeRe.hasMatch(line)) return line;
+  final wrapped = _wrappedRe.firstMatch(line);
+  if (wrapped == null) return null;
+  final mark = wrapped[1]!;
+  final inner = wrapped[2]!;
+  if (_closeRe.hasMatch(inner)) return ':::';
+  if (!_openRe.hasMatch(inner)) return null;
+  final title = inner.replaceFirst(RegExp(r'^:::details[ \t]+'), '');
+  final heading = _headingRe.firstMatch(title)?[0] ?? '';
+  return ':::details $heading$mark${title.substring(heading.length)}$mark';
+}
+
+/// Title markdown with links, images and autolinks flattened to text.
+String _inlineTitleMarkdown(String markdown) => markdown
+    .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '')
+    .replaceAllMapped(RegExp(r'\[([^\]]*)\]\([^)]*\)'), (m) => m[1]!)
+    .replaceAllMapped(RegExp(r'<(https?://[^>\s]+)>'), (m) => m[1]!)
+    .trim();
 
 /// Shown when a title has no text of its own, e.g. `:::details [](url)`.
 const detailsFallbackTitle = 'Details';
@@ -154,11 +199,13 @@ List<(int, int)> _topLevelPairs(List<String> lines, int maxDepth) {
     }
     fence = _fenceOpen(line);
     if (fence != null) continue;
-    if (_openRe.hasMatch(line)) {
+    final marker = normalizeMarkerLine(line);
+    if (marker == null) continue;
+    if (_openRe.hasMatch(marker)) {
       final allowed = depth < maxDepth;
       open.add(allowed ? index : -1);
       if (allowed) depth++;
-    } else if (_closeRe.hasMatch(line) && open.isNotEmpty) {
+    } else if (_closeRe.hasMatch(marker) && open.isNotEmpty) {
       final start = open.removeLast();
       if (start < 0) continue;
       depth--;

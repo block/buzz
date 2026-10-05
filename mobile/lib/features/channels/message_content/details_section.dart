@@ -41,7 +41,7 @@ class _MessageDetailsContent extends StatelessWidget {
 
   /// Nesting level of [segments], bounding how deep their bodies may nest.
   final int depth;
-  final Widget Function(String markdown) buildMarkdown;
+  final Widget Function(String markdown, {TextStyle? textStyle}) buildMarkdown;
 
   const _MessageDetailsContent({
     required this.segments,
@@ -84,7 +84,7 @@ class _MessageDetailsSection extends HookConsumerWidget {
   final TextStyle? titleStyle;
   final String keyPrefix;
   final int depth;
-  final Widget Function(String markdown) buildMarkdown;
+  final Widget Function(String markdown, {TextStyle? textStyle}) buildMarkdown;
 
   const _MessageDetailsSection({
     required this.block,
@@ -124,7 +124,9 @@ class _MessageDetailsSection extends HookConsumerWidget {
         children: [
           Semantics(
             button: true,
+            header: block.level > 0,
             expanded: open,
+            label: block.title,
             child: InkWell(
               onTap: toggle,
               borderRadius: BorderRadius.circular(Radii.sm),
@@ -144,11 +146,21 @@ class _MessageDetailsSection extends HookConsumerWidget {
                       ),
                     ),
                     const SizedBox(width: Grid.half),
+                    // Formatting only: the title's own links and mentions
+                    // stay inert, so the toggle is the single control.
                     Expanded(
-                      child: Text(
-                        block.title,
-                        style: titleStyle?.copyWith(
-                          fontWeight: FontWeight.w600,
+                      child: IgnorePointer(
+                        child: ExcludeSemantics(
+                          child: buildMarkdown(
+                            block.level > 0
+                                ? '${'#' * block.level} ${block.titleMarkdown}'
+                                : block.titleMarkdown,
+                            textStyle: block.level > 0
+                                ? null
+                                : titleStyle?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                          ),
                         ),
                       ),
                     ),
