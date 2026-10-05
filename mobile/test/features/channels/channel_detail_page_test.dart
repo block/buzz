@@ -75,6 +75,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
@@ -490,6 +491,7 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  _loadingReviewTests();
   threadReplyRefreshTests();
   presenceTests();
   setUp(() async {
@@ -1950,91 +1952,56 @@ void main() {
       },
     );
 
-    testWidgets('debounces same-slot reconnect skeletons before revealing', (
+    testWidgets('uses known media shapes in the reconnect shimmer', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
       await tester.pumpWidget(
         _buildTestable(
           messages: [
-            _textMsg(id: 'msg1', pubkey: 'alice', content: 'Existing message'),
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content:
+                  'Existing message\n![photo](https://example.com/loading.jpg)',
+              extraTags: [
+                [
+                  'imeta',
+                  'url https://example.com/loading.jpg',
+                  'm image/jpeg',
+                  'dim 1200x2400',
+                ],
+              ],
+            ),
           ],
           relaySessionNotifier: relaySession,
-          readStateNotifier: _SynchronousReadStateNotifier(
-            const ReadStateState(
-              isReady: false,
-              pubkey: 'self',
-              contexts: {},
-              version: 0,
-            ),
-          ),
         ),
       );
       await tester.pump();
-
-      expect(find.text('Existing message'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
       expect(
         tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
-        isFalse,
+        isTrue,
       );
-
-      await tester.pump(const Duration(milliseconds: 1999));
-      expect(
-        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
-        isFalse,
-      );
-
-      await tester.pump(const Duration(milliseconds: 1));
-      await tester.pump();
-      final skeleton = find.byKey(
-        const Key('channel-detail-connection-skeleton'),
-      );
-      expect(skeleton, findsOneWidget);
-      expect(
-        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
-        findsWidgets,
-      );
-      expect(find.text('Existing message'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(
         tester
-            .widget<Opacity>(
-              find.byKey(const Key('skeleton-reveal-placeholder')),
-            )
+            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
             .opacity,
-        1,
+        0,
       );
-
+      expect(
+        find.byKey(
+          const ValueKey(
+            'message-skeleton-image:https://example.com/loading.jpg',
+          ),
+        ),
+        findsOneWidget,
+      );
       relaySession.connect();
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(
         tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
         isFalse,
-      );
-      await tester.pump(const Duration(milliseconds: 200));
-
-      expect(
-        tester
-            .widget<Opacity>(
-              find.byKey(const Key('skeleton-reveal-placeholder')),
-            )
-            .opacity,
-        closeTo(0.5, 0.01),
-      );
-      expect(
-        tester
-            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
-            .opacity,
-        closeTo(0.5, 0.01),
-      );
-
-      await tester.pump(const Duration(milliseconds: 200));
-      expect(
-        tester
-            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
-            .opacity,
-        1,
       );
     });
 
@@ -2077,7 +2044,7 @@ void main() {
       );
     });
 
-    testWidgets('keeps forum content visible with reconnect shimmer feedback', (
+    testWidgets('keeps loaded forum content visible during reconnect', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
@@ -2110,12 +2077,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump();
-      final skeleton = find.byKey(const Key('forum-connection-skeleton'));
-      expect(skeleton, findsOneWidget);
-      expect(
-        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
-        findsWidgets,
-      );
+      expect(find.byKey(const Key('forum-connection-skeleton')), findsNothing);
       expect(find.byType(SkeletonReveal), findsNothing);
     });
 
@@ -15579,7 +15541,11 @@ class _TrackingRelaySession extends RelaySessionNotifier {
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
+  final SessionStatus initialStatus;
+  void setReconnecting() =>
+      state = const SessionState(status: SessionStatus.reconnecting);
   _ReconnectingRelaySession({
+    this.initialStatus = SessionStatus.reconnecting,
     this.huddleCreatePublishGate,
     this.huddleEndPublishGate,
   });
@@ -15591,8 +15557,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   final List<int> publishedKinds = [];
 
   @override
-  SessionState build() =>
-      const SessionState(status: SessionStatus.reconnecting);
+  SessionState build() => SessionState(status: initialStatus);
 
   @override
   Future<List<NostrEvent>> fetchHistory(
