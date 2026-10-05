@@ -207,72 +207,89 @@ export default function remarkDetails() {
     // biome-ignore lint/suspicious/noExplicitAny: remark tree types are not available
     tree: any,
   ) => {
-    const occurrences = new Map<string, number>();
-    const root: Node[] = [];
-    const stack: Frame[] = [];
-    // Openers past the depth limit, still waiting for their closers. They
-    // and their closers stay text in place, so the work stays linear.
-    let skipped = 0;
-    const target = () => stack[stack.length - 1]?.children ?? root;
-
-    for (const child of tree.children as Node[]) {
-      if (isOpenMarker(child)) {
-        if (stack.length >= MAX_DETAILS_DEPTH) {
-          skipped += 1;
-          target().push(child);
-        } else {
-          stack.push({ marker: child, children: [] });
-        }
-        continue;
-      }
-      if (skipped > 0 && isCloseMarker(child)) {
-        skipped -= 1;
-        target().push(child);
-        continue;
-      }
-      const frame = stack[stack.length - 1];
-      if (frame && isCloseMarker(child)) {
-        stack.pop();
-        const { children, level, text: title } = summaryOf(frame.marker);
-        const occurrence = occurrences.get(title) ?? 0;
-        occurrences.set(title, occurrence + 1);
-        const summary = {
-          type: "detailsSummary",
-          children,
-          data: {
-            hName: "summary",
-            hProperties: level > 0 ? { "data-heading": "" } : {},
-          },
-        };
-        target().push({
-          type: "details",
-          children: [
-            // A heading title keeps the message's heading style, with the
-            // toggle inside it (the WAI-ARIA accordion pattern).
-            level > 0
-              ? { type: "heading", depth: level, children: [summary] }
-              : summary,
-            ...frame.children,
-          ],
-          data: {
-            hName: "details",
-            // Stable across edits elsewhere in the message, so a reader's
-            // open/closed choice survives in-place updates.
-            hProperties: { "data-details-key": `${occurrence}:${title}` },
-          },
-        });
-        continue;
-      }
-      target().push(child);
-    }
-
-    // `prepareDetailsBlocks` only isolates matched pairs, but a marker can
-    // still lose its partner inside a container (e.g. a closing `:::` in a
-    // list item). Unmatched openers fall back to their original paragraphs.
-    while (stack.length > 0) {
-      const frame = stack.pop() as Frame;
-      target().push(frame.marker, ...frame.children);
-    }
-    tree.children = root;
+    tree.children = groupDetails(tree.children as Node[], 0, new Map());
   };
+}
+
+/** Groups marker paragraphs in one block container into sections. Block
+ * spoilers are grouped by `remarkSpoilers` before this runs, so sections
+ * inside them are found by recursing into each spoiler at the current depth. */
+function groupDetails(
+  nodes: Node[],
+  baseDepth: number,
+  occurrences: Map<string, number>,
+): Node[] {
+  const root: Node[] = [];
+  const stack: Frame[] = [];
+  // Openers past the depth limit, still waiting for their closers. They
+  // and their closers stay text in place, so the work stays linear.
+  let skipped = 0;
+  const target = () => stack[stack.length - 1]?.children ?? root;
+
+  for (const child of nodes) {
+    if (isOpenMarker(child)) {
+      if (baseDepth + stack.length >= MAX_DETAILS_DEPTH) {
+        skipped += 1;
+        target().push(child);
+      } else {
+        stack.push({ marker: child, children: [] });
+      }
+      continue;
+    }
+    if (skipped > 0 && isCloseMarker(child)) {
+      skipped -= 1;
+      target().push(child);
+      continue;
+    }
+    const frame = stack[stack.length - 1];
+    if (frame && isCloseMarker(child)) {
+      stack.pop();
+      const { children, level, text: title } = summaryOf(frame.marker);
+      const occurrence = occurrences.get(title) ?? 0;
+      occurrences.set(title, occurrence + 1);
+      const summary = {
+        type: "detailsSummary",
+        children,
+        data: {
+          hName: "summary",
+          hProperties: level > 0 ? { "data-heading": "" } : {},
+        },
+      };
+      target().push({
+        type: "details",
+        children: [
+          // A heading title keeps the message's heading style, with the
+          // toggle inside it (the WAI-ARIA accordion pattern).
+          level > 0
+            ? { type: "heading", depth: level, children: [summary] }
+            : summary,
+          ...frame.children,
+        ],
+        data: {
+          hName: "details",
+          // Stable across edits elsewhere in the message, so a reader's
+          // open/closed choice survives in-place updates.
+          hProperties: { "data-details-key": `${occurrence}:${title}` },
+        },
+      });
+      continue;
+    }
+    if (child.type === "spoiler" && Array.isArray(child.children)) {
+      child.children = groupDetails(
+        child.children,
+        baseDepth + stack.length,
+        occurrences,
+      );
+    }
+    target().push(child);
+  }
+
+  // `prepareDetailsBlocks` only isolates matched pairs, but a marker can
+  // still lose its partner inside a container (e.g. a closing `:::` in a
+  // list item). Unmatched openers fall back to their original paragraphs.
+  while (stack.length > 0) {
+    const frame = stack.pop() as Frame;
+    target().push(frame.marker, ...frame.children);
+  }
+  return root;
 }

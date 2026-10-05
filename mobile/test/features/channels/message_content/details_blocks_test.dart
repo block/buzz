@@ -114,7 +114,7 @@ void main() {
 
   test('title text matches desktop plain text', () {
     expect(plainDetailsTitle('_italic_ snake_case'), 'italic snake_case');
-    expect(plainDetailsTitle('Icon ![lock](https://x/y.png)'), 'Icon');
+    expect(plainDetailsTitle('Icon ![lock](https://x/y.png)'), 'Icon lock');
     expect(plainDetailsTitle('<https://example.com>'), 'https://example.com');
     expect(plainDetailsTitle('[](https://example.com)'), detailsFallbackTitle);
   });
@@ -141,5 +141,26 @@ void main() {
     expect(block.title, 'docs now');
     expect(block.titleMarkdown, 'docs **now**');
     expect(block.key, '0:docs now');
+  });
+
+  test('titles match desktop for images and parenthesised links', () {
+    final image = splitDetailsBlocks(
+      ':::details ![lock](https://x/i.png)\nx\n:::',
+    ).whereType<DetailsBlock>().single;
+    expect(image.title, 'lock');
+    expect(plainDetailsTitle('[docs](https://x/a_(b))'), 'docs');
+  });
+
+  test('title sanitizing stays linear on hostile 64 KiB titles', () {
+    for (final unit in ['[', '![', '*', '#', ' ', '_', '[a](']) {
+      final title = unit * (64 * 1024 ~/ unit.length);
+      final watch = Stopwatch()..start();
+      splitDetailsBlocks(':::details x$title\nbody\n:::');
+      expect(
+        watch.elapsed,
+        lessThan(const Duration(milliseconds: 500)),
+        reason: 'unit "$unit"',
+      );
+    }
   });
 }

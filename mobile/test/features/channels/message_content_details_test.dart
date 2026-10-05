@@ -111,4 +111,44 @@ void main() {
     await tester.pump();
     expect(_shows('three'), isTrue);
   });
+
+  testWidgets('a heading title exposes one labelled, inert-content toggle', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      _app(
+        ValueNotifier(
+          ':::details ## [docs](https://example.com) **now**\nbody\n:::',
+        ),
+      ),
+    );
+    final toggle = find
+        .ancestor(
+          of: find.textContaining('now', findRichText: true),
+          matching: find.byType(InkWell),
+        )
+        .first;
+    expect(
+      tester.getSemantics(toggle),
+      matchesSemantics(
+        isButton: true,
+        isHeader: true,
+        hasExpandedState: true,
+        isExpanded: false,
+        hasTapAction: true,
+        isFocusable: true,
+        hasFocusAction: true,
+        label: 'docs now',
+        textDirection: TextDirection.ltr,
+      ),
+    );
+    // The title's link is neither a second semantics node nor tappable.
+    expect(find.bySemanticsLabel(RegExp('docs')), findsOneWidget);
+    expect(
+      find.descendant(of: toggle, matching: find.byType(IgnorePointer)),
+      findsWidgets,
+    );
+    handle.dispose();
+  });
 }

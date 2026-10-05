@@ -140,25 +140,38 @@ String? normalizeMarkerLine(String line) {
   return ':::details $heading$mark${title.substring(heading.length)}$mark';
 }
 
+// Title sanitizers. Every repeat is capped, so each match attempt scans a
+// bounded window and a hostile 64 KiB title stays linear on the UI isolate.
+final _imageRe = RegExp(
+  r'!\[([^\]\n]{0,300})\]\((?:[^()\n]|\([^()\n]{0,300}\)){0,300}\)',
+);
+final _linkRe = RegExp(
+  r'\[([^\]\n]{0,300})\]\((?:[^()\n]|\([^()\n]{0,300}\)){0,300}\)',
+);
+final _autolinkRe = RegExp(r'<(https?://[^>\s]{1,300})>');
+final _emphasisRe = RegExp(r'(\*\*|__|~~|`|\*)(.{1,300}?)\1');
+final _underscoreRe = RegExp(r'(?<!\w)_(.{1,300}?)_(?!\w)');
+
+/// Images become their alt text, links their text, autolinks their URL,
+/// as desktop's plain text does.
+String _flattenLinks(String markdown) => markdown
+    .replaceAllMapped(_imageRe, (m) => m[1]!)
+    .replaceAllMapped(_linkRe, (m) => m[1]!)
+    .replaceAllMapped(_autolinkRe, (m) => m[1]!);
+
 /// Title markdown with links, images and autolinks flattened to text.
-String _inlineTitleMarkdown(String markdown) => markdown
-    .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '')
-    .replaceAllMapped(RegExp(r'\[([^\]]*)\]\([^)]*\)'), (m) => m[1]!)
-    .replaceAllMapped(RegExp(r'<(https?://[^>\s]+)>'), (m) => m[1]!)
-    .trim();
+String _inlineTitleMarkdown(String markdown) => _flattenLinks(markdown).trim();
 
 /// Shown when a title has no text of its own, e.g. `:::details [](url)`.
 const detailsFallbackTitle = 'Details';
 
 /// Best-effort markdown-to-text for titles, matching desktop's plain text:
-/// images dropped, link text kept, autolinks, code and emphasis unwrapped.
+/// images become alt text, link text kept, autolinks, code and emphasis
+/// unwrapped. Linear in the title length (the sanitizer repeats are capped).
 String plainDetailsTitle(String markdown) {
-  final title = markdown
-      .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '')
-      .replaceAllMapped(RegExp(r'\[([^\]]*)\]\([^)]*\)'), (m) => m[1]!)
-      .replaceAllMapped(RegExp(r'<(https?://[^>\s]+)>'), (m) => m[1]!)
-      .replaceAllMapped(RegExp(r'(\*\*|__|~~|`|\*)(.+?)\1'), (m) => m[2]!)
-      .replaceAllMapped(RegExp(r'(?<!\w)_(.+?)_(?!\w)'), (m) => m[1]!)
+  final title = _flattenLinks(markdown)
+      .replaceAllMapped(_emphasisRe, (m) => m[2]!)
+      .replaceAllMapped(_underscoreRe, (m) => m[1]!)
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
   return title.isEmpty ? detailsFallbackTitle : title;

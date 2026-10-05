@@ -173,3 +173,12 @@ test("remarkDetails: falls back to a title when the title has no text", () => {
   const html = render(":::details [](https://example.com)\nsecret\n:::");
   assert.match(html, /<h6>Details<\/h6><p>secret<\/p>/);
 });
+
+test("remarkDetails: a section inside a block spoiler still folds", () => {
+  const html = render("||\n:::details X\nbody\n:::\n||");
+  assert.match(
+    html,
+    /<section data-key="0:X"><h6>X<\/h6><p>body<\/p><\/section>/,
+  );
+  assert.doesNotMatch(html, /:::/);
+});
