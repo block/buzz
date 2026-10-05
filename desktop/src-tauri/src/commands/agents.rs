@@ -657,12 +657,7 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
             input.parallelism,
             linked_persona.as_ref(),
         )?;
-        // A picked effort is canonical, so stale env aliases must not shadow it.
-        let mut env_vars = input.env_vars.clone();
-        if input.effort_level.is_some() {
-            crate::managed_agents::remove_record_effort_aliases(&mut env_vars);
-        }
-        let record = ManagedAgentRecord {
+        let mut record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: name.clone(),
             description: None,
@@ -721,7 +716,7 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
             provider_binary_path,
             persona_team_dir: None,
             persona_name_in_team: None,
-            env_vars,
+            env_vars: input.env_vars.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,
@@ -754,8 +749,11 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
             } else {
                 relay_mesh.clone()
             },
-            effort_level: input.effort_level.clone(),
+            effort_level: None,
         };
+        if let Some(level) = input.effort_level.clone() {
+            super::agent_config::apply_picker_effort_level(&mut record, Some(level));
+        }
         records.push(record);
 
         save_managed_agents(&app, &records)?;
