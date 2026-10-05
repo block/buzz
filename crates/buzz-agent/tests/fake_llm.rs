@@ -983,8 +983,14 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
+    // The steer reply and the prompt's completion race each other, so read
+    // until both have arrived instead of stopping at whichever comes first.
     let mut saw_reject = false;
+    let mut prompt_done = false;
     for _ in 0..40 {
+        if saw_reject && prompt_done {
+            break;
+        }
         let v = h.recv().await;
         if v["id"] == json!(s_id) {
             assert_eq!(
@@ -994,10 +1000,14 @@ async fn steer_rejected_on_run_id_mismatch() {
             saw_reject = true;
         } else if v["id"] == json!(p_id) {
             // Turn finishes normally regardless of the rejected steer.
-            break;
+            prompt_done = true;
         }
     }
     assert!(saw_reject, "run-id mismatch was not rejected");
+    assert!(
+        prompt_done,
+        "prompt did not finish after the rejected steer"
+    );
     h.shutdown().await;
 }
 
@@ -1520,17 +1530,27 @@ async fn steer_rejected_on_empty_prompt() {
             json!({"sessionId": sid, "expectedRunId": run_id, "prompt": []}),
         )
         .await;
+    // As in steer_rejected_on_run_id_mismatch: the rejection and the prompt's
+    // completion are unordered, so wait for both.
     let mut saw_reject = false;
+    let mut prompt_done = false;
     for _ in 0..40 {
+        if saw_reject && prompt_done {
+            break;
+        }
         let v = h.recv().await;
         if v["id"] == json!(s_id) {
             assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
             saw_reject = true;
         } else if v["id"] == json!(p_id) {
-            break;
+            prompt_done = true;
         }
     }
     assert!(saw_reject, "empty steer prompt was not rejected");
+    assert!(
+        prompt_done,
+        "prompt did not finish after the rejected steer"
+    );
     h.shutdown().await;
 }
 
