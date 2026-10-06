@@ -201,35 +201,51 @@ impl ReplyRoute {
     }
 }
 
-/// Whether the running turn's prompt rendered its channel as a DM.
+/// How the running turn's prompt routes replies, as the steer guard needs to
+/// know.
 ///
-/// The prompt task records this when it formats the turn's `<context>`
-/// (`format_prompt`'s `is_dm`). The steer guard reads the recorded value
-/// instead of classifying the incoming event again: channel metadata can
-/// become resolvable after the turn starts, and the guard must apply the rule
-/// that matches the `<context>` the agent actually received.
+/// The prompt task records each fact when it formats the turn's `<context>`.
+/// The steer guard reads the recorded values instead of deriving them from
+/// the incoming event again: channel metadata can become resolvable after the
+/// turn starts, and the guard must apply the rule that matches the
+/// `<context>` the agent actually received.
 #[derive(Debug, Clone, Default)]
-pub struct PromptDmClassification(Arc<OnceLock<bool>>);
+pub struct PromptRouting {
+    is_dm: Arc<OnceLock<bool>>,
+    trigger_anchor: Arc<OnceLock<bool>>,
+}
 
-impl PromptDmClassification {
-    /// Record the prompt's classification. Later calls are ignored: a turn has
-    /// one `<context>`.
-    pub fn record(&self, is_dm: bool) {
-        let _ = self.0.set(is_dm);
+impl PromptRouting {
+    /// Record whether the prompt rendered the channel as a DM
+    /// (`format_prompt`'s `is_dm`). Later calls are ignored: a turn has one
+    /// `<context>`.
+    pub fn record_dm(&self, is_dm: bool) {
+        let _ = self.is_dm.set(is_dm);
     }
 
-    /// The recorded classification; `None` before the prompt is formatted.
-    pub fn get(&self) -> Option<bool> {
-        self.0.get().copied()
+    /// The recorded DM classification; `None` until it is recorded.
+    pub fn is_dm(&self) -> Option<bool> {
+        self.is_dm.get().copied()
+    }
+
+    /// Record whether the prompt anchored replies to its triggering message
+    /// rather than to the thread (see [`reply_anchor_is_trigger`]). Later
+    /// calls are ignored.
+    pub fn record_trigger_anchor(&self, trigger_anchor: bool) {
+        let _ = self.trigger_anchor.set(trigger_anchor);
+    }
+
+    /// The recorded anchor kind; `None` before the prompt is formatted.
+    pub fn trigger_anchor(&self) -> Option<bool> {
+        self.trigger_anchor.get().copied()
     }
 }
 
-/// Reply destination of an in-flight turn, and how its prompt classified the
-/// channel.
+/// Reply destination of an in-flight turn, and how its prompt routed replies.
 #[derive(Debug, Clone)]
 struct InFlightReplyRoute {
     route: ReplyRoute,
-    prompt_is_dm: PromptDmClassification,
+    prompt: PromptRouting,
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -1028,12 +1044,18 @@ impl EventQueue {
     /// not be steered natively; the cancel+merge path re-dispatches it with
     /// its own full `<context>`.
     ///
-    /// The rule follows how the running turn's prompt classified the channel
-    /// (see [`PromptDmClassification`]). Until the prompt task records that,
-    /// `channel_is_dm` is the listener's own classification, where unresolved
-    /// metadata counts as a DM. A channel the listener knows is not a DM also
-    /// renders as one in the prompt, so the channel rule applies at once.
-    /// Otherwise the prompt may render either way, and the answer is `false`.
+    /// The rule follows how the running turn's prompt routed replies (see
+    /// [`PromptRouting`]). Until the prompt task records its DM
+    /// classification, `channel_is_dm` is the listener's own classification,
+    /// where unresolved metadata counts as a DM. A channel the listener knows
+    /// is not a DM also renders as one in the prompt, so the channel rule
+    /// applies at once. Otherwise the prompt may render either way, and the
+    /// answer is `false`.
+    ///
+    /// A channel turn inside a thread may anchor replies to its own trigger
+    /// (see [`reply_anchor_is_trigger`]), a destination no other message
+    /// shares. Such a turn accepts no native steer, and neither does one whose
+    /// prompt has not yet recorded its anchor.
     pub fn in_flight_accepts_steer(
         &self,
         scope: &SessionScope,
@@ -1043,19 +1065,26 @@ impl EventQueue {
         let Some(running) = self.in_flight_reply_routes.get(scope) else {
             return false;
         };
-        match running.prompt_is_dm.get() {
-            Some(is_dm) => running.route.accepts_steer(incoming, is_dm),
-            None if !channel_is_dm => running.route.accepts_steer(incoming, false),
-            None => false,
+        let is_dm = match running.prompt.is_dm() {
+            Some(is_dm) => is_dm,
+            None if !channel_is_dm => false,
+            None => return false,
+        };
+        if !is_dm
+            && running.route.root_event_id.is_some()
+            && running.prompt.trigger_anchor() != Some(false)
+        {
+            return false;
         }
+        running.route.accepts_steer(incoming, is_dm)
     }
 
     /// The cell in which the prompt task for `scope`'s in-flight turn records
-    /// its DM classification (see [`PromptDmClassification`]).
-    pub fn in_flight_prompt_dm(&self, scope: &SessionScope) -> Option<PromptDmClassification> {
+    /// how it routed replies (see [`PromptRouting`]).
+    pub fn in_flight_prompt_routing(&self, scope: &SessionScope) -> Option<PromptRouting> {
         self.in_flight_reply_routes
             .get(scope)
-            .map(|running| running.prompt_is_dm.clone())
+            .map(|running| running.prompt.clone())
     }
 
     fn record_in_flight_reply_route(&mut self, scope: &SessionScope, events: &[BatchEvent]) {
@@ -1065,7 +1094,7 @@ impl EventQueue {
                     scope.clone(),
                     InFlightReplyRoute {
                         route: last.reply_route(),
-                        prompt_is_dm: PromptDmClassification::default(),
+                        prompt: PromptRouting::default(),
                     },
                 );
             }
@@ -1752,6 +1781,33 @@ fn resolve_reply_anchor(
     )
 }
 
+/// Whether `format_prompt` anchors `batch`'s ordinary replies to its
+/// triggering message instead of the thread every same-thread message
+/// shares: an agent↔agent turn inside a channel thread (see
+/// [`resolve_reply_anchor`]). The prompt task records this for the
+/// native-steer guard (see [`EventQueue::in_flight_accepts_steer`]).
+pub fn reply_anchor_is_trigger(
+    batch: &FlushBatch,
+    is_dm: bool,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> bool {
+    let Some(last_event) = batch.events.last() else {
+        return false;
+    };
+    let thread_tags = last_event.routing_thread_tags();
+    let routing_event_id = last_event.routing_event_id();
+    !is_dm
+        && thread_tags.root_event_id.is_some()
+        && resolve_reply_anchor(
+            &last_event.event.pubkey.to_hex(),
+            &thread_tags,
+            &routing_event_id,
+            profile_lookup,
+        )
+        .as_deref()
+            == Some(routing_event_id.as_str())
+}
+
 /// Maximum length (in characters) of a channel description rendered into `<context>`.
 ///
 /// Limits prompt bloat from unusually long descriptions. Multi-line
@@ -2334,7 +2390,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // Agent↔agent turns in a thread anchor to the triggering event — deep
     // nesting is intentional there — and top-level ones get no anchor.
     // DMs are always 1:1 with a human, so they always anchor.
-    // `ReplyRoute::accepts_steer` mirrors this DM rule; keep them in sync.
+    // `ReplyRoute::accepts_steer` mirrors this DM rule, and
+    // `reply_anchor_is_trigger` reports the agent↔agent thread anchor to the
+    // native-steer guard; keep them in sync.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
         thread_tags
@@ -5007,6 +5065,68 @@ mod tests {
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
         let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
+    }
+
+    #[test]
+    fn test_human_merged_into_agent_thread_turn_anchors_to_root() {
+        // An agent↔agent turn in a thread anchors to its trigger. When a
+        // human's message in that thread joins the batch (the steer guard's
+        // cancel+merge path), the merged prompt anchors to the root again.
+        let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let agent = Keys::generate();
+        let human = Keys::generate();
+        let other_agent = Keys::generate().public_key().to_hex();
+        let lookup = HashMap::from([
+            (agent.public_key().to_hex(), profile(true)),
+            (other_agent.clone(), profile(true)),
+        ]);
+        let in_thread = |keys: &Keys, content: &str| BatchEvent {
+            edit: None,
+            event: EventBuilder::new(Kind::Custom(9), content)
+                .tags([
+                    nostr::Tag::parse(["e", root.as_str(), "", "reply"]).unwrap(),
+                    nostr::Tag::parse(["p", other_agent.as_str()]).unwrap(),
+                ])
+                .sign_with_keys(keys)
+                .unwrap(),
+            prompt_tag: "@mention".into(),
+            received_at: Instant::now(),
+        };
+        let batch = |events| FlushBatch {
+            channel_id: ch,
+            scope: conv(ch),
+            events,
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let args = FormatPromptArgs {
+            profile_lookup: Some(&lookup),
+            ..Default::default()
+        };
+        let agent_event = in_thread(&agent, "agent asks");
+        let agent_event_id = agent_event.event.id.to_hex();
+
+        let agent_only = batch(vec![agent_event.clone()]);
+        assert!(reply_anchor_is_trigger(&agent_only, false, Some(&lookup)));
+        let prompt = format_prompt(&agent_only, &args).join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {agent_event_id}")),
+            "{prompt}"
+        );
+
+        let merged = batch(vec![agent_event, in_thread(&human, "human asks")]);
+        assert!(!reply_anchor_is_trigger(&merged, false, Some(&lookup)));
+        let prompt = format_prompt(&merged, &args).join("\n\n");
+        assert!(prompt.contains(&format!("--reply-to {root}")), "{prompt}");
+        assert!(
+            !prompt.contains(&format!("--reply-to {agent_event_id}")),
+            "{prompt}"
+        );
+
+        // A DM renders its own anchor rule, which the steer guard handles
+        // separately.
+        assert!(!reply_anchor_is_trigger(&agent_only, true, Some(&lookup)));
     }
 
     #[test]

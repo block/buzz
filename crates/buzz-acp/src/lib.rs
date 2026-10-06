@@ -4883,9 +4883,9 @@ fn dispatch_pending(
             .state
             .set_scope_owner_generation(scope.clone(), owner_generation);
 
-        // The prompt task records how it classified the channel, for the
+        // The prompt task records how it routed replies, for the
         // native-steer guard (`EventQueue::in_flight_accepts_steer`).
-        let prompt_dm = queue.in_flight_prompt_dm(&scope).unwrap_or_default();
+        let prompt_routing = queue.in_flight_prompt_routing(&scope).unwrap_or_default();
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
                 agent,
@@ -4895,7 +4895,7 @@ fn dispatch_pending(
                 result_tx,
                 Some(control_rx),
                 task_turn_id,
-                prompt_dm,
+                prompt_routing,
             )
             .await;
         });
@@ -10055,8 +10055,8 @@ mod edit_native_steer_tests {
     /// Drive `incoming` through the listener's steer decision while a turn
     /// for `running_event` is in flight in the same conversation session
     /// (the channel policy, or any DM). `prompt_is_dm` is how the running
-    /// turn's prompt classified the channel; `None` means the prompt has not
-    /// been formatted yet.
+    /// turn's prompt classified the channel, recorded with a thread-shared
+    /// reply anchor; `None` means the prompt has not been formatted yet.
     fn steer_into_running_turn(
         is_dm: bool,
         prompt_is_dm: Option<bool>,
@@ -10084,10 +10084,11 @@ mod edit_native_steer_tests {
         queue.flush_next().expect("running turn");
         assert!(queue.is_scope_in_flight(&scope));
         if let Some(prompt_is_dm) = prompt_is_dm {
-            queue
-                .in_flight_prompt_dm(&scope)
-                .expect("in-flight turn records its prompt classification")
-                .record(prompt_is_dm);
+            let routing = queue
+                .in_flight_prompt_routing(&scope)
+                .expect("in-flight turn records its prompt routing");
+            routing.record_dm(prompt_is_dm);
+            routing.record_trigger_anchor(false);
         }
 
         let mut pool = AgentPool::from_slots(vec![]);
@@ -10224,6 +10225,7 @@ mod edit_native_steer_tests {
         hold_at: HoldAt,
         running_event: nostr::Event,
         incoming: nostr::Event,
+        profiles: &[nostr::Event],
     ) -> (Option<pool::SteerRequest>, Option<ControlSignal>) {
         let channel_id = Uuid::new_v4();
         let is_dm = channel_type == "dm";
@@ -10277,23 +10279,32 @@ mod edit_native_steer_tests {
                 .insert(scope.clone(), "live-session".into());
         }
         // The relay has no newer metadata, project, or history: every query
-        // returns no events, so the turn keeps the startup channel metadata.
+        // except a profile lookup returns no events, so the turn keeps the
+        // startup channel metadata.
         let relay = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind relay fixture");
         let base_url = format!("http://{}", relay.local_addr().unwrap());
+        let profiles = Arc::new(serde_json::to_string(profiles).expect("profiles json"));
         let relay = tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             loop {
                 let (mut socket, _) = relay.accept().await.expect("accept relay query");
+                let profiles = Arc::clone(&profiles);
                 tokio::spawn(async move {
                     let mut request = [0; 16384];
-                    let _ = socket.read(&mut request).await;
-                    let _ = socket
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
-                        )
-                        .await;
+                    let read = socket.read(&mut request).await.unwrap_or(0);
+                    let body =
+                        if String::from_utf8_lossy(&request[..read]).contains("\"kinds\":[0]") {
+                            profiles.as_str()
+                        } else {
+                            "[]"
+                        };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
                 });
             }
         });
@@ -10372,9 +10383,15 @@ mod edit_native_steer_tests {
     /// top-level follow-up must be steered natively.
     #[tokio::test]
     async fn dispatched_dm_turn_records_classification_for_native_steer() {
-        let (steer, control) =
-            steer_into_dispatched_turn("dm", None, HoldAt::Prompt, message(None), message(None))
-                .await;
+        let (steer, control) = steer_into_dispatched_turn(
+            "dm",
+            None,
+            HoldAt::Prompt,
+            message(None),
+            message(None),
+            &[],
+        )
+        .await;
 
         assert!(steer.is_some(), "DM follow-up is sent as a native steer");
         assert_eq!(
@@ -10394,6 +10411,7 @@ mod edit_native_steer_tests {
             HoldAt::SessionNew,
             message(None),
             message(None),
+            &[],
         )
         .await;
 
@@ -10415,6 +10433,7 @@ mod edit_native_steer_tests {
             HoldAt::SessionNew,
             message(None),
             message(None),
+            &[],
         )
         .await;
 
@@ -10425,12 +10444,11 @@ mod edit_native_steer_tests {
         assert_eq!(control, Some(ControlSignal::Steer));
     }
 
-    /// A known channel's prompt is never rendered as a DM, so a same-thread
-    /// follow-up is steered natively before the turn's classification is
-    /// recorded, as before DM steering existed: here the prompt task is
-    /// still waiting on `session/new` ahead of an `initial_message`.
+    /// Until a thread turn's prompt is formatted, its reply anchor is
+    /// unknown: an agent↔agent turn anchors to its own trigger. A same-thread
+    /// follow-up during `session/new` therefore takes the cancel+merge path.
     #[tokio::test]
-    async fn channel_same_thread_follow_up_during_setup_steers_natively() {
+    async fn channel_same_thread_follow_up_during_setup_cancels_and_merges() {
         let root = "ab".repeat(32);
         let (steer, control) = steer_into_dispatched_turn(
             "stream",
@@ -10438,6 +10456,30 @@ mod edit_native_steer_tests {
             HoldAt::SessionNew,
             message(Some(&root)),
             message(Some(&root)),
+            &[],
+        )
+        .await;
+
+        assert!(
+            steer.is_none(),
+            "no native steer before the anchor is known"
+        );
+        assert_eq!(control, Some(ControlSignal::Steer));
+    }
+
+    /// A human-facing thread turn anchors to the thread root, which every
+    /// same-thread message shares, so a follow-up is steered natively once
+    /// the prompt has recorded that anchor.
+    #[tokio::test]
+    async fn channel_same_thread_follow_up_during_prompt_steers_natively() {
+        let root = "ab".repeat(32);
+        let (steer, control) = steer_into_dispatched_turn(
+            "stream",
+            None,
+            HoldAt::Prompt,
+            message(Some(&root)),
+            message(Some(&root)),
+            &[],
         )
         .await;
 
@@ -10446,6 +10488,45 @@ mod edit_native_steer_tests {
             control, None,
             "native steer must not cancel the running turn"
         );
+    }
+
+    /// An agent↔agent thread turn replies under its own trigger. A human's
+    /// message in that thread must reply at the thread root, so it takes the
+    /// cancel+merge path, whose re-prompt carries its own `<context>`.
+    #[tokio::test]
+    async fn human_follow_up_to_agent_thread_turn_cancels_and_merges() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let root = "ab".repeat(32);
+        let agent = Keys::generate();
+        let other_agent = Keys::generate();
+        let agent_profile = |keys: &Keys| {
+            EventBuilder::new(Kind::Metadata, "{}")
+                .tags([Tag::parse(["auth", &"cd".repeat(32), "", &"ef".repeat(64)]).unwrap()])
+                .sign_with_keys(keys)
+                .unwrap()
+        };
+        let running = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "agent asks",
+        )
+        .tags([
+            Tag::parse(["e", root.as_str(), "", "reply"]).unwrap(),
+            Tag::parse(["p", other_agent.public_key().to_hex().as_str()]).unwrap(),
+        ])
+        .sign_with_keys(&agent)
+        .unwrap();
+        let (steer, control) = steer_into_dispatched_turn(
+            "stream",
+            None,
+            HoldAt::Prompt,
+            running,
+            message(Some(&root)),
+            &[agent_profile(&agent), agent_profile(&other_agent)],
+        )
+        .await;
+
+        assert!(steer.is_none(), "no native steer into an agent-only turn");
+        assert_eq!(control, Some(ControlSignal::Steer));
     }
 
     /// A DM thread reply needs a `--reply-to` the running top-level turn's
