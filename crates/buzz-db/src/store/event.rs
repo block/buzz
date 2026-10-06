@@ -1135,7 +1135,7 @@ pub async fn soft_delete_by_coordinate(
     )
     .await?;
     let purged = purge_retention_free_events(
-        &mut *tx,
+        &mut tx,
         community_id,
         RetentionFreeTarget::Coordinate {
             kind,
