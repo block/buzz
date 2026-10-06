@@ -42,6 +42,14 @@ scrape-visible while availability is `0`, and
 stock or activity collections retry after 60 seconds; a successful retry
 restores availability and resumes the normal hourly and daily cadences.
 
+Each skipped or failed collection increments
+`buzz_usage_query_skipped_total{family,reason}`: `reader_unavailable` when no
+fresh proved reader was available, `query_error` when the reader query failed,
+and `timeout` when the whole collection (reader proof included) exceeded its
+relay-side deadline of 10 seconds for stock or 20 seconds for activity. The
+deadline bounds a reader that stops answering, which the server-side statement
+timeout cannot, so a hung reader cannot stall the leader's poller.
+
 Storage totals come from the `buzz-admin` worker snapshot and carry their own
 `buzz_storage_snapshot_load_ok` and `buzz_storage_snapshot_age_seconds` health
 gauges. In fleet-only mode the relay does not attribute storage to communities,
@@ -62,6 +70,10 @@ paths fall back to the writer.
    gauges above.
 3. Remove dependencies on the retired per-community series before increasing
    community count.
+
+`buzz_total_messages` and `buzz_total_active_channels` are emitted only by the
+`all` collection. In the default fleet-only mode they stop updating, so move
+dashboards off them before rollout.
 
 `BUZZ_USAGE_METRICS_PER_COMMUNITY=all` temporarily restores the prior
 per-community emission for rollback or dashboard migration. It also restores

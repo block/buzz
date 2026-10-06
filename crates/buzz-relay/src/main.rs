@@ -116,6 +116,13 @@ impl EmissionScope {
 const FLEET_STOCK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const FLEET_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 const FLEET_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+// Relay-side deadlines for one complete fleet collection: reader acquire,
+// replica proof, transaction begin, and the aggregate. The server-side
+// `statement_timeout` (5s stock, 15s activity) cannot fire when a reader
+// connection stops answering, so these bound the leader's poller tick. Each is
+// above its statement timeout so the server-side error still wins normally.
+const FLEET_STOCK_COLLECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+const FLEET_ACTIVITY_COLLECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
 struct FleetUsageSchedule {
     next_stock: std::time::Instant,
@@ -2402,36 +2409,66 @@ fn emit_usage_snapshot_availability(schedule: &FleetUsageSchedule) {
 }
 
 async fn emit_fleet_db_usage_metrics(state: &AppState, schedule: &mut FleetUsageSchedule) {
+    // Futures are lazy: a family that is not due is never polled.
+    refresh_due_fleet_usage(
+        schedule,
+        state.db.usage_fleet_stock_snapshot(),
+        state.db.usage_fleet_active_users(chrono::Utc::now()),
+    )
+    .await;
+}
+
+/// Run each due fleet collection under its relay-side deadline and apply the
+/// outcome. An expired collection is dropped (rolling back its reader
+/// transaction) and treated as a failed refresh, so a reader that stops
+/// answering cannot stall the leader's poller.
+async fn refresh_due_fleet_usage(
+    schedule: &mut FleetUsageSchedule,
+    stock: impl std::future::Future<Output = FleetStockRefresh>,
+    activity: impl std::future::Future<Output = FleetActivityRefresh>,
+) {
     let now = std::time::Instant::now();
     if schedule.stock_due(now) {
-        let result = state.db.usage_fleet_stock_snapshot().await;
+        let result = tokio::time::timeout(FLEET_STOCK_COLLECTION_DEADLINE, stock).await;
         apply_stock_refresh(schedule, now, result);
     }
     if schedule.activity_due(now) {
-        let result = state.db.usage_fleet_active_users(chrono::Utc::now()).await;
+        let result = tokio::time::timeout(FLEET_ACTIVITY_COLLECTION_DEADLINE, activity).await;
         apply_activity_refresh(schedule, now, result);
     }
     emit_cached_fleet_usage_metrics(schedule);
 }
 
+type FleetStockRefresh = buzz_db::Result<Option<buzz_db::usage::FleetStockSnapshot>>;
+type FleetActivityRefresh = buzz_db::Result<Option<buzz_db::usage::FleetActiveUsersSnapshot>>;
+
 /// Apply one due stock refresh. Success caches the snapshot and marks the
-/// family available; a missing proved reader or a query error keeps the cached
-/// values, marks the family unavailable, and schedules a retry.
+/// family available; a missing proved reader, a query error, or an expired
+/// deadline keeps the cached values, marks the family unavailable, and
+/// schedules a retry.
 fn apply_stock_refresh(
     schedule: &mut FleetUsageSchedule,
     now: std::time::Instant,
-    result: buzz_db::Result<Option<buzz_db::usage::FleetStockSnapshot>>,
+    result: Result<FleetStockRefresh, tokio::time::error::Elapsed>,
 ) {
     match result {
-        Ok(Some(snapshot)) => schedule.mark_stock_success(now, snapshot),
-        Ok(None) => {
+        Ok(Ok(Some(snapshot))) => schedule.mark_stock_success(now, snapshot),
+        Ok(Ok(None)) => {
             schedule.mark_stock_failure(now);
             record_usage_refresh_skip("stock", "reader_unavailable");
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             schedule.mark_stock_failure(now);
             warn!(error = %error, "fleet usage stock query failed");
             record_usage_refresh_skip("stock", "query_error");
+        }
+        Err(_) => {
+            schedule.mark_stock_failure(now);
+            warn!(
+                deadline = ?FLEET_STOCK_COLLECTION_DEADLINE,
+                "fleet usage stock collection timed out"
+            );
+            record_usage_refresh_skip("stock", "timeout");
         }
     }
 }
@@ -2441,18 +2478,26 @@ fn apply_stock_refresh(
 fn apply_activity_refresh(
     schedule: &mut FleetUsageSchedule,
     now: std::time::Instant,
-    result: buzz_db::Result<Option<buzz_db::usage::FleetActiveUsersSnapshot>>,
+    result: Result<FleetActivityRefresh, tokio::time::error::Elapsed>,
 ) {
     match result {
-        Ok(Some(snapshot)) => schedule.mark_activity_success(now, snapshot),
-        Ok(None) => {
+        Ok(Ok(Some(snapshot))) => schedule.mark_activity_success(now, snapshot),
+        Ok(Ok(None)) => {
             schedule.mark_activity_failure(now);
             record_usage_refresh_skip("activity", "reader_unavailable");
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             schedule.mark_activity_failure(now);
             warn!(error = %error, "fleet usage activity query failed");
             record_usage_refresh_skip("activity", "query_error");
+        }
+        Err(_) => {
+            schedule.mark_activity_failure(now);
+            warn!(
+                deadline = ?FLEET_ACTIVITY_COLLECTION_DEADLINE,
+                "fleet usage activity collection timed out"
+            );
+            record_usage_refresh_skip("activity", "timeout");
         }
     }
 }
@@ -2913,9 +2958,11 @@ mod tests {
         apply_activity_refresh, apply_stock_refresh, buzz_auto_migrate_enabled, connect_audit_pool,
         dropped_in_memory_keys, emit_cached_fleet_usage_metrics, idle_timeout_secs,
         jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
-        record_legacy_usage_collection, refresh_legacy_active_gauge_recency,
-        relay_keypair_from_config, run_jwks_refresh_supervisor, run_periodic_until_cancelled,
-        EmissionScope, FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
+        record_legacy_usage_collection, refresh_due_fleet_usage,
+        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        run_jwks_refresh_supervisor, run_periodic_until_cancelled, EmissionScope,
+        FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
+        FLEET_ACTIVITY_COLLECTION_DEADLINE, FLEET_STOCK_COLLECTION_DEADLINE,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -3254,8 +3301,8 @@ mod tests {
                         activity_result| {
                 let recorder = metrics_util::debugging::DebuggingRecorder::new();
                 metrics::with_local_recorder(&recorder, || {
-                    apply_stock_refresh(schedule, at, stock_result);
-                    apply_activity_refresh(schedule, at, activity_result);
+                    apply_stock_refresh(schedule, at, Ok(stock_result));
+                    apply_activity_refresh(schedule, at, Ok(activity_result));
                     emit_cached_fleet_usage_metrics(schedule);
                 });
                 usage_metric_values(&recorder)
@@ -3305,6 +3352,104 @@ mod tests {
                 "{reason}: recovery must not record a skip"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_fleet_collection_times_out_into_failed_refresh() {
+        let retry = Duration::from_secs(60);
+        let started = std::time::Instant::now();
+        // Zero cadences keep both families due after the seeded success.
+        let mut schedule =
+            FleetUsageSchedule::new_at(started, Duration::ZERO, Duration::ZERO, retry);
+        schedule.mark_stock_success(
+            started,
+            buzz_db::usage::FleetStockSnapshot {
+                communities_estimated: 7,
+                ..Default::default()
+            },
+        );
+        schedule.mark_activity_success(
+            started,
+            buzz_db::usage::FleetActiveUsersSnapshot {
+                human_1d: 3,
+                ..Default::default()
+            },
+        );
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let tick_started = tokio::time::Instant::now();
+        let before = std::time::Instant::now();
+        // A reader that never answers: neither collection ever completes.
+        tokio::time::timeout(
+            Duration::from_secs(60 * 60),
+            refresh_due_fleet_usage(
+                &mut schedule,
+                std::future::pending(),
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("a stalled reader must not stall the poller tick");
+        let after = std::time::Instant::now();
+        assert_eq!(
+            tokio::time::Instant::now() - tick_started,
+            FLEET_STOCK_COLLECTION_DEADLINE + FLEET_ACTIVITY_COLLECTION_DEADLINE,
+            "each family is abandoned at its own deadline"
+        );
+
+        let values = usage_metric_values(&recorder);
+        assert_eq!(
+            values.get("buzz_usage_snapshot_available{family=stock}"),
+            Some(&0.0)
+        );
+        assert_eq!(
+            values.get("buzz_usage_snapshot_available{family=activity}"),
+            Some(&0.0)
+        );
+        assert_eq!(values.get("buzz_communities_estimated{}"), Some(&7.0));
+        assert_eq!(
+            values.get("buzz_total_active_users{window=1d,type=human}"),
+            Some(&3.0)
+        );
+        for family in ["stock", "activity"] {
+            let key = format!("buzz_usage_query_skipped_total{{family={family},reason=timeout}}");
+            assert_eq!(values.get(&key), Some(&1.0), "{key}");
+        }
+        assert!(!schedule.stock_due(before + retry - Duration::from_millis(1)));
+        assert!(!schedule.activity_due(before + retry - Duration::from_millis(1)));
+        assert!(schedule.stock_due(after + retry));
+        assert!(schedule.activity_due(after + retry));
+
+        // The next tick still runs and a successful collection recovers.
+        schedule.next_stock = after;
+        schedule.next_activity = after;
+        refresh_due_fleet_usage(
+            &mut schedule,
+            std::future::ready(Ok(Some(buzz_db::usage::FleetStockSnapshot {
+                communities_estimated: 8,
+                ..Default::default()
+            }))),
+            std::future::ready(Ok(Some(buzz_db::usage::FleetActiveUsersSnapshot {
+                human_1d: 4,
+                ..Default::default()
+            }))),
+        )
+        .await;
+        let values = usage_metric_values(&recorder);
+        assert_eq!(
+            values.get("buzz_usage_snapshot_available{family=stock}"),
+            Some(&1.0)
+        );
+        assert_eq!(
+            values.get("buzz_usage_snapshot_available{family=activity}"),
+            Some(&1.0)
+        );
+        assert_eq!(values.get("buzz_communities_estimated{}"), Some(&8.0));
+        assert_eq!(
+            values.get("buzz_total_active_users{window=1d,type=human}"),
+            Some(&4.0)
+        );
     }
 
     #[test]
