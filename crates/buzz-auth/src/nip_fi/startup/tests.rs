@@ -21,7 +21,6 @@ fn make_offline_policy(issuer: &str) -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![JwtAlgorithm::ES256],
-        false,
         0,
         3600,
         None,
@@ -37,7 +36,6 @@ fn make_status_policy(issuer: &str) -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![JwtAlgorithm::ES256],
-        false,
         0,
         3600,
         Some(60),
@@ -179,4 +177,44 @@ fn enforce_duplicate_jwks_issuer_in_configs_rejects() {
         validate_nip_fi_config(NipFiMode::Enforce, &registry, &jwks).is_err(),
         "duplicate JWKS configs must not pass"
     );
+}
+
+#[test]
+fn shadow_mode_validates_like_enforce() {
+    let issuer = "https://id.example";
+    let mut registry = IssuerRegistry::new();
+    assert_eq!(
+        validate_nip_fi_config(NipFiMode::Shadow, &registry, &[]).unwrap_err(),
+        NipFiStartupError::EmptyRegistry
+    );
+    registry.insert(make_offline_policy(issuer));
+    assert_eq!(
+        validate_nip_fi_config(NipFiMode::Shadow, &registry, &[]).unwrap_err(),
+        NipFiStartupError::MissingJwksConfig
+    );
+    assert!(
+        validate_nip_fi_config(NipFiMode::Shadow, &registry, &[make_jwks_config(issuer)]).is_ok()
+    );
+}
+
+#[test]
+fn mode_predicates_separate_evaluation_from_authority() {
+    // (mode, restricts, evaluates): Shadow is the only mode that evaluates
+    // evidence without the verdict affecting admission.
+    for (mode, restricts, evaluates) in [
+        (NipFiMode::Off, false, false),
+        (NipFiMode::Enforce, true, true),
+        (NipFiMode::DenyProtected, true, false),
+        (NipFiMode::Shadow, false, true),
+    ] {
+        assert_eq!(mode.restricts(), restricts, "{mode:?} restricts");
+        assert_eq!(mode.evaluates(), evaluates, "{mode:?} evaluates");
+        assert_eq!(mode.enforces(), restricts && evaluates, "{mode:?} enforces");
+        assert_eq!(
+            mode.denies_unconditionally(),
+            restricts && !evaluates,
+            "{mode:?}"
+        );
+        assert_eq!(mode.observes_only(), evaluates && !restricts, "{mode:?}");
+    }
 }

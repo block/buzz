@@ -1,14 +1,14 @@
+use super::managed_agent_definition::validate_create_definition;
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
-
-use super::managed_agent_definition::validate_create_definition;
 
 use crate::{
     app_state::AppState,
     managed_agents::{
+        bestie_assignment::{recover_pending_assignment_cleanup, with_agent_assignments_cleared},
         build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
         find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
-        managed_agent_avatar_url, normalize_agent_args, resolve_provider_binary,
+        managed_agents_base_dir, normalize_agent_args, resolve_provider_binary,
         save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
         stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
         validate_provider_config, BackendKind, CreateManagedAgentRequest,
@@ -54,54 +54,13 @@ pub(super) fn summarize_from_disk(
     )
 }
 
-fn normalize_relay_mesh(
-    config: Option<&RelayMeshConfig>,
-    backend: &BackendKind,
-) -> Result<Option<RelayMeshConfig>, String> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let model_ref = config.model_ref.trim();
-    if model_ref.is_empty() {
-        return Err("Buzz shared compute model is required".to_string());
-    }
-    if backend != &BackendKind::Local {
-        return Err("Buzz shared compute agents must use the local backend".to_string());
-    }
-
-    Ok(Some(RelayMeshConfig {
-        model_ref: model_ref.to_string(),
-    }))
-}
-
-fn trim_to_optional_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn resolve_created_avatar_url(
-    requested_avatar_url: Option<&str>,
-    persona_avatar_url: Option<String>,
-    agent_command: &str,
-) -> Option<String> {
-    requested_avatar_url
-        .and_then(trim_to_optional_string)
-        .or_else(|| {
-            persona_avatar_url
-                .as_deref()
-                .and_then(trim_to_optional_string)
-        })
-        .or_else(|| managed_agent_avatar_url(agent_command))
-}
+#[path = "agents_create_fields.rs"]
+mod create_fields;
+use create_fields::{normalize_relay_mesh, resolve_created_avatar_url, trim_to_optional_string};
 
 #[cfg(feature = "mesh-llm")]
-async fn ensure_relay_mesh_for_record(
-    app: &AppHandle,
+async fn ensure_relay_mesh_for_record<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     model_id: Option<&str>,
     allow_fresh_create_start: bool,
 ) -> Result<(), String> {
@@ -109,19 +68,23 @@ async fn ensure_relay_mesh_for_record(
 }
 
 #[cfg(not(feature = "mesh-llm"))]
-async fn ensure_relay_mesh_for_record(
-    _app: &AppHandle,
+async fn ensure_relay_mesh_for_record<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
     _model_id: Option<&str>,
     _allow_fresh_create_start: bool,
 ) -> Result<(), String> {
     Ok(())
 }
 
+/// Start `pubkey`'s pairs on `relay_urls`. Restart flows capture `admission`
+/// before they stop the pairs, so a community removed while the restart runs
+/// refuses its start; those relays are skipped quietly.
 pub(super) async fn start_local_agent_pairs_with_preflight(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
     relay_urls: &[String],
+    admission: &crate::managed_agents::AdmissionSnapshot,
 ) -> Result<ManagedAgentSummary, String> {
     let record_snapshot = {
         let _store_guard = state
@@ -172,9 +135,13 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
             pubkey.to_string(),
             relay_url.clone(),
+            admission,
             app.clone(),
         ) {
-            errors.push(format!("{relay_url}: {error}"));
+            // A relay removed since `admission` was captured has nothing to restart.
+            if error != crate::managed_agents::RELAY_REMOVED_ERROR {
+                errors.push(format!("{relay_url}: {error}"));
+            }
         }
     }
     if !errors.is_empty() {
@@ -200,14 +167,49 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
     summarize_from_disk(app, record, &runtimes)
 }
 
-pub(super) async fn start_local_agent_with_preflight(
-    app: &AppHandle,
+pub(super) async fn start_local_agent_with_preflight<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     pubkey: &str,
     allow_fresh_create_start: bool,
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
+    replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
+    start_local_agent_after_preflight(
+        app,
+        state,
+        pubkey,
+        expected_relay_url,
+        expected_signer_pubkey,
+        replay_floor_unix,
+        |mesh_model_id| async move {
+            ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start)
+                .await
+        },
+    )
+    .await
+}
+
+/// The ordinary start with its one awaited step, mesh preflight, supplied by
+/// the caller so tests can hold it open across a removal.
+pub(super) async fn start_local_agent_after_preflight<R, P, F>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    pubkey: &str,
+    expected_relay_url: Option<&str>,
+    expected_signer_pubkey: Option<&str>,
+    replay_floor_unix: Option<u64>,
+    preflight: P,
+) -> Result<ManagedAgentSummary, String>
+where
+    R: tauri::Runtime,
+    P: FnOnce(Option<String>) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    // Captured before mesh preflight: a community removed while it awaits
+    // refuses this start below.
+    let admission = crate::managed_agents::AdmissionSnapshot::capture(state);
     let record_snapshot = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -240,7 +242,7 @@ pub(super) async fn start_local_agent_with_preflight(
             &personas,
             &global,
         );
-    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
+    preflight(mesh_model_id).await?;
 
     // The mesh preflight above is the suspension window Projects callbacks
     // capture their scope against: a community switch during that await
@@ -260,6 +262,14 @@ pub(super) async fn start_local_agent_with_preflight(
     let workspace_owner =
         crate::relay::bind_expected_signer(expected_signer_pubkey, workspace_owner_hex(state)?)?;
 
+    // Lock order matches `start_pair`: transition, then store, then runtime
+    // map. The transition lock is held until the pair is registered, so a
+    // removal either refuses this start or waits and its stop sweep finds it.
+    let transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let admitted = transition.admit(&admission, workspace_relay_url.as_str())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -300,6 +310,8 @@ pub(super) async fn start_local_agent_with_preflight(
         &mut runtimes,
         Some(workspace_owner.as_str()),
         &workspace_relay_url,
+        &admitted,
+        replay_floor_unix,
     )?;
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
@@ -647,9 +659,10 @@ pub async fn create_managed_agent(
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
             avatar_url: resolved_avatar_url.clone(),
-            acp_command: input
-                .acp_command
-                .as_deref()
+            acp_command: linked_persona
+                .as_ref()
+                .and_then(|persona| persona.acp_command.as_deref())
+                .or(input.acp_command.as_deref())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(DEFAULT_ACP_COMMAND)
@@ -666,6 +679,10 @@ pub async fn create_managed_agent(
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
             parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
+            session_policy: linked_persona
+                .as_ref()
+                .map(|persona| persona.session_policy)
+                .unwrap_or_default(),
             system_prompt: snapshot_prompt.or_else(|| {
                 input
                     .system_prompt
@@ -751,7 +768,8 @@ pub async fn create_managed_agent(
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
     let mut spawn_error = None;
     let agent = if input.spawn_after_create && input.backend == BackendKind::Local {
-        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None).await {
+        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None, None).await
+        {
             Ok(agent) => agent,
             Err(error) => {
                 let _store_guard = state
@@ -812,7 +830,7 @@ pub async fn create_managed_agent(
                 build_deploy_payload(&app, &state, rec)?
             };
             match deploy_to_provider(
-                &app, &state, &pubkey, id, config, agent_json, None, None, None,
+                &app, &state, &pubkey, id, config, agent_json, None, None, None, None,
             )
             .await
             {
@@ -860,6 +878,7 @@ pub async fn start_managed_agent(
     pubkey: String,
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
+    replay_floor_unix: Option<u64>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
@@ -959,6 +978,7 @@ pub async fn start_managed_agent(
                 false,
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
+                replay_floor_unix,
             )
             .await
         }
@@ -971,6 +991,9 @@ pub async fn start_managed_agent(
             // against the payload rebuilt after the deploy lock — the exact
             // payload invoked — so a switch racing the lock wait cannot deploy
             // the agent into the new tenant on behalf of a stale callback.
+            // The replay floor rides along so a publish-first mention send's
+            // remote harness replays past the already-published message, same
+            // as the local spawn path.
             deploy_to_provider(
                 &app,
                 &state,
@@ -981,6 +1004,7 @@ pub async fn start_managed_agent(
                 cached_binary_path.as_deref(),
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
+                replay_floor_unix,
             )
             .await?;
 
@@ -1087,6 +1111,20 @@ pub async fn stop_managed_agent(
 
 // Async so the blocking body (disk reads/writes, process termination, keyring
 // delete, nest regeneration) runs off the main UI thread via spawn_blocking.
+fn run_managed_agent_deletion<T>(
+    base_dir: &std::path::Path,
+    pubkey: &str,
+    records: &mut Vec<ManagedAgentRecord>,
+    delete: impl FnOnce(&mut Vec<ManagedAgentRecord>) -> Result<T, String>,
+) -> Result<T, String> {
+    recover_pending_assignment_cleanup(base_dir, |pending_pubkey| {
+        records
+            .iter()
+            .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
+    })?;
+    with_agent_assignments_cleared(base_dir, pubkey, || delete(records))
+}
+
 #[tauri::command]
 pub async fn delete_managed_agent(
     pubkey: String,
@@ -1102,6 +1140,12 @@ pub async fn delete_managed_agent(
                 .lock()
                 .map_err(|error| error.to_string())?;
             let mut records = load_managed_agents(&app)?;
+            let base_dir = managed_agents_base_dir(&app)?;
+            recover_pending_assignment_cleanup(&base_dir, |pending_pubkey| {
+                records
+                    .iter()
+                    .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
+            })?;
             let mut runtimes = state
                 .managed_agent_processes
                 .lock()
@@ -1135,16 +1179,17 @@ pub async fn delete_managed_agent(
                 }
             }
 
-            if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
-                stop_managed_agent_process(&app, record, &mut runtimes)?;
-            }
-            state.clear_agent_session_caches(&pubkey);
-            let initial_len = records.len();
-            records.retain(|record| record.pubkey != pubkey);
-            if records.len() == initial_len {
+            if !records.iter().any(|record| record.pubkey == pubkey) {
                 return Err(format!("agent {pubkey} not found"));
             }
-            save_managed_agents(&app, &records)?;
+            run_managed_agent_deletion(&base_dir, &pubkey, &mut records, |records| {
+                if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
+                    stop_managed_agent_process(&app, record, &mut runtimes)?;
+                }
+                state.clear_agent_session_caches(&pubkey);
+                records.retain(|record| record.pubkey != pubkey);
+                save_managed_agents(&app, records)
+            })?;
             crate::managed_agents::delete_agent_key(&pubkey);
             // Tombstone after confirmed removal (inside lock; every published
             // agent tombstones). The NIP-IA kind:9035 archive request — which
@@ -1181,6 +1226,9 @@ pub(crate) use profile::*;
 #[cfg(test)]
 use profile::{profile_needs_sync, resolve_legacy_avatar};
 
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "agents_admission_tests.rs"]
+mod admission_tests;
 #[cfg(test)]
 #[path = "agents_tests.rs"]
 mod tests;

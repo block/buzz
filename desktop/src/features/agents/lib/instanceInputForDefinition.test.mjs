@@ -138,9 +138,12 @@ test("row 3: failed persona avatar upload never substitutes the runtime avatar",
 });
 
 test("mapping carries the runtime and definition fields", async () => {
-  const input = await buildInstanceInputForDefinition(persona(), gooseRuntime);
+  const input = await buildInstanceInputForDefinition(
+    persona({ acpCommand: "buzz-janet-acp" }),
+    gooseRuntime,
+  );
   assert.equal(input.name, "Test Agent");
-  assert.equal(input.acpCommand, "buzz-acp");
+  assert.equal(input.acpCommand, "buzz-janet-acp");
   assert.equal(input.agentCommand, "goose-cmd");
   // B-5: agentArgs is intentionally empty at create time — spawn reads args
   // live from the definition on every start so definition edits take effect

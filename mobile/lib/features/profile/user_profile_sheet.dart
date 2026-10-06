@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
@@ -23,12 +26,25 @@ import '../../shared/profile/user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
-void showUserProfileSheet(BuildContext context, String pubkey) {
+///
+/// The sheet names [pubkey] as the opening surface did: within the live
+/// comparison context [names] (for example a channel's members or a Pulse
+/// timeline). Without it, the identity is compared only with itself.
+void showUserProfileSheet(
+  BuildContext context,
+  String pubkey, {
+  ProviderListenable<IdentityNames>? names,
+  WidgetBuilder? contextualActions,
+}) {
   showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) => UserProfileSheet(pubkey: pubkey),
+    builder: (_) => UserProfileSheet(
+      pubkey: pubkey,
+      names: names,
+      contextualActions: contextualActions,
+    ),
   ).then((channel) {
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
@@ -42,7 +58,20 @@ void showUserProfileSheet(BuildContext context, String pubkey) {
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
-  const UserProfileSheet({super.key, required this.pubkey});
+  /// The opening surface's comparison context. The sheet watches it, so its
+  /// title follows profile and context changes while it is open. The caller
+  /// owns the context, so this sheet depends on no other feature's state.
+  final ProviderListenable<IdentityNames>? names;
+
+  /// Optional actions supplied by the opening surface, below the profile tiles.
+  final WidgetBuilder? contextualActions;
+
+  const UserProfileSheet({
+    super.key,
+    required this.pubkey,
+    this.names,
+    this.contextualActions,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -54,7 +83,7 @@ class UserProfileSheet extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final presenceMap = ref.watch(presenceCacheProvider);
-    final presence = presenceMap[pk] ?? 'offline';
+    final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
@@ -83,14 +112,25 @@ class UserProfileSheet extends HookConsumerWidget {
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 
-    final displayName = profile?.displayName;
+    // Canonical npub for the copy action; null when [pubkey] is not a valid
+    // identity, in which case the copy tile is disabled — an invalid key is
+    // never placed on the clipboard.
+    final npub = fullNpub(pubkey);
+
+    // The contextual label from the opening surface, so the sheet names the
+    // identity exactly as the row that was tapped.
+    final opener = names;
+    final displayName =
+        (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
+            .labelFor(pk);
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
     Future<void> copyPublicKey() async {
-      await Clipboard.setData(ClipboardData(text: pubkey));
+      if (npub == null) return;
+      await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
       copied.value = true;
       _showProfileCopyToast(context);
@@ -169,14 +209,26 @@ class UserProfileSheet extends HookConsumerWidget {
                     // Display name — centered, large
                     Center(
                       child: Text(
-                        displayName ?? shortPubkey(pubkey),
+                        displayName,
                         style: context.textTheme.headlineSmall?.copyWith(
                           fontWeight: FontWeight.w700,
                         ),
                       ),
                     ),
-                    // Match Settings: status is quiet, centered copy directly
-                    // below the profile name rather than a separate information row.
+                    if (about.trim().isNotEmpty) ...[
+                      const SizedBox(height: Grid.xxs),
+                      SizedBox(
+                        width: double.infinity,
+                        child: Text(
+                          about,
+                          textAlign: TextAlign.center,
+                          style: context.textTheme.bodyMedium?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                    // Keep the current status centered beneath the profile identity.
                     if (userStatus != null && !userStatus.isEmpty)
                       SizedBox(
                         width: double.infinity,
@@ -239,37 +291,15 @@ class UserProfileSheet extends HookConsumerWidget {
                                 ? LucideIcons.check
                                 : LucideIcons.key,
                             label: copied.value ? 'Copied' : 'Copy public key',
+                            isEnabled: npub != null,
                             onTap: copyPublicKey,
                           ),
                         ),
                       ],
                     ),
                     const SizedBox(height: Grid.xs),
-
-                    // About / bio section
-                    if (about.isNotEmpty) ...[
-                      const SizedBox(height: Grid.xxs),
-                      Divider(
-                        color: context.colors.outlineVariant.withValues(
-                          alpha: 0.3,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.xxs),
-                      Text(
-                        'About',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.half),
-                      Text(
-                        about,
-                        style: context.textTheme.bodyMedium?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+                    if (contextualActions != null)
+                      Builder(builder: contextualActions!),
                   ],
                 ),
               ),
@@ -328,13 +358,13 @@ void _showProfileCopyToast(BuildContext context) {
 class _ProfilePresenceChip extends StatelessWidget {
   const _ProfilePresenceChip({required this.presence});
 
-  final String presence;
+  final String? presence;
 
   @override
   Widget build(BuildContext context) {
     final effectivePresence = switch (presence) {
-      'online' || 'away' => presence,
-      _ => 'offline',
+      'online' || 'away' || 'offline' => presence,
+      _ => null,
     };
     final backgroundColor = switch (effectivePresence) {
       'online' => context.appColors.success,
@@ -344,11 +374,13 @@ class _ProfilePresenceChip extends StatelessWidget {
     final label = switch (effectivePresence) {
       'online' => 'Online',
       'away' => 'Away',
-      _ => 'Offline',
+      'offline' => 'Offline',
+      _ => 'Unknown',
     };
 
     return Semantics(
       label: 'Presence: $label',
+      excludeSemantics: true,
       child: SizedBox(
         height: Grid.xl,
         child: Center(

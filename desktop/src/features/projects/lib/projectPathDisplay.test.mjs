@@ -9,14 +9,14 @@ test("keeps short repository paths intact", () => {
 
 test("shortens long repository paths to their trailing segments", () => {
   assert.equal(
-    shortenProjectPath("/Users/thomasp/sprout/projects/buzz"),
+    shortenProjectPath("/Users/sample-user/sprout/projects/buzz"),
     "…/sprout/projects/buzz",
   );
 });
 
 test("normalizes Windows separators for display", () => {
   assert.equal(
-    shortenProjectPath("C:\\Users\\thomasp\\repos\\buzz"),
-    "…/thomasp/repos/buzz",
+    shortenProjectPath("C:\\Users\\sample-user\\repos\\buzz"),
+    "…/sample-user/repos/buzz",
   );
 });

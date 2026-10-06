@@ -31,27 +31,53 @@ pub mod error;
 mod test_support;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, ReadSession,
+    insert_mentions, migration, replica_fence, Db, DbConfig, DbConnectionOutcome, DbConnectionStep,
+    DbPoolRole, DbPoolStats, DbReadinessOutcome, ReadSession,
 };
+
+/// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
+    runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
+
+/// Raw Prometheus series ceiling per relay pod for the operation-aware contract.
+pub const DB_POOL_ACQUIRE_RAW_SERIES_PER_POD: usize =
+    runtime::observability::POOL_ACQUIRE_RAW_SERIES_PER_POD;
+
+/// Valid database connection role/step pairs with a start counter.
+pub const DB_CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+    runtime::CONNECTION_STARTED_STEPS;
+
+/// Valid database connection role/step pairs with a duration histogram.
+pub const DB_CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+    runtime::CONNECTION_DURATION_STEPS;
+
+/// Valid database connection role/step/outcome terminal combinations.
+pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 15] =
+    runtime::CONNECTION_TERMINALS;
+
+/// Raw Prometheus series ceiling per pod for connection-step telemetry.
+pub const DB_CONNECTION_RAW_SERIES_PER_POD: usize = runtime::CONNECTION_RAW_SERIES_PER_POD;
 pub(crate) use runtime::{
     insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
     RoutePredicate,
 };
 pub use store::{
-    admin_moderation, allowlist, api_token, archived_identities, channel, channel_members,
-    community, deletion, dm, event, feed, git_repo, moderation, partition, product_feedback, push,
-    reaction, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
-    replaceable, thread, usage, user, workflow,
+    admin_moderation, allowlist, api_token, archived_identities, artifact, channel,
+    channel_members, community, deletion, dm, event, feed, git_repo, moderation, operator_listener,
+    partition, product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite,
+    relay_members, relay_operators, reminder, replaceable, storage_accounting, thread,
+    thread_window, usage, user, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
 pub use api_token::{ApiTokenRecord, TokenSummary};
 pub use community::{
     ArchivedCommunityRecord, CommunityRecord, CreateCommunityWithOwnerResult,
-    CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord,
+    CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord, UnarchiveCommunityResult,
     UnarchivedCommunityRecord,
 };
 pub use error::{DbError, Result};
+pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;

@@ -277,6 +277,30 @@ test("open thread panels survive reload", async ({ page }) => {
   await expect(threadPanel).toBeVisible();
 });
 
+test("inbox unread-only choice survives navigation and reload", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const options = page.getByRole("button", { name: "Inbox options" });
+  const unreadOnly = page.getByRole("switch", { name: "Show unread only" });
+  await options.click();
+  await expect(unreadOnly).not.toBeChecked();
+
+  for (const enabled of [true, false]) {
+    await unreadOnly.setChecked(enabled);
+    await page.keyboard.press("Escape");
+    await page.getByTestId("open-agents-view").click();
+    await expect(page.getByTestId("home-inbox-list")).not.toBeVisible();
+    await page.getByTestId("global-back").click();
+    await options.click();
+    await expect(unreadOnly).toBeChecked({ checked: enabled });
+
+    await page.reload();
+    await options.click();
+    await expect(unreadOnly).toBeChecked({ checked: enabled });
+  }
+});
+
 test("home inbox selection survives reload and back restores it", async ({
   page,
 }) => {
@@ -577,21 +601,38 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
     name: "Open repository relaytoolsobservabilityconsole-main",
   });
   await expect(sentChip).toBeVisible();
+  await expect(sentChip).toHaveClass(/wrapping-inline-chip/);
   await sentChip.evaluate((element) => {
     const container = element.parentElement;
     if (container) container.style.width = "220px";
   });
-  const fragmentRects = await sentChip.evaluate((element) =>
-    Array.from(element.getClientRects(), (rect) => ({
+  const fragmentMetrics = await sentChip.evaluate((element) => {
+    const chipStyle = getComputedStyle(element);
+    const rects = Array.from(element.getClientRects(), (rect) => ({
       bottom: rect.bottom,
       height: rect.height,
       left: rect.left,
       right: rect.right,
       top: rect.top,
       width: rect.width,
-    })).filter((rect) => rect.width > 0 && rect.height > 0),
-  );
-  expect(fragmentRects.length).toBeGreaterThanOrEqual(2);
+    })).filter((rect) => rect.width > 0 && rect.height > 0);
+    const fragmentTops = Array.from(
+      new Set(rects.map((rect) => Math.round(rect.top))),
+    ).sort((a, b) => a - b);
+    return {
+      boxDecorationBreak:
+        chipStyle.getPropertyValue("box-decoration-break") ||
+        chipStyle.getPropertyValue("-webkit-box-decoration-break"),
+      fragmentStep:
+        fragmentTops.length > 1 ? fragmentTops[1] - fragmentTops[0] : null,
+      lineHeight: Number.parseFloat(chipStyle.lineHeight),
+      rects,
+    };
+  });
+  expect(fragmentMetrics.boxDecorationBreak).toBe("clone");
+  expect(fragmentMetrics.lineHeight).toBe(22);
+  expect(fragmentMetrics.fragmentStep).toBe(22);
+  expect(fragmentMetrics.rects.length).toBeGreaterThanOrEqual(2);
 
   const tooltip = page.getByRole("tooltip");
   await sentChip.focus();

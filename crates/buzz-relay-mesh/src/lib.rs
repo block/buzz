@@ -148,6 +148,12 @@ pub trait RelayMeshMembership: Send + Sync + 'static {
     fn local_runtime_id(&self) -> RuntimeId;
     /// Begin drain: gossip `draining=true`, stop accepting new sessions.
     fn begin_drain(&self);
+    /// Whether the record for exactly `runtime_id` advertises `capability`.
+    /// Runtime ids are boot-unique, so a positive answer describes that very
+    /// process. Unknown peers — and implementations without records — say no.
+    fn peer_has_capability(&self, _runtime_id: RuntimeId, _capability: &str) -> bool {
+        false
+    }
 }
 
 /// Seam 2: transport. Moves fenced bytes to a specific runtime.

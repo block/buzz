@@ -11,7 +11,7 @@ use crate::{
     action::AuditAction,
     entry::{AuditEntry, NewAuditEntry},
     error::AuditError,
-    hash::{compute_hash, to_storage_precision},
+    hash::{compute_hash, to_storage_precision, CURRENT_HASH_VERSION},
 };
 
 /// The `created_at` stamped on a new entry.
@@ -119,6 +119,7 @@ impl AuditService {
         let mut audit_entry = AuditEntry {
             community_id,
             seq,
+            hash_version: CURRENT_HASH_VERSION,
             hash: Vec::new(),
             prev_hash,
             action: entry.action,
@@ -135,8 +136,8 @@ impl AuditService {
         sqlx::query(
             r#"
             INSERT INTO audit_log
-                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at, hash_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(audit_entry.community_id)
@@ -148,6 +149,7 @@ impl AuditService {
         .bind(audit_entry.object_id.as_deref())
         .bind(&audit_entry.detail)
         .bind(audit_entry.created_at)
+        .bind(audit_entry.hash_version)
         .execute(&mut *tx)
         .await?;
 
@@ -175,7 +177,7 @@ impl AuditService {
         let rows = sqlx::query(
             r#"
             SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
-                   object_id, detail, created_at
+                   object_id, detail, created_at, hash_version
             FROM audit_log
             WHERE community_id = $1 AND seq BETWEEN $2 AND $3
             ORDER BY seq ASC
@@ -231,7 +233,7 @@ impl AuditService {
         let rows = sqlx::query(
             r#"
             SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
-                   object_id, detail, created_at
+                   object_id, detail, created_at, hash_version
             FROM audit_log
             WHERE community_id = $1 AND seq >= $2
             ORDER BY seq ASC
@@ -258,6 +260,7 @@ fn row_to_audit_entry(row: &sqlx::postgres::PgRow) -> Result<AuditEntry, AuditEr
     Ok(AuditEntry {
         community_id: row.get::<Uuid, _>("community_id"),
         seq: row.get("seq"),
+        hash_version: row.get("hash_version"),
         hash: row.get("hash"),
         prev_hash: row.get("prev_hash"),
         action,
@@ -343,6 +346,7 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(e.seq, 1, "first entry in a community starts at seq 1");
+        assert_eq!(e.hash_version, CURRENT_HASH_VERSION);
         assert!(e.prev_hash.is_none(), "genesis entry has NULL prev_hash");
         assert_eq!(e.hash.len(), 32);
         assert_eq!(e.community_id, c);
@@ -358,8 +362,18 @@ mod postgres_tests {
         let svc = AuditService::new(pool.clone());
         let c = make_community(&pool).await;
 
-        let e1 = svc
+        let mut e1 = svc
             .log(new_entry(c, AuditAction::EventCreated))
+            .await
+            .unwrap();
+        // Model a historical row, including the migration's version default.
+        e1.hash_version = 1;
+        e1.hash = compute_hash(&e1).unwrap().to_vec();
+        sqlx::query("UPDATE audit_log SET hash_version = DEFAULT, hash = $1 WHERE community_id = $2 AND seq = $3")
+            .bind(&e1.hash)
+            .bind(c)
+            .bind(e1.seq)
+            .execute(&pool)
             .await
             .unwrap();
         let e2 = svc
@@ -374,6 +388,8 @@ mod postgres_tests {
         assert_eq!(e1.seq, 1);
         assert_eq!(e2.seq, 2);
         assert_eq!(e3.seq, 3);
+        assert_eq!(e2.hash_version, CURRENT_HASH_VERSION);
+        assert_eq!(e3.hash_version, CURRENT_HASH_VERSION);
         assert!(e1.prev_hash.is_none());
         assert_eq!(e2.prev_hash.as_deref(), Some(e1.hash.as_slice()));
         assert_eq!(e3.prev_hash.as_deref(), Some(e2.hash.as_slice()));
@@ -381,6 +397,13 @@ mod postgres_tests {
             .verify_chain(CommunityId::from_uuid(c), 1, 3)
             .await
             .unwrap());
+        let rows = svc
+            .get_entries(CommunityId::from_uuid(c), 1, 3)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].hash_version, 1);
+        assert_eq!(rows[0].hash, e1.hash);
+        assert_eq!(rows[1].hash_version, CURRENT_HASH_VERSION);
     }
 
     /// THE isolation property: two communities keep independent chains. Each
@@ -460,20 +483,19 @@ mod postgres_tests {
         svc.log(new_entry(c, AuditAction::EventCreated))
             .await
             .unwrap();
-        let e2 = svc
-            .log(new_entry(c, AuditAction::EventDeleted))
-            .await
-            .unwrap();
+        let mut input = new_entry(c, AuditAction::EventDeleted);
+        input.actor_pubkey = Some(vec![1; 32]);
+        let e2 = svc.log(input).await.unwrap();
         svc.log(new_entry(c, AuditAction::ChannelDeleted))
             .await
             .unwrap();
 
-        // Tamper with e2's stored actor_pubkey.
-        let tampered: Vec<u8> = vec![0xff; 32];
-        sqlx::query("UPDATE audit_log SET actor_pubkey = $1 WHERE community_id = $2 AND seq = $3")
-            .bind(tampered)
+        // This shift preserved the old concatenated bytes, but changes TLV.
+        sqlx::query("UPDATE audit_log SET actor_pubkey = $1, object_id = $4 WHERE community_id = $2 AND seq = $3")
+            .bind(vec![1_u8; 31])
             .bind(c)
             .bind(e2.seq)
+            .bind(format!("\u{1}{}", e2.object_id.as_deref().unwrap()))
             .execute(&pool)
             .await
             .unwrap();
@@ -503,8 +525,8 @@ mod postgres_tests {
 
         // Forge: copy A's seq-1 row's hash into B's chain at seq 1.
         sqlx::query(
-            "INSERT INTO audit_log (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
-             VALUES ($1, 1, $2, NULL, $3, $4, $5, $6, NOW())",
+            "INSERT INTO audit_log (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at, hash_version)
+             VALUES ($1, 1, $2, NULL, $3, $4, $5, $6, $7, $8)",
         )
         .bind(b)
         .bind(&a1.hash) // A's hash, which was computed over community_id = A
@@ -512,6 +534,8 @@ mod postgres_tests {
         .bind(a1.actor_pubkey.as_deref())
         .bind(a1.object_id.as_deref())
         .bind(&a1.detail)
+        .bind(a1.created_at)
+        .bind(a1.hash_version)
         .execute(&pool)
         .await
         .unwrap();

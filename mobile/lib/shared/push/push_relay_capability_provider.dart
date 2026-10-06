@@ -15,11 +15,13 @@ final buzzPushDescriptorFetcherProvider = Provider<BuzzPushDescriptorFetcher>(
 
 /// The fully validated push capability advertised by the current relay.
 ///
+/// An unconfigured artifact has no capability and never starts discovery.
 /// Discovery fails closed. An absent, malformed, or unreachable NIP-11 push
 /// descriptor is represented as no capability, so no notification permission,
 /// APNs registration, gateway enrollment, or relay lease can begin.
 final currentRelayPushDescriptorProvider =
     FutureProvider.autoDispose<BuzzPushLeaseDescriptor?>((ref) async {
+      if (!Env.pushGatewayConfigured) return null;
       final session = ref.watch(relaySessionProvider);
       final config = ref.watch(relayConfigProvider);
       final community = ref.watch(activeCommunityProvider).value;

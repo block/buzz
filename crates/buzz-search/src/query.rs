@@ -252,6 +252,9 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push_bind(*query.community.as_uuid());
     qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
 
+    // Search is a current-state surface; old artifact snapshots cannot match.
+    qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND NOT ah.deleted))");
+
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the
     // three carry-over cases; `ChannelLessOnly` is the new fence that the

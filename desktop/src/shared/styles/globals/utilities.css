@@ -1,3 +1,9 @@
+@utility rounded-squircle {
+  border-radius: 0;
+  -webkit-clip-path: url("#rounded-squircle-clip");
+  clip-path: url("#rounded-squircle-clip");
+}
+
 @layer utilities {
   /*
    * Skips rendering (layout, paint) for offscreen rows while keeping them in

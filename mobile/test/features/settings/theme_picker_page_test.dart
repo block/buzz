@@ -666,12 +666,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(selectionHaptics, 1);
 
-      final scrubber = tester.getRect(
-        find.byKey(const ValueKey('theme-preview-scrubber')),
-      );
-      await tester.tapAt(
-        Offset(scrubber.left + scrubber.width * 0.75, scrubber.center.dy),
-      );
+      await tester.tap(find.byKey(const ValueKey('theme-pagination-dot-1')));
       await tester.pumpAndSettle();
       expect(selectionHaptics, 2);
     });

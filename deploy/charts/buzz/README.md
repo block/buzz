@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.8 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.10 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -110,10 +110,266 @@ SigV4 signing, so do not put the bucket into `s3.endpoint`; pass Railway's base
 
 Object storage is contacted during relay startup only when
 `BUZZ_GIT_CONFORMANCE_PROBE` is enabled (the relay default). A probe failure is
-startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
-disables that probe through `relay.extraEnv`, `/_readiness` does not test object
-storage; configuration is still parsed strictly, but reachability and addressing
-errors surface on the first storage operation.
+startup-fatal, so the process exits and Kubernetes readiness never opens. If an
+operator explicitly disables that probe through `relay.extraEnv`, configuration
+is still parsed strictly, but reachability and addressing errors surface on the
+first storage operation. `/_readiness` tests no external dependency in either
+case — see the readiness contract below.
+
+## Community deletion operator job
+
+`operatorJobs.deletionDrain` is a disabled-by-default, typed CronJob for
+`/usr/local/bin/buzz-admin deletions drain`. It runs inside the relay image with
+bounded Job lifetime/history, `concurrencyPolicy: Forbid`, `backoffLimit: 0`,
+and no relay HTTP call. Postgres deletion requests, leases, retries, and
+checkpoints remain the execution authority.
+
+The pod receives only `DATABASE_URL`, `REDIS_URL`, and required S3
+configuration/credential variables. It does not receive the relay private key,
+git-hook secret, relay URL, service links, or a generic environment registry.
+The chart disables the ordinary Kubernetes API service-account token mount;
+platform workload-identity admission may still inject its own projected token
+and provider environment variables. Schedule,
+deadline, history, termination grace, resources, service account, pod labels,
+and pod annotations are independently configurable under
+`operatorJobs.deletionDrain`.
+
+See [`docs/operator-community-deletion.md`](../../../docs/operator-community-deletion.md)
+for enablement, permissions, the staffed first-run procedure, failure recovery,
+and the current explicit approval/alerting boundaries.
+
+### Early-startup telemetry contract
+
+`buzz_process_lifecycle` JSON records are the authoritative history for the
+fixed phases `crypto_init`, `tracing_init`, `config_load`, `key_load`, and
+`metrics_bind`, plus the aggregate `process_telemetry` result. They use bounded
+status/reason values and never contain raw configuration, keys, URLs, or errors.
+These phases intentionally do not emit metrics. Most run before the Prometheus
+exporter exists, and one uniform log-only contract preserves every phase's real
+event time and failure without assigning an eventual scrape time to earlier work.
+
+### Readiness contract
+
+**`/_readiness` reports local process lifecycle only.** It performs no
+Postgres, Redis, or deletion-catalog I/O: `shutting_down` returns 503, and any
+other state returns 200. Shared dependencies are shared by every replica, so
+gating the probe on them removed the whole deployment from the load balancer at
+once and left a reconnect burst with nowhere to land. There is no separate
+"starting" state — the health listener does not bind until the database,
+migrations, Redis, and pub/sub are up, so a process that can answer has booted.
+
+Shared-dependency health moved to **`/_status`** on the same private health
+listener, under a `dependencies` object carrying the `postgres`, `redis`,
+`deletion_catalog`, and aggregate `reason` fields the readiness body used to
+return. Do not wire `/_status` to a Kubernetes probe.
+
+**`/_status` is a cached read.** It performs no Postgres, Redis, or
+deletion-catalog I/O of its own. One background loop per pod evaluates the
+three dependencies **every 30 seconds**, awaiting each evaluation before taking
+the next tick, so a pod never has more than one evaluation in flight no matter
+how often — or how rarely — the endpoint is read. The loop publishes the
+dependency metrics below and caches the report `/_status` serves. Its first
+cycle runs at startup, and each evaluation is bounded by a two-second budget.
+
+Every `dependencies` object therefore states how old its report is:
+
+| Field | Meaning |
+|-------|---------|
+| `sample: "not_yet_sampled"` | the first cycle has not completed; no `postgres`/`redis`/`deletion_catalog`/`reason` fields are present, because there is no observation to report |
+| `sample: "fresh"` | the report is at most two cadences (60s) old |
+| `sample: "stale"` | the report outlived two cadences, so the sampler missed at least one cycle — read the verdict as history, not as current state |
+| `sample_age_seconds` | age of the report at request time (absent when `not_yet_sampled`) |
+| `sample_interval_seconds` | the sampling cadence, `30` |
+
+Polling `/_status` more often than the cadence returns the same cached report;
+it does not make the data fresher and adds no dependency load.
+
+### Readiness telemetry contract
+
+Only requests served by the private health listener (`BUZZ_HEALTH_PORT`) emit
+rollout telemetry. The compatibility `/_readiness` route on the public app
+listener returns the same lifecycle answer but does not change these metrics.
+
+| Metric | Type | Labels | Source |
+|--------|------|--------|--------|
+| `buzz_readiness_checks_total` | counter | `reason` ∈ {`ready`, `shutting_down`} | `/_readiness` |
+| `buzz_readiness_state` | gauge | `check="overall"`; latest private probe observation, 1 ready or 0 shutting down | `/_readiness` |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` | dependency sampler |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only | dependency sampler |
+| `buzz_readiness_dependency_sample_completed_timestamp_seconds` | gauge | none; Unix time the cached report completed | completion publisher |
+
+The three dependency families keep their `buzz_readiness_*` names for dashboard
+continuity, but nothing about them is request-driven any more: the 30-second
+sampler publishes them whether or not anyone reads `/_status`, so a quiet
+endpoint no longer produces a flat dashboard during the outage it exists to
+explain.
+
+`buzz_readiness_dependency_sample_completed_timestamp_seconds` carries **when
+the cached report completed**, in Unix seconds. The relay sampler is the only
+owner allowed to advance that epoch, and it writes it immediately after the
+cache is replaced. A separate bounded publisher re-emits the stored epoch often
+enough to survive local gauge idle-timeout; republishing never advances the
+timestamp. If a republish races a newer completion, one scrape can briefly see
+the older epoch, but the republish path verifies after writing and repairs to the
+newer stored epoch before that republish call returns. So the value stands still
+when sampling stops, and the time elapsed since it was written is whatever the
+reader computes at read time.
+
+Following the `buzz_storage_sweep_age_seconds` convention, the series is not
+emitted until the first sample completes: its absence means "not yet sampled",
+not "fresh".
+
+That is the whole server-side contract. Freshness alerting is built from this
+gauge in the monitoring provider, and the monitor query, thresholds, and
+per-pod tag grouping belong with the deployment's monitor configuration rather
+than in this chart — they depend on the provider's query grammar and on the
+tags its agent attaches, neither of which this repo owns.
+
+Two properties of the neighboring families are worth knowing when building
+that alerting. `buzz_readiness_dependency_checks_total` and
+`buzz_readiness_check_duration_seconds` are cumulative, so a sampler that stops
+leaves their last values exported and scraped indefinitely: those series stay
+present and flat rather than disappearing. And per-report freshness for a human
+reading a single pod is already on the `sample`, `sample_age_seconds`, and
+`sample_interval_seconds` fields of `/_status` above.
+
+The schema has a ceiling of 87 raw Prometheus series per pod: 2 probe reasons,
+11 valid dependency/outcome pairs, 72 histogram series, and 2 gauges (overall lifecycle + completion timestamp). Do not
+add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant, user,
+community, pubkey, header, query, or other request-controlled labels. A
+readiness probe records no dependency attempt or latency sample at all.
+The readiness gauge is not a monotonic lifecycle mirror: shutdown changes the
+authoritative lifecycle flag, and the next private readiness probe observes and
+publishes that state.
+
+### Community admission telemetry
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_community_admission_checks_total` | counter | `outcome` ∈ {`active`, `inactive`, `check_error`} |
+
+Counts the durable community-active check run before a socket is admitted.
+Admission is fail-closed: only `active` serves. `inactive` (a confirmed
+archival answer) and `check_error` (the lookup itself failed, so the tenant
+lifecycle is unknown) both refuse the socket before any AUTH or REQ frame is
+read; the client sees an ordinary dial failure and retries. The two outcomes
+stay distinct so a rise in `check_error` reads as database pressure rather than
+archival. `outcome` is the only dimension — community and error text are
+request-controlled and must never become labels.
+
+### Operation-aware database pool acquisition contract
+
+The operation-aware families separate four questions: when an operation asked
+for a connection, who is waiting now, how completed/abandoned attempts ended,
+and how long checkout waits took.
+Outcome remains on the terminal counter for historical deployment comparison;
+it is intentionally absent from the expensive duration histogram.
+
+These families cover the explicitly routed deployment-critical operations
+listed below; they are not a count of every SQLx checkout in Buzz. In
+particular, a zero operation waiter does not prove that the shared SQLx pool
+has no uninstrumented waiter. Interpret it beside the pool active, idle, and
+maximum gauges when diagnosing total capacity pressure.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_acquire_started_total` | counter | `pool_role`, `operation` |
+| `buzz_db_pool_acquire_duration_seconds` | histogram | `pool_role`, `operation` |
+| `buzz_db_pool_acquire_attempts_total` | counter | `pool_role`, `operation`, `outcome` |
+| `buzz_db_pool_waiters` | gauge | `pool_role`, `operation`; tracked operations only, periodically refreshed including zero |
+
+Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
+`bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
+`authorization`, `subscription_history`, `event_write`, and `maintenance`.
+Only the following eleven pairs are valid:
+
+```text
+writer/bootstrap                 reader/bootstrap
+writer/readiness
+writer/tenant_resolution
+writer/authentication
+writer/authorization             reader/authorization
+writer/subscription_history      reader/subscription_history
+writer/event_write
+writer/maintenance
+```
+
+Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
+series per valid pair. The new contract therefore has a hard ceiling of 198
+raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+families remain temporarily for dashboard compatibility and are not part of
+that new-family budget. No `other` operation or request-controlled/sensitive
+label is valid.
+
+### Writer connection setup contract
+
+Writer connection setup is separate from checkout. At boot, SQLx constructs
+the writer pool and creates its minimum physical connections. Later it may
+create more when the pool grows or replaces a broken or expired connection.
+Every connected writer session must install the created-at floor, install the
+session timeouts, verify READ COMMITTED isolation, and reach `ready` before SQLx
+can give it to a caller.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_connection_step_started_total` | counter | `pool_role`, `step` |
+| `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
+| `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
+
+The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+`session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
+duration, and terminal evidence. `physical_connect` and `ready` are success
+milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
+authentication finish, so Buzz does not invent separate timings for those
+internal phases. Raw connect failures before `after_connect` are classified on
+the aggregate `writer_pool` phase during initial construction. Outcomes are
+`succeeded`, `failed`, `timed_out`, and `cancelled` where valid.
+
+For a measurable phase on one pod, subtract all terminal outcomes from its
+start counter to derive the number of attempts currently in progress. The
+session phases run in order, so a later phase start also proves the earlier
+phases succeeded for that attempt.
+
+Four start counters, four 13-series histograms, and fifteen terminal counters
+create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
+labels.
+
+When audit logging is enabled, the `buzz_db_connection_*` metric totals combine
+the main writer pool and the separate audit writer pool.
+
+### Physical database pool utilization and configuration contract
+
+Every physical Postgres pool the relay owns reports current utilization,
+capacity, and configuration under role-labelled families. The role vocabulary
+is closed — `writer`, `reader`, `audit`, `search` — and all four roles are always
+present, so a series never appears or disappears when an optional pool is
+enabled or disabled. An unconfigured optional pool reports
+`buzz_db_pool_configured` `0` with zero utilization and capacity rather than
+going missing.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_db_pool_connections` | gauge | `pool_role`, `state` |
+| `buzz_db_pool_max_connections` | gauge | `pool_role` |
+| `buzz_db_pool_configured` | gauge | `pool_role`; `1` configured, `0` not configured |
+
+States are `idle` and `active`; their sum is the pool's current size.
+`buzz_db_pool_max_connections` reports capacity separately, so summing the
+connections family counts each current connection exactly once. The three
+families are fixed at 16 raw Prometheus series per pod (`4 × 2` current
+utilization plus `4` maximum capacity plus `4` configured). The `audit` and
+`search` roles are statistics-only: pool ownership, capacities, timeouts, and
+query routing are unchanged, and these roles emit no acquisition telemetry.
+
+The pre-existing unlabelled `buzz_db_pool_*` (writer) and `buzz_db_read_pool_*`
+(reader) gauges are still exported unchanged for dashboard compatibility. The
+reader family remains absent when no read replica is configured; use
+`buzz_db_pool_configured{pool_role="reader"}` for the explicit signal.
+
+Pool sizing and the aggregate connection budget across all four roles remain
+deployment configuration concerns. The relay does not enforce a combined
+connection ceiling.
 
 ## Relay Pod extensions
 

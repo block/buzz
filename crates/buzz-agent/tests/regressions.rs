@@ -1444,8 +1444,8 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
         )
         .await;
 
-    // Wait for the tool call to be in-progress.
-    h.recv_until(|v| {
+    // Approve the tool so this test reaches execution before cancelling it.
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))
@@ -2706,6 +2706,30 @@ async fn ordinary_400_stays_terminal_and_triggers_no_recovery() {
 /// part of the assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_recovery_budget_exhaustion_surfaces_the_error() {
+    assert_context_recovery_budget_exhaustion(false).await;
+}
+
+/// The same real provider/ACP scenario with stderr collection held until after
+/// the stdout response. The old immediate snapshot cannot observe the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_recovery_budget_exhaustion_waits_for_delayed_stderr() {
+    assert_context_recovery_budget_exhaustion(true).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "timed out waiting for stderr diagnostic")]
+async fn stderr_diagnostic_wait_is_bounded_when_absent() {
+    let llm = spawn_capturing_llm(vec![]).await;
+    let h = Harness::spawn(&llm.url).await;
+    h.wait_for_stderr(
+        "diagnostic that is never emitted",
+        Duration::from_millis(20),
+    )
+    .await;
+}
+
+async fn assert_context_recovery_budget_exhaustion(delay_stderr: bool) {
+    let (release_stderr, stderr_gate) = tokio::sync::oneshot::channel();
     // Enough canned 400s that the queue is never the thing that stops the loop;
     // the fallback response is also a 400-shaped body under this helper only if
     // queued, so keep the queue generously long.
@@ -2713,7 +2737,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         .map(|_| (400, openai_context_length_error()))
         .collect();
     let llm = spawn_capturing_llm_with_status(responses).await;
-    let mut h = Harness::spawn_with_env(
+    let mut h = Harness::spawn_with_stderr_gate(
         &llm.url,
         &[
             ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
@@ -2723,6 +2747,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
             ),
             ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
         ],
+        delay_stderr.then_some(stderr_gate),
     )
     .await;
     let sid = init_session(&mut h, json!([])).await;
@@ -2751,8 +2776,27 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
     // floor produce a surfaced error, so the assertion above passes either way
     // — and the floor can fire on the first rung without the budget ever being
     // consumed, which would make this test silently exercise a different
-    // mechanism than its name claims. Pin the budget explicitly.
-    let stderr = h.stderr_text();
+    // mechanism than its name claims. Pin the budget explicitly. Stdout is not
+    // a barrier for the independent stderr collector.
+    let stderr = {
+        let wait = h.wait_for_stderr("context recovery budget spent", Duration::from_secs(5));
+        tokio::pin!(wait);
+        if delay_stderr {
+            assert!(
+                !h.stderr_text().contains("context recovery budget spent"),
+                "the old immediate snapshot must miss the held diagnostic"
+            );
+            // Prove the actual wait stays pending before releasing the collector,
+            // without a sleep or depending on how quickly either task runs.
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release_stderr.send(()).expect("release stderr collection");
+        }
+        wait.await
+    };
     assert!(
         stderr.contains("context recovery budget spent"),
         "the per-run recovery BUDGET must be what stops the loop here, not the prompt floor; \
@@ -2766,6 +2810,15 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         rungs, 3,
         "expected all 3 recovery rungs to be attempted before giving up, saw {rungs} — \
          stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("context recovery would shrink"),
+        "the prompt floor must not stop this fixture: {stderr}"
+    );
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        4,
+        "expected the rejected completion plus exactly three failed summaries"
     );
     h.shutdown().await;
 }
@@ -2816,7 +2869,9 @@ async fn small_history_context_400_refuses_rescue_at_the_prompt_floor() {
         r0.get("error").is_some(),
         "a context 400 with no shrinkable history must surface the error, got: {r0}"
     );
-    let stderr = h.stderr_text();
+    let stderr = h
+        .wait_for_stderr("context recovery would shrink", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("below the") && stderr.contains("floor"),
         "the prompt-budget FLOOR must be what stops this, not the recovery budget; got: {stderr}"
@@ -3283,16 +3338,16 @@ async fn handoff_cap_binds_within_a_single_turn() {
     //  req 1: turn 1 complete()            → usage=950 (over threshold=900)
     //  req 2: turn 2 round 0 summarize()   → summary (handoff_attempts: 0→1)
     //  req 3: turn 2 round 0 complete()    → tool_call + usage=950 (re-arms gate)
-    //         [fake-mcp tool executes; steer queued while run is active]
-    //  req 4: turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
+    //         [steer accepted while fake-mcp tool waits for approval]
+    //         turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
     //                                         → WARN, skip (cap exhausted for this turn)
-    //  req 5: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
+    //  req 4: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
     let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
     // Build a tool-call response that also carries usage so the gate re-arms
     // on round 1's preflight (without usage, last_request_input_tokens is None
     // after the handoff clears it, and the byte-fallback won't fire on tiny history).
     let tool_call_with_usage = {
-        let mut v = openai_tool_call("tc-1", "test_tool", json!({}));
+        let mut v = openai_tool_call("tc-1", "cap_test__tool_0", json!({}));
         v["usage"] = json!({
             "prompt_tokens": 950u64,
             "completion_tokens": 5,
@@ -3322,7 +3377,7 @@ async fn handoff_cap_binds_within_a_single_turn() {
     )
     .await;
 
-    // Init with the fake MCP server so test_tool is available.
+    // Init with the fake MCP server so cap_test__tool_0 is available.
     h.send(
         "initialize",
         json!({"protocolVersion":1,"clientCapabilities":{}}),
@@ -3366,76 +3421,59 @@ async fn handoff_cap_binds_within_a_single_turn() {
         )
         .await;
 
-    // Drain until the final response, approving tool-permission requests,
-    // capturing the activeRunId once it is broadcast, sending one steer,
-    // and verifying that it is accepted in the live run.
-    let mut run_id: Option<String> = None;
-    let mut steer_id: i64 = -1;
-    let mut steer_accepted = false;
-    loop {
-        let v = h.recv().await;
+    let update = h
+        .recv_until(|v| v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string())
+        .await;
+    let run_id = update["params"]["update"]["_meta"]["goose"]["activeRunId"]
+        .as_str()
+        .unwrap();
 
-        // Capture the run id from the first session/update that carries it,
-        // then immediately queue a steer.  This must happen before round 1 so
-        // the steer text is present but the cap check still fires — proving
-        // the counter is not reset by the steer path.
-        if run_id.is_none() {
-            if let Some(rid) = v["params"]["update"]["_meta"]["goose"]["activeRunId"].as_str() {
-                run_id = Some(rid.to_owned());
-                steer_id = h
-                    .send(
-                        "_goose/unstable/session/steer",
-                        json!({
-                            "sessionId": sid,
-                            "expectedRunId": rid,
-                            "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
-                        }),
-                    )
-                    .await;
-            }
-        }
-
-        // Steer response: assert it was accepted in the live run.
-        if steer_id >= 0 && v["id"] == json!(steer_id) {
-            assert!(
-                v.get("result").is_some(),
-                "steer must be accepted while the run is active; got: {v}"
-            );
-            assert_eq!(
-                v["result"]["runId"].as_str(),
-                run_id.as_deref(),
-                "steer must reference the live run id"
-            );
-            steer_accepted = true;
-            continue;
-        }
-
-        if v.get("method") == Some(&json!("session/request_permission")) {
-            h.write(approve_permission(&v)).await;
-            continue;
-        }
-        if v["id"] == json!(p2) {
-            assert!(
-                v.get("result").is_some(),
-                "turn 2 must succeed even when cap blocks round-1 handoff; got: {v}"
-            );
-            break;
-        }
-    }
-
+    // Hold tool approval after the first handoff so the steer is accepted
+    // before round 1, regardless of how the agent and test are scheduled.
+    let permission = h
+        .recv_until(|v| v["method"] == "session/request_permission" || v["id"] == json!(p2))
+        .await;
+    assert_eq!(permission["method"], "session/request_permission");
+    let steer_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": run_id,
+                "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
+            }),
+        )
+        .await;
+    let steer = h.recv_until(|v| v["id"] == json!(steer_id)).await;
+    assert_eq!(
+        steer["result"]["runId"].as_str(),
+        Some(run_id),
+        "steer must be accepted in the live run; got: {steer}"
+    );
+    h.write(approve_permission(&permission)).await;
+    let response = h.recv_until(|v| v["id"] == json!(p2)).await;
     assert!(
-        steer_accepted,
-        "steer was never accepted during turn 2; the steer arm is missing coverage"
+        response.get("result").is_some(),
+        "turn 2 must succeed even when cap blocks round-1 handoff; got: {response}"
     );
 
     // 4 LLM requests: seed + summarize + tool-call-with-usage + final-complete.
-    let count = llm.captured.lock().await.len();
+    let requests = llm.captured.lock().await;
+    let count = requests.len();
     assert_eq!(
         count, 4,
         "expected 4 LLM requests (seed + summarize + tool-call + final); got {count}"
     );
 
-    let stderr = h.stderr_text();
+    assert!(
+        requests[3]["messages"].to_string().contains("STEER-CANARY"),
+        "the final request must include the accepted steer"
+    );
+    drop(requests);
+
+    let stderr = h
+        .wait_for_stderr("handoff cap reached", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("handoff cap reached"),
         "expected cap-reached WARN in stderr; got: {stderr}"

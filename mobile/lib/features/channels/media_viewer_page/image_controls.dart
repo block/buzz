@@ -3,9 +3,6 @@ part of '../media_viewer_page.dart';
 class _MediaViewerBottomControls extends StatelessWidget {
   final List<MediaViewerImage> images;
   final int currentIndex;
-  final ValueListenable<double> pagePosition;
-  final ValueChanged<double> onScrubUpdate;
-  final VoidCallback onScrubEnd;
   final ValueChanged<int> onSelect;
   final VoidCallback? onReply;
   final VoidCallback? onMore;
@@ -13,9 +10,6 @@ class _MediaViewerBottomControls extends StatelessWidget {
   const _MediaViewerBottomControls({
     required this.images,
     required this.currentIndex,
-    required this.pagePosition,
-    required this.onScrubUpdate,
-    required this.onScrubEnd,
     required this.onSelect,
     required this.onReply,
     required this.onMore,
@@ -37,14 +31,19 @@ class _MediaViewerBottomControls extends StatelessWidget {
           const SizedBox(width: Grid.xxs),
           Expanded(
             child: images.length > 1
-                ? _MediaViewerFilmstrip(
-                    key: const ValueKey('message-media-image-viewer-filmstrip'),
-                    images: images,
-                    currentIndex: currentIndex,
-                    pagePosition: pagePosition,
-                    onScrubUpdate: onScrubUpdate,
-                    onScrubEnd: onScrubEnd,
-                    onSelect: onSelect,
+                ? Theme(
+                    data: ThemeData.dark(),
+                    child: PageIndicator(
+                      key: const ValueKey(
+                        'message-media-image-viewer-pagination',
+                      ),
+                      semanticLabel: 'Image',
+                      containerHeight: 48,
+                      count: images.length,
+                      selected: currentIndex,
+                      animateChanges: !MediaQuery.disableAnimationsOf(context),
+                      onSelected: onSelect,
+                    ),
                   )
                 : const SizedBox(height: 56),
           ),
@@ -56,171 +55,6 @@ class _MediaViewerBottomControls extends StatelessWidget {
             onPressed: onMore,
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _MediaViewerFilmstrip extends StatelessWidget {
-  final List<MediaViewerImage> images;
-  final int currentIndex;
-  final ValueListenable<double> pagePosition;
-  final ValueChanged<double> onScrubUpdate;
-  final VoidCallback onScrubEnd;
-  final ValueChanged<int> onSelect;
-
-  const _MediaViewerFilmstrip({
-    super.key,
-    required this.images,
-    required this.currentIndex,
-    required this.pagePosition,
-    required this.onScrubUpdate,
-    required this.onScrubEnd,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 56,
-      child: RepaintBoundary(
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onHorizontalDragUpdate: (details) =>
-              onScrubUpdate(details.primaryDelta ?? 0),
-          onHorizontalDragEnd: (_) => onScrubEnd(),
-          child: ValueListenableBuilder<double>(
-            valueListenable: pagePosition,
-            builder: (context, position, _) {
-              return LayoutBuilder(
-                builder: (context, constraints) {
-                  const compactWidth = 40.0;
-                  const focusedWidth = 72.0;
-                  const itemHeight = 52.0;
-                  const spacing = Grid.half;
-                  final clampedPosition = position
-                      .clamp(0.0, images.length - 1.0)
-                      .toDouble();
-                  final widths = <double>[];
-                  final proximities = <double>[];
-                  final centers = <double>[];
-                  var cursor = 0.0;
-
-                  for (var index = 0; index < images.length; index++) {
-                    final proximity = (1 - (index - clampedPosition).abs())
-                        .clamp(0.0, 1.0)
-                        .toDouble();
-                    final width =
-                        compactWidth +
-                        ((focusedWidth - compactWidth) * proximity);
-                    widths.add(width);
-                    proximities.add(proximity);
-                    centers.add(cursor + (width / 2));
-                    cursor += width + spacing;
-                  }
-
-                  final lowerIndex = clampedPosition.floor();
-                  final upperIndex = clampedPosition.ceil();
-                  final fraction = clampedPosition - lowerIndex;
-                  final lowerCenter = centers[lowerIndex];
-                  final upperCenter = centers[upperIndex];
-                  final focusCenter =
-                      lowerCenter + ((upperCenter - lowerCenter) * fraction);
-                  final viewportCenter = constraints.maxWidth / 2;
-
-                  return Stack(
-                    clipBehavior: Clip.hardEdge,
-                    children: [
-                      for (var index = 0; index < images.length; index++)
-                        Positioned(
-                          left:
-                              viewportCenter +
-                              centers[index] -
-                              focusCenter -
-                              (widths[index] / 2),
-                          top: Grid.quarter,
-                          width: widths[index],
-                          height: itemHeight,
-                          child: _MediaViewerFilmstripImage(
-                            image: images[index],
-                            index: index,
-                            proximity: proximities[index],
-                            selected: index == currentIndex,
-                            onSelect: onSelect,
-                          ),
-                        ),
-                    ],
-                  );
-                },
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MediaViewerFilmstripImage extends StatelessWidget {
-  final MediaViewerImage image;
-  final int index;
-  final double proximity;
-  final bool selected;
-  final ValueChanged<int> onSelect;
-
-  const _MediaViewerFilmstripImage({
-    required this.image,
-    required this.index,
-    required this.proximity,
-    required this.selected,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final borderWidth = 1 + (1.5 * proximity);
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: selected
-          ? 'Image ${index + 1}, selected'
-          : 'Show image ${index + 1}',
-      child: GestureDetector(
-        key: ValueKey('message-media-image-viewer-thumbnail:$index'),
-        onTap: () => onSelect(index),
-        child: Container(
-          height: 52,
-          padding: EdgeInsets.all(borderWidth),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(Radii.sm),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.28 + (0.72 * proximity)),
-              width: borderWidth,
-            ),
-          ),
-          child: ClipRRect(
-            key: ValueKey('message-media-image-viewer-thumbnail-clip:$index'),
-            borderRadius: BorderRadius.circular(Radii.sm - borderWidth),
-            clipBehavior: Clip.antiAlias,
-            child: Opacity(
-              opacity: 0.62 + (0.38 * proximity),
-              child: MediaImage(
-                url: image.url,
-                decodeWidth: 72,
-                fit: BoxFit.cover,
-                semanticLabel: image.semanticLabel,
-                errorBuilder: (_, _, _) => const ColoredBox(
-                  color: Color.fromRGBO(255, 255, 255, 0.12),
-                  child: Icon(
-                    LucideIcons.imageOff,
-                    color: Colors.white70,
-                    size: 18,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -240,6 +74,22 @@ class _MediaViewerCircleButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (onPressed != null && defaultTargetPlatform == TargetPlatform.iOS) {
+      return Theme(
+        data: ThemeData.dark(),
+        child: IosGlassNavigationButton(
+          icon: icon == LucideIcons.x
+              ? IosGlassNavigationIcon.close
+              : icon == LucideIcons.ellipsis
+              ? IosGlassNavigationIcon.more
+              : IosGlassNavigationIcon.reply,
+          semanticLabel: tooltip,
+          foregroundColor: Colors.white,
+          controlSize: 48,
+          onPressed: onPressed,
+        ),
+      );
+    }
     return SizedBox.square(
       dimension: 48,
       child: onPressed == null
@@ -285,6 +135,14 @@ class _MediaViewerCloseButton extends StatelessWidget {
       onPressed: onPressed,
     );
   }
+}
+
+EdgeInsets _mediaViewerPadding(BuildContext context) {
+  final viewPadding = MediaQuery.viewPaddingOf(context);
+  return EdgeInsets.only(
+    top: viewPadding.top + 48 + Grid.xxs,
+    bottom: viewPadding.bottom + 56 + (Grid.xxs * 2),
+  );
 }
 
 Size _imageViewerSize(Size viewport, double? aspectRatio) {

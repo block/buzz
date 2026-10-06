@@ -100,7 +100,12 @@ pub async fn verify_channel_roster_fence_catalog<'e>(
 /// function. This rolled-back probe verifies that a canonical empty roster is
 /// accepted while a stale roster member is rejected with `check_violation`.
 pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     let community_id = Uuid::new_v4();
     let channel_id = Uuid::new_v4();
     sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -191,6 +196,82 @@ async fn acquire_channel_membership_lock(
     .await?;
     Ok(())
 }
+
+// ── Transaction-level membership helpers (for commit_participant_join) ────────
+
+/// Acquire the per-channel membership advisory lock on a caller-owned transaction.
+///
+/// Equivalent to the internal `acquire_channel_membership_lock`, but exposed
+/// for callers that need to compose multiple operations in one transaction
+/// (e.g., `commit_participant_join` in `audio/handler.rs`).
+pub async fn acquire_channel_membership_lock_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    acquire_channel_membership_lock(tx, community_id, channel_id).await
+}
+
+/// Check whether a pubkey is an active channel member on a caller-owned transaction.
+///
+/// Runs the same query as `is_member` but within the caller's transaction so
+/// the read is serialized with any concurrent membership writes on the same lock.
+pub async fn is_member_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_one(&mut **tx)
+    .await?;
+    let cnt: i64 = row.try_get("cnt")?;
+    Ok(cnt > 0)
+}
+
+/// Auto-add a member on a caller-owned transaction (for ephemeral-channel admission).
+///
+/// Inserts or reactivates the membership row at `Member` role with the given
+/// `invited_by` (channel creator for huddle auto-add). Does NOT acquire the
+/// advisory lock — callers must have already called
+/// `acquire_channel_membership_lock_in_transaction` before calling this.
+///
+/// Used by `commit_participant_join` to atomically add membership and the
+/// `48101` event in a single transaction under a session effect permit.
+pub async fn insert_auto_membership_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    invited_by: &[u8],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+        VALUES ($1, $2, $3, 'member'::member_role, $4)
+        ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            removed_at = NULL,
+            removed_by = NULL,
+            role = EXCLUDED.role
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .bind(invited_by)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+// ── End transaction-level helpers ─────────────────────────────────────────────
 
 /// An active member roster captured while holding the channel's membership
 /// serialization lock on one writer connection.
@@ -323,7 +404,12 @@ pub async fn lock_member_snapshot(
     channel_id: Uuid,
     relay_pubkey: &[u8],
 ) -> Result<LockedMemberSnapshot> {
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     // Match the canonical replacement writer's lock order. Old binaries take
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
@@ -396,7 +482,12 @@ pub async fn add_member(
         )));
     }
 
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // First statement: serialize the whole role-check / owner-count / upsert
     // sequence against concurrent membership writes on this channel.
@@ -577,7 +668,12 @@ pub async fn remove_member(
         crate::user::is_agent_owner(pool, community_id, pubkey, actor_pubkey).await?
     };
 
-    let mut tx = pool.begin().await?;
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // First statement: serialize the actor-role check, the last-owner count and
     // the UPDATE against concurrent membership writes on this channel (same key
@@ -648,6 +744,11 @@ pub async fn is_member(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT COUNT(*) as cnt FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
@@ -656,10 +757,177 @@ pub async fn is_member(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     let cnt: i64 = row.try_get("cnt")?;
     Ok(cnt > 0)
+}
+
+/// Verify that a member is still removed under the channel-membership lock,
+/// serializing with any concurrent [`add_member`] call on the same channel.
+///
+/// Returns `true` when `removed_at IS NOT NULL` for `(community_id, channel_id,
+/// pubkey)` — i.e., the removal that crash-recovery is re-applying is still the
+/// current state and no re-add has reversed it.
+///
+/// Uses the same `pg_advisory_xact_lock` key as [`add_member`] so that a
+/// concurrent re-add either sees this check complete (and then sets `removed_at
+/// = NULL` after recovery finishes) or serializes before it (in which case this
+/// check observes the re-add and returns `false`, preventing stale eviction).
+///
+/// Designed for use before firing subscription eviction and workflow
+/// disablement: cache invalidation is always safe (it only drops a stale
+/// positive), but eviction and workflow-disable must not target a member who
+/// was legitimately re-added after the kick committed.
+///
+/// **Use [`membership_removal_fence`] instead of this function** when the caller
+/// needs to hold the advisory lock through the destructive effects themselves.
+/// This function releases the lock immediately after the read; concurrent
+/// `add_member` calls can commit between the return and the caller's effects.
+pub async fn verify_member_still_removed(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
+    let row = sqlx::query(
+        "SELECT removed_at FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Row absent → never joined or hard-deleted; treat as removed (safe to skip
+    // eviction for someone who isn't and wasn't a member).
+    let still_removed = match row {
+        None => true,
+        Some(r) => {
+            let removed_at: Option<chrono::DateTime<Utc>> = r.try_get("removed_at")?;
+            removed_at.is_some()
+        }
+    };
+    tx.rollback().await?;
+    Ok(still_removed)
+}
+
+/// A guard that holds the per-channel membership advisory lock for the
+/// duration of kick live side effects.
+///
+/// Acquired via [`membership_removal_fence`]. The lock is released when the
+/// guard is dropped (the inner transaction rolls back). Callers must NOT drop
+/// the guard until after subscription eviction and workflow-disable complete,
+/// so that no concurrent [`add_member`] can commit between the `still_removed`
+/// observation and the destructive effects.
+///
+/// After firing all live side effects, call
+/// [`commit_disabling_workflows`][Self::commit_disabling_workflows] to run
+/// the durable workflow-disable UPDATE on this guard's own connection and
+/// commit the transaction (releasing the lock). If the guard is dropped
+/// without committing, the inner transaction rolls back — the advisory lock
+/// is released, but no domain writes persist.
+pub struct MembershipRemovalFence {
+    /// `true` when the member row still has `removed_at IS NOT NULL` — i.e., no
+    /// re-add has reversed the kick since it committed. When `false`, the caller
+    /// must NOT fire eviction or workflow-disable.
+    pub still_removed: bool,
+    // Holds the advisory transaction lock. The caller commits via
+    // `commit_disabling_workflows`; on drop without commit the tx rolls back.
+    tx: Transaction<'static, Postgres>,
+}
+
+impl MembershipRemovalFence {
+    /// Run the workflow-disable UPDATE on this guard's own connection, then
+    /// commit the transaction (releasing the advisory lock).
+    ///
+    /// By running the UPDATE inside the same connection that holds the lock,
+    /// no additional pool connection is needed — preventing the self-deadlock
+    /// that would arise from a pool-size-N scenario where every kick holds one
+    /// connection while trying to acquire a second for the disable write.
+    ///
+    /// The commit makes the disable durable before the lock is released, so
+    /// there is no window between "workflows disabled" and "lock released."
+    ///
+    /// On failure the transaction is rolled back (the advisory lock is still
+    /// released), and the error is returned to the caller to handle (log/skip).
+    pub async fn commit_disabling_workflows(
+        mut self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> crate::Result<u64> {
+        let affected = crate::workflow::disable_workflows_for_owner_in_channel_on_conn(
+            &mut self.tx,
+            community_id,
+            channel_id,
+            owner_pubkey,
+        )
+        .await?;
+        self.tx.commit().await?;
+        Ok(affected)
+    }
+}
+
+/// Acquire the per-channel membership advisory lock and check whether the
+/// kicked member is still removed, returning a [`MembershipRemovalFence`] that
+/// keeps the lock alive until the guard is dropped.
+///
+/// By holding the lock from the moment of the `removed_at` check until after
+/// the caller's subscription eviction and workflow-disable complete, this
+/// prevents the window where a concurrent [`add_member`] could commit between
+/// the check and the effects (the race that [`verify_member_still_removed`]
+/// leaves open, since it releases the lock before returning).
+///
+/// The guard is read-only before [`Self::commit_disabling_workflows`] is called.
+/// Once the caller has finished its effects, dropping the guard releases the
+/// lock (the transaction is implicitly rolled back if not committed). To
+/// durably write the workflow-disable and release the lock in one step, call
+/// [`Self::commit_disabling_workflows`].
+pub async fn membership_removal_fence(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<MembershipRemovalFence> {
+    let connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
+    let row = sqlx::query(
+        "SELECT removed_at FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Row absent → never joined or hard-deleted; treat as removed (safe to
+    // skip eviction for someone who isn't and wasn't a member).
+    let still_removed = match row {
+        None => true,
+        Some(r) => {
+            let removed_at: Option<chrono::DateTime<Utc>> = r.try_get("removed_at")?;
+            removed_at.is_some()
+        }
+    };
+
+    Ok(MembershipRemovalFence { still_removed, tx })
 }
 
 /// Return which of the given (channel, pubkey) combinations are active
@@ -674,6 +942,11 @@ pub async fn membership_pairs(
     if channel_ids.is_empty() || pubkeys.is_empty() {
         return Ok(Vec::new());
     }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let rows = sqlx::query(
         "SELECT cm.channel_id, cm.pubkey FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
@@ -682,7 +955,7 @@ pub async fn membership_pairs(
     .bind(community_id.as_uuid())
     .bind(channel_ids)
     .bind(pubkeys)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     rows.into_iter()
         .map(|row| Ok((row.try_get("channel_id")?, row.try_get("pubkey")?)))
@@ -702,6 +975,22 @@ pub async fn get_members(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<Vec<MemberRecord>> {
+    get_members_with_operation(
+        pool,
+        community_id,
+        channel_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+}
+
+async fn get_members_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    operation: crate::observability::WriterOperation,
+) -> Result<Vec<MemberRecord>> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
@@ -713,7 +1002,7 @@ pub async fn get_members(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     rows.into_iter().map(row_to_member_record).collect()
 }
@@ -733,6 +1022,11 @@ pub async fn get_members_bulk(
     if channel_ids.is_empty() {
         return Ok(Vec::new());
     }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
@@ -744,7 +1038,7 @@ pub async fn get_members_bulk(
     )
     .bind(community_id.as_uuid())
     .bind(channel_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     rows.into_iter().map(row_to_member_record).collect()
 }
@@ -758,6 +1052,11 @@ pub async fn get_accessible_channel_ids(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id
@@ -772,7 +1071,7 @@ pub async fn get_accessible_channel_ids(
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     rows.into_iter()
@@ -799,6 +1098,10 @@ pub struct LargeChannelRoster {
 
 /// Returns active channels whose canonical roster exceeds `minimum_members`.
 ///
+/// Only active communities are scanned: archived communities must not have
+/// their discovery state rewritten, and deleting or tombstoned communities
+/// would only produce fenced-write failures.
+///
 /// This is an internal cross-community maintenance read. Callers must preserve
 /// the returned community id when reading or rewriting discovery state.
 pub async fn list_large_channel_rosters_needing_reconciliation(
@@ -806,6 +1109,11 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
     minimum_members: i64,
     relay_pubkey: &[u8],
 ) -> Result<Vec<LargeChannelRoster>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         WITH large_rosters AS (
@@ -821,7 +1129,11 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
         )
         SELECT lr.community_id, community.host, lr.channel_id, lr.member_count
         FROM large_rosters lr
-        JOIN communities community ON community.id = lr.community_id
+        JOIN communities community
+          ON community.id = lr.community_id
+         AND community.archived_at IS NULL
+         AND community.deleted_at IS NULL
+         AND community.deletion_state = 'active'
         JOIN LATERAL (
             SELECT roster.tags
             FROM events roster
@@ -843,7 +1155,7 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
     )
     .bind(minimum_members)
     .bind(relay_pubkey)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     rows.into_iter()
@@ -964,6 +1276,11 @@ pub async fn get_accessible_channels(
     visibility_filter: Option<&str>,
     member_only: Option<bool>,
 ) -> Result<Vec<AccessibleChannel>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     // When `member_only` is `Some(true)`, restrict to channels where the user
     // has an active membership (cm.channel_id IS NOT NULL). This is a strict
     // subset of the default result set and is pushed into SQL so the LIMIT 1000
@@ -1008,7 +1325,7 @@ pub async fn get_accessible_channels(
         query
     };
 
-    let rows = query.fetch_all(pool).await?;
+    let rows = query.fetch_all(&mut *connection).await?;
     rows.into_iter()
         .map(|row| {
             let is_member: bool = row.try_get("is_member").unwrap_or(false);
@@ -1027,6 +1344,11 @@ pub async fn get_bot_members(
     pool: &PgPool,
     community_id: CommunityId,
 ) -> Result<Vec<BotMemberRecord>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         SELECT cm.pubkey, u.display_name, u.agent_type, u.capabilities,
@@ -1040,7 +1362,7 @@ pub async fn get_bot_members(
         "#,
     )
     .bind(community_id.as_uuid())
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut out = Vec::with_capacity(rows.len());
@@ -1072,9 +1394,25 @@ pub async fn get_users_bulk(
     community_id: CommunityId,
     pubkeys: &[Vec<u8>],
 ) -> Result<Vec<UserRecord>> {
+    get_users_bulk_with_operation(
+        pool,
+        community_id,
+        pubkeys,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await
+}
+
+async fn get_users_bulk_with_operation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+    operation: crate::observability::WriterOperation,
+) -> Result<Vec<UserRecord>> {
     if pubkeys.is_empty() {
         return Ok(Vec::new());
     }
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
 
     // Build a parameterised IN clause: ($2, $3, ...); $1 is community_id.
     let placeholders = (2..(pubkeys.len() + 2))
@@ -1091,7 +1429,7 @@ pub async fn get_users_bulk(
         q = q.bind(pk);
     }
 
-    let rows = q.fetch_all(pool).await?;
+    let rows = q.fetch_all(&mut *connection).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1124,12 +1462,17 @@ pub async fn get_member_count(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<i64> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT COUNT(*) as cnt FROM channel_members WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(row.try_get("cnt")?)
 }
@@ -1146,6 +1489,11 @@ pub async fn get_member_counts_bulk(
     if channel_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
         "SELECT channel_id, COUNT(*) as cnt FROM channel_members \
@@ -1159,7 +1507,7 @@ pub async fn get_member_counts_bulk(
     }
     qb.push(") GROUP BY channel_id");
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb.build().fetch_all(&mut *connection).await?;
 
     let mut map = std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
@@ -1179,6 +1527,11 @@ pub async fn get_member_role(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<Option<String>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         "SELECT cm.role::text AS role FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
@@ -1187,7 +1540,7 @@ pub async fn get_member_role(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
@@ -1196,7 +1549,14 @@ impl Db {
     /// Verify the mixed-version channel-roster database fence end to end.
     #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
     pub async fn verify_channel_roster_fence(&self) -> Result<()> {
-        verify_channel_roster_fence_catalog(&self.pool).await?;
+        {
+            let mut connection = crate::observability::acquire_writer(
+                &self.pool,
+                crate::observability::WriterOperation::Bootstrap,
+            )
+            .await?;
+            verify_channel_roster_fence_catalog(&mut *connection).await?;
+        }
         verify_channel_roster_fence_behavior(&self.pool).await
     }
 
@@ -1255,6 +1615,45 @@ impl Db {
         is_member(&self.pool, community_id, channel_id, pubkey).await
     }
 
+    /// Returns `true` when the member row still has `removed_at IS NOT NULL`,
+    /// holding the channel-membership advisory lock so the check serializes
+    /// with concurrent [`add_member`] calls.
+    ///
+    /// **Note:** this function releases the lock before returning. Use
+    /// [`Db::membership_removal_fence`] when the advisory lock must remain
+    /// held through subscription eviction and workflow-disable.
+    #[datastore_span(name = "verify_member_still_removed", system = "postgresql")]
+    pub async fn verify_member_still_removed(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        verify_member_still_removed(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Acquire the per-channel membership advisory lock and return a
+    /// [`MembershipRemovalFence`] that keeps the lock alive until it is
+    /// dropped or committed via [`MembershipRemovalFence::commit_disabling_workflows`].
+    ///
+    /// The guard's `still_removed` field indicates whether the kick is still
+    /// the current state (i.e., no re-add has reversed it). When `true`, the
+    /// caller fires eviction and then calls
+    /// [`MembershipRemovalFence::commit_disabling_workflows`] to durably
+    /// write the workflow-disable and commit the transaction (releasing the
+    /// lock). When `false`, the member was re-added and effects must be skipped.
+    /// Dropping the guard without committing releases the advisory lock (the
+    /// transaction is implicitly rolled back).
+    #[datastore_span(name = "membership_removal_fence", system = "postgresql")]
+    pub async fn membership_removal_fence(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<MembershipRemovalFence> {
+        membership_removal_fence(&self.pool, community_id, channel_id, pubkey).await
+    }
+
     /// Return the active (channel, pubkey) membership pairs among the given
     /// sets, in one statement.
     #[datastore_span(name = "membership_pairs", system = "postgresql")]
@@ -1275,6 +1674,22 @@ impl Db {
         channel_id: Uuid,
     ) -> Result<Vec<MemberRecord>> {
         get_members(&self.pool, community_id, channel_id).await
+    }
+
+    /// Return a channel roster used to build or validate an event mutation.
+    #[datastore_span(name = "get_members_for_event_write", system = "postgresql")]
+    pub async fn get_members_for_event_write(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<MemberRecord>> {
+        get_members_with_operation(
+            &self.pool,
+            community_id,
+            channel_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
     }
 
     /// Returns active members for multiple channels in a single query.
@@ -1344,6 +1759,22 @@ impl Db {
         pubkeys: &[Vec<u8>],
     ) -> Result<Vec<UserRecord>> {
         get_users_bulk(&self.pool, community_id, pubkeys).await
+    }
+
+    /// Bulk-fetch user names while constructing an event and its mention tags.
+    #[datastore_span(name = "get_users_bulk_for_event_write", system = "postgresql")]
+    pub async fn get_users_bulk_for_event_write(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<UserRecord>> {
+        get_users_bulk_with_operation(
+            &self.pool,
+            community_id,
+            pubkeys,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
     }
 
     /// Returns the count of active members in a channel.
@@ -1909,6 +2340,99 @@ mod postgres_tests {
                 .await
                 .expect("check converged snapshot");
         assert!(converged.is_empty());
+    }
+
+    /// Seed a channel whose roster (owner + one member) has diverged from its
+    /// live relay-authored kind-39002 snapshot (owner only).
+    async fn seed_divergent_roster(pool: &PgPool, community_id: Uuid, relay_pubkey: &[u8]) -> Uuid {
+        let creator = random_pubkey();
+        let channel = create_test_channel(
+            pool,
+            community_id,
+            "divergent-roster",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create test channel");
+        let tags = serde_json::json!([
+            ["d", channel.id.to_string()],
+            ["p", hex::encode(&creator), "", "owner"]
+        ]);
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
+            VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, $6, $7)
+            "#,
+        )
+        .bind(community_id)
+        .bind(random_pubkey())
+        .bind(relay_pubkey)
+        .bind(tags)
+        .bind(vec![0u8; 64])
+        .bind(channel.id)
+        .bind(channel.id.to_string())
+        .execute(pool)
+        .await
+        .expect("insert roster snapshot");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at) \
+             VALUES ($1, $2, $3, 'member', NOW())",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(random_pubkey())
+        .execute(pool)
+        .await
+        .expect("diverge roster");
+        channel.id
+    }
+
+    /// Startup roster reconciliation must not rewrite discovery state for
+    /// archived communities, nor attempt fenced writes for deleting or
+    /// tombstoned ones. Same active-community predicate as #7558.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn large_roster_reconciliation_skips_archived_and_deleted_communities() {
+        let pool = setup_pool().await;
+        let relay_pubkey = random_pubkey();
+        let mut fixtures = Vec::new();
+        for label in ["active", "archived", "quiescing", "fenced", "tombstone"] {
+            let community_id = make_test_community(&pool).await;
+            let channel_id = seed_divergent_roster(&pool, community_id, &relay_pubkey).await;
+            fixtures.push((label, community_id, channel_id));
+        }
+        for (label, community_id, _) in &fixtures {
+            match *label {
+                "active" => {}
+                "archived" => {
+                    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+                        .bind(community_id)
+                        .execute(&pool)
+                        .await
+                        .expect("archive fixture");
+                }
+                state => crate::test_support::set_deletion_state(&pool, *community_id, state).await,
+            }
+        }
+
+        let candidates = list_large_channel_rosters_needing_reconciliation(&pool, 1, &relay_pubkey)
+            .await
+            .expect("list candidates");
+        let found: Vec<(CommunityId, Uuid)> = candidates
+            .iter()
+            .map(|c| (c.community_id, c.channel_id))
+            .collect();
+        let (_, active_community, active_channel) = fixtures[0];
+        assert_eq!(
+            found,
+            vec![(CommunityId::from_uuid(active_community), active_channel)],
+            "only the active community's divergent roster may be reconciled"
+        );
     }
 
     /// A random non-admin, non-owner user cannot remove someone else's bot.
@@ -2940,6 +3464,37 @@ mod postgres_tests {
             error.to_string().contains(&child),
             "verification must identify the unfenced partition: {error}"
         );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_roster_fence_verification_supports_size_one_pool() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, scratch_name) = create_scratch_db(&admin, "roster_fence_size_one").await;
+        seed_pool.close().await;
+
+        let base_url = admin_url().await;
+        let path = base_url.rfind('/').expect("database URL path");
+        let scratch_url = format!("{}/{}", &base_url[..path], scratch_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect(&scratch_url)
+            .await
+            .expect("connect size-one writer pool");
+        let db = Db::from_pool(pool.clone());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            db.verify_channel_roster_fence(),
+        )
+        .await
+        .expect("roster verification must not self-deadlock on its second checkout")
+        .expect("migrated roster fence verifies on a size-one pool");
 
         drop_scratch_db(&admin, pool, &scratch_name).await;
     }

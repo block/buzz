@@ -1,3 +1,7 @@
+import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/material.dart';
+import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -14,23 +18,8 @@ import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 
-/// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
-/// SSRF-prevention validation.
-///
-/// The pairing flow used to validate by calling `GET /api/users/me/profile`
-/// over HTTP. That has been replaced with a NIP-42 WebSocket handshake via
-/// [RelaySocket], which is constructed directly inside the provider with no
-/// dependency-injection hook — so the "happy path" that exercises the
-/// network is no longer mockable in a unit test.
-///
-/// What we still cover here:
-///   - Initial state.
-///   - Parsing every documented payload format (raw base64, `buzz://`
-///     prefix, whitespace).
-///   - Failure modes that return BEFORE any network call: invalid base64,
-///     wrong shape (non-object, missing fields, missing nsec), and SSRF
-///     guards (private IPs, non-http schemes).
-///   - `reset()` returning to idle from an error state.
+/// Exercises payload validation, credential import, and cancellation across
+/// pairing and credential-validation socket lifetimes.
 void main() {
   group('PairingNotifier', () {
     late ProviderContainer container;
@@ -44,6 +33,45 @@ void main() {
     }
 
     tearDown(() => container.dispose());
+
+    test(
+      'reset closes legacy validation and rejects its late success',
+      () async {
+        final socket = _PendingValidationSocket();
+        final auth = FakeAuthNotifier();
+        final notifier = PairingNotifier(
+          validationSocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) => socket,
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        final input = base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': 'https://relay.example',
+              'nsec': 'pending-key',
+            }),
+          ),
+        );
+        final pending = container.read(pairingProvider.notifier).pair(input);
+        notifier.reset();
+        expect(socket.disposed, isTrue);
+        socket.connection.complete();
+        await pending;
+        expect(auth.lastCommunity, isNull);
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+      },
+    );
 
     test('starts in idle state', () {
       container = createContainer();
@@ -77,7 +105,7 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.error);
         expect(
           container.read(pairingProvider).errorMessage,
-          contains('internal error'),
+          contains('Lost connection to pairing relay'),
         );
       },
     );
@@ -269,6 +297,237 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.storing);
       }
 
+      testWidgets('early input is submitted when desktop negotiation arrives', (
+        tester,
+      ) async {
+        final pairing = notifier.pair(pairingCode);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await pairing;
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: const PairingPage(),
+            ),
+          ),
+        );
+        final localCode = container.read(pairingProvider).sasCode;
+        final code = localCode == '111111' ? '222222' : '111111';
+        await tester.enterText(
+          find.byKey(const Key('pairing-code-input')),
+          code,
+        );
+        await tester.pump();
+        expect(
+          socket
+              .decryptedPublishedMessages(sourceSecret)
+              .where((m) => m['type'] == 'code-submit'),
+          isEmpty,
+        );
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'desktop-code'},
+        );
+        await tester.pump();
+        await tester.pump();
+        final submissions = socket
+            .decryptedPublishedMessages(sourceSecret)
+            .where((m) => m['type'] == 'code-submit')
+            .toList();
+        expect(submissions, hasLength(1));
+        expect(submissions.single['code'], code);
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        await tester.pump();
+        expect(find.text('Enter pairing code'), findsNothing);
+        expect(find.text('Protect your identity'), findsOneWidget);
+        notifier.reset();
+        await tester.pumpWidget(const SizedBox.shrink());
+      });
+
+      testWidgets(
+        'delayed desktop responses retain one attempt and leave code entry',
+        (tester) async {
+          final pairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await pairing;
+          expect(socket.published.single['tags'], hasLength(1));
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .single['confirmation'],
+            'desktop-code-v1',
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'desktop-code'},
+          );
+          expect(container.read(pairingProvider).requiresDesktopCode, isTrue);
+          final wrong = notifier.verifyDesktopCode('111111');
+          final first = socket.decryptedPublishedMessages(sourceSecret).last;
+          expect(first['type'], 'code-submit');
+          expect(first['code'], '111111');
+          bool? wrongResult;
+          unawaited(wrong.then((value) => wrongResult = value));
+          await tester.pump(const Duration(seconds: 11));
+          expect(wrongResult, isNull);
+          expect(await notifier.verifyDesktopCode('111111'), isFalse);
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'code-submit'),
+            hasLength(1),
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'code-rejected',
+              'request_id': first['request_id'],
+              'remaining_attempts': 4,
+            },
+          );
+          expect(await wrong, isFalse);
+          expect(importAuth.lastCommunity, isNull);
+          await tester.pumpWidget(
+            UncontrolledProviderScope(
+              container: container,
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: const PairingPage(),
+              ),
+            ),
+          );
+          await tester.enterText(
+            find.byKey(const Key('pairing-code-input')),
+            '222222',
+          );
+          await tester.pump(const Duration(seconds: 11));
+          expect(find.text('Enter pairing code'), findsOneWidget);
+          expect(
+            find.text('Couldn’t check the code. Try again.'),
+            findsNothing,
+          );
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'code-submit'),
+            hasLength(2),
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'sas-confirm'},
+            includeTranscriptHash: true,
+          );
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'payload',
+              'payload_type': 'credentials',
+              'payload': jsonEncode({
+                'relayUrl': 'https://relay.test',
+                'pubkey': nostr.Keys(sourceSecret).public,
+                'nsec': nostr.Keys(sourceSecret).nsec,
+              }),
+            },
+          );
+          await tester.pump();
+          expect(find.text('Enter pairing code'), findsNothing);
+          expect(find.text('Protect your identity'), findsOneWidget);
+          expect(
+            container.read(pairingProvider).status,
+            PairingStatus.confirmingSas,
+          );
+          expect(importAuth.lastCommunity, isNull);
+          notifier.setProtectSensitiveActions(false);
+          notifier.confirmSas();
+          await tester.pump();
+          expect(container.read(pairingProvider).status, PairingStatus.storing);
+          expect(
+            socket
+                .decryptedPublishedMessages(sourceSecret)
+                .where((m) => m['type'] == 'sas-confirm'),
+            isEmpty,
+          );
+          notifier.reset();
+          await tester.pumpWidget(const SizedBox.shrink());
+        },
+      );
+
+      testWidgets(
+        'delayed final rejection exits the session and reset cancels pending verification',
+        (tester) async {
+          final pairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await pairing;
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'desktop-code'},
+          );
+          final result = notifier.verifyDesktopCode('111111');
+          final request = socket.decryptedPublishedMessages(sourceSecret).last;
+          await tester.pump(const Duration(seconds: 11));
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {
+              'type': 'code-rejected',
+              'request_id': request['request_id'],
+              'remaining_attempts': 0,
+            },
+          );
+          expect(await result, isFalse);
+          expect(container.read(pairingProvider).status, PairingStatus.error);
+          expect(importAuth.lastCommunity, isNull);
+          notifier.reset();
+          final nextPairing = notifier.pair(pairingCode);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await nextPairing;
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'desktop-code'},
+          );
+          final pending = notifier.verifyDesktopCode('222222');
+          notifier.reset();
+          expect(await pending, isFalse);
+          expect(container.read(pairingProvider).status, PairingStatus.idle);
+        },
+      );
+
+      test(
+        'a rejected offer exits code entry instead of silently waiting',
+        () async {
+          await notifier.pair(pairingCode);
+          socket.relayMessageCallback([
+            'OK',
+            socket.published.single['id'],
+            false,
+            'event must have exactly one p tag',
+          ]);
+          expect(container.read(pairingProvider).status, PairingStatus.error);
+          expect(
+            container.read(pairingProvider).errorMessage,
+            contains('Scan a new desktop QR code'),
+          );
+          expect(socket.isConnected, isFalse);
+        },
+      );
+
       test('unchecked protection persists on a successful import', () async {
         await beginImport(protected: false);
 
@@ -280,6 +539,10 @@ void main() {
           SensitiveActionPolicy.disabledByUser,
         );
         expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(
+          container.read(pairedCommunityLandingProvider),
+          importAuth.lastCommunity,
+        );
       });
 
       test('checked protection persists on a successful import', () async {
@@ -312,6 +575,25 @@ void main() {
               .any((message) => message['type'] == 'complete'),
           isFalse,
         );
+      });
+
+      test('reset during NIP-AB connection retires its continuation', () async {
+        final pending = notifier.pair(pairingCode);
+        notifier.reset();
+        await pending;
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+        expect(socket.isConnected, isFalse);
+        expect(socket.decryptedPublishedMessages(sourceSecret), isEmpty);
+      });
+
+      test('reset during NIP-AB offer delay prevents a late offer', () async {
+        final pending = notifier.pair(pairingCode);
+        await Future<void>.delayed(Duration.zero);
+        notifier.reset();
+        await pending;
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+        expect(socket.isConnected, isFalse);
+        expect(socket.decryptedPublishedMessages(sourceSecret), isEmpty);
       });
 
       test('stale biometric approval cannot advance a reset import', () async {
@@ -439,6 +721,15 @@ void main() {
         final state = container.read(pairingProvider);
         expect(state.status, PairingStatus.confirmingSas);
         expect(state.sendsIdentityToDesktop, isTrue);
+        expect(
+          socket.published.first['tags'],
+          isNot(contains(equals(['confirmation', 'code-entry']))),
+        );
+        notifier.confirmSas();
+        expect(
+          socket.decryptedPublishedMessages(sourceSecret).map((m) => m['type']),
+          ['offer'],
+        );
         expect(state.sasCode, hasLength(6));
       });
 
@@ -1103,4 +1394,23 @@ class _ControllableSocket extends PairingSocket {
     );
     relayMessageCallback(['EVENT', 'pair', event.toMap()]);
   }
+}
+
+class _PendingValidationSocket extends RelaySocket {
+  _PendingValidationSocket()
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+  final connection = Completer<void>();
+  bool disposed = false;
+  @override
+  Future<void> connect() => connection.future;
+  @override
+  void dispose() => disposed = true;
+  @override
+  Future<void> disconnect() async => disposed = true;
 }

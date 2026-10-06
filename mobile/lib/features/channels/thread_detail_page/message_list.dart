@@ -9,6 +9,8 @@ class _ThreadMessageList extends StatelessWidget {
   final ItemPositionsListener itemPositionsListener;
   final double bottomInset;
   final List<TimelineMessage> replies;
+  final AsyncValue<List<NostrEvent>> relayReplyState;
+  final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
   final bool headIsDeleted;
@@ -34,6 +36,8 @@ class _ThreadMessageList extends StatelessWidget {
     required this.itemPositionsListener,
     required this.bottomInset,
     required this.replies,
+    required this.relayReplyState,
+    required this.onRetryReplies,
     required this.localSendAnimations,
     required this.trackActiveScrollPosition,
     required this.headIsDeleted,
@@ -50,6 +54,18 @@ class _ThreadMessageList extends StatelessWidget {
     required this.restoreComposerFocus,
     required this.childrenByParent,
   });
+
+  String get _replySummary {
+    if (!relayReplyState.hasValue && replies.isEmpty) {
+      return relayReplyState.isLoading
+          ? 'Loading replies…'
+          : 'Couldn’t load replies';
+    }
+    final count =
+        '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}';
+    if (!relayReplyState.hasError) return count;
+    return '$count · ${relayReplyState.isLoading ? 'Retrying…' : 'Couldn’t refresh'}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -136,14 +152,31 @@ class _ThreadMessageList extends StatelessWidget {
                             ),
                             child: Row(
                               children: [
-                                Text(
-                                  '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
-                                  style: context.textTheme.labelMedium
-                                      ?.copyWith(
-                                        color: context.colors.onSurfaceVariant,
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                Flexible(
+                                  child: Semantics(
+                                    liveRegion: true,
+                                    child: Text(
+                                      _replySummary,
+                                      style: context.textTheme.labelMedium
+                                          ?.copyWith(
+                                            color:
+                                                context.colors.onSurfaceVariant,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
+                                  ),
                                 ),
+                                if (relayReplyState.hasError &&
+                                    !relayReplyState.isLoading)
+                                  IconButton(
+                                    key: const ValueKey('thread-replies-retry'),
+                                    onPressed: onRetryReplies,
+                                    tooltip: 'Retry',
+                                    icon: const Icon(
+                                      LucideIcons.refreshCcw,
+                                      size: 16,
+                                    ),
+                                  ),
                                 const SizedBox(width: Grid.xxs),
                                 Expanded(
                                   child: Divider(

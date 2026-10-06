@@ -304,12 +304,11 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
 
     final readState = ref.read(readStateProvider);
     if (readState.isReady) {
-      final unread = isMessageUnread(
+      final unread = messageActionShowsUnread(
+        ref,
         readState,
         channelId: channelId,
-        messageId: message.id,
-        createdAt: message.createdAt,
-        threadRootId: message.rootId,
+        message: message,
       );
       actions.add(
         _PopoverMessageAction(
@@ -477,17 +476,7 @@ class _IosNativeMessageActionSurface extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final viewId = useState<int?>(null);
-    useEffect(() {
-      final id = viewId.value;
-      if (id == null) return null;
-      final channel = MethodChannel('buzz/native_message_action_surface/$id');
-      channel.setMethodCallHandler((call) async {
-        if (call.method != 'selected' || call.arguments is! Map) return;
-        final actionId = (call.arguments as Map)['id'];
-        if (actionId is String) onSelected(actionId);
-      });
-      return () => channel.setMethodCallHandler(null);
-    }, [viewId.value, onSelected]);
+    useNativeMessageActionSelection(viewId.value, onSelected);
 
     return UiKitView(
       key: const ValueKey('ios-native-message-action-surface'),

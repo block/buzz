@@ -411,6 +411,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "shutter": buttonIconName = "circle.fill"
     case "sun": buttonIconName = "sun.max"
     case "moon": buttonIconName = "moon"
+    case "more": buttonIconName = "ellipsis"
+    case "reply": buttonIconName = "arrowshape.turn.up.left"
     case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
     case "colorSwatch": buttonIconName = "circle.fill"
     default: buttonIconName = "chevron.backward"

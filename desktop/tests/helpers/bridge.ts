@@ -56,6 +56,7 @@ type MockSearchProfileSeed = {
 
 type MockRelayAgentSeed = {
   pubkey: string;
+  ownerPubkey?: string | null;
   name: string;
   agentType?: string;
   capabilities?: string[];
@@ -63,7 +64,7 @@ type MockRelayAgentSeed = {
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];
-  status?: "online" | "away" | "offline";
+  status?: "online" | "away" | "offline" | "unknown";
 };
 
 type MockHuddleSeed = {
@@ -228,6 +229,10 @@ type MockBridgeOptions = {
   };
   /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
   huddleStateReadDelayMs?: number;
+  /** Delay (ms) for `sync_agents_to_active_huddle` so e2e tests can hold the
+   * send path open across a leg that writes nothing to the relay.
+   * Releasable early via `__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__()`. */
+  syncAgentsToActiveHuddleDelayMs?: number;
   /** Delay companion creation to expose the newly-started huddle handoff state. */
   openHuddleWindowDelayMs?: number;
   /** Delay the native start result after membership arrives in the channel list. */
@@ -283,6 +288,13 @@ type MockBridgeOptions = {
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Seed canvas revisions (oldest first); see e2eBridge mock config. */
+  canvasRevisions?: Array<{
+    content: string;
+    createdAt?: number;
+    eventId?: string;
+    author?: string;
+  }>;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   /** Reject `clear_pending_navigation_deep_links` with this message. */
@@ -324,6 +336,8 @@ type MockBridgeOptions = {
   /** Delay (ms) for newest-page fetches; see e2eBridge mock config. */
   channelHeadDelayMs?: number;
   profileReadDelayMs?: number;
+  /** Hold `get_profile` responses until `__BUZZ_E2E_RELEASE_PROFILE_READS__()`. */
+  deferProfileReads?: boolean;
   profileReadError?: string;
   /** Override whether get_profile reports a real kind:0 event. */
   profileHasEvent?: boolean;
@@ -468,6 +482,8 @@ type MockBridgeOptions = {
    * can exercise the "Thread deleted" label / disabled-send path.
    */
   deletedEventIds?: string[];
+  /** Reject one identity read after the configured number of successful reads. */
+  identityReadErrorAfter?: { message: string; successfulReads: number };
   /**
    * When true, `get_identity` returns `lost: true` until `persist_current_identity`
    * or `import_identity` is invoked. Drives the identity-lost recovery UX in tests.
@@ -595,6 +611,8 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  /** ACP commands returned by `discover_acp_commands`. Defaults to `[]`. */
+  acpCommands?: Array<{ command: string; binaryPath: string }>;
   /**
    * Providers returned by `discover_backend_providers`. Defaults to `[]`
    * (the "Run on" section stays hidden). Setting this renders the remote

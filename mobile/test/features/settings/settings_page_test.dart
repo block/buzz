@@ -1,9 +1,17 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:buzz/shared/push/dev_push_lease.dart';
+import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -11,9 +19,127 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  setUp(() {
+    PackageInfo.setMockInitialValues(
+      appName: 'Buzz',
+      packageName: 'xyz.block.buzz',
+      version: '0.16.0',
+      buildNumber: '432',
+      buildSignature: '',
+    );
+  });
+
+  for (final buildNumber in ['432', '', '2147483647']) {
+    testWidgets('shows version with build number "$buildNumber"', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      PackageInfo.setMockInitialValues(
+        appName: 'Buzz',
+        packageName: 'xyz.block.buzz',
+        version: '0.16.0',
+        buildNumber: buildNumber,
+        buildSignature: '',
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            currentCommunityRoleProvider.overrideWithValue(
+              const AsyncData<CommunityMemberRole?>(CommunityMemberRole.admin),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(2)),
+              child: child!,
+            ),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Invite to community'), findsNothing);
+      await tester.pumpAndSettle();
+      expect(
+        find.text(buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final outcome in ['absent', 'error']) {
+    testWidgets('hides notifications while capability loads and is $outcome', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final capability = Completer<BuzzPushLeaseDescriptor?>();
+      var permissionReads = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            activeCommunityProvider.overrideWith(
+              (ref) async => Community.create(
+                name: 'No push',
+                relayUrl: 'wss://relay.example',
+              ).copyWith(pushNotificationsEnabled: false),
+            ),
+            currentRelayPushDescriptorProvider.overrideWith(
+              (ref) => capability.future,
+            ),
+            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
+              () async {
+                permissionReads += 1;
+                return BuzzPushAuthorizationStatus.authorized;
+              },
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Notifications'), findsNothing);
+      expect(find.byType(Switch), findsNothing);
+      if (outcome == 'absent') {
+        capability.complete(null);
+      } else {
+        capability.completeError(StateError('discovery failed'));
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('Notifications'), findsNothing);
+      expect(find.text('Push notifications'), findsNothing);
+      expect(find.byType(Switch), findsNothing);
+      expect(permissionReads, 0);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   testWidgets('shows the persisted per-community push opt-in on iOS', (
     tester,
   ) async {
@@ -26,11 +152,14 @@ void main() {
       relayUrl: 'wss://relay.example',
     ).copyWith(pushNotificationsEnabled: true);
 
+    final capability = Future<BuzzPushLeaseDescriptor?>.value(_pushDescriptor);
+
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
+          currentRelayPushDescriptorProvider.overrideWith((ref) => capability),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => BuzzPushAuthorizationStatus.authorized,
@@ -40,7 +169,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -74,6 +202,9 @@ void main() {
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
+          currentRelayPushDescriptorProvider.overrideWith(
+            (ref) async => _pushDescriptor,
+          ),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => BuzzPushAuthorizationStatus.denied,
@@ -89,7 +220,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -127,6 +257,9 @@ void main() {
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
+          currentRelayPushDescriptorProvider.overrideWith(
+            (ref) async => _pushDescriptor,
+          ),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => throw StateError('authorization unavailable'),
@@ -136,7 +269,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -155,75 +287,102 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('opens profile edit choices and routes photo directly', (
-    tester,
-  ) async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'shows status above profile editing and routes photo directly in ${brightness.name}',
+      (tester) async {
+        if (Platform.environment.containsKey('PROFILE_SCREENSHOTS')) {
+          await tester.runAsync(() async {
+            for (final font in {
+              'Inter': 'assets/fonts/InterVariable.ttf',
+              'packages/lucide_icons_flutter/Lucide':
+                  'packages/lucide_icons_flutter/assets/lucide.ttf',
+            }.entries) {
+              await (FontLoader(
+                font.key,
+              )..addFont(rootBundle.load(font.value))).load();
+            }
+          });
+        }
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: SettingsPage(
-            profileHeader: const SizedBox.square(dimension: 128),
-            profileEditPageBuilder: (_) =>
-                const Scaffold(body: Text('Profile editor destination')),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
-            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+            child: MaterialApp(
+              theme: brightness == Brightness.dark
+                  ? AppTheme.dark()
+                  : AppTheme.light(),
+              home: SettingsPage(
+                profileHeader: const SizedBox.square(dimension: 128),
+                profileEditPageBuilder: (_) =>
+                    const Scaffold(body: Text('Profile editor destination')),
+                identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+              ),
+            ),
           ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
+        );
+        await tester.pumpAndSettle();
 
-    expect(find.text('Profile'), findsNothing);
-    await tester.tap(find.byKey(const ValueKey('settings-edit-profile')));
-    await tester.pumpAndSettle();
-    expect(find.text('Edit profile'), findsOneWidget);
-    expect(find.text('Display name'), findsOneWidget);
-    expect(find.text('Profile description'), findsOneWidget);
-    expect(find.text('Photo'), findsOneWidget);
-    final optionCard = find.descendant(
-      of: find.byKey(const ValueKey('edit-profile-options')),
-      matching: find.byType(Material),
+        expect(find.text('Profile'), findsNothing);
+        expect(find.text('Edit profile'), findsNothing);
+        expect(find.text('Display name'), findsOneWidget);
+        expect(find.text('Profile description'), findsOneWidget);
+        expect(find.text('Edit photo'), findsOneWidget);
+        final optionCard = find.descendant(
+          of: find.byKey(const ValueKey('edit-profile-options')),
+          matching: find.byType(Material),
+        );
+        expect(tester.getSize(optionCard.first).height, greaterThan(150));
+        for (final key in const [
+          'edit-profile-display-name',
+          'edit-profile-description',
+          'edit-profile-photo',
+        ]) {
+          expect(
+            tester
+                .widget<AppListRow>(find.byKey(ValueKey(key)))
+                .verticalPadding,
+            Grid.xs,
+          );
+        }
+        expect(
+          find.byKey(const ValueKey('settings-edit-profile')),
+          findsNothing,
+        );
+        expect(find.byType(BottomSheet), findsNothing);
+        expect(
+          tester.widget<AppListCard>(find.byType(AppListCard).first).key,
+          const ValueKey('status-identity-options'),
+        );
+        if (Platform.environment['PROFILE_SCREENSHOTS'] case final directory?) {
+          final boundary = tester
+              .element(find.byType(SettingsPage))
+              .findAncestorRenderObjectOfType<RenderRepaintBoundary>()!;
+          await tester.runAsync(() async {
+            final image = await boundary.toImage(pixelRatio: 2);
+            final bytes = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
+            await Directory(directory).create(recursive: true);
+            await File(
+              '$directory/profile-${brightness.name}.png',
+            ).writeAsBytes(bytes!.buffer.asUint8List());
+            image.dispose();
+          });
+        }
+        await tester.tap(find.byKey(const ValueKey('edit-profile-photo')));
+        await tester.pumpAndSettle();
+        expect(find.text('Profile editor destination'), findsOneWidget);
+      },
     );
-    expect(tester.getSize(optionCard.first).height, greaterThan(150));
-    for (final key in const [
-      'edit-profile-display-name',
-      'edit-profile-description',
-      'edit-profile-photo',
-    ]) {
-      expect(
-        tester.widget<AppListRow>(find.byKey(ValueKey(key))).verticalPadding,
-        Grid.xs,
-      );
-    }
-    final sheetContent = tester.widget<Padding>(
-      find.byKey(const ValueKey('edit-profile-sheet-content')),
-    );
-    expect(sheetContent.padding, const EdgeInsets.only(bottom: Grid.xs));
-    final sheetSafeArea = tester.widget<SafeArea>(
-      find.ancestor(
-        of: find.byKey(const ValueKey('edit-profile-sheet-content')),
-        matching: find.byType(SafeArea),
-      ),
-    );
-    expect(sheetSafeArea.top, isFalse);
-    expect(sheetSafeArea.bottom, isTrue);
-    final sheetRect = tester.getRect(find.byType(BottomSheet));
-    final optionRect = tester.getRect(
-      find.byKey(const ValueKey('edit-profile-options')),
-    );
-    expect(sheetRect.height, lessThan(340));
-    expect(sheetRect.bottom - optionRect.bottom, Grid.xs);
-    await tester.tap(find.byKey(const ValueKey('edit-profile-photo')));
-    await tester.pumpAndSettle();
-    expect(find.text('Profile editor destination'), findsOneWidget);
-  });
+  }
 
-  testWidgets('opens profile text editors after dismissing the choices', (
+  testWidgets('opens profile text editors directly from settings', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -237,9 +396,9 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
+            onSetStatus: (_) => opened.add('status'),
             onEditDisplayName: (_) async => opened.add('name'),
             onEditProfileDescription: (_) async => opened.add('description'),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -247,59 +406,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('settings-edit-profile')));
-    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('Set status')).dy,
+      lessThan(tester.getTopLeft(find.text('Display name')).dy),
+    );
+    await tester.tap(find.text('Set status'));
+    expect(opened, ['status']);
     await tester.tap(find.byKey(const ValueKey('edit-profile-display-name')));
     await tester.pumpAndSettle();
-    expect(opened, ['name']);
+    expect(opened, ['status', 'name']);
     expect(find.text('Edit profile'), findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey('settings-edit-profile')));
-    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('edit-profile-description')));
     await tester.pumpAndSettle();
-    expect(opened, ['name', 'description']);
+    expect(opened, ['status', 'name', 'description']);
   });
 
-  testWidgets('places Theme second in the Community section', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
-          currentCommunityRoleProvider.overrideWithValue(
-            const AsyncData<CommunityMemberRole?>(CommunityMemberRole.admin),
-          ),
-        ],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: SettingsPage(
-            profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
-            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Theme'), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.text('Theme')).dy,
-      greaterThan(tester.getTopLeft(find.text('Invite to community')).dy),
-    );
-    expect(find.byKey(const ValueKey('community-theme-row')), findsOneWidget);
-    expect(find.text('Appearance'), findsNothing);
-    expect(find.text('Style · This community'), findsNothing);
-
-    await tester.tap(find.byKey(const ValueKey('community-theme-row')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('theme-preview-pages')), findsOneWidget);
-  });
-
-  testWidgets('uses the native glass close control on iOS', (tester) async {
+  testWidgets('uses native navigation with Close and no Edit action on iOS', (
+    tester,
+  ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     SharedPreferences.setMockInitialValues({});
@@ -312,7 +437,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -320,24 +444,19 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final nativeViews = tester.widgetList<UiKitView>(find.byType(UiKitView));
-    final nativeClose = nativeViews.singleWhere(
-      (view) =>
-          (view.creationParams as Map<Object?, Object?>?)?['icon'] == 'close',
-    );
-    final nativeEdit = nativeViews.singleWhere(
-      (view) =>
-          (view.creationParams as Map<Object?, Object?>?)?['label'] == 'Edit',
-    );
-    expect(nativeClose.viewType, 'buzz/navigation_glass');
-    expect(nativeClose.creationParams, containsPair('icon', 'close'));
-    expect(nativeEdit.viewType, 'buzz/navigation_glass');
-    expect(nativeEdit.creationParams, containsPair('controlWidth', 56.0));
-    expect(find.byTooltip('Close settings'), findsOneWidget);
+    final nativeBar = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(nativeBar.viewType, 'buzz/ios_navigation_bar');
+    final params = nativeBar.creationParams! as Map<String, Object?>;
+    expect(params['title'], 'Settings');
+    expect(params['largeTitle'], isFalse);
+    expect(params['leading'], containsPair('symbol', 'xmark'));
+    expect(params['leading'], containsPair('label', 'Close settings'));
+    expect(params['actions'], isEmpty);
+
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('shows community invite navigation to owners and admins', (
+  testWidgets('keeps community controls out of personal settings', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -355,7 +474,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const Text('Invite destination'),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -363,17 +481,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Invite to community'), findsOneWidget);
+    expect(find.text('Invite to community'), findsNothing);
     expect(
       find.text('Add people directly or share an invite link'),
       findsNothing,
     );
-    await tester.tap(find.text('Invite to community'));
-    await tester.pumpAndSettle();
-    expect(find.text('Invite destination'), findsOneWidget);
   });
 
-  testWidgets('keeps invite navigation available when role lookup fails', (
+  testWidgets('keeps personal settings independent of community role errors', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -394,7 +509,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const Text('Invite destination'),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -402,10 +516,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Invite to community'), findsOneWidget);
-    await tester.tap(find.text('Invite to community'));
-    await tester.pumpAndSettle();
-    expect(find.text('Invite destination'), findsOneWidget);
+    expect(find.text('Invite to community'), findsNothing);
   });
 
   testWidgets('hides community invite navigation from plain members', (
@@ -426,7 +537,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const Text('Invite destination'),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -458,7 +568,6 @@ void main() {
           theme: AppTheme.light(),
           home: SettingsPage(
             profileHeader: const SizedBox(height: 100),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
@@ -479,3 +588,15 @@ class _SettingsLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
 }
+
+const _pushDescriptor = BuzzPushLeaseDescriptor(
+  origin: 'wss://relay.example',
+  executorKeyId: 'key',
+  executorPubkey: 'pubkey',
+  transport: 'apns',
+  maxLeaseTtlSeconds: 3600,
+  maxContentLength: 4096,
+  maxPlaintextLength: 4096,
+  maxEndpointLength: 2048,
+  maxStringLength: 512,
+);

@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -14,16 +15,19 @@ import '../profile/user_status_cache_provider.dart';
 import 'agent_activity/agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 
 class MembersSheet extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
+  final void Function(BuildContext context, String pubkey)? onMemberTap;
 
   const MembersSheet({
     super.key,
     required this.channel,
     required this.currentPubkey,
+    this.onMemberTap,
   });
 
   @override
@@ -94,42 +98,52 @@ class MembersSheet extends HookConsumerWidget {
             shrinkWrap: true,
             padding: EdgeInsets.only(top: Grid.xxs, bottom: bottomClearance),
             children: [
-              if (people.isNotEmpty) ...[
-                _SectionLabel(label: 'People · ${people.length}'),
-                for (final member in people)
-                  _MemberTile(
-                    member: member,
-                    currentPubkey: currentPubkey,
-                    profile: userCache[member.pubkey.toLowerCase()],
-                    canManage: canManage,
-                    isSelf:
-                        member.pubkey.toLowerCase() ==
-                        currentPubkey?.toLowerCase(),
-                    channelId: channel.id,
-                    userStatus: statusCache[member.pubkey.toLowerCase()],
-                  ),
-              ],
-              if (bots.isNotEmpty) ...[
-                const SizedBox(height: Grid.xxs),
-                _SectionLabel(label: 'Agents · ${bots.length}'),
-                for (final bot in bots)
-                  _MemberTile(
-                    member: bot,
-                    currentPubkey: currentPubkey,
-                    profile: userCache[bot.pubkey.toLowerCase()],
-                    canManage: canManage,
-                    isSelf: false,
-                    channelId: channel.id,
-                    isWorking: typingBotPubkeys.contains(
-                      bot.pubkey.toLowerCase(),
-                    ),
-                    onViewActivity: () => openActivity(bot),
-                    onActivityTap:
-                        typingBotPubkeys.contains(bot.pubkey.toLowerCase())
-                        ? () => openActivity(bot)
-                        : null,
-                  ),
-              ],
+              if (people.isNotEmpty)
+                SheetActionSection(
+                  label: 'People · ${people.length}',
+                  dividerIndent: Grid.xs + 40 + Grid.xs,
+                  children: [
+                    for (final member in people)
+                      _MemberTile(
+                        member: member,
+                        currentPubkey: currentPubkey,
+                        profile: userCache[member.pubkey.toLowerCase()],
+                        canManage: canManage,
+                        isSelf:
+                            member.pubkey.toLowerCase() ==
+                            currentPubkey?.toLowerCase(),
+                        channelId: channel.id,
+                        userStatus: statusCache[member.pubkey.toLowerCase()],
+                        onActivityTap: onMemberTap == null
+                            ? null
+                            : () => onMemberTap!(context, member.pubkey),
+                      ),
+                  ],
+                ),
+              if (bots.isNotEmpty)
+                SheetActionSection(
+                  label: 'Agents · ${bots.length}',
+                  dividerIndent: Grid.xs + 40 + Grid.xs,
+                  children: [
+                    for (final bot in bots)
+                      _MemberTile(
+                        member: bot,
+                        currentPubkey: currentPubkey,
+                        profile: userCache[bot.pubkey.toLowerCase()],
+                        canManage: canManage,
+                        isSelf: false,
+                        channelId: channel.id,
+                        isWorking: typingBotPubkeys.contains(
+                          bot.pubkey.toLowerCase(),
+                        ),
+                        onViewActivity: () => openActivity(bot),
+                        onActivityTap:
+                            typingBotPubkeys.contains(bot.pubkey.toLowerCase())
+                            ? () => openActivity(bot)
+                            : null,
+                      ),
+                  ],
+                ),
               if (people.isEmpty && bots.isEmpty)
                 Center(
                   child: Text(
@@ -155,26 +169,6 @@ class MembersSheet extends HookConsumerWidget {
               ),
             ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  final String label;
-
-  const _SectionLabel({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: Grid.half, bottom: Grid.half),
-      child: Text(
-        label,
-        style: context.textTheme.labelMedium?.copyWith(
-          color: context.colors.onSurfaceVariant,
-          fontWeight: FontWeight.w600,
         ),
       ),
     );
@@ -216,17 +210,22 @@ class _MemberTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final label = isSelf
+    final name = isSelf
         ? 'You'
         : (profile?.displayName?.trim().isNotEmpty == true
               ? profile!.displayName!.trim()
               : member.labelFor(currentPubkey));
-    final initial = label.substring(0, 1).toUpperCase();
+    final label = _watchContextualLabel(ref);
+    // Named members initial from their name; unnamed ones stay keyed to the
+    // hex public key so the compact-npub label doesn't render `N` for all.
+    final hasName = profile?.displayName?.trim().isNotEmpty == true;
+    final initial = isSelf || hasName
+        ? name[0].toUpperCase()
+        : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
 
     return ListTile(
-      contentPadding: EdgeInsets.zero,
       leading: _MemberAvatar(
         avatarUrl: profile?.avatarUrl,
         initial: initial,
@@ -282,6 +281,10 @@ class _MemberTile extends ConsumerWidget {
     );
   }
 
+  /// 'You' for the viewer; otherwise the channel's contextual label.
+  String _watchContextualLabel(WidgetRef ref) =>
+      isSelf ? 'You' : watchChannelIdentityLabel(ref, channelId, member.pubkey);
+
   void _showMemberActions(
     BuildContext context,
     WidgetRef ref, {
@@ -289,9 +292,9 @@ class _MemberTile extends ConsumerWidget {
   }) {
     final label = isSelf
         ? 'You'
-        : (profile?.displayName?.trim().isNotEmpty == true
-              ? profile!.displayName!.trim()
-              : member.labelFor(currentPubkey));
+        : ref
+              .read(channelIdentityNamesProvider(channelId))
+              .labelFor(member.pubkey);
     final canChangeRole = showManagementActions && !member.isBot;
     showBuzzModalBottomSheet<void>(
       context: context,
@@ -303,19 +306,24 @@ class _MemberTile extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (onViewActivity != null)
-              ListTile(
-                leading: Icon(
-                  LucideIcons.activity,
-                  size: 18,
-                  color: context.colors.primary,
-                ),
-                title: const Text('View activity'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    onViewActivity?.call();
-                  });
-                },
+              SheetActionSection(
+                horizontalPadding: Grid.gutter,
+                children: [
+                  ListTile(
+                    leading: Icon(
+                      LucideIcons.activity,
+                      size: 18,
+                      color: context.colors.primary,
+                    ),
+                    title: const Text('View activity'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        onViewActivity?.call();
+                      });
+                    },
+                  ),
+                ],
               ),
             if (showManagementActions) ...[
               if (canChangeRole) ...[
@@ -335,47 +343,52 @@ class _MemberTile extends ConsumerWidget {
                 ),
                 const SizedBox(height: Grid.xs),
               ],
-              ListTile(
-                leading: Icon(
-                  LucideIcons.userMinus,
-                  size: 18,
-                  color: context.colors.error,
-                ),
-                title: Text(
-                  'Remove from channel',
-                  style: TextStyle(color: context.colors.error),
-                ),
-                onTap: () async {
-                  Navigator.of(context).pop();
-                  final confirmed = await showBuzzDialog<bool>(
-                    context: context,
-                    builder: (context) => AlertDialog(
-                      title: const Text('Remove member'),
-                      content: Text('Remove $label from this channel?'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(false),
-                          child: const Text('Cancel'),
-                        ),
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(true),
-                          child: Text(
-                            'Remove',
-                            style: TextStyle(color: context.colors.error),
-                          ),
-                        ),
-                      ],
+              SheetActionSection(
+                horizontalPadding: Grid.gutter,
+                children: [
+                  ListTile(
+                    leading: Icon(
+                      LucideIcons.userMinus,
+                      size: 18,
+                      color: context.colors.error,
                     ),
-                  );
-                  if (confirmed == true) {
-                    await ref
-                        .read(channelActionsProvider)
-                        .removeMember(
-                          channelId: channelId,
-                          pubkey: member.pubkey,
-                        );
-                  }
-                },
+                    title: Text(
+                      'Remove from channel',
+                      style: TextStyle(color: context.colors.error),
+                    ),
+                    onTap: () async {
+                      Navigator.of(context).pop();
+                      final confirmed = await showBuzzDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Remove member'),
+                          content: Text('Remove $label from this channel?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(true),
+                              child: Text(
+                                'Remove',
+                                style: TextStyle(color: context.colors.error),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirmed == true) {
+                        await ref
+                            .read(channelActionsProvider)
+                            .removeMember(
+                              channelId: channelId,
+                              pubkey: member.pubkey,
+                            );
+                      }
+                    },
+                  ),
+                ],
               ),
             ],
             const SizedBox(height: Grid.xxs),

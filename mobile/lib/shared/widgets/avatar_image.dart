@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -12,6 +13,8 @@ import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
 import '../push/push_presentation_cache.dart';
 import '../relay/relay.dart';
+
+part 'avatar_image_native.dart';
 
 /// An avatar that supports both remote URLs and inline image data.
 ///

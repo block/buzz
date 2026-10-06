@@ -20,7 +20,7 @@ import { HighlightedSearchText } from "@/features/search/ui/HighlightedSearchTex
 import { useSearchMenuKeyboardNavigation } from "@/features/search/ui/useSearchMenuKeyboardNavigation";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import {
@@ -134,7 +134,7 @@ function getUserDisplayName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 

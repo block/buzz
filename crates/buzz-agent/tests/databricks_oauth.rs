@@ -774,25 +774,21 @@ async fn databricks_v2_other_models_route_through_ai_gateway_mlflow_chat() {
 }
 
 #[tokio::test]
-async fn databricks_v2_model_service_fqn_uses_mlflow_chat_and_preserves_full_id() {
+async fn databricks_v2_claude_model_service_fqn_uses_messages_and_preserves_full_id() {
     let canned = vec![json!({
-        "id": "x",
-        "object": "chat.completion",
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": "ok" },
-            "finish_reason": "stop"
-        }]
+        "stop_reason": "end_turn",
+        "content": [{ "type": "text", "text": "ok" }]
     })];
     // Family-looking text in a Unity Catalog namespace is data, not route
-    // authority. The full raw FQN must reach the MLflow model field.
+    // authority. Only the service component selects Anthropic Messages, and
+    // the full raw FQN must reach the model field.
     let model = "catalog.schema.claude-gpt-5";
     let req = run_captured_prompt("databricks_v2", model, canned).await;
 
     assert_eq!(
         req.path.as_str(),
-        "/ai-gateway/mlflow/v1/chat/completions",
-        "Unity Catalog model-service FQNs must always use MLflow Chat"
+        "/ai-gateway/anthropic/v1/messages",
+        "a Claude model-service FQN must use Anthropic Messages"
     );
     assert_eq!(req.body["model"], model);
     assert!(
@@ -800,7 +796,7 @@ async fn databricks_v2_model_service_fqn_uses_mlflow_chat_and_preserves_full_id(
             .get("messages")
             .and_then(|value| value.as_array())
             .is_some(),
-        "model-service FQN requests must use the Chat Completions envelope"
+        "Claude model-service FQN requests must use the Messages envelope"
     );
 }
 

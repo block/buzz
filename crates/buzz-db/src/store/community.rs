@@ -44,7 +44,7 @@ pub enum CreateCommunityWithOwnerResult {
     Created(CreatedCommunityRecord),
     /// The host already belongs to another owner.
     HostExists,
-    /// The intended owner already owns the maximum number of communities.
+    /// The intended owner has reached the active or lifetime community limit.
     LimitReached,
 }
 
@@ -59,6 +59,19 @@ pub struct OwnedCommunityRecord {
     pub created_at: DateTime<Utc>,
     /// When the community was archived; absent while active.
     pub archived_at: Option<DateTime<Utc>>,
+}
+
+/// Owner-list rows plus the authoritative quota projection from one snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedCommunitiesPage {
+    /// Visible live owner memberships, excluding communities already under deletion.
+    pub communities: Vec<OwnedCommunityRecord>,
+    /// De-duplicated live memberships and incomplete owner deletion reservations.
+    pub quota_used: i64,
+    /// Configured active limit only; the lifetime cap is reflected in `can_create`.
+    pub quota_limit: i64,
+    /// Whether the snapshot leaves room under both the active and lifetime caps.
+    pub can_create: bool,
 }
 
 /// Community row returned by an owner-authorized archive operation.
@@ -81,6 +94,17 @@ pub struct UnarchivedCommunityRecord {
     pub host: String,
 }
 
+/// Result of an owner-authorized unarchive attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnarchiveCommunityResult {
+    /// The community is active, with archive state cleared idempotently.
+    Unarchived(UnarchivedCommunityRecord),
+    /// Durable deletion intent exists and wins over restoration.
+    DeletionPending,
+    /// The host is absent, unavailable, or not owned by the asserted pubkey.
+    NotFound,
+}
+
 impl Db {
     /// Returns the community mapped to a normalized request host, if one exists.
     ///
@@ -91,6 +115,11 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT id, host
@@ -102,7 +131,7 @@ impl Db {
             "#,
         )
         .bind(normalized_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         row.map(|row| {
@@ -120,11 +149,37 @@ impl Db {
     /// Returns whether a community id still exists in the active lifecycle state.
     #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        self.is_community_active_with_operation(
+            community_id,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// Background lifecycle revalidation variant of [`Self::is_community_active`].
+    #[datastore_span(name = "is_community_active_for_maintenance", system = "postgresql")]
+    pub async fn is_community_active_for_maintenance(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool> {
+        self.is_community_active_with_operation(
+            community_id,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await
+    }
+
+    async fn is_community_active_with_operation(
+        &self,
+        community_id: CommunityId,
+        operation: crate::observability::WriterOperation,
+    ) -> Result<bool> {
+        let mut connection = crate::observability::acquire_writer(&self.pool, operation).await?;
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         Ok(active)
     }
@@ -138,9 +193,14 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
             .bind(normalized_host)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *connection)
             .await?;
         row.map(|row| {
             Ok(CommunityRecord {
@@ -159,8 +219,17 @@ impl Db {
     pub async fn list_communities_owned_by(
         &self,
         owner_pubkey: &str,
-    ) -> Result<Vec<OwnedCommunityRecord>> {
+    ) -> Result<OwnedCommunitiesPage> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.host, c.created_at, c.archived_at
@@ -168,14 +237,18 @@ impl Db {
             JOIN relay_members rm ON rm.community_id = c.id
             WHERE rm.pubkey = $1
               AND rm.role = 'owner'
+              AND NOT EXISTS (
+                  SELECT 1 FROM community_deletion_requests request
+                  WHERE request.community_id = c.id AND request.stage <> 'aborted'
+              )
             ORDER BY c.created_at ASC, c.host ASC
             "#,
         )
-        .bind(owner_pubkey)
-        .fetch_all(&self.pool)
+        .bind(&owner_pubkey)
+        .fetch_all(&mut *tx)
         .await?;
-
-        rows.into_iter()
+        let communities = rows
+            .into_iter()
             .map(|row| {
                 let id: Uuid = row.try_get("id")?;
                 let host: String = row.try_get("host")?;
@@ -188,7 +261,15 @@ impl Db {
                     archived_at,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let quota = relay_members::owner_quota_in_transaction(&mut tx, &owner_pubkey).await?;
+        tx.commit().await?;
+        Ok(OwnedCommunitiesPage {
+            communities,
+            quota_used: quota.active,
+            quota_limit: relay_members::max_communities_per_owner(),
+            can_create: quota.admits(),
+        })
     }
 
     /// Returns the normalized host mapped to a community id, if the community
@@ -203,6 +284,11 @@ impl Db {
     /// is never used to re-derive the community.
     #[datastore_span(name = "lookup_community_host", system = "postgresql")]
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT host
@@ -214,7 +300,7 @@ impl Db {
             "#,
         )
         .bind(community_id.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         row.map(|row| {
@@ -255,6 +341,11 @@ impl Db {
         community_id: CommunityId,
         icon: Option<&str>,
     ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query(
             r#"
             UPDATE communities
@@ -264,7 +355,7 @@ impl Db {
         )
         .bind(community_id.as_uuid())
         .bind(icon)
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
         Ok(())
     }
@@ -279,6 +370,35 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        self.ensure_configured_community_with_operation(
+            normalized_host,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await
+    }
+
+    /// Ensure the deployment-configured community during process bootstrap.
+    #[datastore_span(
+        name = "ensure_configured_community_for_bootstrap",
+        system = "postgresql"
+    )]
+    pub async fn ensure_configured_community_for_bootstrap(
+        &self,
+        normalized_host: &str,
+    ) -> Result<EnsuredCommunityRecord> {
+        self.ensure_configured_community_with_operation(
+            normalized_host,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await
+    }
+
+    async fn ensure_configured_community_with_operation(
+        &self,
+        normalized_host: &str,
+        operation: crate::observability::WriterOperation,
+    ) -> Result<EnsuredCommunityRecord> {
+        let mut connection = crate::observability::acquire_writer(&self.pool, operation).await?;
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -290,7 +410,7 @@ impl Db {
             "#,
         )
         .bind(normalized_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?
         .ok_or_else(|| {
             DbError::AccessDenied(format!(
@@ -321,7 +441,12 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<CreateCommunityWithOwnerResult> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
-        let mut tx = self.pool.begin().await?;
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
         // Serialize on the owner pubkey so concurrent creates to the same
         // owner cannot both pass the ownership count check.
@@ -350,14 +475,10 @@ impl Db {
             let host: String = row.try_get("host")?;
 
             // Enforce the limit before inserting the new owner row.
-            let owned_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
-            )
-            .bind(&owner_pubkey)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            if owned_count >= relay_members::max_communities_per_owner() {
+            if !relay_members::owner_quota_in_transaction(&mut tx, &owner_pubkey)
+                .await?
+                .admits()
+            {
                 tx.rollback().await?;
                 return Ok(CreateCommunityWithOwnerResult::LimitReached);
             }
@@ -412,6 +533,11 @@ impl Db {
         owner_pubkey: &str,
         protected_deployment_host: &str,
     ) -> Result<Option<ArchivedCommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let row = sqlx::query(
             r#"UPDATE communities c
                SET archived_at = COALESCE(c.archived_at, now())
@@ -428,7 +554,7 @@ impl Db {
         .bind(normalized_host)
         .bind(owner_pubkey)
         .bind(protected_deployment_host)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         row.map(|row| {
             Ok(ArchivedCommunityRecord {
@@ -441,35 +567,69 @@ impl Db {
     }
 
     /// Idempotently restores a community when the asserted pubkey is its current owner.
+    ///
+    /// Locks the community row so owner-deletion admission and restoration have
+    /// one serial order. A non-aborted deletion request returns
+    /// [`UnarchiveCommunityResult::DeletionPending`] without clearing archive state.
     #[datastore_span(name = "unarchive_community_owned_by", system = "postgresql")]
     pub async fn unarchive_community_owned_by(
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
-    ) -> Result<Option<UnarchivedCommunityRecord>> {
-        let row = sqlx::query(
-            r#"UPDATE communities c
-               SET archived_at = NULL
-               FROM relay_members rm
-               WHERE lower(c.host) = lower($1)
-                 AND rm.community_id = c.id
-                 AND lower(rm.pubkey) = lower($2)
-                 AND rm.role = 'owner'
-                 AND c.deletion_state = 'active'
-                 AND c.deleted_at IS NULL
-               RETURNING c.id, c.host"#,
+    ) -> Result<UnarchiveCommunityResult> {
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        let target = sqlx::query(
+            "SELECT id, host FROM communities \
+             WHERE lower(host) = lower($1) AND deletion_state = 'active' \
+               AND deleted_at IS NULL FOR UPDATE",
         )
         .bind(normalized_host)
-        .bind(owner_pubkey)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        row.map(|row| {
-            Ok(UnarchivedCommunityRecord {
-                id: CommunityId::from_uuid(row.try_get("id")?),
-                host: row.try_get("host")?,
-            })
-        })
-        .transpose()
+        let Some(target) = target else {
+            tx.rollback().await?;
+            return Ok(UnarchiveCommunityResult::NotFound);
+        };
+        let community_id: Uuid = target.try_get("id")?;
+        let is_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_members \
+             WHERE community_id = $1 AND lower(pubkey) = lower($2) AND role = 'owner')",
+        )
+        .bind(community_id)
+        .bind(owner_pubkey)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !is_owner {
+            tx.rollback().await?;
+            return Ok(UnarchiveCommunityResult::NotFound);
+        }
+        let deletion_pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+             WHERE community_id = $1 AND stage <> 'aborted')",
+        )
+        .bind(community_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if deletion_pending {
+            tx.rollback().await?;
+            return Ok(UnarchiveCommunityResult::DeletionPending);
+        }
+        sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
+            .bind(community_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(UnarchiveCommunityResult::Unarchived(
+            UnarchivedCommunityRecord {
+                id: CommunityId::from_uuid(community_id),
+                host: target.try_get("host")?,
+            },
+        ))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -478,6 +638,11 @@ impl Db {
     /// they are acting on, rather than falling back to an implicit default.
     #[datastore_span(name = "community_of_channel", system = "postgresql")]
     pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT community_id
@@ -487,7 +652,7 @@ impl Db {
             "#,
         )
         .bind(channel_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         row.map(|row| {
@@ -523,6 +688,11 @@ impl Db {
         if channel_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
         let rows = sqlx::query(
             r#"
             SELECT id, community_id
@@ -532,7 +702,7 @@ impl Db {
             "#,
         )
         .bind(channel_ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
 
         let mut out = std::collections::HashMap::with_capacity(rows.len());
@@ -644,6 +814,7 @@ mod postgres_tests {
             "EnsuredCommunityRecord",
             "CreatedCommunityRecord",
             "OwnedCommunityRecord",
+            "OwnedCommunitiesPage",
             "ArchivedCommunityRecord",
             "UnarchivedCommunityRecord",
         ];
@@ -795,22 +966,26 @@ mod postgres_tests {
                 .is_none(),
             "archived communities must fail admission"
         );
-        assert!(db
-            .unarchive_community_owned_by(&host, &outsider)
-            .await
-            .expect("wrong-owner unarchive")
-            .is_none());
-        assert!(db
-            .unarchive_community_owned_by("missing.example", &owner)
-            .await
-            .expect("unknown-host unarchive")
-            .is_none());
+        assert_eq!(
+            db.unarchive_community_owned_by(&host, &outsider)
+                .await
+                .expect("wrong-owner unarchive"),
+            UnarchiveCommunityResult::NotFound
+        );
+        assert_eq!(
+            db.unarchive_community_owned_by("missing.example", &owner)
+                .await
+                .expect("unknown-host unarchive"),
+            UnarchiveCommunityResult::NotFound
+        );
 
         let restored = db
             .unarchive_community_owned_by(&host.to_ascii_uppercase(), &owner)
             .await
-            .expect("unarchive community")
-            .expect("owned community");
+            .expect("unarchive community");
+        let UnarchiveCommunityResult::Unarchived(restored) = restored else {
+            panic!("expected owned community")
+        };
         assert_eq!(restored.id, created.id);
         assert_eq!(restored.host, host);
         assert_eq!(
@@ -833,9 +1008,8 @@ mod postgres_tests {
         let retry = db
             .unarchive_community_owned_by(&host, &owner)
             .await
-            .expect("idempotent retry")
-            .expect("owned community");
-        assert_eq!(retry, restored);
+            .expect("idempotent retry");
+        assert_eq!(retry, UnarchiveCommunityResult::Unarchived(restored));
     }
 
     #[tokio::test]
@@ -941,8 +1115,168 @@ mod postgres_tests {
             .await
             .expect("list owned communities");
 
-        assert_eq!(owned.len(), 1);
-        assert_eq!(owned[0].id, community_a);
+        assert_eq!(owned.communities.len(), 1);
+        assert_eq!(owned.communities[0].id, community_a);
+        assert_eq!(owned.quota_used, 1);
+        assert_eq!(
+            owned.quota_limit,
+            crate::relay_members::max_communities_per_owner()
+        );
+        assert!(owned.can_create);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_quota_serializes_concurrent_create_and_transfer_with_reservation() {
+        let db = setup_db().await;
+        let recipient = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let source_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+
+        for index in 0..3 {
+            let host = format!("quota-live-{index}-{}.example", Uuid::new_v4().simple());
+            assert!(matches!(
+                db.create_community_with_owner(&host, &recipient)
+                    .await
+                    .expect("create live quota fixture"),
+                CreateCommunityWithOwnerResult::Created(_)
+            ));
+        }
+        let reserved_host = format!("quota-held-{}.example", Uuid::new_v4().simple());
+        let reserved = db
+            .create_community_with_owner(&reserved_host, &recipient)
+            .await
+            .expect("create reservation fixture");
+        let CreateCommunityWithOwnerResult::Created(reserved) = reserved else {
+            panic!("expected reservation community")
+        };
+        sqlx::query(
+            "INSERT INTO community_deletion_requests \
+             (id, community_id, community_host, requested_by, request_origin, owner_pubkey, \
+              mediating_operator_pubkey, acknowledgement_version) \
+             VALUES ($1, $2, $3, $4, 'owner', $4, $5, 1)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(reserved.id.as_uuid())
+        .bind(&reserved_host)
+        .bind(&recipient)
+        .bind("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .execute(&db.pool)
+        .await
+        .expect("insert reservation");
+        sqlx::query("DELETE FROM relay_members WHERE community_id = $1")
+            .bind(reserved.id.as_uuid())
+            .execute(&db.pool)
+            .await
+            .expect("simulate purged membership");
+
+        let transfer_host = format!("quota-transfer-{}.example", Uuid::new_v4().simple());
+        let transfer_target = db
+            .create_community_with_owner(&transfer_host, &source_owner)
+            .await
+            .expect("create transfer target");
+        let CreateCommunityWithOwnerResult::Created(transfer_target) = transfer_target else {
+            panic!("expected transfer target")
+        };
+        let create_host = format!("quota-race-{}.example", Uuid::new_v4().simple());
+
+        let (create, transfer) = tokio::join!(
+            db.create_community_with_owner(&create_host, &recipient),
+            db.transfer_ownership(transfer_target.id, &recipient, &source_owner),
+        );
+        let create = create.expect("concurrent create result");
+        let transfer = transfer.expect("concurrent transfer result");
+        let create_won = matches!(create, CreateCommunityWithOwnerResult::Created(_));
+        let transfer_won = matches!(
+            transfer,
+            crate::relay_members::TransferResult::Transferred { .. }
+        );
+        assert_ne!(create_won, transfer_won, "exactly one owner grant may win");
+        assert!(
+            matches!(create, CreateCommunityWithOwnerResult::LimitReached) || create_won,
+            "create loser must observe the quota"
+        );
+        assert!(
+            matches!(transfer, crate::relay_members::TransferResult::LimitReached) || transfer_won,
+            "transfer loser must observe the quota"
+        );
+        assert_eq!(
+            db.list_communities_owned_by(&recipient)
+                .await
+                .expect("post-race quota")
+                .quota_used,
+            crate::relay_members::max_communities_per_owner()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn completed_owner_deletions_count_toward_lifetime_cap() {
+        let db = setup_db().await;
+        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let other_owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let operator = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        // Create and completely delete up to the lifetime cap: each tombstone
+        // frees its active slot but keeps its host and its lifetime count.
+        for i in 0..crate::relay_members::MAX_LIFETIME_COMMUNITIES_PER_OWNER {
+            let host = format!("lifetime-{i}-{}.example", Uuid::new_v4().simple());
+            let CreateCommunityWithOwnerResult::Created(record) = db
+                .create_community_with_owner(&host, &owner)
+                .await
+                .expect("create under lifetime cap")
+            else {
+                panic!("create {i} must succeed below the lifetime cap")
+            };
+            sqlx::query(
+                "INSERT INTO community_deletion_requests \
+                 (id, community_id, community_host, requested_by, request_origin, owner_pubkey, \
+                  mediating_operator_pubkey, acknowledgement_version, stage, completed_at) \
+                 VALUES ($1, $2, $3, $4, 'owner', $4, $5, 1, 'retention_pending', now())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(record.id.as_uuid())
+            .bind(&host)
+            .bind(&owner)
+            .bind(operator)
+            .execute(&db.pool)
+            .await
+            .expect("insert completed owner deletion");
+            sqlx::query("DELETE FROM relay_members WHERE community_id = $1")
+                .bind(record.id.as_uuid())
+                .execute(&db.pool)
+                .await
+                .expect("simulate purged membership");
+        }
+
+        let page = db
+            .list_communities_owned_by(&owner)
+            .await
+            .expect("owner list at lifetime cap");
+        assert_eq!(page.quota_used, 0, "completed deletions free active slots");
+        assert!(!page.can_create, "the lifetime cap still blocks creation");
+
+        let host = format!("lifetime-overflow-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            db.create_community_with_owner(&host, &owner)
+                .await
+                .expect("create past lifetime cap"),
+            CreateCommunityWithOwnerResult::LimitReached
+        );
+
+        let transfer_host = format!("lifetime-transfer-{}.example", Uuid::new_v4().simple());
+        let CreateCommunityWithOwnerResult::Created(target) = db
+            .create_community_with_owner(&transfer_host, &other_owner)
+            .await
+            .expect("create transfer target")
+        else {
+            panic!("expected transfer target")
+        };
+        assert_eq!(
+            db.transfer_ownership(target.id, &owner, &other_owner)
+                .await
+                .expect("transfer past lifetime cap"),
+            crate::relay_members::TransferResult::LimitReached
+        );
     }
 
     #[tokio::test]

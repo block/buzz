@@ -1,7 +1,6 @@
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -20,7 +19,6 @@ export type Channel = {
   ttlSeconds: number | null;
   ttlDeadline: string | null;
 };
-
 export type ChannelDetail = Channel & {
   createdBy: string;
   createdAt: string;
@@ -33,7 +31,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
@@ -69,21 +66,15 @@ export type SetChannelPurposeInput = {
   purpose: string;
 };
 
-export type CanvasResponse = {
-  content: string | null;
-  updatedAt: number | null;
-  author: string | null;
-};
+export type {
+  CanvasHistoryCursor,
+  CanvasHistoryResponse,
+  CanvasResponse,
+  CanvasRevision,
+  SetCanvasInput,
+  SetCanvasResult,
+} from "@/shared/api/canvasTypes";
 
-export type SetCanvasInput = {
-  channelId: string;
-  content: string;
-};
-
-export type SetCanvasResult = {
-  ok: boolean;
-  eventId: string;
-};
 export type AddChannelMembersInput = {
   channelId: string;
   pubkeys: string[];
@@ -161,8 +152,10 @@ export type UserStatus = {
   text: string;
   emoji: string;
   updatedAt: number;
+  /** NIP-01 tie-breaker for replacement events sharing `updatedAt`. */
+  eventId?: string;
+  expiresAt?: number;
 };
-
 export type UserStatusLookup = Record<string, UserStatus | null>;
 
 export type {
@@ -270,7 +263,8 @@ export type RelayAgent = {
   channels: string[];
   channelIds: string[];
   capabilities: string[];
-  status: "online" | "away" | "offline";
+  /** Policy-only discovery has no liveness evidence. */
+  status: "online" | "away" | "offline" | "unknown";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
 };
@@ -299,6 +293,9 @@ export type ManagedAgentRuntimeStatus = {
 export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
+
+/** ACP conversation boundary configured on an agent definition. */
+export type AcpSessionPolicy = "channel" | "thread";
 
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
@@ -329,6 +326,7 @@ export type ManagedAgent = {
   idleTimeoutSeconds: number | null;
   maxTurnDurationSeconds: number | null;
   parallelism: number;
+  sessionPolicy: AcpSessionPolicy;
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
@@ -501,6 +499,15 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  /**
+   * Canonical accepted effort values for this runtime, in display order.
+   *
+   * Non-null only for runtimes with a static finite effort vocabulary
+   * (currently Goose: `["off","low","medium","high","max"]`). The renderer
+   * uses this instead of the TS-side `GOOSE_EFFORT_CANONICAL_VALUES` duplicate.
+   * Null for buzz-agent (provider/model catalog), Claude/Codex/unknown runtimes.
+   */
+  effortCanonicalValues: string[] | null;
   maxTokensEnvVar: string | null;
   contextLimitEnvVar: string | null;
   maxRoundsEnvVar: string | null;
@@ -664,9 +671,9 @@ export type RuntimeConfigSurface = {
   sources: ConfigSourceReport;
   /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
   claudeConfigDirCustom?: boolean;
-  /** B5: the adapter-advertised `thought_level` configId, discovered from the running session. Present only for claude after the first session. Drives the effort picker. */
+  /** The adapter-advertised `thought_level` configId, discovered from the running session — present once a session advertises `thought_level` support (Claude today; any effort-capable ACP adapter in general). Drives the effort picker. */
   effortConfigId?: string;
-  /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
+  /** Adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
   effortOptions?: AcpConfigOptionValue[];
 };
 
@@ -694,11 +701,10 @@ export type UpdateManagedAgentInput = {
   mcpCommand?: string;
   /** Absent = don't touch. Present = set the mode. */
   respondTo?: RespondToMode;
-  /**
-   * Absent = don't touch. Present = replace the allowlist with this list
-   * (validated & normalized server-side).
-   */
+  /** Absent = keep. Present = replace the allowlist (server-validated). */
   respondToAllowlist?: string[];
+  /** Tri-state: absent = don't touch; `null` = clear; `string` = set. Persisted in the locked update so access-change restarts snapshot the new effort. Send only when `effortTouched`. */
+  effortLevel?: string | null;
 };
 // Persona (agent definition) types live in a sibling module to keep this
 // file inside the repo-wide size ratchet; re-exported so import paths

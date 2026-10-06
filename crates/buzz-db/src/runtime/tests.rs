@@ -1,10 +1,68 @@
 use super::*;
 use crate::{relay_members, thread};
 use buzz_core::CommunityId;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
 const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
+
+type ConnectionCounters = std::collections::BTreeMap<(String, String, Option<String>), u64>;
+
+fn connection_counters(snapshotter: &Snapshotter) -> ConnectionCounters {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _, _, value)| {
+            let metric_name = key.key().name();
+            if ![
+                "buzz_db_connection_step_started_total",
+                "buzz_db_connection_step_attempts_total",
+            ]
+            .contains(&metric_name)
+            {
+                return None;
+            }
+            let DebugValue::Counter(value) = value else {
+                panic!("{metric_name} must be a counter");
+            };
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(labels.get("pool_role").map(String::as_str), Some("writer"));
+            Some((
+                (
+                    metric_name.to_owned(),
+                    labels
+                        .get("step")
+                        .expect("connection step label")
+                        .to_owned(),
+                    labels.get("outcome").cloned(),
+                ),
+                value,
+            ))
+        })
+        .collect()
+}
+
+fn connection_counter(
+    counters: &ConnectionCounters,
+    metric_name: &str,
+    step: DbConnectionStep,
+    outcome: Option<DbConnectionOutcome>,
+) -> u64 {
+    counters
+        .get(&(
+            metric_name.to_owned(),
+            step.as_str().to_owned(),
+            outcome.map(|outcome| outcome.as_str().to_owned()),
+        ))
+        .copied()
+        .unwrap_or_default()
+}
 
 async fn setup_db() -> Db {
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
@@ -17,6 +75,245 @@ async fn setup_db() -> Db {
             .expect("apply migration schema");
     }
     Db::from_pool(pool)
+}
+
+#[tokio::test]
+async fn begin_transaction_compatibility_alias_is_preserved() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&crate::test_support::database_url())
+        .expect("construct lazy compatibility pool");
+    pool.close().await;
+    let db = Db::from_pool(pool);
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    #[allow(deprecated)]
+    let result = db.begin_transaction().await;
+    assert!(matches!(
+        result,
+        Err(DbError::Sqlx(sqlx::Error::PoolClosed))
+    ));
+
+    let counters = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _, _, value)| {
+            let name = key.key().name();
+            if ![
+                "buzz_db_pool_acquire_attempts_total",
+                "buzz_db_pool_acquisitions_total",
+            ]
+            .contains(&name)
+            {
+                return None;
+            }
+            let DebugValue::Counter(value) = value else {
+                panic!("pool acquisition terminals must be counters");
+            };
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            Some(((name.to_owned(), labels), value))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = [
+        (
+            (
+                "buzz_db_pool_acquire_attempts_total".to_owned(),
+                [
+                    ("operation".to_owned(), "event_write".to_owned()),
+                    ("outcome".to_owned(), "error".to_owned()),
+                    ("pool_role".to_owned(), "writer".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            1,
+        ),
+        (
+            (
+                "buzz_db_pool_acquisitions_total".to_owned(),
+                [
+                    ("outcome".to_owned(), "error".to_owned()),
+                    ("pool_role".to_owned(), "writer".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            1,
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(counters, expected);
+}
+
+#[test]
+fn nip43_reconciliation_compatibility_alias_is_preserved() {
+    #[allow(deprecated)]
+    async fn call(
+        db: &Db,
+        community_id: CommunityId,
+        relay_pubkey: &nostr::PublicKey,
+    ) -> crate::Result<bool> {
+        db.nip43_membership_snapshot_needs_reconciliation(community_id, relay_pubkey)
+            .await
+    }
+
+    let _ = call;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_distinguishes_pool_exhaustion_from_success() {
+    let database_url = crate::test_support::database_url();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect size-one readiness test pool");
+    let held = pool
+        .acquire()
+        .await
+        .expect("hold the only readiness test connection");
+    let db = Db::from_pool(pool);
+
+    let exhausted = db
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_millis(25))
+        .await;
+    assert_eq!(exhausted, DbReadinessOutcome::PoolTimeout);
+
+    drop(held);
+    let recovered = db
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+    assert_eq!(recovered, DbReadinessOutcome::Success);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_classifies_closed_pool_query_timeout_and_query_error() {
+    let database_url = crate::test_support::database_url();
+
+    let closed_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect closed readiness test pool");
+    closed_pool.close().await;
+    let closed = Db::from_pool(closed_pool)
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+    assert_eq!(closed, DbReadinessOutcome::PoolError);
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect query classification test pool");
+    let db = Db::from_pool(pool);
+
+    let timed_out = db
+        .readiness_check_sql(
+            tokio::time::Instant::now() + std::time::Duration::from_millis(25),
+            "SELECT pg_sleep(0.2)",
+        )
+        .await;
+    assert_eq!(timed_out, DbReadinessOutcome::QueryTimeout);
+
+    let query_error = db
+        .readiness_check_sql(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            "SELECT 1 / 0",
+        )
+        .await;
+    assert_eq!(query_error, DbReadinessOutcome::QueryError);
+
+    assert_eq!(
+        db.readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await,
+        DbReadinessOutcome::Success,
+        "query failures must return the acquired connection to the pool"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() {
+    let database_url = crate::test_support::database_url();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect cancellation readiness test pool");
+    let held = pool
+        .acquire()
+        .await
+        .expect("hold sole connection before waiter cancellation");
+    let db = Db::from_pool(pool);
+
+    let waiting_db = db.clone();
+    let waiting = tokio::spawn(async move {
+        waiting_db
+            .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    waiting.abort();
+    assert!(waiting
+        .await
+        .expect_err("waiting check must be cancelled")
+        .is_cancelled());
+    drop(held);
+
+    assert_eq!(
+        db.readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await,
+        DbReadinessOutcome::Success,
+        "cancelled pool waiter must not consume the released connection"
+    );
+
+    let querying_db = db.clone();
+    let querying = tokio::spawn(async move {
+        querying_db
+            .readiness_check_sql(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                "SELECT pg_sleep(5)",
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    querying.abort();
+    assert!(querying
+        .await
+        .expect_err("querying check must be cancelled")
+        .is_cancelled());
+
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let outcome = db
+                .readiness_check(
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(250),
+                )
+                .await;
+            match outcome {
+                DbReadinessOutcome::Success => break outcome,
+                DbReadinessOutcome::PoolTimeout => tokio::task::yield_now().await,
+                unexpected => panic!(
+                    "cancelled in-flight query produced unexpected recovery outcome: {unexpected:?}"
+                ),
+            }
+        }
+    })
+    .await
+    .expect("cancelled in-flight query must return or replace its connection");
+    assert_eq!(recovered, DbReadinessOutcome::Success);
 }
 
 async fn make_community(pool: &PgPool) -> Uuid {
@@ -339,6 +636,26 @@ async fn migration_schema_database_guard_covers_legacy_writer_and_nip09_deletion
     .expect("read C watermark");
     assert_eq!(watermark.0.timestamp(), base as i64 + 3);
     assert_eq!(watermark.1, c.id.as_bytes().as_slice());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_operator_listener_outbox_is_not_tenant_scoped() {
+    let db = setup_db().await;
+    let community = CommunityId::from_uuid(make_community(&db.pool).await);
+    let inventory = db
+        .deletion_store()
+        .inventory_schema(community)
+        .await
+        .expect("migrated deletion catalog should validate");
+
+    assert!(
+        !inventory
+            .scoped_tables
+            .iter()
+            .any(|table| table == "operator_listener_outbox"),
+        "operator-listener outbox is deployment-global, not tenant-scoped"
+    );
 }
 
 // ---- Read-replica routing ------------------------------------------------
@@ -2305,9 +2622,151 @@ fn writer_pool_safety_hook_is_single_and_composed() {
     assert!(!reader_doc.contains("Db::connect_writer_pool"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Postgres"]
+async fn writer_pool_metrics_record_every_initial_connection_ready() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let db = Db::new(&DbConfig {
+        database_url: crate::test_support::database_url(),
+        max_connections: 2,
+        min_connections: 2,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect instrumented writer pool");
+    let counters = connection_counters(&snapshotter);
+
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_started_total",
+            DbConnectionStep::WriterPool,
+            None,
+        ),
+        1
+    );
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::WriterPool,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        1
+    );
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::PhysicalConnect,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        2
+    );
+    for step in [
+        DbConnectionStep::CreatedAtFloor,
+        DbConnectionStep::SessionTimeouts,
+        DbConnectionStep::Isolation,
+    ] {
+        assert_eq!(
+            connection_counter(
+                &counters,
+                "buzz_db_connection_step_started_total",
+                step,
+                None,
+            ),
+            2,
+            "every initial connection must start {}",
+            step.as_str(),
+        );
+        assert_eq!(
+            connection_counter(
+                &counters,
+                "buzz_db_connection_step_attempts_total",
+                step,
+                Some(DbConnectionOutcome::Succeeded),
+            ),
+            2,
+            "every initial connection must complete {}",
+            step.as_str(),
+        );
+    }
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::Ready,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        2
+    );
+    db.pool.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Postgres"]
+async fn writer_pool_metrics_record_connection_created_after_startup() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let pool = Db::connect_writer_pool(&DbConfig {
+        database_url: crate::test_support::database_url(),
+        max_connections: 2,
+        min_connections: 1,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect instrumented size-one writer pool");
+    let startup_counters = connection_counters(&snapshotter);
+    assert_eq!(
+        connection_counter(
+            &startup_counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::Ready,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        1
+    );
+
+    let first = pool.acquire().await.expect("hold initial connection");
+    let second = pool
+        .acquire()
+        .await
+        .expect("grow pool with a second connection");
+    let growth_counters = connection_counters(&snapshotter);
+    assert_eq!(
+        connection_counter(
+            &growth_counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::Ready,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        1,
+        "a post-startup pool growth connection must traverse the same instrumented safety hook"
+    );
+    assert_eq!(
+        connection_counter(
+            &growth_counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::PhysicalConnect,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        1,
+    );
+
+    drop(second);
+    drop(first);
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn writer_pool_rejects_non_read_committed_database_default() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");
@@ -2337,6 +2796,26 @@ async fn writer_pool_rejects_non_read_committed_database_default() {
             || error.to_string().contains("pool timed out"),
         "unexpected isolation rejection: {error}"
     );
+    let counters = connection_counters(&snapshotter);
+    assert!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::Isolation,
+            Some(DbConnectionOutcome::Failed),
+        ) > 0,
+        "the failing production hook must record the isolation failure"
+    );
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::Ready,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        0,
+        "an isolation-rejected connection must never reach ready"
+    );
 
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP DATABASE {name} WITH (FORCE)"
@@ -2344,6 +2823,59 @@ async fn writer_pool_rejects_non_read_committed_database_default() {
     .execute(&admin)
     .await
     .expect("drop isolation test database");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Postgres"]
+async fn writer_pool_metrics_stop_after_session_timeout_setup_failure() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let error = Db::new(&DbConfig {
+        database_url: crate::test_support::database_url(),
+        max_connections: 1,
+        min_connections: 1,
+        acquire_timeout_secs: 1,
+        statement_timeout_ms: u64::MAX,
+        ..DbConfig::default()
+    })
+    .await
+    .expect_err("Postgres must reject an out-of-range statement timeout");
+    assert!(
+        error.to_string().contains("pool timed out")
+            || error.to_string().contains("invalid value for parameter")
+    );
+    let counters = connection_counters(&snapshotter);
+
+    assert!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::SessionTimeouts,
+            Some(DbConnectionOutcome::Failed),
+        ) > 0,
+        "the failing production hook must record the timeout-setup failure"
+    );
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_started_total",
+            DbConnectionStep::Isolation,
+            None,
+        ),
+        0,
+        "a timeout-setup failure must stop before isolation"
+    );
+    assert_eq!(
+        connection_counter(
+            &counters,
+            "buzz_db_connection_step_attempts_total",
+            DbConnectionStep::Ready,
+            Some(DbConnectionOutcome::Succeeded),
+        ),
+        0,
+        "a timeout-setup failure must never reach ready"
+    );
 }
 
 /// Session-timeout environment overrides retain PostgreSQL's `0 = disabled`
@@ -2586,6 +3118,131 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
     db.pool.close().await;
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replica_floor_writer_transaction_holds_shared_lock() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (seed_pool, name) = create_scratch_db(&admin, "floor_writer_foundation").await;
+
+    let base = admin_url().await;
+    let idx = base.rfind('/').expect("db url has a path segment");
+    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let db = Db::new(&DbConfig {
+        database_url: scratch_url,
+        max_connections: 3,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect armed Db");
+
+    let writer = db
+        .begin_replica_floor_locked_event_write_transaction()
+        .await
+        .expect("open compliant floor-guarded writer tx");
+
+    let mut shared_contender = db.pool.begin().await.expect("begin shared contender");
+    let shared_taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
+        .bind(crate::replica_fence::REPLICA_FLOOR_LOCK_KEY)
+        .fetch_one(&mut *shared_contender)
+        .await
+        .expect("probe shared floor lock");
+    assert!(
+        shared_taken,
+        "compliant writer must allow another shared replica-floor lock holder"
+    );
+    shared_contender
+        .rollback()
+        .await
+        .expect("rollback shared contender");
+
+    let mut contender = db.pool.begin().await.expect("begin exclusive contender");
+    let exclusive_taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(crate::replica_fence::REPLICA_FLOOR_LOCK_KEY)
+        .fetch_one(&mut *contender)
+        .await
+        .expect("probe exclusive floor lock");
+    assert!(
+        !exclusive_taken,
+        "compliant writer must hold the shared replica-floor advisory lock"
+    );
+
+    contender
+        .rollback()
+        .await
+        .expect("rollback exclusive contender");
+    writer.rollback().await.expect("rollback writer tx");
+    db.pool.close().await;
+    drop_scratch_db(&admin, seed_pool, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (seed_pool, name) = create_scratch_db(&admin, "floor_probe_foundation").await;
+
+    let base = admin_url().await;
+    let idx = base.rfind('/').expect("db url has a path segment");
+    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let db = Db::new(&DbConfig {
+        database_url: scratch_url,
+        max_connections: 2,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect armed Db");
+
+    let token_before: i64 = sqlx::query_scalar("SELECT token FROM replica_heartbeat WHERE id = 1")
+        .fetch_one(&db.pool)
+        .await
+        .expect("read token before probe");
+
+    let writer = db
+        .begin_replica_floor_locked_event_write_transaction()
+        .await
+        .expect("open compliant floor-guarded writer tx");
+
+    let probe_pool = db.pool.clone();
+    let probe_fence = std::sync::Arc::clone(db.fence());
+    let mut probing = tokio::spawn(async move {
+        crate::replica_fence::probe_once(&probe_pool, probe_fence.as_ref()).await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut probing)
+            .await
+            .is_err(),
+        "probe must wait for the exclusive floor lock while compliant writer is open"
+    );
+
+    writer
+        .rollback()
+        .await
+        .expect("release shared floor writer");
+    let entry = tokio::time::timeout(std::time::Duration::from_secs(5), probing)
+        .await
+        .expect("probe must complete after writer release")
+        .expect("probe task")
+        .expect("probe succeeds");
+
+    assert_eq!(
+        entry.token,
+        token_before + 1,
+        "existing handshake must publish one token via probe_once"
+    );
+    assert_eq!(
+        db.fence().verified_through(),
+        Some(entry.fence_wall),
+        "probe entry must be retained in the in-memory fence ring"
+    );
+
+    db.pool.close().await;
+    drop_scratch_db(&admin, seed_pool, &name).await;
+}
+
 /// `spawn_fence_probe` must verify the floor guard before letting the
 /// probe run — catalog shape AND observed behavior — and refuse on
 /// sabotage. This is the production gate for a relay running with
@@ -2780,3 +3437,303 @@ async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
 
     drop_scratch_db(&admin, pool, &name).await;
 }
+
+// ---- Statement-deadline cancellation vs. replica fallback ----------------
+//
+// A replica read cancelled by `statement_timeout` (SQLSTATE 57014) must be
+// surfaced, not re-run on the writer: the writer would be just as slow and
+// the relay maps it to a distinct non-retried "query timed out". Every other
+// replica failure keeps failing closed to the writer.
+
+/// Writer and replica scratch DBs holding one root plus an `e`-tagged reply
+/// that mentions `mentioned` — the writer copy says "writer-reply" so a
+/// writer re-run is observable. Returns the reply-targeted query shape.
+struct EtagFixture {
+    admin: PgPool,
+    writer: PgPool,
+    wname: String,
+    replica: PgPool,
+    rname: String,
+    cid: CommunityId,
+    root_hex: String,
+    mentioned_hex: String,
+}
+
+async fn e_tag_fixture(prefix: &str) -> EtagFixture {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (writer, wname) = create_scratch_db(&admin, &format!("{prefix}_w")).await;
+    let (replica, rname) = create_scratch_db(&admin, &format!("{prefix}_r")).await;
+    let author = nostr::Keys::generate();
+    let mentioned = nostr::Keys::generate();
+    let community = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    let base = 1_700_000_000u64;
+    let root = signed_event_at(&author, "root", base);
+    for (pool, content) in [(&writer, "writer-reply"), (&replica, "replica-reply")] {
+        seed_community_channel(pool, community, channel, &author).await;
+        insert_top_level(pool, community, channel, &root).await;
+        let reply = nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+            .tags([
+                nostr::Tag::event(root.id),
+                nostr::Tag::public_key(mentioned.public_key()),
+            ])
+            .custom_created_at(nostr::Timestamp::from(base + 10))
+            .sign_with_keys(&author)
+            .expect("sign reply");
+        insert_top_level(pool, community, channel, &reply).await;
+        crate::insert_mentions(
+            pool,
+            CommunityId::from_uuid(community),
+            &reply,
+            Some(channel),
+        )
+        .await
+        .expect("insert mentions");
+    }
+    EtagFixture {
+        admin,
+        writer,
+        wname,
+        replica,
+        rname,
+        cid: CommunityId::from_uuid(community),
+        root_hex: root.id.to_hex(),
+        mentioned_hex: mentioned.public_key().to_hex(),
+    }
+}
+
+impl EtagFixture {
+    fn e_tag_query(&self) -> EventQuery {
+        let mut q = EventQuery::for_community(self.cid);
+        q.e_tags = Some(vec![self.root_hex.clone(), "00".repeat(32)]);
+        q
+    }
+
+    /// A routed `Db` whose reader pool connects fresh (so it picks up any
+    /// `ALTER DATABASE` settings made on the replica), with the fence open
+    /// and a bounded budget so unpinned reads route to the replica.
+    async fn routed_db(&self) -> Db {
+        let base = admin_url().await;
+        let url = format!("{}/{}", &base[..base.rfind('/').expect("path")], self.rname);
+        let reader = PgPool::connect(&url).await.expect("connect reader");
+        let mut db = Db::from_pools(self.writer.clone(), reader);
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        db
+    }
+
+    async fn drop(self) {
+        drop_scratch_db(&self.admin, self.replica, &self.rname).await;
+        drop_scratch_db(&self.admin, self.writer, &self.wname).await;
+    }
+}
+
+fn contents(rows: &[StoredEvent]) -> Vec<&str> {
+    rows.iter().map(|e| e.event.content.as_str()).collect()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replica_statement_cancel_propagates_without_writer_rerun() {
+    let fx = e_tag_fixture("cxl").await;
+    // A short operator cap on the replica (kept, not raised, by the e-tag
+    // deadline), plus a lock that parks every `events` read past it: the
+    // heartbeat proof still succeeds, then the routed read is cancelled.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE {} SET statement_timeout = '300ms'",
+        fx.rname
+    )))
+    .execute(&fx.admin)
+    .await
+    .expect("set replica statement_timeout");
+    let db = fx.routed_db().await;
+    let q = fx.e_tag_query();
+
+    // Healthy control: the replica serves before it is locked.
+    let rows = db.query_events_routed("t_cxl", &q).await.expect("healthy");
+    assert!(
+        contents(&rows).contains(&"replica-reply"),
+        "fixture must route to replica"
+    );
+
+    let mut locker = fx.replica.begin().await.expect("begin locker");
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .expect("lock replica events");
+
+    let cancelled = |r: crate::Result<()>, what: &str| match r {
+        Err(e) => assert!(e.is_statement_cancelled(), "{what}: want 57014, got {e}"),
+        Ok(()) => panic!("{what}: replica cancel was re-run on the writer"),
+    };
+    cancelled(
+        db.query_events_routed("t_cxl", &q).await.map(drop),
+        "query_events_routed",
+    );
+    cancelled(
+        db.query_events_routed_bounded("t_cxl", &q).await.map(drop),
+        "query_events_routed_bounded",
+    );
+    cancelled(
+        db.count_events_routed("t_cxl", &q).await.map(drop),
+        "count_events_routed",
+    );
+    let root_id = hex::decode(&fx.root_hex).expect("hex");
+    cancelled(
+        db.get_events_by_ids_routed("t_cxl", fx.cid, &[root_id.as_slice()])
+            .await
+            .map(drop),
+        "get_events_by_ids_routed",
+    );
+
+    locker.rollback().await.expect("unlock");
+    drop(db);
+    fx.drop().await;
+}
+
+/// [`replica_statement_cancel_propagates_without_writer_rerun`] for the
+/// request-scoped [`ReadSession`]: a cancelled aux read inside the proved
+/// replica transaction surfaces 57014 and does not degrade to the writer.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn read_session_statement_cancel_propagates_without_writer_rerun() {
+    let fx = e_tag_fixture("scxl").await;
+    let db = fx.routed_db().await;
+    let reader_tx = db
+        .read_pool
+        .as_ref()
+        .expect("reader pool")
+        .begin()
+        .await
+        .expect("begin reader tx");
+    let mut session = ReadSession {
+        inner: ReadSessionInner::Replica {
+            tx: reader_tx,
+            writer: fx.writer.clone(),
+        },
+    };
+    let rows = session
+        .query_events(&fx.e_tag_query())
+        .await
+        .expect("healthy");
+    assert_eq!(contents(&rows), vec!["replica-reply"]);
+
+    // Force the next statement in the session over a short cap.
+    let ReadSessionInner::Replica { tx, .. } = &mut session.inner else {
+        unreachable!()
+    };
+    sqlx::query("SET LOCAL statement_timeout = '50ms'")
+        .execute(&mut **tx)
+        .await
+        .expect("cap session");
+    let mut locker = fx.replica.begin().await.expect("begin locker");
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .expect("lock replica events");
+
+    match session.query_events(&fx.e_tag_query()).await {
+        Err(e) => assert!(e.is_statement_cancelled(), "want 57014, got {e}"),
+        Ok(rows) => panic!("cancel re-ran on the writer: {:?}", contents(&rows)),
+    }
+    assert!(
+        session.is_replica(),
+        "a cancel must not degrade the session"
+    );
+
+    locker.rollback().await.expect("unlock");
+    drop(session);
+    drop(db);
+    fx.drop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replica_non_cancel_failure_still_falls_back_to_writer() {
+    let fx = e_tag_fixture("nfb").await;
+    let db = fx.routed_db().await;
+    let q = fx.e_tag_query();
+    let rows = db.query_events_routed("t_nfb", &q).await.expect("healthy");
+    assert!(
+        contents(&rows).contains(&"replica-reply"),
+        "fixture must route to replica"
+    );
+
+    // Break the replica after the proof point (heartbeat table intact).
+    sqlx::query("DROP TABLE events CASCADE")
+        .execute(&fx.replica)
+        .await
+        .expect("drop replica events");
+
+    for rows in [
+        db.query_events_routed("t_nfb", &q).await,
+        db.query_events_routed_bounded("t_nfb", &q).await,
+    ] {
+        let rows = rows.expect("non-cancel failure must fall back");
+        assert!(
+            contents(&rows).contains(&"writer-reply"),
+            "{:?}",
+            contents(&rows)
+        );
+    }
+    assert_eq!(
+        db.count_events_routed("t_nfb", &q)
+            .await
+            .expect("count falls back"),
+        1
+    );
+
+    drop(db);
+    fx.drop().await;
+}
+
+/// The `#p`-joined SELECT (fenced, `e.` column prefix) and the COUNT `ANY`
+/// path, executed with real bound values rather than only rendered SQL.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
+    let fx = e_tag_fixture("pjn").await;
+    let mut q = fx.e_tag_query();
+
+    let rows = event::query_events(&fx.writer, &q)
+        .await
+        .expect("e-tag select");
+    assert_eq!(contents(&rows), vec!["writer-reply"]);
+    assert_eq!(
+        event::count_events(&fx.writer, &q)
+            .await
+            .expect("e-tag count"),
+        1
+    );
+
+    q.p_tag_hex = Some(fx.mentioned_hex.clone());
+    let rows = event::query_events(&fx.writer, &q)
+        .await
+        .expect("#p + e-tag select");
+    assert_eq!(contents(&rows), vec!["writer-reply"]);
+    assert_eq!(
+        event::count_events(&fx.writer, &q)
+            .await
+            .expect("#p + e-tag count"),
+        1
+    );
+
+    q.p_tag_hex = Some("11".repeat(32));
+    assert!(event::query_events(&fx.writer, &q)
+        .await
+        .expect("miss")
+        .is_empty());
+    assert_eq!(
+        event::count_events(&fx.writer, &q)
+            .await
+            .expect("miss count"),
+        0
+    );
+
+    fx.drop().await;
+}
+
+#[path = "tests/thread_window_postgres_tests.rs"]
+mod thread_window_postgres_tests;

@@ -65,9 +65,14 @@ class _ChannelTile extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    resolveDmChannelDisplayLabel(
-                      channel,
-                      currentPubkey: currentPubkey,
+                    ref.watch(
+                      identityNameSourcesProvider.select(
+                        (names) => resolveDmChannelDisplayLabel(
+                          channel,
+                          currentPubkey: currentPubkey,
+                          names: names,
+                        ),
+                      ),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -176,9 +181,7 @@ class _DmAvatar extends ConsumerWidget {
     );
     final presence = ref.watch(
       presenceCacheProvider.select(
-        (presenceMap) => otherPubkey == null
-            ? 'offline'
-            : (presenceMap[otherPubkey] ?? 'offline'),
+        (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
       ),
     );
 
@@ -191,11 +194,14 @@ class _DmAvatar extends ConsumerWidget {
     }
 
     final avatarUrl = profile?.avatarUrl;
+    // Keyed to the hex public key when the counterpart is unnamed and the
+    // profile isn't cached — the compact-npub participant label would
+    // otherwise render `N` for every unnamed DM counterpart. Selection skips
+    // the current user like the row label does, so the initial always
+    // identifies the same counterpart the label names.
     final initial =
         profile?.initial ??
-        (channel.participants.isNotEmpty
-            ? channel.participants.first[0].toUpperCase()
-            : '?');
+        dmAvatarInitial(channel, currentPubkey: currentPubkey);
     return SizedBox(
       width: _kDmAvatarSize,
       height: _kDmAvatarSize,
@@ -216,28 +222,29 @@ class _DmAvatar extends ConsumerWidget {
             ),
             isAgent: profile?.isAgent == true,
           ),
-          Positioned(
-            right: -1,
-            bottom: -1,
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: _presenceColor(context, presence),
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: context.theme.scaffoldBackgroundColor,
-                  width: 1.5,
+          if (presence != null)
+            Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: _presenceColor(context, presence),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: context.theme.scaffoldBackgroundColor,
+                    width: 1.5,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Color _presenceColor(BuildContext context, String presence) {
+  Color _presenceColor(BuildContext context, String? presence) {
     return switch (presence) {
       'online' => context.appColors.success,
       'away' => context.appColors.warning,

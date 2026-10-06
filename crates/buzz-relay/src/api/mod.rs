@@ -9,6 +9,7 @@ pub mod invites;
 pub mod media;
 pub mod mesh_demo;
 pub mod nip05;
+pub mod nip_fi;
 pub mod operator;
 pub mod workflows;
 
@@ -27,9 +28,49 @@ pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>)
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
 }
 
+/// Stable client-visible body for a read cancelled by its server-side
+/// statement deadline. Clients match this string to skip retrying: a retry
+/// would re-run the same expensive query.
+pub(crate) const QUERY_TIMED_OUT: &str = "query timed out";
+
+/// Map a DB read failure: a statement-deadline cancel becomes a distinct
+/// 503 `query timed out`; anything else stays a generic 500.
+pub(crate) fn db_read_error(
+    context: &str,
+    e: &buzz_db::DbError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if e.is_statement_cancelled() {
+        tracing::warn!("{context}: {e}");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
+    }
+    internal_error(&format!("{context}: {e}"))
+}
+
 #[allow(dead_code)]
 pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     api_error(StatusCode::NOT_FOUND, msg)
+}
+
+/// Parse a raw query string into `T` after NIP-FI/NIP-98 admission has
+/// already succeeded.
+///
+/// - Absent or empty query → `Ok(T::default())` (no params is valid).
+/// - Non-empty but malformed → `Err(400 bad request)`.
+///
+/// **Do not use `.ok().unwrap_or_default()` here.**  That pattern silently
+/// discards malformed input and changes query semantics — for example,
+/// `?status=open&limit=abc` would drop the valid `status=` field together
+/// with the bad `limit=`, broadening the query to all statuses.  Post-
+/// admission a parse failure is the caller's error, not an auth failure.
+/// [FI-TRACE-HTTP-INGRESS]
+pub(crate) fn parse_query_or_400<T: serde::de::DeserializeOwned + Default>(
+    raw: Option<&str>,
+) -> Result<T, (StatusCode, Json<serde_json::Value>)> {
+    match raw {
+        None | Some("") => Ok(T::default()),
+        Some(q) => serde_urlencoded::from_str(q)
+            .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid query: {e}"))),
+    }
 }
 
 /// Relay membership enforcement — single gate for all authenticated entry points.
@@ -84,14 +125,65 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
     ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            false,
+        )
+        .await
+    }
+
+    /// [`check_relay_membership`] reading principal and owner membership from
+    /// the writer. The final admission fence uses it: a removal whose
+    /// disconnect already ran must not be undone by a stale replica row.
+    pub async fn check_relay_membership_authoritative(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            true,
+        )
+        .await
+    }
+
+    async fn read_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_hex: &str,
+        writer: bool,
+    ) -> buzz_db::Result<bool> {
+        if writer {
+            state.db.is_relay_member_writer(community, pubkey_hex).await
+        } else {
+            state.db.is_relay_member(community, pubkey_hex).await
+        }
+    }
+
+    async fn check_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        writer: bool,
+    ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
             return Ok(MembershipDecision::OpenRelay);
         }
 
         let pubkey_hex = hex::encode(pubkey_bytes);
-        let is_member = state
-            .db
-            .is_relay_member(community, &pubkey_hex)
+        let is_member = read_membership(state, community, &pubkey_hex, writer)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
@@ -114,9 +206,7 @@ pub mod relay_members {
                 ) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
-                            .db
-                            .is_relay_member(community, &owner_hex)
+                        let owner_is_member = read_membership(state, community, &owner_hex, writer)
                             .await
                             .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
                         if owner_is_member {
@@ -165,8 +255,28 @@ pub mod relay_members {
         )
         .await
         {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
+                deny_banned(
+                    state,
+                    community,
+                    pubkey_bytes,
+                    auth_tag_header,
+                    signed_auth_created_at,
+                )
+                .await?;
+                Ok(None)
+            }
+            Ok(MembershipDecision::ViaOwner(owner)) => {
+                deny_banned(
+                    state,
+                    community,
+                    pubkey_bytes,
+                    auth_tag_header,
+                    signed_auth_created_at,
+                )
+                .await?;
+                Ok(Some(owner))
+            }
             Ok(MembershipDecision::Denied) => Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -178,6 +288,40 @@ pub mod relay_members {
                 tracing::error!("relay membership check errored: {e}");
                 Err(super::internal_error(&e))
             }
+        }
+    }
+
+    /// Refuse a community-banned principal (own ban or its agent owner's) on
+    /// HTTP. Bans only: a timeout blocks writes, and HTTP writes reach the
+    /// ingest gate, while reads stay allowed. Fails closed with 503.
+    async fn deny_banned(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
+            return Err(super::internal_error("invalid pubkey for ban check"));
+        };
+        match crate::handlers::auth::community_ban_outcome(
+            state,
+            community,
+            pubkey,
+            auth_tag_header,
+            signed_auth_created_at,
+        )
+        .await
+        {
+            crate::handlers::auth::BanOutcome::Clear => Ok(()),
+            crate::handlers::auth::BanOutcome::Banned => Err(super::api_error(
+                StatusCode::FORBIDDEN,
+                "blocked: you are banned from this community",
+            )),
+            crate::handlers::auth::BanOutcome::DbError => Err(super::api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "error: internal error checking restriction state",
+            )),
         }
     }
 
@@ -223,7 +367,7 @@ pub mod relay_members {
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
                 .db
-                .ensure_user(tenant.community(), pubkey.as_bytes())
+                .ensure_user_for_authorization(tenant.community(), pubkey.as_bytes())
                 .await
             {
                 Ok(true) => {
@@ -243,10 +387,20 @@ pub mod relay_members {
 
         let materialized = match state
             .db
-            .set_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
+            .set_agent_owner_for_authorization(
+                tenant.community(),
+                agent.as_bytes(),
+                owner.as_bytes(),
+            )
             .await
         {
-            Ok(true) => true,
+            Ok(true) => {
+                // The owner was just recorded. Sockets this agent opened
+                // without it would only be found by an owner-to-agent lookup
+                // at revoke time; make them reconnect with the owner attached.
+                state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
+                true
+            }
             Ok(false) => state
                 .db
                 .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
@@ -379,3 +533,114 @@ pub mod relay_members {
         }
     }
 }
+
+#[cfg(test)]
+mod db_read_error_tests {
+    use super::*;
+
+    #[test]
+    fn non_cancel_db_error_stays_generic_500() {
+        let (status, body) = db_read_error("ctx", &buzz_db::DbError::NotFound("x".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["error"], "internal server error");
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn statement_timeout_maps_to_distinct_503() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL statement_timeout = '10ms'")
+            .execute(&mut *tx)
+            .await
+            .expect("set timeout");
+        let err: buzz_db::DbError = sqlx::query("SELECT pg_sleep(1)")
+            .execute(&mut *tx)
+            .await
+            .expect_err("statement must be cancelled")
+            .into();
+        assert!(err.is_statement_cancelled());
+
+        let (status, body) = db_read_error("ctx", &err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"], QUERY_TIMED_OUT);
+    }
+}
+
+// ── parse_query_or_400 regression tests ──────────────────────────────────────
+
+#[cfg(test)]
+mod parse_query_tests {
+    use super::parse_query_or_400;
+    use serde::Deserialize;
+
+    /// Mirror of `ModerationReadQuery` — independent so this module compiles
+    /// without pulling in handler dependencies.
+    #[derive(Debug, Deserialize, Default, PartialEq)]
+    struct QueryFixture {
+        status: Option<String>,
+        limit: Option<i64>,
+    }
+
+    /// Absent query → Default.  No params is always valid.
+    #[test]
+    fn absent_query_gives_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(None);
+        assert_eq!(result.unwrap(), QueryFixture::default());
+    }
+
+    /// Empty string → Default.  Same as absent.
+    #[test]
+    fn empty_query_gives_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some(""));
+        assert_eq!(result.unwrap(), QueryFixture::default());
+    }
+
+    /// Well-formed query → parsed correctly.
+    #[test]
+    fn valid_query_parses_correctly() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some("status=open&limit=50"));
+        let q = result.unwrap();
+        assert_eq!(q.status.as_deref(), Some("open"));
+        assert_eq!(q.limit, Some(50));
+    }
+
+    /// Malformed limit → 400 error, NOT default.
+    ///
+    /// Regression for the `.ok().unwrap_or_default()` bug: the old code would
+    /// silently discard ALL fields on any parse error, so `status=open&limit=abc`
+    /// would return `QueryFixture::default()` (status=None) instead of 400.
+    /// That made malformed input yield a BROADER query than intended.
+    #[test]
+    fn malformed_limit_is_400_not_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some("status=open&limit=abc"));
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.0,
+            axum::http::StatusCode::BAD_REQUEST,
+            "malformed ?limit= must return 400, not silently default \
+             (old bug: .ok().unwrap_or_default() would drop status= too)"
+        );
+    }
+
+    /// Malformed standalone limit → 400 error, NOT default.
+    #[test]
+    fn malformed_standalone_limit_is_400_not_default() {
+        let result: Result<QueryFixture, _> = parse_query_or_400(Some("limit=abc"));
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.0,
+            axum::http::StatusCode::BAD_REQUEST,
+            "malformed ?limit=abc must return 400, not silently default to the cap"
+        );
+    }
+}
+
+mod artifact;

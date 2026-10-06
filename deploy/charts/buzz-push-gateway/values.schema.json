@@ -11,8 +11,10 @@
       "type": "string",
       "minLength": 1
     },
-    "publicDeliveryUrl": {
-      "const": "https://push.buzz.xyz/v1/deliveries/apns"
+    "gatewayOrigin": {
+      "type": "string",
+      "description": "Routing origin for the optional HTTPRoute; not passed to the gateway binary.",
+      "pattern": "^(https://[^/?#@:]+/?)?$"
     },
     "maxGrantLifetimeSeconds": {
       "type": "integer",
@@ -40,10 +42,10 @@
     },
     "httpRoute": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "enabled",
-        "parentRefs",
-        "hostnames"
+        "parentRefs"
       ],
       "properties": {
         "enabled": {
@@ -51,12 +53,6 @@
         },
         "parentRefs": {
           "type": "array"
-        },
-        "hostnames": {
-          "type": "array",
-          "contains": {
-            "const": "push.buzz.xyz"
-          }
         }
       },
       "allOf": [
@@ -243,6 +239,12 @@
         },
         "resources": {
           "type": "object"
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     }
@@ -310,7 +312,6 @@
   "required": [
     "replicaCount",
     "existingSecret",
-    "publicDeliveryUrl",
     "maxGrantLifetimeSeconds",
     "profiles",
     "httpRoute",

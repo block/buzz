@@ -1,4 +1,5 @@
 import BuzzPushKit
+import Flutter
 import Intents
 import UserNotifications
 import XCTest
@@ -69,6 +70,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
       donate: { _, completion in
         completion(NSError(domain: "test", code: 1))
       },
+      deleteAllInteractions: { completion in completion(nil) },
       updateContent: { content, _ in
         updateCalled = true
         return content
@@ -98,6 +100,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
         order.append("donate")
         completion(nil)
       },
+      deleteAllInteractions: { completion in completion(nil) },
       updateContent: { _, _ in
         order.append("update")
         let specialized = UNMutableNotificationContent()
@@ -125,6 +128,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
     ordinary.body = "Hello Buzz"
     let presenter = BuzzCommunicationNotificationPresenter(
       donate: { _, completion in completion(nil) },
+      deleteAllInteractions: { completion in completion(nil) },
       updateContent: { _, _ in throw NSError(domain: "test", code: 2) }
     )
     let completed = expectation(description: "ordinary fallback returned")
@@ -140,6 +144,70 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
 
     wait(for: [completed], timeout: 1)
   }
+
+  func testFenceChangeDeletesDonatedInteractionBeforeCompleting() {
+    let ordinary = UNMutableNotificationContent()
+    ordinary.title = "Alice"
+    var allowed = true
+    var order: [String] = []
+    let presenter = BuzzCommunicationNotificationPresenter(
+      donate: { _, completion in
+        order.append("donate")
+        allowed = false
+        completion(nil)
+      },
+      deleteAllInteractions: { completion in
+        order.append("delete")
+        completion(nil)
+      },
+      updateContent: { content, _ in
+        order.append("update")
+        return content
+      }
+    )
+    let completed = expectation(description: "restricted donation deleted")
+
+    presenter.present(
+      ordinaryContent: ordinary,
+      resolution: communicationResolution(),
+      isStillAllowed: { allowed }
+    ) { content in
+      order.append("complete")
+      XCTAssertEqual(content.title, "Alice")
+      completed.fulfill()
+    }
+
+    wait(for: [completed], timeout: 1)
+    XCTAssertEqual(order, ["donate", "delete", "complete"])
+  }
+
+  func testBlockedFenceDoesNotDonate() {
+    let ordinary = UNMutableNotificationContent()
+    ordinary.title = "Alice"
+    var donateCalled = false
+    let presenter = BuzzCommunicationNotificationPresenter(
+      donate: { _, completion in
+        donateCalled = true
+        completion(nil)
+      },
+      deleteAllInteractions: { completion in completion(nil) },
+      updateContent: { content, _ in content }
+    )
+    let completed = expectation(description: "blocked donation skipped")
+
+    presenter.present(
+      ordinaryContent: ordinary,
+      resolution: communicationResolution(),
+      isStillAllowed: { false }
+    ) { content in
+      XCTAssertEqual(content.title, "Alice")
+      completed.fulfill()
+    }
+
+    wait(for: [completed], timeout: 1)
+    XCTAssertFalse(donateCalled)
+  }
+
 
   private func communicationResolution(
     displayName: String = "Alice",
@@ -175,6 +243,176 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
 }
 
 final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
+  func testAgeSignalRequestDoesNotDependOnNotificationStorage() {
+    let delegate = MissingAppGroupDelegate()
+    var completed = false
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: nil
+    ) { value in
+      if #available(iOS 26.0, *) {
+        XCTAssertEqual((value as? FlutterError)?.code, "age_signal_unavailable")
+      } else {
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "noSignal")
+      }
+      completed = true
+    }
+    XCTAssertTrue(completed)
+  }
+
+  @MainActor
+  func testNativeAgeRequestDeliversKnownMinorAndFailureThroughFlutterCallback() async {
+    guard #available(iOS 26.0, *) else { return }
+    let delegate = MissingAppGroupDelegate()
+    delegate.requestPlatformAgeSignal = { _ in
+      BuzzAgeSignalPayload.sharing(exclusiveUpperBound: 18, lowerBound: 13)
+    }
+    let minor = expectation(description: "native minor response")
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: UIViewController()
+    ) { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "signal")
+      XCTAssertEqual((value as? [String: Any])?["ageUpper"] as? Int, 17)
+      minor.fulfill()
+    }
+    await fulfillment(of: [minor], timeout: 1)
+
+    delegate.requestPlatformAgeSignal = { _ in
+      throw NSError(domain: "InjectedAgeFailure", code: 1)
+    }
+    let failed = expectation(description: "native error response")
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: UIViewController()
+    ) { value in
+      XCTAssertEqual((value as? FlutterError)?.code, "age_signal_unavailable")
+      failed.fulfill()
+    }
+    await fulfillment(of: [failed], timeout: 1)
+  }
+
+  func testAllowedNotificationRestoreNeedsNoAppGroupStore() {
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil
+    )
+    let completed = expectation(description: "allowed without storage")
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      XCTAssertNil(value)
+      completed.fulfill()
+    })
+    wait(for: [completed], timeout: 1)
+  }
+
+  func testRestrictionCleanupFailurePreservesSnapshotAndRestoreReleasesAuthority() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzPushPresentationCacheStore(containerURL: directory)
+    try store.replaceCommunities([
+      PushLeaseCommunity(id: "retained", name: "Retained", relayUrl: "https://relay.example",
+        pubkey: nil, policies: [])
+    ])
+    let snapshotURL = directory.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)
+    let original = try Data(contentsOf: snapshotURL)
+    var deletionCalls = 0
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil,
+      containerURL: { directory },
+      interactionDeletionDeadline: BuzzInteractionDeletionDeadline(
+        timeout: 5,
+        deleteAllInteractions: { completion in
+          deletionCalls += 1
+          completion(deletionCalls == 1 ? NSError(domain: "InjectedCleanupFailure", code: 1) : nil)
+        },
+        scheduleTimeout: { _, _ in }
+      )
+    )
+    let restricted = expectation(description: "restriction despite cleanup failure")
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "purgeAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      XCTAssertEqual((value as? FlutterError)?.code, "age_restriction_purge_failed")
+      XCTAssertTrue(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+      restricted.fulfill()
+    })
+    wait(for: [restricted], timeout: 1)
+    XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
+
+    let restored = expectation(description: "allowed without restoring snapshot")
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      XCTAssertNil(value)
+      XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+      restored.fulfill()
+    })
+    wait(for: [restored], timeout: 1)
+    XCTAssertEqual(deletionCalls, 2)
+    XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
+  }
+
+  func testNewBridgeRetriesRecordedCleanupWithoutRestrictingAccess() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let failure = NSError(domain: "InjectedCleanupFailure", code: 1)
+    let deletion = BuzzInteractionDeletionDeadline(timeout: 5,
+      deleteAllInteractions: { $0(failure) }, scheduleTimeout: { _, _ in })
+    BuzzInteractionCleanupRetry(containerURL: directory, deletion: deletion).request {
+      XCTAssertNotNil($0)
+    }
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil, containerURL: { directory },
+      interactionDeletionDeadline: deletion
+    )
+    let completed = expectation(description: "retry failure stays allowed")
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      XCTAssertEqual((value as? FlutterError)?.code, "interaction_cleanup_retry_failed")
+      XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+      completed.fulfill()
+    })
+    wait(for: [completed], timeout: 1)
+  }
+
+  func testStrictAgeGateWriteFailsWhenAppGroupStoreIsUnavailable() {
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil
+    )
+    let completed = expectation(description: "strict write rejected")
+
+    XCTAssertTrue(
+      bridge.handle(
+        FlutterMethodCall(
+          methodName: "syncAgeGatePushSnapshot",
+          arguments: [
+            "section": "communities",
+            "communities": [[String: Any]](),
+            "signingKeys": [String: String](),
+            "settleFence": false,
+          ]
+        )
+      ) { value in
+        XCTAssertEqual((value as? FlutterError)?.code, "snapshot_sync_unavailable")
+        completed.fulfill()
+      }
+    )
+
+    wait(for: [completed], timeout: 1)
+  }
+
   func testMetadataAuthorityUsesCurrentAppProfileForMatchingRelay() {
     let correctProfile = grant(
       appProfile: BuzzDevPushEnrollmentDriver.appProfile,
@@ -202,9 +440,11 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     metadataPubkey: String
   ) -> BuzzPushEndpointGrantRecord {
     BuzzPushEndpointGrantRecord(
+      gatewayOrigin: "https://push.example",
       relayOrigin: "https://relay.example",
       relayPubkey: String(repeating: "c", count: 64),
       relayMetadataPubkey: metadataPubkey,
+      appAttestKeyId: Data(repeating: 0xAA, count: 32).base64EncodedString(),
       installationId: "installation",
       endpointGrant: "opaque-grant",
       endpointHash: String(repeating: "d", count: 64),
@@ -279,4 +519,8 @@ final class BuzzPushNotificationResponseTests: XCTestCase {
     XCTAssertTrue(routedTargets.isEmpty)
     XCTAssertEqual(completions, 1)
   }
+}
+
+private final class MissingAppGroupDelegate: AppDelegate {
+  override var appGroupIdentifier: String? { nil }
 }

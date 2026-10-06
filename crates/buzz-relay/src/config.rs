@@ -1,11 +1,11 @@
 //! Relay configuration from environment variables.
 
-use std::net::SocketAddr;
 use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
@@ -200,6 +200,10 @@ pub struct Config {
     pub health_port: u16,
     /// TCP port for the Prometheus metrics exporter (`GET /metrics`).
     pub metrics_port: u16,
+    /// Interval between read-only partition catalog audits.
+    pub partition_audit_interval: Duration,
+    /// Whether the partition manager may create uncovered monthly partitions.
+    pub partition_manager_create_enabled: bool,
 
     /// When true, NIP-42 pubkey-only authentication (no API token) is
     /// restricted to pubkeys in the `pubkey_allowlist` table. Users with valid
@@ -276,6 +280,9 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Configured operator-listener identities and their HTTPS delivery URLs.
+    pub operator_listener_delivery_urls: HashMap<String, url::Url>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -350,12 +357,14 @@ pub struct Config {
     pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
-    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
-    /// An absent setting selects the canonical Buzz gateway. An explicitly
-    /// empty setting is allowed only while push is disabled.
+    /// Exact HTTP(S) gateway endpoint used to sign and submit APNs delivery capabilities.
+    /// Required while push is enabled. An explicitly empty setting is allowed
+    /// only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
-    /// Hard timeout for one gateway delivery request.
+    /// Hard timeout for one push gateway delivery request.
     pub push_gateway_timeout: Duration,
+    /// Hard timeout for one operator-listener delivery request.
+    pub operator_listener_timeout: Duration,
 
     /// Optional relay-hosted policy shown on join surfaces. Disabled when no
     /// documents or age attestation are configured.
@@ -371,6 +380,15 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+
+    /// NIP-FI federated-identity enforcement configuration.
+    ///
+    /// Selected by `BUZZ_NIP_FI_MODE`: `enforce` validates assertions at HTTP
+    /// ingress and (via S3) at WebSocket upgrade; `deny_protected` denies
+    /// protected requests without evaluating; `shadow` evaluates and records
+    /// the enforce verdict but admits exactly as `off`. `Off` (the default)
+    /// leaves all identity enforcement to NIP-42 alone.
+    pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -451,16 +469,15 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
-const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
-
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
         ConfigError::InvalidValue(format!(
             "BUZZ_PUSH_GATEWAY_DELIVERY_URL is not a valid URL: {e}"
         ))
     })?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.host().is_none()
+        || (url.scheme() == "https" && url.port().is_some())
         || !url.username().is_empty()
         || url.password().is_some()
         || url.path() != "/v1/deliveries/apns"
@@ -468,11 +485,63 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without credentials, query, or fragment"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries/apns URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
                 .to_string(),
         ));
     }
     Ok(url)
+}
+
+fn parse_operator_listener_delivery_urls(
+    raw: &str,
+) -> Result<HashMap<String, url::Url>, ConfigError> {
+    let mut endpoints = HashMap::new();
+    let entries: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if !raw.trim().is_empty() && entries.is_empty() {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_OPERATOR_LISTENERS must contain pubkey:delivery_url pairs".to_string(),
+        ));
+    }
+    for entry in entries {
+        let (pubkey, delivery_url) = entry.split_once(':').ok_or_else(|| {
+            ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS entries must be pubkey:delivery_url pairs".to_string(),
+            )
+        })?;
+        let pubkey = pubkey.trim().to_ascii_lowercase();
+        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS entry has an invalid pubkey: {pubkey:?}"
+            )));
+        }
+        let url = url::Url::parse(delivery_url.trim()).map_err(|e| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS endpoint is not a valid URL: {e}"
+            ))
+        })?;
+        if url.scheme() != "https"
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS endpoints must be HTTPS URLs without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        if endpoints.insert(pubkey.clone(), url).is_some() {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS contains duplicate pubkey: {pubkey}"
+            )));
+        }
+    }
+    Ok(endpoints)
 }
 
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
@@ -804,6 +873,21 @@ impl Config {
             );
         }
 
+        let operator_listener_delivery_urls = match std::env::var("BUZZ_OPERATOR_LISTENERS") {
+            Ok(raw) => parse_operator_listener_delivery_urls(&raw)?,
+            Err(std::env::VarError::NotPresent) => HashMap::new(),
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_OPERATOR_LISTENERS must be valid UTF-8: {error}"
+                )));
+            }
+        };
+        if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
+            error!(
+                "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
+            );
+        }
+
         let auth = buzz_auth::AuthConfig {
             rate_limits: rate_limit_config_from_env()?,
         };
@@ -838,6 +922,18 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
+
+        // Catalog-only and cheap, but clamp operator mistakes away from a hot
+        // loop or a multi-day observability gap.
+        let partition_audit_interval = Duration::from_secs(
+            std::env::var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(15 * 60)
+                .clamp(60, 24 * 60 * 60),
+        );
+        let partition_manager_create_enabled =
+            parse_bool("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", true)?;
 
         let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
             Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
@@ -992,9 +1088,18 @@ impl Config {
             }
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
-            Err(_) => Some(parse_push_gateway_delivery_url(
-                DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
-            )?),
+            Err(std::env::VarError::NotPresent) if push_enabled => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be configured when BUZZ_PUSH_ENABLED=true"
+                        .to_string(),
+                ));
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be valid UTF-8: {error}"
+                )));
+            }
         };
         let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
@@ -1010,6 +1115,33 @@ impl Config {
             Err(_) => 2_000,
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
+        let operator_listener_timeout_millis = match std::env::var(
+            "BUZZ_OPERATOR_LISTENER_TIMEOUT_MS",
+        ) {
+            Ok(raw) => match raw
+                .parse::<u64>()
+                .ok()
+                .filter(|millis| (100..=10_000).contains(millis))
+            {
+                Some(millis) => millis,
+                None => {
+                    error!(
+                        value = %raw,
+                        "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms (expected integer in 100..=10000)"
+                    );
+                    5_000
+                }
+            },
+            Err(std::env::VarError::NotPresent) => 5_000,
+            Err(err) => {
+                error!(
+                    error = %err,
+                    "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms"
+                );
+                5_000
+            }
+        };
+        let operator_listener_timeout = Duration::from_millis(operator_listener_timeout_millis);
 
         const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
         let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
@@ -1239,6 +1371,8 @@ impl Config {
             uds_path,
             health_port,
             metrics_port,
+            partition_audit_interval,
+            partition_manager_create_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,
@@ -1247,6 +1381,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            operator_listener_delivery_urls,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1268,11 +1403,40 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            operator_listener_timeout,
             join_policy,
             admin,
             web_dir,
             serve_git_web_gui,
+            nip_fi: crate::nip_fi_config::NipFiRelayConfig::from_env()?,
         })
+    }
+
+    /// Build a baseline `Config` suitable for test fixtures that need a
+    /// structurally valid config without caring about specific field values.
+    ///
+    /// Equivalent to `from_env()` with all env variables absent, but calls
+    /// that function while holding `NIP_FI_ENV_LOCK` so that concurrent NIP-FI
+    /// env-writer tests cannot produce a partially-written env state that this
+    /// call observes.  Every test fixture that previously called
+    /// `Config::from_env().expect("…")` should use this instead — it is the
+    /// only env-isolation-safe way to obtain a default config in test code.
+    ///
+    /// Fields that differ from production defaults (`database_url`,
+    /// `redis_url`, etc.) should be overridden on the returned struct after
+    /// calling this function, exactly as was done before.
+    ///
+    /// [FI-TRACE-ENV-RACE]
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        crate::nip_fi_config::FOR_TEST_LOCK_WAITERS
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::from_env().expect("default config must load for test fixture")
     }
 }
 
@@ -1295,6 +1459,25 @@ mod tests {
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire both the FI env lock and the config-test env lock in a consistent
+    /// order so concurrent FI writers never observe a partially-written env state.
+    ///
+    /// Lock ordering: NIP_FI_ENV_LOCK → ENV_MUTEX. Every direct `Config::from_env()`
+    /// caller in this test module must hold both locks. Use this helper instead of
+    /// acquiring them separately to guarantee the order is never inverted.
+    ///
+    /// [FI-TRACE-ENV-RACE]
+    fn env_guards() -> (
+        std::sync::MutexGuard<'static, ()>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let fi = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = ENV_MUTEX.lock().unwrap();
+        (fi, cfg)
+    }
 
     /// Look up against a fixed set, standing in for process env.
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
@@ -1351,7 +1534,7 @@ mod tests {
 
     #[test]
     fn defaults_are_valid() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let config = Config::from_env().expect("default config");
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
@@ -1361,6 +1544,8 @@ mod tests {
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+        assert_eq!(config.partition_audit_interval, Duration::from_secs(900));
+        assert!(config.partition_manager_create_enabled);
         assert!(config.slow_client_grace_limit > 0);
         assert!(
             !config.pubkey_allowlist_enabled,
@@ -1403,6 +1588,10 @@ mod tests {
 
     /// Run `Config::from_env()` with the admin variables forced to `values`,
     /// restoring the ambient environment afterwards.
+    ///
+    /// Callers must already hold [`env_guards()`] before calling this function,
+    /// so that FI writers cannot produce a partially-written env state while
+    /// `Config::from_env()` reads it. [FI-TRACE-ENV-RACE]
     fn config_with_admin_env(values: &[(&str, Option<&str>)]) -> Result<Config, ConfigError> {
         const KEYS: [&str; 3] = ["BUZZ_ADMIN_HOST", "BUZZ_ADMIN_TOKEN", "BUZZ_ADMIN_AUTH"];
         let previous: Vec<_> = KEYS
@@ -1476,6 +1665,20 @@ mod tests {
         (config, captured)
     }
 
+    fn config_with_operator_listeners(raw: Option<&str>) -> Result<Config, ConfigError> {
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        match raw {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+        let result = Config::from_env();
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+        result
+    }
+
     /// Assert `captured` contains a WARN naming the removal of `BUZZ_ADMIN_TOKEN`
     /// so the migration breadcrumb Will's ruling preserved cannot silently regress.
     fn assert_admin_token_removal_warning(captured: &str) {
@@ -1499,7 +1702,7 @@ mod tests {
 
     #[test]
     fn admin_token_set_is_ignored_and_warns_at_startup() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         // Token authentication was removed. A lingering BUZZ_ADMIN_TOKEN with a
         // host is ignored (logged as a warning) and never changes the resolved
         // auth mode: unset/nip98 stay nip98, disabled stays disabled.
@@ -1531,7 +1734,7 @@ mod tests {
 
     #[test]
     fn admin_surface_defaults_to_nip98_when_auth_unset() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let admin = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some("admin.example"))])
             .expect("config with an admin host and no BUZZ_ADMIN_AUTH")
             .admin
@@ -1545,7 +1748,7 @@ mod tests {
 
     #[test]
     fn admin_host_bare_ipv6_literal_fails_closed() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         for host in ["::1", "::1:3000", "fe80::1", "2001:db8::1"] {
             let result = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some(host))]);
             assert!(
@@ -1568,7 +1771,7 @@ mod tests {
         //   - query/fragment suffixes parse as a valid URL, but the `?x=1` /
         //     `#frag` lands in the query/fragment rather than the host, so a
         //     parse-only gate would miss them — the structural check catches them.
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         for host in [
             "[::1",
             "[::1:3000",
@@ -1592,7 +1795,7 @@ mod tests {
 
     #[test]
     fn admin_host_bracketed_ipv6_literal_is_accepted() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         for host in ["[::1]", "[::1]:3000", "[2001:db8::1]:8443"] {
             let admin = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some(host))])
                 .unwrap_or_else(|e| panic!("bracketed IPv6 host {host:?} must be accepted: {e:?}"))
@@ -1604,7 +1807,7 @@ mod tests {
 
     #[test]
     fn admin_host_mixed_case_is_normalized_to_lowercase() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         // Hostnames are case-insensitive (RFC 4343). A mixed-case BUZZ_ADMIN_HOST
         // must be stored lowercase so it round-trips through desktop URL parsing
         // (url::Url always lowercases hostnames) without a mismatch.
@@ -1626,7 +1829,7 @@ mod tests {
 
     #[test]
     fn admin_token_without_a_host_is_ignored_and_warns() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         // Even without BUZZ_ADMIN_HOST, a lingering BUZZ_ADMIN_TOKEN is ignored
         // (logged as a warning) — token auth was removed and the admin surface
         // stays absent because the host is unset, not because of the token.
@@ -1646,7 +1849,7 @@ mod tests {
 
     #[test]
     fn disabled_mode_activates_without_a_token() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let admin = config_with_admin_env(&[
             ("BUZZ_ADMIN_HOST", Some("admin.example")),
             ("BUZZ_ADMIN_TOKEN", None),
@@ -1661,7 +1864,7 @@ mod tests {
 
     #[test]
     fn admin_auth_junk_values_all_fail_closed() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         for junk in [
             "1",
             "yes",
@@ -1694,7 +1897,7 @@ mod tests {
     fn admin_auth_empty_string_defaults_to_nip98() {
         // An empty value (e.g. `BUZZ_ADMIN_AUTH=`) is treated as unset → nip98,
         // the fail-secure default.
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let admin = config_with_admin_env(&[
             ("BUZZ_ADMIN_HOST", Some("admin.example")),
             ("BUZZ_ADMIN_TOKEN", None),
@@ -1708,7 +1911,7 @@ mod tests {
 
     #[test]
     fn nip98_mode_parses_and_succeeds_without_pubkeys_env() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let admin = config_with_admin_env(&[
             ("BUZZ_ADMIN_HOST", Some("admin.example")),
             ("BUZZ_ADMIN_AUTH", Some("nip98")),
@@ -1723,7 +1926,7 @@ mod tests {
 
     #[test]
     fn malformed_relay_owner_pubkey_is_a_startup_error_not_warn_and_ignore() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("RELAY_OWNER_PUBKEY");
         for bad in ["not-a-pubkey", &"a".repeat(63), &"z".repeat(64), "abcd"] {
             std::env::set_var("RELAY_OWNER_PUBKEY", bad);
@@ -1747,7 +1950,7 @@ mod tests {
 
     #[test]
     fn valid_relay_owner_pubkey_parses_correctly() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("RELAY_OWNER_PUBKEY");
         let valid = "a".repeat(64);
         std::env::set_var("RELAY_OWNER_PUBKEY", &valid);
@@ -1760,8 +1963,67 @@ mod tests {
     }
 
     #[test]
-    fn s3_addressing_style_env_accepts_virtual_and_rejects_invalid_values() {
+    fn partition_manager_config_has_bounded_interval_and_create_kill_switch() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_interval = std::env::var_os("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
+        let previous_create = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+
+        std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", "1");
+        std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", "false");
+        let minimum = Config::from_env().expect("minimum config");
+        std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", "999999");
+        let maximum = Config::from_env().expect("maximum config");
+
+        if let Some(value) = previous_interval {
+            std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
+        }
+        if let Some(value) = previous_create {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+        }
+
+        assert_eq!(minimum.partition_audit_interval, Duration::from_secs(60));
+        assert!(!minimum.partition_manager_create_enabled);
+        assert_eq!(
+            maximum.partition_audit_interval,
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert!(!maximum.partition_manager_create_enabled);
+    }
+
+    #[test]
+    fn partition_manager_create_kill_switch_parses_false_values_strictly() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+
+        for value in ["FALSE", "off", "  false  "] {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+            let config = Config::from_env().expect("recognized false value");
+            assert!(!config.partition_manager_create_enabled, "value: {value:?}");
+        }
+
+        std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", "disable-maybe");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+        }
+
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PARTITION_MANAGER_CREATE_ENABLED")
+        ));
+    }
+
+    #[test]
+    fn s3_addressing_style_env_accepts_virtual_and_rejects_invalid_values() {
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
 
         std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "virtual");
@@ -1792,7 +2054,7 @@ mod tests {
     fn s3_addressing_style_env_rejects_non_unicode_values() {
         use std::os::unix::ffi::OsStringExt;
 
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
         std::env::set_var(
             "BUZZ_S3_ADDRESSING_STYLE",
@@ -1816,7 +2078,7 @@ mod tests {
 
     #[test]
     fn redis_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
 
         std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
@@ -1841,7 +2103,7 @@ mod tests {
 
     #[test]
     fn db_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
 
         std::env::set_var("BUZZ_DB_POOL_SIZE", "80");
@@ -1866,7 +2128,7 @@ mod tests {
 
     #[test]
     fn db_read_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_READ_POOL_SIZE");
 
         std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
@@ -1895,7 +2157,7 @@ mod tests {
 
     #[test]
     fn read_database_url_unset_or_blank_is_none() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("READ_DATABASE_URL");
 
         std::env::remove_var("READ_DATABASE_URL");
@@ -1923,7 +2185,7 @@ mod tests {
 
     #[test]
     fn replica_read_max_age_defaults_off_and_rejects_junk() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
         let previous_old = std::env::var_os("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
         std::env::remove_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
@@ -2004,7 +2266,7 @@ mod tests {
 
     #[test]
     fn drain_jitter_defaults_off_and_rejects_junk() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DRAIN_JITTER_MS");
 
         std::env::remove_var("BUZZ_DRAIN_JITTER_MS");
@@ -2058,7 +2320,7 @@ mod tests {
 
     #[test]
     fn audit_logging_defaults_on_and_accepts_explicit_off() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
         std::env::remove_var("BUZZ_AUDIT_ENABLED");
         assert!(parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
@@ -2073,7 +2335,7 @@ mod tests {
 
     #[test]
     fn audit_logging_rejects_invalid_boolean() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
         std::env::set_var("BUZZ_AUDIT_ENABLED", "sometimes");
         let result = parse_bool("BUZZ_AUDIT_ENABLED", true);
@@ -2091,7 +2353,7 @@ mod tests {
 
     #[test]
     fn join_policy_age_attestation_rejects_invalid_boolean() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AGE_ATTESTATION_REQUIRED");
         std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
         let result = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED");
@@ -2109,7 +2371,7 @@ mod tests {
 
     #[test]
     fn rate_limits_can_be_overridden() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
         std::env::set_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN", "1004");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
@@ -2129,7 +2391,7 @@ mod tests {
 
     #[test]
     fn rate_limit_overrides_reject_zero() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
         let result = Config::from_env();
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
@@ -2143,7 +2405,7 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_parse_dedupe_and_normalize() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2167,7 +2429,7 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_invalid_entry_is_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("RELAY_OPERATOR_PUBKEYS", "not-a-pubkey");
         let result = Config::from_env();
         std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
@@ -2184,7 +2446,7 @@ mod tests {
         // community provisioning and the NIP-98 admin console. Configuring the
         // admin console (pubkeys) must NOT force the provisioning origin — boot
         // succeeds; provisioning stays fail-closed at request time.
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2206,7 +2468,7 @@ mod tests {
 
     #[test]
     fn relay_operator_api_origin_rejects_paths() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("RELAY_OPERATOR_API_ORIGIN", "https://buzz.example/operator");
         let result = Config::from_env();
         std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
@@ -2218,23 +2480,28 @@ mod tests {
     }
 
     #[test]
-    fn push_is_opt_in_and_gateway_defaults_to_buzz() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+    fn push_is_opt_in_and_gateway_is_required_when_enabled() {
+        let _guards = env_guards();
         let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         std::env::remove_var("BUZZ_PUSH_ENABLED");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
         assert!(!config.push_enabled);
-        assert_eq!(
-            config
-                .push_gateway_delivery_url
-                .as_ref()
-                .map(url::Url::as_str),
-            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
-        );
+        assert!(config.push_gateway_delivery_url.is_none());
 
         std::env::set_var("BUZZ_PUSH_ENABLED", "true");
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must be configured")
+        ));
+
+        std::env::set_var(
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL",
+            "https://push.example/v1/deliveries/apns",
+        );
         let config = Config::from_env().expect("enabled push config");
         assert!(config.push_enabled);
         assert_eq!(
@@ -2242,7 +2509,7 @@ mod tests {
                 .push_gateway_delivery_url
                 .as_ref()
                 .map(url::Url::as_str),
-            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+            Some("https://push.example/v1/deliveries/apns")
         );
 
         std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
@@ -2271,7 +2538,7 @@ mod tests {
 
     #[test]
     fn invalid_push_enabled_value_is_rejected() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_PUSH_ENABLED");
         std::env::set_var("BUZZ_PUSH_ENABLED", "sometimes");
         let result = Config::from_env();
@@ -2290,8 +2557,20 @@ mod tests {
     #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
         assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
+        let delivery_url = "http://push.example:8080/v1/deliveries/apns";
+        assert_eq!(
+            parse_push_gateway_delivery_url(delivery_url)
+                .unwrap()
+                .as_str(),
+            delivery_url
+        );
+        assert!(parse_push_gateway_delivery_url("http://push-gateway/v1/deliveries/apns").is_ok());
         for invalid in [
-            "http://push.example/v1/deliveries/apns",
+            "ftp://push.example/v1/deliveries/apns",
+            "http://push-gateway:8080/v1/deliveries/apns?token=x",
+            "http://user@push-gateway:8080/v1/deliveries/apns",
+            "http://push-gateway:8080/v1/deliveries/apns#fragment",
+            "https://push.example:8443/v1/deliveries/apns",
             "https://push.example/v1/deliveries/apns/",
             "https://push.example/v1/deliveries/apns?token=x",
             "https://user@push.example/v1/deliveries/apns",
@@ -2304,8 +2583,95 @@ mod tests {
     }
 
     #[test]
+    fn operator_listener_routes_parse_and_normalize() {
+        let routes = parse_operator_listener_delivery_urls(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:https://one.example/mentions;bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:https://two.example/mentions",
+        )
+        .expect("valid operator-listener routes");
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes.contains_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(
+            routes.contains_key("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn operator_listener_routes_reject_unsafe_or_duplicate_entries() {
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for raw in [
+            format!("{key}:http://listener.example/mentions"),
+            format!("{key}:https://user:pass@listener.example/mentions"),
+            format!("{key}:https://listener.example/mentions?token=secret"),
+            format!("{key}:https://listener.example/mentions;{key}:https://other.example"),
+        ] {
+            assert!(
+                parse_operator_listener_delivery_urls(&raw).is_err(),
+                "unsafe or duplicate route accepted: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_operator_listener_config_prevents_startup() {
+        let _guards = env_guards();
+        let result = config_with_operator_listeners(Some(";"));
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENERS")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_operator_listener_config_prevents_startup() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        std::env::set_var(
+            "BUZZ_OPERATOR_LISTENERS",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+
+        let result = Config::from_env();
+
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENERS must be valid UTF-8")
+        ));
+    }
+
+    #[test]
+    fn valid_and_absent_operator_listener_config_preserve_routes() {
+        let _guards = env_guards();
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let raw = format!("{key}:https://listener.example/mentions");
+        let config = config_with_operator_listeners(Some(&raw)).expect("valid listener config");
+        assert_eq!(
+            config
+                .operator_listener_delivery_urls
+                .get(key)
+                .map(url::Url::as_str),
+            Some("https://listener.example/mentions")
+        );
+
+        let config = config_with_operator_listeners(None).expect("absent listener config");
+        assert!(config.operator_listener_delivery_urls.is_empty());
+    }
+
+    #[test]
     fn invalid_push_gateway_timeout_is_not_silently_defaulted() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS", "99");
         let result = Config::from_env();
         std::env::remove_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS");
@@ -2318,7 +2684,7 @@ mod tests {
 
     #[test]
     fn invalid_push_executor_key_id_is_rejected() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_PUSH_EXECUTOR_KEY_ID", "");
         let result = Config::from_env();
         std::env::remove_var("BUZZ_PUSH_EXECUTOR_KEY_ID");
@@ -2331,7 +2697,7 @@ mod tests {
 
     #[test]
     fn huddle_audio_available_can_be_disabled_for_horizontal_scaling() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_HUDDLE_AUDIO_AVAILABLE");
@@ -2351,7 +2717,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_url_accepts_websocket_urls_and_rejects_http() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_PAIRING_RELAY_URL", "wss://pairing.buzz.xyz");
         let config = Config::from_env().expect("config");
         assert_eq!(
@@ -2370,7 +2736,7 @@ mod tests {
 
     #[test]
     fn max_frame_bytes_can_be_configured() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_MAX_FRAME_BYTES", "262144");
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
@@ -2379,7 +2745,7 @@ mod tests {
 
     #[test]
     fn git_repo_path_is_created_if_missing() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         // Pick a path under temp_dir that definitely doesn't exist yet.
         let base = std::env::temp_dir().join(format!(
             "buzz-test-git-repo-path-{}-{}",

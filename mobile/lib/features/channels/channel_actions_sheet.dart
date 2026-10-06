@@ -7,8 +7,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import 'dm_channel_labels.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -19,9 +22,9 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/lucide_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../../shared/widgets/sheet_divider.dart';
 import 'channel.dart';
 import 'add_members_sheet.dart';
+import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
@@ -177,174 +180,185 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 ),
                 const SizedBox(height: Grid.xs),
               ],
-              if (!channel.isDm)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(LucideIcons.folderInput),
-                  title: const Text('Move to section…'),
-                  onTap: () async {
-                    final pageContext = Navigator.of(
-                      context,
-                      rootNavigator: true,
-                    ).context;
-                    close();
-                    await _showMoveSectionSheet(
-                      pageContext,
-                      ref,
-                      channel: channel,
-                      sectionId: sectionId,
-                    );
-                  },
-                ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(isMuted ? LucideIcons.bell : LucideIcons.bellOff),
-                title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
-                onTap: () {
-                  close();
-                  final notifier = ref.read(channelMutesProvider.notifier);
-                  isMuted
-                      ? notifier.unmuteChannel(channel.id)
-                      : notifier.muteChannel(channel.id);
-                },
-              ),
-              if (!channel.isDm)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(LucideIcons.settings),
-                  title: const Text('Manage channel'),
-                  onTap: () async {
-                    final shouldClose = await showBuzzModalBottomSheet<bool>(
-                      context: context,
-                      title: 'Manage channel',
-                      isScrollControlled: true,
-                      showDragHandle: true,
-                      constraints: BoxConstraints(
-                        maxWidth: 640,
-                        maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-                      ),
-                      builder: (_) => ManageChannelSheet(
-                        channel: currentChannel,
-                        canEditDetails:
-                            canManageLifecycle && !currentChannel.isArchived,
-                        onChannelUpdated: (updated) =>
-                            displayedChannel.value = updated,
-                      ),
-                    );
-                    if (shouldClose == true && context.mounted) {
-                      Navigator.of(context).pop(true);
-                    }
-                  },
-                ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(LucideIcons.copy),
-                title: const Text('Copy channel name'),
-                onTap: () {
-                  close();
-                  copyToClipboard(
-                    context,
-                    currentChannel.name,
-                    message: 'Channel name copied to clipboard',
-                  );
-                },
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(LucideIcons.hash),
-                title: const Text('Copy channel ID'),
-                onTap: () {
-                  close();
-                  copyToClipboard(
-                    context,
-                    channel.id,
-                    message: 'Channel ID copied to clipboard',
-                  );
-                },
-              ),
-              if (!channel.isDm) ...[
-                const SheetDivider(),
-                if (channel.isMember && !channel.isArchived)
-                  _ActionTile(
-                    icon: LucideIcons.logOut,
-                    label: 'Leave channel',
-                    destructive: true,
-                    onTap: () => _confirmAndRun(
-                      context,
-                      ref,
-                      title: 'Leave #${currentChannel.name}?',
-                      body: 'You’ll stop receiving messages from this channel.',
-                      confirmLabel: 'Leave',
-                      action: () => ref
-                          .read(channelActionsProvider)
-                          .leaveChannel(channel.id),
+              SheetActionSection(
+                children: [
+                  if (!channel.isDm)
+                    ListTile(
+                      leading: const Icon(LucideIcons.folderInput),
+                      title: const Text('Move to section…'),
+                      onTap: () async {
+                        final pageContext = Navigator.of(
+                          context,
+                          rootNavigator: true,
+                        ).context;
+                        close();
+                        await _showMoveSectionSheet(
+                          pageContext,
+                          ref,
+                          channel: channel,
+                          sectionId: sectionId,
+                        );
+                      },
                     ),
+                  ListTile(
+                    leading: Icon(
+                      isMuted ? LucideIcons.bell : LucideIcons.bellOff,
+                    ),
+                    title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
+                    onTap: () {
+                      close();
+                      final notifier = ref.read(channelMutesProvider.notifier);
+                      isMuted
+                          ? notifier.unmuteChannel(channel.id)
+                          : notifier.muteChannel(channel.id);
+                    },
                   ),
-                if (lifecycleCapabilitiesLoading)
-                  const ListTile(
-                    enabled: false,
-                    leading: BuzzLoadingIndicator(
-                      size: 20,
-                      semanticLabel: 'Loading channel actions',
-                    ),
-                    title: Text('Loading channel actions…'),
-                  )
-                else if (lifecycleCapabilitiesUnavailable)
-                  const ListTile(
-                    enabled: false,
-                    leading: Icon(LucideIcons.triangleAlert),
-                    title: Text('Channel actions unavailable'),
-                  )
-                else ...[
-                  if (canArchive)
-                    _ActionTile(
-                      icon: LucideIcons.archive,
-                      label: 'Archive channel',
-                      onTap: () => _confirmAndRun(
-                        context,
-                        ref,
-                        title: 'Archive #${currentChannel.name}?',
-                        body: 'The channel will become read-only.',
-                        confirmLabel: 'Archive',
-                        action: () => ref
-                            .read(channelActionsProvider)
-                            .archiveChannel(channel.id),
-                      ),
-                    ),
-                  if (canUnarchive)
-                    _ActionTile(
-                      icon: LucideIcons.archiveRestore,
-                      label: 'Unarchive channel',
-                      onTap: () => _confirmAndRun(
-                        context,
-                        ref,
-                        title: 'Unarchive #${currentChannel.name}?',
-                        body: 'The channel will become active again.',
-                        confirmLabel: 'Unarchive',
-                        action: () => ref
-                            .read(channelActionsProvider)
-                            .unarchiveChannel(channel.id),
-                      ),
-                    ),
-                  if (canDelete)
-                    _ActionTile(
-                      icon: LucideIcons.trash2,
-                      label: 'Delete channel',
-                      destructive: true,
-                      onTap: () => _confirmAndRun(
-                        context,
-                        ref,
-                        title: 'Delete #${currentChannel.name}?',
-                        body:
-                            'This permanently deletes the channel and cannot be undone.',
-                        confirmLabel: 'Delete',
-                        action: () => ref
-                            .read(channelActionsProvider)
-                            .deleteChannel(channel.id),
-                      ),
+                  if (!channel.isDm)
+                    ListTile(
+                      leading: const Icon(LucideIcons.settings),
+                      title: const Text('Manage channel'),
+                      onTap: () async {
+                        final shouldClose =
+                            await showBuzzModalBottomSheet<bool>(
+                              context: context,
+                              title: 'Manage channel',
+                              isScrollControlled: true,
+                              showDragHandle: true,
+                              constraints: BoxConstraints(
+                                maxWidth: 640,
+                                maxHeight:
+                                    MediaQuery.sizeOf(context).height * 0.9,
+                              ),
+                              builder: (_) => ManageChannelSheet(
+                                channel: currentChannel,
+                                canEditDetails:
+                                    canManageLifecycle &&
+                                    !currentChannel.isArchived,
+                                onChannelUpdated: (updated) =>
+                                    displayedChannel.value = updated,
+                              ),
+                            );
+                        if (shouldClose == true && context.mounted) {
+                          Navigator.of(context).pop(true);
+                        }
+                      },
                     ),
                 ],
-              ],
+              ),
+              SheetActionSection(
+                children: [
+                  ListTile(
+                    leading: const Icon(LucideIcons.copy),
+                    title: const Text('Copy channel name'),
+                    onTap: () {
+                      close();
+                      copyToClipboard(
+                        context,
+                        currentChannel.name,
+                        message: 'Channel name copied to clipboard',
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(LucideIcons.hash),
+                    title: const Text('Copy channel ID'),
+                    onTap: () {
+                      close();
+                      copyToClipboard(
+                        context,
+                        channel.id,
+                        message: 'Channel ID copied to clipboard',
+                      );
+                    },
+                  ),
+                ],
+              ),
+              if (!channel.isDm)
+                SheetActionSection(
+                  children: [
+                    if (channel.isMember && !channel.isArchived)
+                      _ActionTile(
+                        icon: LucideIcons.logOut,
+                        label: 'Leave channel',
+                        destructive: true,
+                        onTap: () => _confirmAndRun(
+                          context,
+                          ref,
+                          title: 'Leave #${currentChannel.name}?',
+                          body:
+                              'You’ll stop receiving messages from this channel.',
+                          confirmLabel: 'Leave',
+                          action: () => ref
+                              .read(channelActionsProvider)
+                              .leaveChannel(channel.id),
+                        ),
+                      ),
+                    if (lifecycleCapabilitiesLoading)
+                      const ListTile(
+                        enabled: false,
+                        leading: BuzzLoadingIndicator(
+                          size: 20,
+                          semanticLabel: 'Loading channel actions',
+                        ),
+                        title: Text('Loading channel actions…'),
+                      )
+                    else if (lifecycleCapabilitiesUnavailable)
+                      const ListTile(
+                        enabled: false,
+                        leading: Icon(LucideIcons.triangleAlert),
+                        title: Text('Channel actions unavailable'),
+                      )
+                    else ...[
+                      if (canArchive)
+                        _ActionTile(
+                          icon: LucideIcons.archive,
+                          label: 'Archive channel',
+                          onTap: () => _confirmAndRun(
+                            context,
+                            ref,
+                            title: 'Archive #${currentChannel.name}?',
+                            body: 'The channel will become read-only.',
+                            confirmLabel: 'Archive',
+                            action: () => ref
+                                .read(channelActionsProvider)
+                                .archiveChannel(channel.id),
+                          ),
+                        ),
+                      if (canUnarchive)
+                        _ActionTile(
+                          icon: LucideIcons.archiveRestore,
+                          label: 'Unarchive channel',
+                          onTap: () => _confirmAndRun(
+                            context,
+                            ref,
+                            title: 'Unarchive #${currentChannel.name}?',
+                            body: 'The channel will become active again.',
+                            confirmLabel: 'Unarchive',
+                            action: () => ref
+                                .read(channelActionsProvider)
+                                .unarchiveChannel(channel.id),
+                          ),
+                        ),
+                      if (canDelete)
+                        _ActionTile(
+                          icon: LucideIcons.trash2,
+                          label: 'Delete channel',
+                          destructive: true,
+                          onTap: () => _confirmAndRun(
+                            context,
+                            ref,
+                            title: 'Delete #${currentChannel.name}?',
+                            body:
+                                'This permanently deletes the channel and cannot be undone.',
+                            confirmLabel: 'Delete',
+                            action: () => ref
+                                .read(channelActionsProvider)
+                                .deleteChannel(channel.id),
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
             ],
           ),
         ),
@@ -452,7 +466,6 @@ class _ActionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListTile(
-    contentPadding: EdgeInsets.zero,
     leading: Icon(icon, color: destructive ? context.colors.error : null),
     title: Text(
       label,
@@ -528,8 +541,7 @@ Future<void> _showMoveSectionSheet(
             Grid.gutter,
             Grid.xs,
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          child: SheetActionSection(
             children: [
               for (final section in sections)
                 ListTile(

@@ -4,10 +4,12 @@ import type { ReactNode } from "react";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
-const UNREAD_PILL_CLASS =
-  "pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/70 bg-background/95 px-2 py-1 text-2xs font-medium tracking-[0.02em] text-muted-foreground/70 shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4";
-const PRIMARY_UNREAD_PILL_CLASS =
-  "pointer-events-auto h-7 min-h-7 max-w-[calc(100%_-_1rem)] overflow-hidden gap-1.5 rounded-full px-2 py-1 text-xs font-medium shadow-sm [&_svg]:size-4";
+const UNREAD_PILL_COMPOSITION_CLASS =
+  "pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border px-2 py-1 text-2xs font-medium tracking-[0.02em] shadow-xs [&_svg]:size-4";
+const DEFAULT_UNREAD_PILL_TREATMENT_CLASS =
+  "border-border/70 bg-background/95 text-muted-foreground/70 backdrop-blur-sm hover:bg-muted/70 hover:text-foreground";
+const PRIMARY_UNREAD_PILL_TREATMENT_CLASS =
+  "border-primary bg-primary text-primary-foreground hover:bg-primary/90";
 
 export function unreadCountLabel(count: number) {
   return `${count} new message${count === 1 ? "" : "s"}`;
@@ -37,7 +39,10 @@ export function UnreadPill({
     <Button
       aria-label={accessibleLabel}
       className={cn(
-        emphasis === "primary" ? PRIMARY_UNREAD_PILL_CLASS : UNREAD_PILL_CLASS,
+        UNREAD_PILL_COMPOSITION_CLASS,
+        emphasis === "primary"
+          ? PRIMARY_UNREAD_PILL_TREATMENT_CLASS
+          : DEFAULT_UNREAD_PILL_TREATMENT_CLASS,
         className,
       )}
       data-testid={testId}

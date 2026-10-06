@@ -6,6 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use buzz_core::kind::{
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_REMINDER,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
+};
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
@@ -240,7 +244,8 @@ pub struct AuthenticateArgs {
 #[derive(Debug, Parser)]
 #[command(
     name = "buzz-acp",
-    about = "ACP harness that bridges Buzz events to AI agents"
+    about = "ACP harness that bridges Buzz events to AI agents",
+    after_help = "Commands: run (one local task), models, auth-methods, authenticate.\nUse buzz-acp <COMMAND> --help. With no command, start the conversational service."
 )]
 pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
@@ -424,7 +429,7 @@ pub struct CliArgs {
     pub no_memory: bool,
 
     /// Disable the `<base>` platform-context section prepended to every prompt.
-    /// When set, agents receive only the persona `<system>` prompt with no Buzz orientation.
+    /// When set, agents receive only the persona `<agent-instructions>` prompt with no Buzz orientation.
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
@@ -493,7 +498,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Team-owned instructions layered after `<system>` and before agent memory.
+    /// Team-owned instructions layered after `<agent-instructions>` and before agent memory.
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
 
@@ -516,6 +521,15 @@ pub struct CliArgs {
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
+
+    /// Unix-seconds replay floor for the startup watermark. A publish-first
+    /// mention send publishes the triggering message and then spawns this
+    /// harness, passing the send timestamp here so the first REQ replays past
+    /// that message however long the spawn takes. Floors older than 15 minutes
+    /// are clamped to 15 minutes before startup; floors in the future are
+    /// ignored (the watermark stays at startup time).
+    #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
+    pub replay_floor: Option<u64>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -605,6 +619,12 @@ pub struct Config {
     /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
     /// Only meaningful when `lazy_pool` is true.
     pub idle_pool_sleep_secs: u64,
+    /// Optional unix-seconds replay floor for the startup watermark
+    /// (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`), set by a publish-first
+    /// mention send so the first REQ replays past the already-published
+    /// triggering message. Clamped where consumed — see
+    /// `startup_watermark_with_floor`.
+    pub replay_floor_unix: Option<u64>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1185,6 +1205,7 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
+            replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1316,16 +1337,26 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
     Ok(config.rules)
 }
 
+/// Event kinds that carry actionable direct mentions by default.
+///
+/// Message edits are included because Desktop emits `p` tags only for
+/// recipients newly added by an edit. Receiving kind 40003 therefore wakes an
+/// agent once for a newly added mention without re-waking it for ordinary edits.
+pub(crate) fn default_mention_kinds() -> Vec<u32> {
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_EDIT,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+    ]
+}
+
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
     config: &Config,
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
@@ -1340,13 +1371,10 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_mention_kinds);
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
@@ -1424,10 +1452,6 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
     // allowlist. Config mode ignores --channels (per CLI contract) and uses
@@ -1445,13 +1469,12 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_mention_kinds),
+            ),
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
@@ -1560,6 +1583,7 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -1598,9 +1622,26 @@ mod tests {
             assert!(f.require_mention, "mentions mode requires mention");
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
+            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE_EDIT));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
         }
+    }
+
+    #[test]
+    fn test_dynamic_mentions_mode_includes_message_edits() {
+        let config = test_config(SubscribeMode::Mentions);
+        let filter = resolve_dynamic_channel_filter(&config, Uuid::new_v4(), &[])
+            .expect("dynamic channel should be subscribed");
+
+        assert!(filter.require_mention);
+        assert!(
+            filter
+                .kinds
+                .expect("mentions mode should constrain kinds")
+                .contains(&KIND_STREAM_MESSAGE_EDIT),
+            "newly mentioned agents must receive message edits on dynamic channels"
+        );
     }
 
     #[test]

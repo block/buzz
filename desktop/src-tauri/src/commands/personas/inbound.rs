@@ -77,6 +77,9 @@ pub async fn reconcile_inbound_persona_event(
     arrival_relay_url: String,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Captured before the blocking reconcile stops the runtime: a community
+    // removed while this restart runs refuses its start.
+    let admission = crate::managed_agents::AdmissionSnapshot::capture(&app.state::<AppState>());
     let blocking_app = app.clone();
     let restart = tokio::task::spawn_blocking(move || {
         reconcile_inbound_persona_event_blocking(event_json, arrival_relay_url, blocking_app)
@@ -92,6 +95,7 @@ pub async fn reconcile_inbound_persona_event(
                 &state,
                 &pubkey,
                 &relay_urls,
+                &admission,
             )
             .await
             .map_err(|error| {
@@ -129,6 +133,7 @@ pub async fn reconcile_inbound_persona_event(
                 &config,
                 agent_json,
                 cached_binary_path.as_deref(),
+                None,
                 None,
                 None,
             )
@@ -673,9 +678,11 @@ fn event_d_tag(event: &nostr::Event) -> Result<String, String> {
 /// in place, or push it when none matches.
 ///
 /// The match key is `persona_d_tag` — the same derivation the outbound path
-/// uses — so the inbound and outbound keys can never drift. On match, only the
-/// projected fields are overwritten; local `id`, `env_vars`, `source_team`, and
-/// `created_at` survive. On no match, the parsed record is inserted as-is; since
+/// uses — so the inbound and outbound keys can never drift. On match, every
+/// field projected by `PersonaEventContent` is overwritten (except a redacted
+/// shared transport preserves a nonportable local override), while local `id`,
+/// `env_vars`, `source_team`, and `created_at` survive. On no match, the parsed
+/// record is inserted as-is; since
 /// `persona_from_event` sets `id = d_tag`, an in-app persona reuses its d-tag as
 /// the id and a re-received event stays idempotent (no duplicate row).
 fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefinition) {
@@ -689,6 +696,17 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
             local.avatar_url = inbound.avatar_url;
             local.description = inbound.description;
             local.system_prompt = inbound.system_prompt;
+            // Shared absence can be a redacted machine-local transport. Keep
+            // only that local override; portable/legacy absence still resets.
+            // Shared writers emit explicit buzz-acp for an intentional reset.
+            let redacted_local_command = inbound.shared
+                && inbound.acp_command.is_none()
+                && local.acp_command.as_deref().is_some_and(|command| {
+                    !crate::managed_agents::is_portable_acp_command(command)
+                });
+            if !redacted_local_command {
+                local.acp_command = inbound.acp_command;
+            }
             local.runtime = inbound.runtime;
             local.model = inbound.model;
             local.provider = inbound.provider;
@@ -696,6 +714,7 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
             local.respond_to = inbound.respond_to;
             local.respond_to_allowlist = inbound.respond_to_allowlist;
             local.parallelism = inbound.parallelism;
+            local.session_policy = inbound.session_policy;
             local.shared = inbound.shared;
             local.updated_at = inbound.updated_at;
         }

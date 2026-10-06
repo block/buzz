@@ -91,9 +91,9 @@ cache_uses.each do |path, location, ref|
   end
 end
 
-ci_path = root / ".github" / "workflows" / "ci.yml"
-ci = workflows.fetch(ci_path) { load_workflow.call(ci_path) }
-jobs = ci["jobs"]
+rust_ci_path = root / ".github" / "workflows" / "_ci-rust.yml"
+rust_ci = workflows.fetch(rust_ci_path) { load_workflow.call(rust_ci_path) }
+jobs = rust_ci["jobs"]
 unit_tests = jobs.is_a?(Hash) ? jobs["unit-tests"] : nil
 abort "unit-tests job missing" unless unit_tests.is_a?(Hash)
 steps = unit_tests["steps"]

@@ -2,14 +2,18 @@ import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import type { BlobDescriptor } from "@/shared/api/tauri";
-import {
-  hasMentionClipboardHtml,
-  normalizeMentionClipboardHtml,
-} from "@/features/messages/lib/normalizeMentionClipboard";
+import { hasMentionClipboardHtml } from "@/features/messages/lib/normalizeMentionClipboard";
+import { handleMentionClipboardPaste } from "@/features/messages/lib/mentionClipboardPaste";
+import type { BindPastedMentionIdentities } from "@/features/messages/lib/mentionPasteBinding";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 
 export function useComposerPasteHandler(options: {
   editor: Editor | null;
+  /**
+   * Teaches the composer each `name → pubkey` pair a Buzz copy carried, once
+   * trusted state vouches for it. Without it, a paste binds nothing.
+   */
+  bindMentionIdentities?: BindPastedMentionIdentities;
   scrollToBottom: () => void;
   setPendingImeta: (
     update: (current: BlobDescriptor[]) => BlobDescriptor[],
@@ -18,6 +22,8 @@ export function useComposerPasteHandler(options: {
 }) {
   const uploadFileRef = React.useRef(options.uploadFile);
   uploadFileRef.current = options.uploadFile;
+  const bindMentionIdentitiesRef = React.useRef(options.bindMentionIdentities);
+  bindMentionIdentitiesRef.current = options.bindMentionIdentities;
   React.useEffect(() => {
     const editor = options.editor;
     if (!editor) return;
@@ -57,13 +63,20 @@ export function useComposerPasteHandler(options: {
           }
           if (handleAgentSnapshotPaste(event, options.setPendingImeta))
             return true;
-          const html = event.clipboardData?.getData("text/html");
-          if (html && hasMentionClipboardHtml(html)) {
-            event.preventDefault();
-            view.pasteHTML(normalizeMentionClipboardHtml(html));
-            return true;
+          const clipboardData = event.clipboardData;
+          const html = clipboardData?.getData("text/html");
+          if (clipboardData && html && hasMentionClipboardHtml(html)) {
+            if (clipboardData.getData("text/plain").includes("\n")) {
+              options.scrollToBottom();
+            }
+            return handleMentionClipboardPaste({
+              bindMentionIdentities: bindMentionIdentitiesRef.current,
+              clipboardData,
+              preventDefault: () => event.preventDefault(),
+              view,
+            });
           }
-          if ((event.clipboardData?.getData("text/plain") ?? "").includes("\n"))
+          if ((clipboardData?.getData("text/plain") ?? "").includes("\n"))
             options.scrollToBottom();
           return false;
         },

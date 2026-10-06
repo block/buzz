@@ -40,6 +40,56 @@ part 'profile_edit_page_test/image_selection_tests.dart';
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
 void main() {
+  testWidgets('native profile title follows every photo editor entry', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/842');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final header = find.byWidgetPredicate(
+      (widget) =>
+          widget is UiKitView && widget.viewType == 'buzz/ios_navigation_bar',
+    );
+    Widget page({bool direct = false}) => WidgetHelpers.testable(
+      overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+      child: ProfileEditPage(startInPhotoEditor: direct),
+    );
+    await tester.pumpWidget(page());
+    await tester.pumpAndSettle();
+    final native = tester.widget<UiKitView>(header);
+    expect(native.creationParams, containsPair('title', 'Profile'));
+    native.onPlatformViewCreated!(842);
+    await tester.pump();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    expect(
+      calls.where((call) => call.method == 'configure').last.arguments,
+      containsPair('title', 'Edit Photo'),
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(page(direct: true));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<UiKitView>(header).creationParams,
+      containsPair('title', 'Edit Photo'),
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('keeps crop Save disabled while dimensions decode', (
     tester,
   ) async {

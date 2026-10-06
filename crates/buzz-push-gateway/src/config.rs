@@ -11,9 +11,21 @@ pub enum ApnsEnvironment {
 #[derive(Debug, Clone)]
 pub struct AppProfileConfig {
     pub app_attest_app_id: String,
+    /// Exact Apple attestation environment accepted for enrollment.
+    pub app_attest_environment: AppAttestEnvironment,
     pub apns_cert_path: PathBuf,
     pub apns_topic: String,
     pub apns_environment: ApnsEnvironment,
+}
+
+/// Apple App Attest environment, independent of the APNs transport environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAttestEnvironment {
+    /// Distributed applications, also the default for personal development builds.
+    Production,
+    /// Development-signed applications in an explicitly opted-in gateway build.
+    #[cfg(feature = "personal-dev-app-attest")]
+    Development,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +38,6 @@ pub struct KeyConfig {
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
-    pub public_delivery_url: url::Url,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -41,6 +52,19 @@ pub struct Config {
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
 }
+
+// Registered NIP-PL v1 App Attest audiences are protocol constants, not routing URLs.
+/// Fixed NIP-PL v1 App Attest audience for installation enrollment.
+pub const ENROLL_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations";
+/// Fixed NIP-PL v1 App Attest audience for creating a delegation.
+pub const DELEGATE_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations";
+/// Fixed NIP-PL v1 App Attest audience for rotating an installation endpoint.
+pub const ROTATE_ENDPOINT_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/endpoint";
+/// Fixed NIP-PL v1 App Attest audience for revoking a delegation.
+pub const REVOKE_DELEGATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations/revoke";
+/// Fixed NIP-PL v1 App Attest audience for revoking an installation.
+pub const REVOKE_INSTALLATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/revoke";
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("missing required environment variable {0}")]
@@ -94,6 +118,15 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
             .ok_or(ConfigError::Missing(key))
     };
     let app_attest_app_id = required(app_id_key)?.to_owned();
+    let app_attest_environment = match e
+        .get("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")
+        .map(String::as_str)
+    {
+        None | Some("production") => AppAttestEnvironment::Production,
+        #[cfg(feature = "personal-dev-app-attest")]
+        Some("development") => AppAttestEnvironment::Development,
+        Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")),
+    };
     let apns_topic = required(topic_key)?.to_owned();
     let apns_cert_path = PathBuf::from(required(cert_key)?);
     let apns_environment = match e.get(environment_key).map(String::as_str) {
@@ -103,6 +136,7 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
     };
     Ok(AppProfileConfig {
         app_attest_app_id,
+        app_attest_environment,
         apns_cert_path,
         apns_topic,
         apns_environment,
@@ -131,20 +165,6 @@ impl Config {
                 .any(|token| grant.id == token.id || grant.key == token.key)
         }) {
             return Err(ConfigError::Invalid("BUZZ_PUSH_TOKEN_KEYS"));
-        }
-        let public_delivery_url = req(e, "BUZZ_PUSH_PUBLIC_DELIVERY_URL")?
-            .parse::<url::Url>()
-            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"))?;
-        if public_delivery_url.scheme() != "https"
-            || public_delivery_url.host_str() != Some("push.buzz.xyz")
-            || public_delivery_url.port().is_some()
-            || public_delivery_url.path() != "/v1/deliveries/apns"
-            || public_delivery_url.query().is_some()
-            || public_delivery_url.fragment().is_some()
-            || !public_delivery_url.username().is_empty()
-            || public_delivery_url.password().is_some()
-        {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"));
         }
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
@@ -191,7 +211,6 @@ impl Config {
         Ok(Self {
             bind_addr,
             health_addr,
-            public_delivery_url,
             max_grant_lifetime_seconds,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
@@ -208,6 +227,47 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attestation_environment_is_explicit_and_build_gated() {
+        let mut env = base();
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        for value in ["", "sandbox", "Production", "unknown"] {
+            env.insert("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(), value.into());
+            assert!(Config::from_map(&env).is_err());
+        }
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "production".into(),
+        );
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "development".into(),
+        );
+        #[cfg(feature = "personal-dev-app-attest")]
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .profile
+                .app_attest_environment,
+            AppAttestEnvironment::Development
+        );
+        #[cfg(not(feature = "personal-dev-app-attest"))]
+        assert!(Config::from_map(&env).is_err());
+    }
+
     fn base() -> HashMap<String, String> {
         HashMap::from([
             (
@@ -225,10 +285,6 @@ mod tests {
                     STANDARD.encode([3; 32]),
                     STANDARD.encode([4; 32])
                 ),
-            ),
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL".into(),
-                "https://push.buzz.xyz/v1/deliveries/apns".into(),
             ),
             (
                 "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS".into(),
@@ -286,6 +342,26 @@ mod tests {
     }
 
     #[test]
+    fn startup_needs_no_origin_and_transcript_audiences_stay_registered() {
+        assert!(!base().contains_key("BUZZ_PUSH_GATEWAY_ORIGIN"));
+        Config::from_map(&base()).unwrap();
+        assert_eq!(ENROLL_AUDIENCE, "https://push.buzz.xyz/v1/installations");
+        assert_eq!(DELEGATE_AUDIENCE, "https://push.buzz.xyz/v1/delegations");
+        assert_eq!(
+            ROTATE_ENDPOINT_AUDIENCE,
+            "https://push.buzz.xyz/v1/installations/endpoint"
+        );
+        assert_eq!(
+            REVOKE_DELEGATION_AUDIENCE,
+            "https://push.buzz.xyz/v1/delegations/revoke"
+        );
+        assert_eq!(
+            REVOKE_INSTALLATION_AUDIENCE,
+            "https://push.buzz.xyz/v1/installations/revoke"
+        );
+    }
+
+    #[test]
     fn keyrings_preserve_current_then_predecessor_order_and_are_independent() {
         let config = Config::from_map(&base()).unwrap();
         assert_eq!(config.grant_keys[0].id, "current");
@@ -298,23 +374,39 @@ mod tests {
     #[test]
     fn malformed_security_configuration_fails_startup() {
         for (key, value) in [
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "http://push.example/v1/deliveries/apns",
-            ),
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "https://push.example/v1/deliveries/apns",
-            ),
             ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
             ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000.5"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
         ] {
             let mut env = base();
             env.insert(key.into(), value.into());
             assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    // The chart test supplies actual Helm-rendered environment values. Keep this
+    // separate from ordinary unit tests, which do not require Helm or fixtures.
+    #[test]
+    #[ignore = "run deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh"]
+    fn helm_rendered_grant_lifetimes() {
+        let path = std::env::var("BUZZ_TEST_HELM_ENV_FILE").unwrap();
+        let cases: Vec<(String, i64, HashMap<String, String>)> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(cases.len(), 9);
+        for (label, expected, rendered) in cases {
+            let mut env = base();
+            env.extend(rendered);
+            let config = Config::from_map(&env).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(config.max_grant_lifetime_seconds, expected, "{label}");
+            assert_eq!(
+                env["BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS"],
+                expected.to_string(),
+                "{label} must render decimal integer text"
+            );
         }
     }
 

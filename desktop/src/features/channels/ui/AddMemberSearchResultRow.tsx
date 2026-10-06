@@ -1,8 +1,9 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { Bot } from "lucide-react";
 import type { UserSearchResult } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
@@ -12,7 +13,7 @@ export function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -60,9 +61,13 @@ export function AddMemberSearchResultRow({
                 <Bot aria-hidden="true" className="h-4 w-4" />
                 agent
               </span>
+              <AgentManagementMarker
+                pubkey={user.pubkey}
+                ownerPubkey={user.ownerPubkey}
+              />
             </div>
             <span className="block truncate font-mono text-2xs text-muted-foreground">
-              {truncatePubkey(user.pubkey)}
+              {truncateNpub(user.pubkey)}
             </span>
             {ownerLabel ? (
               <span className="block truncate text-xs text-muted-foreground">

@@ -100,6 +100,12 @@
   white-space: normal;
 }
 
+/* Mentions use the prose rhythm while retaining cloned chip decoration. */
+.message-markdown [data-mention].wrapping-inline-chip {
+  padding-block: 0;
+  line-height: calc(var(--conversation-message-line-height) - 2px);
+}
+
 .message-markdown .mention-chip.buzz-link-unavailable,
 .message-markdown .mention-chip.buzz-link-unavailable:hover,
 .message-markdown .mention-chip.buzz-link-deleted,

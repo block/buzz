@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
@@ -12,9 +13,11 @@ import '../../shared/widgets/buzz_search_field.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
@@ -26,6 +29,8 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'recent_searches_provider.dart';
 import 'search_provider.dart';
+
+part 'search_page/message_tile.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
@@ -54,7 +59,8 @@ double _searchActiveFieldRightInset(BuildContext context) {
     textScaler: MediaQuery.textScalerOf(context),
     textDirection: Directionality.of(context),
   )..layout();
-  final cancelWidth = textPainter.width + Grid.half * 2 + Grid.twelve;
+  final cancelWidth =
+      textPainter.width + Grid.half * 2 + Grid.gutter + Grid.xxs;
   return cancelWidth > _searchActiveFieldRightInsetMin
       ? cancelWidth
       : _searchActiveFieldRightInsetMin;
@@ -127,17 +133,33 @@ class SearchPage extends HookConsumerWidget {
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
     final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
-    final searchBottomOverlap =
-        _searchIdleFieldTopInset +
-        compactSearchFieldHeight +
-        _searchControlsToFiltersGap;
+    final nativeIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final searchBottomOverlap = nativeIos
+        ? IosNavigationMetrics.of(context).compactHeight
+        : _searchIdleFieldTopInset +
+              compactSearchFieldHeight +
+              _searchControlsToFiltersGap;
+    final activeFieldTop = nativeIos
+        ? ((searchBottomOverlap - compactSearchFieldHeight) / 2).clamp(
+            0.0,
+            double.infinity,
+          )
+        : _searchIdleFieldTopInset;
+    final filtersTop = nativeIos
+        ? activeFieldTop +
+              compactSearchFieldHeight +
+              _searchControlsToFiltersGap
+        : searchBottomOverlap;
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
         ? compactSearchFieldHeight
         : Grid.xl;
     final searchHeaderBottomHeight = isSearchEditing.value
-        ? searchHeaderFiltersHeight + _searchControlsToFiltersGap
+        ? filtersTop -
+              searchBottomOverlap +
+              searchHeaderFiltersHeight +
+              _searchControlsToFiltersGap
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -205,11 +227,18 @@ class SearchPage extends HookConsumerWidget {
     }
 
     return FrostedScaffold(
+      nativePinnedBody: true,
       backgroundColor: context.colors.surface,
       // Keep the empty state centered in the page rather than the portion left
       // above the keyboard.
       resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
+        nativeTitle: isSearchEditing.value ? '' : 'Search',
+        nativeLayoutDuration: reduceMotion
+            ? Duration.zero
+            : _searchFieldMoveDuration,
+        nativeLargeTitle: !isSearchEditing.value,
+        nativeActions: const [],
         automaticallyImplyLeading: false,
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
@@ -306,7 +335,7 @@ class SearchPage extends HookConsumerWidget {
                   ? searchActiveFieldRightInset
                   : Grid.gutter,
               top: isSearchEditing.value
-                  ? _searchIdleFieldTopInset
+                  ? activeFieldTop
                   : searchBottomOverlap + _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
@@ -338,6 +367,43 @@ class SearchPage extends HookConsumerWidget {
                 ),
               ),
             ),
+            if (nativeIos && isSearchEditing.value)
+              Positioned(
+                top: activeFieldTop,
+                right: Grid.gutter,
+                width: searchActiveFieldRightInset - Grid.gutter - Grid.xxs,
+                height: searchControlHeight,
+                child: Semantics(
+                  button: true,
+                  label: 'Cancel search',
+                  child: GestureDetector(
+                    key: const Key('search-ios-cancel'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      textController.clear();
+                      ref.read(searchProvider.notifier).clear();
+                      deactivateSearch();
+                      focusNode.unfocus();
+                    },
+                    child: Align(
+                      alignment: Alignment.topRight,
+                      child: SizedBox(
+                        height: compactSearchFieldHeight,
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: Text(
+                            'Cancel',
+                            style: filterChipTextStyle.copyWith(
+                              color: context.colors.primary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             Positioned.fill(
               child: AnimatedSwitcher(
                 duration: reduceMotion
@@ -359,7 +425,7 @@ class SearchPage extends HookConsumerWidget {
                     ? Align(
                         alignment: Alignment.topCenter,
                         child: Padding(
-                          padding: EdgeInsets.only(top: searchBottomOverlap),
+                          padding: EdgeInsets.only(top: filtersTop),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
                             height: searchHeaderFiltersHeight,
@@ -399,7 +465,7 @@ class SearchPage extends HookConsumerWidget {
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(Radii.dialog),
               ),
-              child: ColoredBox(
+              child: Material(
                 color: context.colors.surface,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -716,6 +782,16 @@ class _PeopleSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The shown results are the comparison context.
+    final names = watchIdentityNames(
+      ref,
+      [for (final user in users) user.pubkey],
+      agentPubkeys: {
+        for (final user in users)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {for (final user in users) user.pubkey: user.label},
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -728,11 +804,11 @@ class _PeopleSection extends ConsumerWidget {
               key: ValueKey('search-person-leading-${user.pubkey}'),
               imageUrl: user.avatarUrl,
               radius: 20,
-              fallback: Text(user.label.substring(0, 1).toUpperCase()),
+              fallback: Text(user.initial),
               isAgent: user.isAgent,
             ),
             title: Text(
-              user.label,
+              names.labelFor(user.pubkey),
               key: ValueKey('search-person-title-${user.pubkey}'),
               style: contentListTitleTextStyle,
             ),
@@ -801,190 +877,6 @@ class _MessagesSection extends HookConsumerWidget {
             onResultSelected: onResultSelected,
           ),
       ],
-    );
-  }
-}
-
-class _MessageTile extends ConsumerWidget {
-  final SearchHit hit;
-  final UserProfile? authorProfile;
-  final Map<String, UserProfile> userCache;
-  final Channel? channel;
-  final String? currentPubkey;
-  final VoidCallback onResultSelected;
-
-  const _MessageTile({
-    required this.hit,
-    required this.authorProfile,
-    required this.userCache,
-    required this.channel,
-    required this.currentPubkey,
-    required this.onResultSelected,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final authorName = authorProfile?.label ?? shortPubkey(hit.pubkey);
-    final timeAgo = relativeTime(hit.createdAt);
-    final channelName = hit.channelName?.trim().replaceFirst(RegExp(r'^#'), '');
-    final hasChannelName = channelName != null && channelName.isNotEmpty;
-    final isDm = channel?.isDm ?? false;
-    final profileMentionNames = {
-      for (final pubkey in mentionedPubkeysFromTags(hit.tags))
-        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
-          pubkey: userCache[pubkey]!.displayName!.trim(),
-    };
-    final mentionPubkeys = mentionedPubkeysFromTags(hit.tags);
-    final knownAgentPubkeys = channel == null
-        ? ref.watch(knownAgentPubkeysProvider)
-        : ref.watch(agentMentionPubkeysProvider(channel!.id));
-    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
-      knownAgentPubkeys: knownAgentPubkeys,
-      profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
-          if (profile.ownerPubkey != null) profile.pubkey,
-      ],
-    );
-    final mentionNames = mentionNamesWithDirectoryLabels(
-      mentionPubkeys: mentionPubkeys,
-      profileMentionNames: profileMentionNames,
-      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
-      agentMentionPubkeys: agentMentionPubkeys,
-    );
-
-    return ListTile(
-      key: ValueKey('search-message-row-${hit.eventId}'),
-      contentPadding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-      titleAlignment: ListTileTitleAlignment.top,
-      horizontalTitleGap: messageAvatarContentGap,
-      leading: SmallAvatar(
-        key: ValueKey('search-message-avatar-${hit.eventId}'),
-        pubkey: hit.pubkey,
-        userCache: userCache,
-        size: compactMessageAvatarSize,
-      ),
-      title: MessageAuthorMeta(
-        displayName: authorName,
-        username: messageUsernameLabel(authorProfile),
-        timestamp: timeAgo,
-        nameColor: context.colors.onSurface,
-        metadataColor: context.colors.onSurfaceVariant,
-        displayNameKey: ValueKey('search-message-author-${hit.eventId}'),
-        usernameKey: ValueKey('search-message-username-${hit.eventId}'),
-        timestampKey: ValueKey('search-message-timestamp-${hit.eventId}'),
-      ),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 2),
-          Row(
-            key: ValueKey('search-message-context-${hit.eventId}'),
-            children: [
-              Flexible(
-                child: Text(
-                  isDm
-                      ? 'Direct message'
-                      : hasChannelName
-                      ? 'Message in'
-                      : 'Message',
-                  style: activityContextTextStyle.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (!isDm && hasChannelName) ...[
-                const SizedBox(width: Grid.half),
-                Flexible(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Grid.half + Grid.quarter,
-                      vertical: Grid.quarter / 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: context.colors.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(Radii.xs),
-                    ),
-                    child: Text(
-                      '#$channelName',
-                      key: ValueKey('search-message-channel-${hit.eventId}'),
-                      style: activityContextTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: Grid.half),
-          MessageContent(
-            key: ValueKey('search-message-body-${hit.eventId}'),
-            content: hit.content,
-            mentionNames: mentionNames,
-            agentMentionPubkeys: agentMentionPubkeys,
-            tags: hit.tags,
-            maxLines: 2,
-            baseStyle: activityPreviewTextStyle.copyWith(
-              color: context.colors.onSurface,
-            ),
-          ),
-        ],
-      ),
-      onTap: () {
-        onResultSelected();
-        _navigateToHit(context, hit, channel);
-      },
-    );
-  }
-
-  void _navigateToHit(BuildContext context, SearchHit hit, Channel? channel) {
-    if (channel == null) return;
-
-    if (hit.kind == 45001) {
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ForumThreadPage(
-            channelId: channel.id,
-            postEventId: hit.eventId,
-            currentPubkey: currentPubkey,
-            isMember: channel.isMember,
-            isArchived: channel.isArchived,
-          ),
-        ),
-      );
-    } else {
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
-        ),
-      );
-    }
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  final String label;
-
-  const _SectionLabel({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        Grid.gutter,
-        Grid.xs,
-        Grid.gutter,
-        Grid.half,
-      ),
-      child: Text(
-        label,
-        key: ValueKey('search-section-${label.toLowerCase()}'),
-        style: activityContextTextStyle.copyWith(
-          color: context.colors.onSurfaceVariant,
-        ),
-      ),
     );
   }
 }

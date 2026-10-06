@@ -34,6 +34,17 @@
 #     the post-reset empty-dev-keyring state) with the crash-safe
 #     marker-before-delete ordering already shipped. The plaintext file exists
 #     only until that first boot consumes it.
+#   - It does NOT copy baked build-time agent defaults. The prod DMG bakes a
+#     provider and default env vars at compile time via `option_env!` in
+#     `build.rs` (driven by `BUZZ_BUILD_BUZZ_AGENT_PROVIDER` and
+#     `BUZZ_BUILD_AGENT_ENV`). These are compiled into the binary, not stored in
+#     app-data — there is no file here to copy. Dev parity means setting those
+#     env vars when invoking the dev build:
+#       export BUZZ_BUILD_BUZZ_AGENT_PROVIDER="databricks_v2"
+#       export BUZZ_BUILD_AGENT_ENV=$'DATABRICKS_HOST=...\nDATABRICKS_MODEL=...'
+#       just production
+#     Do NOT add these to .env — `set dotenv-load := true` in the Justfile
+#     would bake them into every recipe in that checkout, including test runs.
 #
 # FLAGS
 #   --dry-run   Print every action; write nothing.
@@ -70,7 +81,7 @@ KEYCHAIN_ACCT="${BUZZ_KEYCHAIN_ACCT:-secrets}"
 DRY_RUN=0
 FORCE=0
 
-RECORD_FILES=(managed-agents.json personas.json teams.json)
+RECORD_FILES=(managed-agents.json personas.json teams.json global-agent-config.json)
 
 # --- helpers ----------------------------------------------------------------
 say()  { printf '%s\n' "$*"; }
@@ -251,7 +262,7 @@ if [[ ${#dev_blocking[@]} -gt 0 ]]; then
 fi
 if [[ $dmg_running -eq 1 ]]; then
   info "installed DMG is running — allowed (read-only source)"
-  warn "Do NOT create/archive agents or edit teams in the DMG while this runs; the 4-file bundle is read as one snapshot."
+  warn "Do NOT create/archive agents or edit teams in the DMG while this runs; the 5-file bundle is read as one snapshot."
 else
   info "no running Buzz process detected"
 fi
@@ -326,8 +337,9 @@ if [[ $DRY_RUN -eq 0 && -d "$DEV_DIR/agents" ]] && ! have python3; then
 fi
 
 # --- step 2: restore records (exact bundle, one atomic commit) --------------
-# The four boot-critical paths (managed-agents.json, personas.json, teams.json,
-# teams/) are read as one related state, so the commit must be all-or-nothing.
+# The five boot-critical paths (managed-agents.json, personas.json, teams.json,
+# global-agent-config.json, teams/) are read as one related state, so the
+# commit must be all-or-nothing.
 # Phase 1 builds a COMPLETE replacement agents/ in a staging dir beside the live
 # one — the prod bundle plus any unrelated live entries carried across verbatim,
 # every transform validated, zero live-path mutation. Phase 2 commits it in ONE
@@ -372,16 +384,17 @@ else
   STAGE_TEMPS+=("$stage_agents")
 
   # Seed the stage with the entire live agents/ (a single checked copy — under
-  # `set -e` a partial copy aborts before any commit), then drop the four bundle
+  # `set -e` a partial copy aborts before any commit), then drop the five bundle
   # names FROM THE STAGE so the prod overlay below replaces them cleanly. Any
-  # other live entry (logs/, agent-pids/, global-agent-config.json, retention
-  # stores, …) is carried across verbatim and preserved by the directory swap.
+  # other live entry (logs/, agent-pids/, retention stores, …) is carried across
+  # verbatim and preserved by the directory swap.
   if [[ -d "$DEV_DIR/agents" ]]; then
     cp -Rp "$DEV_DIR/agents/." "$stage_agents/"
     rm -rf -- \
       "$stage_agents/managed-agents.json" \
       "$stage_agents/personas.json" \
       "$stage_agents/teams.json" \
+      "$stage_agents/global-agent-config.json" \
       "$stage_agents/teams"
   fi
 
