@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyReusableAgentAccessPolicy } from "./channelAgents.ts";
+import {
+  applyReusableAgentAccessPolicy,
+  createChannelManagedAgents,
+} from "./channelAgents.ts";
 
 const AGENT_PUBKEY = "a".repeat(64);
 const ALLOWED_PUBKEY = "b".repeat(64);
@@ -146,4 +149,57 @@ test("the write is reported even when the update hands back an unchanged record"
   assert.equal(result.wrote, true);
   assert.equal(result.agent.respondTo, agent.respondTo);
   assert.deepEqual(result.agent.respondToAllowlist, agent.respondToAllowlist);
+});
+
+test("a batch reuses the persona identity created by an earlier item", async (t) => {
+  const calls = [];
+  t.after(
+    installTauriInvoke((command, args) => {
+      calls.push(command);
+      if (command === "list_managed_agents") return Promise.resolve([]);
+      if (command === "get_channel_members") {
+        return Promise.resolve({ members: [] });
+      }
+      if (command === "create_managed_agent") {
+        if (calls.filter((call) => call === command).length > 1) {
+          return Promise.reject(new Error("duplicate persona deployment"));
+        }
+        return Promise.resolve({
+          agent: rawAgent({
+            persona_id: "persona-1",
+            team_id: "team-1",
+            is_active: true,
+          }),
+          private_key_nsec: "nsec1test",
+          profile_sync_error: null,
+          spawn_error: null,
+        });
+      }
+      if (command === "add_channel_members") {
+        return Promise.resolve({ added: args.pubkeys, errors: [] });
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    }),
+  );
+
+  const input = {
+    name: "Agent",
+    runtime: { id: "goose", label: "Goose", command: "goose" },
+    personaId: "persona-1",
+    teamId: "team-1",
+    respondTo: "owner-only",
+    ensureRunning: false,
+  };
+  const result = await createChannelManagedAgents("channel-1", [input, input]);
+
+  assert.equal(result.failures.length, 0, JSON.stringify(result.failures));
+  assert.equal(result.successes.length, 2);
+  assert.deepEqual(
+    result.successes.map((success) => success.created),
+    [true, false],
+  );
+  assert.equal(
+    calls.filter((call) => call === "create_managed_agent").length,
+    1,
+  );
 });
