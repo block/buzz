@@ -139,6 +139,11 @@ kind-0 but no projected row vanish from search. The order is:
    refuse to start on a pending migration: with `BUZZ_AUTO_MIGRATE=false` an
    image built from this change deployed ahead of 0083 boots normally and
    then rejects every kind-0 publish with `column "name" does not exist`.
+   The relay's own "`<host>` Moderation" kind-0 goes through the same seam
+   (`handlers/moderation_notices.rs`), so that image also fails to publish
+   its moderation profile on the next notice it sends — logged as
+   `moderation profile publish failed (continuing)`, the first symptom an
+   operator reading relay logs would see.
    Deployments that apply schema out of band (see `docs/database.md`) must
    have 0083 applied before the rollout reaches a relay pod.
 2. **Precheck.**
