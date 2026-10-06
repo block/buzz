@@ -551,8 +551,12 @@ class _MessageList extends HookConsumerWidget {
           entries.isEmpty) {
         return;
       }
-      // Rows hidden under the app bar or the composer are not read.
-      final bottomEdge = latestAlignment() - 0.01;
+      // Rows hidden under the app bar, the composer or the keyboard are not
+      // read. The keyboard covers rows even when the list does not follow
+      // the latest message, so this uses the whole covered height, not the
+      // list's own bottom inset.
+      final bottomEdge =
+          (navigationBottomInset / viewportHeight).clamp(0.0, 1.0) - 0.01;
       final topEdge =
           1 -
           frostedAppBarHeight(
@@ -573,7 +577,12 @@ class _MessageList extends HookConsumerWidget {
         visible.addAll(group.map((entry) => entry.message));
       }
       final latest = entries.last.message;
-      final atBottom = latestIsAtBoundary();
+      final atBottom =
+          latestIsAtBoundary() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge >= bottomEdge,
+          );
       final marks = readingMarks(
         readState: readState,
         channelId: channelId,
@@ -606,7 +615,7 @@ class _MessageList extends HookConsumerWidget {
           appInUse &&
           (ModalRoute.of(context)?.isCurrent ?? true),
       onDwell: readVisibleRows,
-      keys: [channelId, readingContentKey(allMessages)],
+      keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
     );
 
     useEffect(() {

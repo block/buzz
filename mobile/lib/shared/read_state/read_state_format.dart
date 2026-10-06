@@ -34,21 +34,66 @@ bool readByChannelCatchUp({
 /// (`buzz-app`) uses the same limit, well under NIP-44's 64 KiB maximum.
 const readStatePlaintextBytes = 40 * 1024;
 
+/// The most `msg:` and `thread:` marks this device saves. The desktop app
+/// uses the same limit.
+const localMaxPrunableContexts = 1000;
+
+bool _isPrunableContext(String contextId) =>
+    contextId.startsWith(msgContextPrefix) ||
+    contextId.startsWith(threadContextPrefix);
+
+/// The marks from [contexts] that this device saves, following the desktop
+/// app's `pruneStaleContexts`. It drops `msg:` and `thread:` marks older
+/// than the fetch horizon, then keeps the newest [localMaxPrunableContexts]
+/// of them. Each automatic read writes a `msg:` mark, so without this bound
+/// the saved state, and the time to save it, would grow with every read.
+/// Channel and catch-up marks are kept: there is one per channel or thread,
+/// and losing one would show read messages as unread again.
+Map<String, int> pruneStaleContexts(
+  Map<String, int> contexts, {
+  required int nowUnixSeconds,
+}) {
+  final cutoff = nowUnixSeconds - readStateHorizonSeconds;
+  final kept = <String, int>{};
+  final prunable = <MapEntry<String, int>>[];
+  for (final entry in contexts.entries) {
+    if (!_isPrunableContext(entry.key)) {
+      kept[entry.key] = entry.value;
+    } else if (entry.value >= cutoff) {
+      prunable.add(entry);
+    }
+  }
+  prunable.sort((a, b) {
+    final byTime = b.value.compareTo(a.value);
+    return byTime != 0 ? byTime : a.key.compareTo(b.key);
+  });
+  for (final entry in prunable.take(localMaxPrunableContexts)) {
+    kept[entry.key] = entry.value;
+  }
+  return kept;
+}
+
+/// Whether [contextId] belongs to the web app's manual-unread overrides
+/// (`ov_s:`, `ov_c:`, `ov_b:`) or their escaped frontiers (`esc:`). This app
+/// does not read overrides. It does not take them from other slots, but it
+/// carries the ones already in its own slot unchanged: NIP-RS forbids
+/// dropping them, and an old version of this app copied them there.
+bool isOverrideContext(String contextId) =>
+    contextId.startsWith('ov_') || contextId.startsWith('esc:');
+
 /// Whether this device republishes a mark it merged from another device's
 /// slot. Message marks are not republished: each covers one message, and the
 /// web app prunes them once a catch-up mark reads the message. Broad marks
 /// are republished so they outlive the fetch horizon of the slot that wrote
 /// them.
 bool republishesMergedContext(String contextId) =>
-    !contextId.startsWith(msgContextPrefix);
+    !contextId.startsWith(msgContextPrefix) && !isOverrideContext(contextId);
 
 /// Keep order for a slot that is over budget, following `buzz-app`'s
-/// retention: channel marks and the web app's override keys first, then
-/// thread marks, then catch-up marks, then message marks.
+/// retention: channel marks first, then thread marks, then catch-up marks,
+/// then message marks.
 int _retentionScope(String key) {
-  if (!key.contains(':') || key.startsWith('ov_') || key.startsWith('esc:')) {
-    return 0;
-  }
+  if (!key.contains(':')) return 0;
   if (key.startsWith(threadContextPrefix)) return 1;
   if (key.startsWith('activity:') || key.startsWith('thread-activity:')) {
     return 2;
@@ -56,32 +101,86 @@ int _retentionScope(String key) {
   return 3;
 }
 
-/// The marks from [contexts] that fit one published slot for [clientId]
-/// within [maxBytes] of plaintext. Broader marks are kept first, and within
-/// each kind the newest. A slot over NIP-44's limit cannot be encrypted, so
-/// without this cap sync would stop. Dropped marks stay in local state.
-Map<String, int> retainPublishedContexts(
+/// The share of the budget that broad marks may fill before recent use
+/// decides. The rest always goes to the most recently written marks, so a
+/// new read is never left out because old channel or thread marks fill the
+/// budget. `buzz-app` uses the same share.
+const _scopedShare = 0.75;
+
+/// The marks from [contexts] that fit one read-state slot for [clientId]
+/// within [maxBytes] of plaintext, following `buzz-app`'s retention.
+///
+/// Up to three quarters of the budget goes to broad marks first: channel
+/// marks, then thread marks, then catch-up marks, then message marks. The
+/// rest goes by [recent], the time each mark was last written, newest first,
+/// so reading old history still syncs. A slot over NIP-44's limit cannot be
+/// encrypted, so without this cap sync would stop.
+///
+/// [carried] override keys are kept whole, ahead of every mark. If they do
+/// not fit, this returns null, and the caller must leave the slot as it is
+/// instead of publishing part of an override group.
+Map<String, int>? retainReadStateContexts(
   Map<String, int> contexts, {
   required String clientId,
+  Map<String, int> recent = const {},
+  Map<String, int> carried = const {},
   int maxBytes = readStatePlaintextBytes,
 }) {
+  // JSON-encoded bytes, so escaped characters are counted as published.
   int bytesOf(Object? value) => utf8.encode(jsonEncode(value)).length;
-  var used = bytesOf(ReadStateBlob(clientId: clientId, contexts: {}).toJson());
-  int keepOrder(MapEntry<String, int> a, MapEntry<String, int> b) {
-    final byScope = _retentionScope(a.key).compareTo(_retentionScope(b.key));
-    if (byScope != 0) return byScope;
+  final fixedBytes = bytesOf(
+    ReadStateBlob(clientId: clientId, contexts: carried).toJson(),
+  );
+  if (fixedBytes > maxBytes || carried.length > _maxContexts) return null;
+  // Marks share what the carried keys leave.
+  final markBytes = maxBytes - fixedBytes;
+  final markCount = _maxContexts - carried.length;
+  var used = 0;
+  var count = 0;
+  bool take(MapEntry<String, int> entry, double share) {
+    // A key, its colon, its value and one separating comma.
+    final cost = bytesOf(entry.key) + 2 + '${entry.value}'.length;
+    if (used + cost > markBytes * share || count >= markCount * share) {
+      return false;
+    }
+    used += cost;
+    count++;
+    return true;
+  }
+
+  int byUse(MapEntry<String, int> a, MapEntry<String, int> b) {
+    final byRecent = (recent[b.key] ?? 0).compareTo(recent[a.key] ?? 0);
+    if (byRecent != 0) return byRecent;
     final byTime = b.value.compareTo(a.value);
     return byTime != 0 ? byTime : a.key.compareTo(b.key);
   }
 
-  final ordered = contexts.entries.toList()..sort(keepOrder);
-  final retained = <String, int>{};
-  for (final entry in ordered) {
-    // A key, its colon, its value and one separating comma.
-    final cost = bytesOf(entry.key) + 2 + '${entry.value}'.length;
-    if (used + cost > maxBytes || retained.length >= _maxContexts) break;
-    used += cost;
+  final retained = <String, int>{...carried};
+  final scoped =
+      contexts.entries
+          .where((entry) => !carried.containsKey(entry.key))
+          .toList()
+        ..sort((a, b) {
+          final byScope = _retentionScope(
+            a.key,
+          ).compareTo(_retentionScope(b.key));
+          return byScope != 0 ? byScope : byUse(a, b);
+        });
+  for (final entry in scoped) {
+    // Stop at the first broad mark that does not fit, so a narrower mark
+    // never takes the share ahead of it.
+    if (!take(entry, _scopedShare)) break;
     retained[entry.key] = entry.value;
+  }
+  final byRecent =
+      contexts.entries
+          .where((entry) => !carried.containsKey(entry.key))
+          .toList()
+        ..sort(byUse);
+  for (final entry in byRecent) {
+    if (!retained.containsKey(entry.key) && take(entry, 1)) {
+      retained[entry.key] = entry.value;
+    }
   }
   return retained;
 }

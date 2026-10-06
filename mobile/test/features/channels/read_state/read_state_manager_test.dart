@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
+import 'package:buzz/shared/read_state/read_state_storage.dart';
+import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -198,6 +201,234 @@ void main() {
     });
   });
 
+  test('publishes again when a debounce fires during a publish', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+
+    for (final failFirst in [false, true]) {
+      fakeAsync((async) {
+        final relay = _ParkedSignedEventRelay(failFirst: failFirst);
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: null,
+          signedEventRelay: relay,
+          remoteEnabled: true,
+          onChanged: () {},
+        );
+
+        manager.markContextRead('a-$failFirst', 10);
+        async.elapse(const Duration(seconds: 5));
+        // Publish A has its snapshot and waits on the relay.
+        expect(relay.contents, hasLength(1));
+
+        manager.markContextRead('b-$failFirst', 20);
+        async.elapse(const Duration(seconds: 5));
+        expect(relay.contents, hasLength(1));
+
+        relay.release();
+        async.flushMicrotasks();
+
+        expect(relay.contents, hasLength(2), reason: 'failFirst=$failFirst');
+        final second = decodeReadStateBlob(
+          crypto.decrypt(relay.contents.last),
+        )!.contexts;
+        expect(second['b-$failFirst'], 20);
+        expect(second['a-$failFirst'], 10);
+        manager.dispose(flushPending: false);
+      });
+    }
+  });
+
+  test('bounds saved marks across a restart', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    ReadStateManager create() => ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: null,
+      signedEventRelay: null,
+      remoteEnabled: false,
+      onChanged: () {},
+    );
+
+    final now = currentUnixSeconds();
+    final first = create();
+    first.markContextRead('channel-1', now - 2 * readStateHorizonSeconds);
+    first.markContextRead('msg:stale', now - 2 * readStateHorizonSeconds);
+    for (var index = 0; index < localMaxPrunableContexts + 200; index++) {
+      first.markContextRead('msg:$index', now - 1000 + index % 900);
+    }
+    // This session still reads every mark.
+    expect(first.getEffectiveTimestamp('msg:stale'), isNotNull);
+    first.dispose();
+
+    final stored = ReadStateStorage(prefs).read(keychain.public);
+    final messages = stored.contexts.keys.where((k) => k.startsWith('msg:'));
+    expect(messages.length, localMaxPrunableContexts);
+    expect(stored.contexts, isNot(contains('msg:stale')));
+    expect(stored.contexts['channel-1'], now - 2 * readStateHorizonSeconds);
+    // All three saved structures hold the same marks.
+    expect(stored.publishableContextIds, stored.contexts.keys.toSet());
+    expect(stored.sourceCreatedAt.keys.toSet(), stored.contexts.keys.toSet());
+
+    final restarted = create();
+    expect(restarted.getEffectiveTimestamp('msg:stale'), isNull);
+    expect(
+      restarted.getEffectiveTimestamp('channel-1'),
+      now - 2 * readStateHorizonSeconds,
+    );
+    expect(
+      restarted.effectiveContexts.keys.where((k) => k.startsWith('msg:')),
+      hasLength(localMaxPrunableContexts),
+    );
+  });
+
+  test('carries its own override keys and takes none from others', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final storage = ReadStateStorage(prefs);
+    final clientId = storage.getOrCreateClientId(keychain.public);
+    final slotId = storage.getOrCreateSlotId(keychain.public);
+    const ownGroup = {
+      'ov_s:channel-1': 2,
+      'ov_c:channel-1': 1,
+      'ov_b:channel-1': 90,
+    };
+    final session = _FakeRelaySession()
+      ..historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: clientId,
+          slotId: slotId,
+          contexts: {'channel-1': 90, ...ownGroup},
+          createdAt: 100,
+        ),
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'web-client',
+          slotId: 'web-slot',
+          contexts: {'ov_c:channel-2': 4, 'esc:ov_x': 5, 'channel-2': 80},
+          createdAt: 100,
+        ),
+      ];
+    final relay = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    await manager.initialize();
+    // About 100 KiB of message marks, so retention must leave some out.
+    for (var index = 0; index < 1400; index++) {
+      manager.markContextRead('msg:${index.toString().padLeft(64, '0')}', 200);
+    }
+    await manager.flush();
+
+    final published = decodeReadStateBlob(
+      crypto.decrypt(relay.contents.last),
+    )!.contexts;
+    expect(published, containsPair('ov_s:channel-1', 2));
+    expect(published, containsPair('ov_c:channel-1', 1));
+    expect(published, containsPair('ov_b:channel-1', 90));
+    expect(published, isNot(contains('ov_c:channel-2')));
+    expect(published, isNot(contains('esc:ov_x')));
+    expect(manager.getEffectiveTimestamp('ov_s:channel-1'), isNull);
+    manager.dispose(flushPending: false);
+
+    // A restart without the relay still carries the group.
+    final restartedRelay = _FakeSignedEventRelay();
+    final restarted = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: null,
+      signedEventRelay: restartedRelay,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    restarted.markContextRead('channel-3', 300);
+    await restarted.flush();
+    final republished = decodeReadStateBlob(
+      crypto.decrypt(restartedRelay.contents.last),
+    )!.contexts;
+    for (final entry in ownGroup.entries) {
+      expect(republished, containsPair(entry.key, entry.value));
+    }
+    expect(republished, isNot(contains('ov_c:channel-2')));
+  });
+
+  test('leaves the slot when carried override keys do not fit', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final storage = ReadStateStorage(prefs);
+    final clientId = storage.getOrCreateClientId(keychain.public);
+    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final session = _FakeRelaySession()
+      ..historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: clientId,
+          slotId: slotId,
+          contexts: {
+            for (var index = 0; index < 320; index++) ...{
+              'ov_s:${index.toString().padLeft(36, 'c')}': 2,
+              'ov_c:${index.toString().padLeft(36, 'c')}': 1,
+              'ov_b:${index.toString().padLeft(36, 'c')}': 100,
+            },
+          },
+          createdAt: 100,
+        ),
+      ];
+    final relay = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    await manager.initialize();
+    manager.markContextRead('channel-1', 300);
+    await manager.flush();
+
+    expect(relay.submitCount, 0);
+    expect(manager.getEffectiveTimestamp('channel-1'), 300);
+  });
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -280,6 +511,36 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     contents.add(content);
     if (!submitted.isCompleted) {
       submitted.complete(_SubmittedEvent(kind: kind, tags: tags));
+    }
+    return _stubAckEvent();
+  }
+}
+
+/// Holds the first submit until [release], then fails it if [failFirst].
+class _ParkedSignedEventRelay implements SignedEventRelay {
+  _ParkedSignedEventRelay({required this.failFirst});
+
+  final bool failFirst;
+  final List<String> contents = [];
+  final Completer<void> _parked = Completer<void>();
+
+  void release() => _parked.complete();
+
+  @override
+  String? get pubkey => null;
+
+  @override
+  Future<NostrEvent> submit({
+    required int kind,
+    required String content,
+    required List<List<String>> tags,
+    int? createdAt,
+    void Function(NostrEvent event)? onSigned,
+  }) async {
+    contents.add(content);
+    if (contents.length == 1) {
+      await _parked.future;
+      if (failFirst) throw Exception('relay timeout');
     }
     return _stubAckEvent();
   }

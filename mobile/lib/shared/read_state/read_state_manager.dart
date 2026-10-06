@@ -55,6 +55,9 @@ class ReadStateManager {
 
   final Map<String, int> _effectiveState = {};
   final Set<String> _publishableContextIds = {};
+  // Override keys already in this device's own slot, carried unchanged.
+  // See [isOverrideContext].
+  final Map<String, int> _carriedOverrides = {};
   Map<String, int> _lastPublishedContexts = {};
 
   Timer? _debounceTimer;
@@ -62,6 +65,9 @@ class ReadStateManager {
   bool _initialized = false;
   bool _disposed = false;
   bool _isPublishing = false;
+  // Set when a publish is asked for while one is running. The running
+  // publish took its snapshot first, so it publishes again when it ends.
+  bool _publishAgain = false;
   Completer<void>? _publishCompleter;
   bool _remoteUnsupported = false;
   int _maxFetchedCreatedAt = 0;
@@ -116,11 +122,14 @@ class ReadStateManager {
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
-    _advanceContext(contextId, unixTimestamp, publishable: true);
+    if (_disposed || isOverrideContext(contextId)) return;
+    // Set first: retention keeps the most recently written marks, so the
+    // save that follows must already see this read as the newest.
     _contextSourceCreatedAt[contextId] = max(
       currentUnixSeconds(),
       _maxFetchedCreatedAt + 1,
     );
+    _advanceContext(contextId, unixTimestamp, publishable: true);
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
@@ -243,6 +252,7 @@ class ReadStateManager {
       }
 
       for (final entry in decoded.blob.contexts.entries) {
+        if (isOverrideContext(entry.key)) continue;
         final result = _applyRemoteContextTimestamp(
           contextId: entry.key,
           timestamp: entry.value,
@@ -264,9 +274,26 @@ class ReadStateManager {
     }
 
     if (ownBlob != null) {
+      _carryOwnOverrides(ownBlob.contexts);
       _lastPublishedContexts = Map<String, int>.from(ownBlob.contexts);
-      _publishableContextIds.addAll(ownBlob.contexts.keys);
+      _publishableContextIds.addAll(
+        ownBlob.contexts.keys.where((key) => !isOverrideContext(key)),
+      );
     }
+  }
+
+  /// Merges the override keys of this device's own slot into
+  /// [_carriedOverrides] by `max()`, the NIP-RS merge rule.
+  bool _carryOwnOverrides(Map<String, int> contexts) {
+    var changed = false;
+    for (final entry in contexts.entries) {
+      if (!isOverrideContext(entry.key)) continue;
+      if (entry.value > (_carriedOverrides[entry.key] ?? -1)) {
+        _carriedOverrides[entry.key] = entry.value;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   Future<void> _startLiveSubscription() async {
@@ -315,8 +342,11 @@ class ReadStateManager {
       _rotateSlotId();
     }
 
-    var changed = false;
+    var changed =
+        decoded.blob.clientId == _clientId &&
+        _carryOwnOverrides(decoded.blob.contexts);
     for (final entry in decoded.blob.contexts.entries) {
+      if (isOverrideContext(entry.key)) continue;
       final result = _applyRemoteContextTimestamp(
         contextId: entry.key,
         timestamp: entry.value,
@@ -389,16 +419,45 @@ class ReadStateManager {
         _signedEventRelay == null) {
       return;
     }
-    if (_isPublishing) return;
+    if (_isPublishing) {
+      // The running publish may have taken its snapshot before this change.
+      _publishAgain = true;
+      return _publishCompleter?.future;
+    }
 
     final completer = Completer<void>();
     _publishCompleter = completer;
     _isPublishing = true;
+    try {
+      do {
+        _publishAgain = false;
+        await _publishOnce(_signedEventRelay);
+      } while (_publishAgain &&
+          (allowDisposed || !_disposed) &&
+          !_remoteUnsupported);
+    } finally {
+      _isPublishing = false;
+      _publishAgain = false;
+      completer.complete();
+      if (_publishCompleter == completer) {
+        _publishCompleter = null;
+      }
+    }
+  }
+
+  Future<void> _publishOnce(SignedEventRelay signedEventRelay) async {
     debugPrint('[ReadStateManager] publish starting slotId=$_slotId');
     try {
       await _fetchOwnBlobBeforePublish();
 
       final contexts = _currentContexts();
+      if (contexts == null) {
+        debugPrint(
+          '[ReadStateManager] publish skipped: carried override keys do not '
+          'fit the slot, so it stays as it is.',
+        );
+        return;
+      }
       if (_isIdenticalToLastPublished(contexts)) {
         return;
       }
@@ -407,7 +466,7 @@ class ReadStateManager {
       final ciphertext = _crypto.encrypt(jsonEncode(blob.toJson()));
       final createdAt = max(currentUnixSeconds(), _maxFetchedCreatedAt + 1);
 
-      await _signedEventRelay.submit(
+      await signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
         tags: [
@@ -448,12 +507,6 @@ class ReadStateManager {
         return;
       }
       debugPrint('[ReadStateManager] publish failed: $error');
-    } finally {
-      _isPublishing = false;
-      completer.complete();
-      if (_publishCompleter == completer) {
-        _publishCompleter = null;
-      }
     }
   }
 
@@ -481,7 +534,9 @@ class ReadStateManager {
     }
   }
 
-  bool _isIdenticalToLastPublished(Map<String, int> contexts) {
+  bool _isIdenticalToLastPublished(Map<String, int>? contexts) {
+    // Null: the slot cannot be published, so there is nothing to send.
+    if (contexts == null) return true;
     if (_lastPublishedContexts.length != contexts.length) {
       return false;
     }
@@ -499,24 +554,44 @@ class ReadStateManager {
     return drained;
   }
 
-  Map<String, int> _currentContexts() {
+  /// The slot to publish, or null when the carried override keys alone do
+  /// not fit, so the current slot must stay as it is.
+  Map<String, int>? _currentContexts() {
     final contexts = <String, int>{};
     for (final entry in _effectiveState.entries) {
       if (_publishableContextIds.contains(entry.key)) {
         contexts[entry.key] = entry.value;
       }
     }
-    return retainPublishedContexts(contexts, clientId: _clientId);
+    return retainReadStateContexts(
+      contexts,
+      clientId: _clientId,
+      recent: _contextSourceCreatedAt,
+      carried: _carriedOverrides,
+    );
   }
 
   void _hydrateFromLocalStorage() {
     final stored = _storage.read(pubkey);
+    // Earlier versions merged the web app's override keys and published
+    // them in this device's slot, so publishable ones are carried.
+    _carriedOverrides
+      ..clear()
+      ..addEntries(
+        stored.contexts.entries.where(
+          (entry) =>
+              isOverrideContext(entry.key) &&
+              stored.publishableContextIds.contains(entry.key),
+        ),
+      );
     _effectiveState
       ..clear()
-      ..addAll(stored.contexts);
+      ..addEntries(
+        stored.contexts.entries.where((entry) => !isOverrideContext(entry.key)),
+      );
     _publishableContextIds
       ..clear()
-      ..addAll(stored.publishableContextIds);
+      ..addAll(stored.publishableContextIds.where(_effectiveState.containsKey));
     _contextSourceCreatedAt
       ..clear()
       ..addAll(stored.sourceCreatedAt);
@@ -524,11 +599,23 @@ class ReadStateManager {
   }
 
   void _persistLocalState() {
+    // Save a bounded copy. Memory keeps every mark for this session, so a
+    // message read from old history stays read until the app restarts.
+    final saved = pruneStaleContexts(
+      _effectiveState,
+      nowUnixSeconds: currentUnixSeconds(),
+    )..addAll(_carriedOverrides);
     _storage.write(
       pubkey,
-      _effectiveState,
-      _publishableContextIds,
-      _contextSourceCreatedAt,
+      saved,
+      {
+        ..._publishableContextIds.where(saved.containsKey),
+        ..._carriedOverrides.keys,
+      },
+      {
+        for (final entry in _contextSourceCreatedAt.entries)
+          if (saved.containsKey(entry.key)) entry.key: entry.value,
+      },
     );
   }
 

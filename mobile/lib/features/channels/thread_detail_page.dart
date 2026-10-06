@@ -708,24 +708,30 @@ class ThreadDetailPage extends HookConsumerWidget {
       final readState = ref.read(readStateProvider);
       if (!context.mounted ||
           !readState.isReady ||
-          replies.isEmpty ||
           !viewportHeight.isFinite ||
           viewportHeight <= 0) {
         return;
       }
-      // Rows hidden under the app bar or the composer are not read.
+      // Rows hidden under the app bar, the composer or the keyboard are not
+      // read. The keyboard covers rows even when the list does not follow
+      // the tail, so this uses the whole covered height.
       final topEdge = topOverlayFraction - 0.01;
       final bottomEdge =
-          1 - ((Grid.xs + timelineBottomInset) / viewportHeight) + 0.01;
+          1 - ((Grid.xs + navigationBottomInset) / viewportHeight) + 0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        final replyIndex = position.index - indexForReply(0);
-        if (replyIndex < 0 ||
-            replyIndex >= replies.length ||
-            position.itemLeadingEdge < topEdge ||
+        if (position.itemLeadingEdge < topEdge ||
             position.itemTrailingEdge > bottomEdge) {
           continue;
         }
+        if (position.index == headIndex) {
+          // The head is read like a reply. A thread opened directly, from
+          // a link or a notification, may be the only place it is seen.
+          if (!liveDeletionHidesHead) visible.add(liveHead);
+          continue;
+        }
+        final replyIndex = position.index - indexForReply(0);
+        if (replyIndex < 0 || replyIndex >= replies.length) continue;
         visible.add(replies[replyIndex]);
       }
       final isDm =
@@ -743,7 +749,9 @@ class ThreadDetailPage extends HookConsumerWidget {
         currentPubkey: currentPubkey,
         loaded: allMsgs,
         visible: visible,
-        bottom: threadTailIsVisible() ? replies.last : null,
+        bottom: replies.isNotEmpty && threadTailIsVisible()
+            ? replies.last
+            : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
       );
@@ -767,7 +775,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           appInUse &&
           (ModalRoute.of(context)?.isCurrent ?? true),
       onDwell: readVisibleReplies,
-      keys: [threadHead.id, readingContentKey(allMsgs), timelineBottomInset],
+      keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );
 
     // Thread-scoped typing indicators (exclude self).

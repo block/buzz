@@ -144,6 +144,141 @@ void main() {
       {'channel-a': 10, 'channel-b': 12, 'channel-c': 1},
     );
   });
+
+  group('retainReadStateContexts', () {
+    int publishedBytes(Map<String, int> contexts) => utf8
+        .encode(
+          jsonEncode(
+            ReadStateBlob(clientId: 'client-a', contexts: contexts).toJson(),
+          ),
+        )
+        .length;
+
+    test('counts JSON escaping in the slot budget', () {
+      // Each quote and backslash doubles when encoded.
+      final contexts = {
+        for (var index = 0; index < 400; index++)
+          'msg:${'"\\' * 120}$index': index + 1,
+      };
+
+      final retained = retainReadStateContexts(contexts, clientId: 'client-a')!;
+
+      expect(retained, isNotEmpty);
+      expect(
+        publishedBytes(retained),
+        lessThanOrEqualTo(readStatePlaintextBytes),
+      );
+    });
+
+    test('keeps recent reads when old broad marks fill the budget', () {
+      final contexts = <String, int>{
+        for (var index = 0; index < 300; index++)
+          index.toString().padLeft(36, 'c'): 100,
+        for (var index = 0; index < 380; index++)
+          'thread:${index.toString().padLeft(64, 't')}': 100,
+        'activity:fresh-channel': 500,
+        // An old message, read just now from history.
+        'msg:${'a' * 64}': 50,
+      };
+      final recent = {
+        for (final key in contexts.keys) key: 1000,
+        'activity:fresh-channel': 2000,
+        'msg:${'a' * 64}': 2000,
+      };
+      expect(publishedBytes(contexts), greaterThan(readStatePlaintextBytes));
+
+      final retained = retainReadStateContexts(
+        contexts,
+        clientId: 'client-a',
+        recent: recent,
+      )!;
+
+      expect(retained['activity:fresh-channel'], 500);
+      expect(retained['msg:${'a' * 64}'], 50);
+      expect(
+        publishedBytes(retained),
+        lessThanOrEqualTo(readStatePlaintextBytes),
+      );
+      // Broad marks still fill most of the slot.
+      expect(retained.keys.where((key) => !key.contains(':')).length, 300);
+    });
+
+    test('keeps carried override keys whole ahead of marks', () {
+      final carried = {
+        for (var index = 0; index < 50; index++) ...{
+          'ov_s:channel-$index': 2,
+          'ov_c:channel-$index': 1,
+          'ov_b:channel-$index': 100,
+        },
+      };
+      final contexts = {
+        for (var index = 0; index < 1400; index++)
+          'msg:${index.toString().padLeft(64, '0')}': index + 1,
+      };
+
+      final retained = retainReadStateContexts(
+        contexts,
+        clientId: 'client-a',
+        carried: carried,
+      )!;
+
+      for (final entry in carried.entries) {
+        expect(retained[entry.key], entry.value);
+      }
+      expect(retained.length, lessThan(contexts.length + carried.length));
+      expect(
+        publishedBytes(retained),
+        lessThanOrEqualTo(readStatePlaintextBytes),
+      );
+    });
+
+    test('returns null instead of splitting carried override keys', () {
+      final carried = {
+        for (var index = 0; index < 320; index++) ...{
+          'ov_s:${index.toString().padLeft(36, 'c')}': 2,
+          'ov_c:${index.toString().padLeft(36, 'c')}': 1,
+          'ov_b:${index.toString().padLeft(36, 'c')}': 100,
+        },
+      };
+
+      expect(
+        retainReadStateContexts(
+          {'channel-1': 5},
+          clientId: 'client-a',
+          carried: carried,
+        ),
+        isNull,
+      );
+    });
+  });
+
+  test('pruneStaleContexts bounds message and thread marks only', () {
+    const now = 10 * readStateHorizonSeconds;
+    final fresh = now - 60;
+    final stale = now - readStateHorizonSeconds - 1;
+    final contexts = <String, int>{
+      'channel-1': stale,
+      'activity:channel-1': stale,
+      'thread-activity:root': stale,
+      'msg:stale': stale,
+      'thread:stale': stale,
+      for (var index = 0; index < localMaxPrunableContexts + 10; index++)
+        'msg:$index': fresh + index,
+    };
+
+    final kept = pruneStaleContexts(contexts, nowUnixSeconds: now);
+
+    expect(kept['channel-1'], stale);
+    expect(kept['activity:channel-1'], stale);
+    expect(kept['thread-activity:root'], stale);
+    expect(kept, isNot(contains('msg:stale')));
+    expect(kept, isNot(contains('thread:stale')));
+    final messages = kept.keys.where((key) => key.startsWith('msg:'));
+    expect(messages.length, localMaxPrunableContexts);
+    // The oldest are dropped first.
+    expect(kept, isNot(contains('msg:0')));
+    expect(kept, contains('msg:${localMaxPrunableContexts + 9}'));
+  });
 }
 
 NostrEvent _event({List<List<String>>? tags}) {

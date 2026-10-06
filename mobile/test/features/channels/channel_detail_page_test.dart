@@ -2345,6 +2345,307 @@ void main() {
       });
     });
 
+    testWidgets('a thread opened directly reads its head', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      // A mention: no catch-up mark reads it, so only its own mark does.
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root for @self',
+        createdAt: 1000,
+        extraTags: const [
+          ['p', 'self'],
+        ],
+      );
+      final reply = _textMsg(
+        id: 'reply0',
+        pubkey: 'bob',
+        content: 'Reply 0',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, reply],
+          threadReplies: {
+            'root': [reply],
+          },
+          initialThreadRootId: 'root',
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(readState.markedContexts['msg:root'], 1000);
+      expect(readState.markedContexts['thread-activity:root'], 1100);
+    });
+
+    testWidgets('a thread with no replies reads its head', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root for @self',
+        createdAt: 1000,
+        extraTags: const [
+          ['p', 'self'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          threadReplies: const {'root': []},
+          readStateNotifier: readState,
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, {'msg:root': 1000});
+    });
+
+    testWidgets('rows under the Android keyboard are not read in history', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+        addTearDown(tester.view.reset);
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final messages = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'm$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+              extraTags: const [
+                ['p', 'self'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            readStateNotifier: readState,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Message #general'));
+        await tester.pump();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pump();
+        await tester.pump(androidImeMetricsSettleDelay);
+        await tester.pumpAndSettle();
+
+        // Leave the latest message, then stop with history rows under the
+        // keyboard.
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        final messageListElement = tester.element(messageList);
+        UserScrollNotification(
+          metrics: FixedScrollMetrics(
+            minScrollExtent: 0,
+            maxScrollExtent: 100,
+            pixels: 0,
+            viewportDimension: 100,
+            axisDirection: AxisDirection.down,
+            devicePixelRatio: 1,
+          ),
+          context: messageListElement,
+          direction: ScrollDirection.reverse,
+        ).dispatch(messageListElement);
+        tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemScrollController!
+            .jumpTo(index: 20);
+        await tester.pumpAndSettle();
+        readState.markedContexts.clear();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+        final coveredTop = tester
+            .getTopLeft(find.byKey(const ValueKey('channel-composer-dock')))
+            .dy;
+        final marked = readState.markedContexts.keys.toSet();
+        var hiddenRows = 0;
+        for (var i = 0; i < 40; i++) {
+          final row = find.byKey(ValueKey('channel-message-group-m$i'));
+          if (row.evaluate().isEmpty) continue;
+          final hidden = tester.getTopLeft(row).dy >= coveredTop;
+          if (hidden) {
+            hiddenRows++;
+            expect(marked, isNot(contains('msg:m$i')), reason: 'm$i');
+          }
+          if (marked.contains('msg:m$i')) {
+            // The reading edge allows 1% of the list height.
+            expect(
+              tester.getBottomLeft(row).dy,
+              lessThanOrEqualTo(coveredTop + 10),
+              reason: 'm$i',
+            );
+          }
+        }
+        // Rows sit under the keyboard, and rows above it are read.
+        expect(hiddenRows, greaterThan(0));
+        expect(marked, isNotEmpty);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('thread rows under the Android keyboard are not read', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+        addTearDown(tester.view.reset);
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final root = _textMsg(
+          id: 'root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'reply$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            threadReplies: {'root': replies},
+            readStateNotifier: readState,
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([root]).single,
+              allMessages: formatTimeline([root, ...replies]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Scroll into history, open the keyboard, then scroll toward newer
+        // replies without reaching the tail. An upward drag keeps the
+        // keyboard open.
+        final messageList = find.byKey(const ValueKey('thread-message-list'));
+        await tester.drag(messageList, const Offset(0, 600));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pump();
+        await tester.pump(androidImeMetricsSettleDelay);
+        await tester.pumpAndSettle();
+        await tester.drag(messageList, const Offset(0, -150));
+        await tester.pumpAndSettle();
+        readState.markedContexts.clear();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+        final coveredTop = tester
+            .getTopLeft(find.byKey(const ValueKey('thread-composer-dock')))
+            .dy;
+        final marked = readState.markedContexts.keys.toSet();
+        expect(marked, isNot(contains('thread-activity:root')));
+        var hiddenRows = 0;
+        for (var i = 0; i < 40; i++) {
+          final row = find.byKey(ValueKey('thread-message-group-reply$i'));
+          if (row.evaluate().isEmpty) continue;
+          if (tester.getTopLeft(row).dy >= coveredTop) {
+            hiddenRows++;
+            expect(marked, isNot(contains('msg:reply$i')), reason: 'reply$i');
+          }
+          if (marked.contains('msg:reply$i')) {
+            // The reading edge allows 1% of the list height.
+            expect(
+              tester.getBottomLeft(row).dy,
+              lessThanOrEqualTo(coveredTop + 10),
+              reason: 'reply$i',
+            );
+          }
+        }
+        // Replies sit under the keyboard. Replies above it were read
+        // before the keyboard opened, so they need no new marks.
+        expect(hiddenRows, greaterThan(0));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('shows forum posts view for forum channels', (tester) async {
       final forumChannel = Channel(
         id: _channelId,
