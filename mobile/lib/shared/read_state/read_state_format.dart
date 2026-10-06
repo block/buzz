@@ -98,35 +98,58 @@ String overrideFrontierKey(String contextId) =>
     ? 'esc:$contextId'
     : contextId;
 
-/// The override keys of [contexts] that this app may carry. NIP-RS accepts
-/// an override group only whole: exactly `ov_s:`, `ov_c:` and `ov_b:` for
-/// one context, or `ov_c:` alone as a tombstone. Any other shape is
-/// rejected as a group, so none of its keys is carried. Escaped frontiers
-/// (`esc:`) are frontier keys, not counters, so each is carried as it is.
-Map<String, int> completeOverrideGroups(Map<String, int> contexts) {
+/// Whether [keys] form a legal override group for [target]: exactly
+/// `ov_s:`, `ov_c:` and `ov_b:`, or `ov_c:` alone as a tombstone.
+bool _isOverrideShape(String target, Iterable<String> keys) {
+  final set = keys.toSet();
+  return set.length == _overridePrefixes.length ||
+      (set.length == 1 && set.contains('ov_c:$target'));
+}
+
+/// The override groups in [contexts] that have a legal shape, by target.
+Map<String, Map<String, int>> _overrideGroups(Map<String, int> contexts) {
   final groups = <String, Map<String, int>>{};
-  final kept = <String, int>{};
   for (final entry in contexts.entries) {
-    final target = _overrideTarget(entry.key);
-    if (target != null) {
+    if (_overrideTarget(entry.key) case final target?) {
       (groups[target] ??= {})[entry.key] = entry.value;
-    } else if (entry.key.startsWith('esc:')) {
-      kept[entry.key] = entry.value;
     }
   }
-  for (final MapEntry(key: target, value: group) in groups.entries) {
-    final live = group.length == _overridePrefixes.length;
-    final tombstone = group.length == 1 && group.containsKey('ov_c:$target');
-    if (live || tombstone) kept.addAll(group);
+  return {
+    for (final MapEntry(key: target, value: group) in groups.entries)
+      if (_isOverrideShape(target, group.keys)) target: group,
+  };
+}
+
+/// The override keys of [contexts] that this app may carry. NIP-RS accepts
+/// an override group only whole (see [_isOverrideShape]), and a group must
+/// travel with its frontier, found in [contexts] or [frontiers]. Any other
+/// group is rejected whole, so none of its keys is carried. Escaped
+/// frontiers (`esc:`) are frontier keys, not counters, so each is carried
+/// as it is.
+Map<String, int> completeOverrideGroups(
+  Map<String, int> contexts, {
+  Map<String, int> frontiers = const {},
+}) {
+  final kept = <String, int>{
+    for (final entry in contexts.entries)
+      if (entry.key.startsWith('esc:')) entry.key: entry.value,
+  };
+  for (final MapEntry(key: target, value: group) in _overrideGroups(
+    contexts,
+  ).entries) {
+    final frontier = overrideFrontierKey(target);
+    if (contexts.containsKey(frontier) || frontiers.containsKey(frontier)) {
+      kept.addAll(group);
+    }
   }
   return kept;
 }
 
-/// The frontier keys that must travel with the complete override groups in
+/// The frontier keys that must travel with the override groups in
 /// [contexts] (NIP-RS's co-location rule).
 Set<String> overrideGroupFrontierKeys(Map<String, int> contexts) => {
-  for (final key in completeOverrideGroups(contexts).keys)
-    if (_overrideTarget(key) case final target?) overrideFrontierKey(target),
+  for (final target in _overrideGroups(contexts).keys)
+    overrideFrontierKey(target),
 };
 
 /// Whether this device republishes a mark it merged from another device's
@@ -179,7 +202,7 @@ Map<String, int>? retainReadStateContexts(
 }) {
   // JSON-encoded bytes, so escaped characters are counted as published.
   int bytesOf(Object? value) => utf8.encode(jsonEncode(value)).length;
-  final groups = completeOverrideGroups(carried);
+  final groups = completeOverrideGroups(carried, frontiers: contexts);
   final reserved = <String, int>{...groups};
   for (final key in overrideGroupFrontierKeys(groups)) {
     final frontier = contexts[key];
@@ -356,16 +379,37 @@ ReadStateBlob? decodeReadStateBlob(String plaintext) {
   );
 }
 
+/// The valid entries of a decoded `contexts` object. Override counters are
+/// checked as whole groups first, on the raw values, as NIP-RS requires: one
+/// invalid sibling rejects its whole group, so dropping it alone can never
+/// turn a live group into a tombstone. Other `ov_` keys are reserved and
+/// dropped. Every other entry is checked on its own.
 Map<String, int> sanitizeReadStateContexts(Map<String, Object?> contexts) {
+  bool valid(String key, Object? value) =>
+      utf8.encode(key).length <= 256 &&
+      value is int &&
+      value >= 0 &&
+      value <= 4294967295;
+  final groups = <String, Map<String, Object?>>{};
+  for (final entry in contexts.entries) {
+    if (_overrideTarget(entry.key) case final target?) {
+      (groups[target] ??= {})[entry.key] = entry.value;
+    }
+  }
+  final rejected = {
+    for (final MapEntry(key: target, value: group) in groups.entries)
+      if (!_isOverrideShape(target, group.keys) ||
+          group.entries.any((entry) => !valid(entry.key, entry.value)))
+        target,
+  };
   final sanitized = <String, int>{};
   for (final entry in contexts.entries) {
-    if (utf8.encode(entry.key).length > 256) continue;
-
+    if (entry.key.startsWith('ov_')) {
+      final target = _overrideTarget(entry.key);
+      if (target == null || rejected.contains(target)) continue;
+    }
     final value = entry.value;
-    if (value is! int) continue;
-    if (value < 0 || value > 4294967295) continue;
-
-    sanitized[entry.key] = value;
+    if (valid(entry.key, value)) sanitized[entry.key] = value as int;
   }
   return sanitized;
 }

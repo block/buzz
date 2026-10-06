@@ -400,6 +400,72 @@ void main() {
     expect(republished, isNot(contains('ov_c:channel-2')));
   });
 
+  test('rejects own-slot override groups that are malformed or have no '
+      'frontier', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final storage = ReadStateStorage(prefs);
+    final clientId = storage.getOrCreateClientId(keychain.public);
+    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final session = _FakeRelaySession()
+      ..historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: clientId,
+          slotId: slotId,
+          contexts: const {
+            // Its ov_b: sibling is invalid, so this is not a tombstone.
+            'bad-sibling': 100,
+            'ov_c:bad-sibling': 7,
+            // Complete counters, but no frontier for `no-frontier`.
+            'ov_s:no-frontier': 2,
+            'ov_c:no-frontier': 1,
+            'ov_b:no-frontier': 50,
+            'channel-1': 90,
+            'ov_s:channel-1': 2,
+            'ov_c:channel-1': 1,
+            'ov_b:channel-1': 90,
+          },
+          rawContexts: const {'ov_b:bad-sibling': 'invalid'},
+          createdAt: 100,
+        ),
+      ];
+    final relay = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    await manager.initialize();
+    manager.markContextRead('channel-2', 300);
+    await manager.flush();
+
+    final published = decodeReadStateBlob(
+      crypto.decrypt(relay.contents.last),
+    )!.contexts;
+    expect(published, {
+      // Frontiers stay, including the one whose group was rejected.
+      'bad-sibling': 100,
+      'channel-1': 90,
+      'channel-2': 300,
+      'ov_s:channel-1': 2,
+      'ov_c:channel-1': 1,
+      'ov_b:channel-1': 90,
+    });
+    manager.dispose(flushPending: false);
+  });
+
   test('leaves the slot when carried override keys do not fit', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -420,6 +486,7 @@ void main() {
           slotId: slotId,
           contexts: {
             for (var index = 0; index < 320; index++) ...{
+              index.toString().padLeft(36, 'c'): 100,
               'ov_s:${index.toString().padLeft(36, 'c')}': 2,
               'ov_c:${index.toString().padLeft(36, 'c')}': 1,
               'ov_b:${index.toString().padLeft(36, 'c')}': 100,
@@ -609,8 +676,11 @@ NostrEvent _readStateEvent({
   required String slotId,
   required Map<String, int> contexts,
   required int createdAt,
+  // Extra raw wire entries, such as values that are not valid timestamps.
+  Map<String, Object?> rawContexts = const {},
 }) {
-  final blob = ReadStateBlob(clientId: clientId, contexts: contexts);
+  final blob = ReadStateBlob(clientId: clientId, contexts: contexts).toJson();
+  blob['contexts'] = <String, Object?>{...contexts, ...rawContexts};
   return NostrEvent(
     id: 'event-$clientId-$createdAt',
     pubkey: pubkey,
@@ -620,7 +690,7 @@ NostrEvent _readStateEvent({
       ['d', '$readStateDTagPrefix$slotId'],
       ['t', 'read-state'],
     ],
-    content: crypto.encrypt(jsonEncode(blob.toJson())),
+    content: crypto.encrypt(jsonEncode(blob)),
     sig: 'sig',
   );
 }

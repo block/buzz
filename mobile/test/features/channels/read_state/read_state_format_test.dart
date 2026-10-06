@@ -212,6 +212,7 @@ void main() {
         },
       };
       final contexts = {
+        for (var index = 0; index < 50; index++) 'channel-$index': 100,
         for (var index = 0; index < 1400; index++)
           'msg:${index.toString().padLeft(64, '0')}': index + 1,
       };
@@ -286,6 +287,10 @@ void main() {
           // A tombstone with a baseline is not a legal shape.
           'ov_c:odd': 4,
           'ov_b:odd': 9,
+          // A complete group must travel with its frontier.
+          'ov_s:alone': 2,
+          'ov_c:alone': 1,
+          'ov_b:alone': 9,
         },
       )!;
 
@@ -311,7 +316,11 @@ void main() {
 
       expect(
         retainReadStateContexts(
-          {'channel-1': 5},
+          {
+            'channel-1': 5,
+            for (var index = 0; index < 320; index++)
+              index.toString().padLeft(36, 'c'): 100,
+          },
           clientId: 'client-a',
           carried: carried,
         ),

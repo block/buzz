@@ -588,7 +588,7 @@ class ReadStateManager {
             if (isOverrideContext(entry.key) &&
                 stored.publishableContextIds.contains(entry.key))
               entry.key: entry.value,
-        }),
+        }, frontiers: stored.contexts),
       );
     _effectiveState
       ..clear()
