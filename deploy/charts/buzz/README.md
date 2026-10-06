@@ -148,6 +148,24 @@ These phases intentionally do not emit metrics. Most run before the Prometheus
 exporter exists, and one uniform log-only contract preserves every phase's real
 event time and failure without assigning an eventual scrape time to earlier work.
 
+Startup work **after** `metrics_bind` (database connect through public listener
+bind) runs with a live recorder, so each step logs `Startup phase started` and
+`Startup phase finished` (`phase`, `elapsed_ms`, `outcome` =
+`succeeded`/`degraded`/`failed`) and sets two gauges labelled `phase`:
+
+- `buzz_startup_phase_current` is `1` while the step runs and `0` once it ends.
+  A pod that has not opened its health port shows the step it is stuck on.
+- `buzz_startup_phase_seconds` is the finished step's duration.
+
+These are gauges, not counters, because each value is written once per boot
+and a monotonic-counter scrape drops a series' first sample. They are set once,
+so they age out after the gauge idle timeout (`BUZZ_USAGE_METRICS_IDLE_TIMEOUT_SECS`,
+default 900 s), well after a normal scrape interval has recorded them. The `phase` values
+are the closed `StartupStep` vocabulary in
+`crates/buzz-relay/src/startup_steps.rs`; they never reuse an early lifecycle
+phase name. The NIP-43 startup reconcile also logs
+`NIP-43 startup reconciliation progress` every 5,000 communities.
+
 ### Readiness contract
 
 **`/_readiness` reports local process lifecycle only.** It performs no
