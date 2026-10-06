@@ -1725,12 +1725,13 @@ fn turn_is_human_facing(
 
 /// Resolve the `--reply-to` anchor for a non-DM turn.
 ///
-/// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
-///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
+/// Human-facing turns (see [`turn_is_human_facing`]) stay flat:
+///   - in a thread → the thread ROOT, keeping the reply at layer 1
 ///   - top-level   → the triggering event id, which becomes the new thread root
 ///
-/// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
-/// (intentional for agent coordination).
+/// Agent↔agent turns may nest (intentional for agent coordination):
+///   - in a thread → the triggering event id, so the reply stays in the thread
+///   - top-level   → `None`, leaving the destination to the agent
 fn resolve_reply_anchor(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
@@ -1738,7 +1739,10 @@ fn resolve_reply_anchor(
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> Option<String> {
     if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
-        return None;
+        return thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| triggering_event_id.to_string());
     }
     Some(
         thread_tags
@@ -2327,8 +2331,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // Human-facing turns are anchored so replies stay readable at layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
-    // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // Agent↔agent turns in a thread anchor to the triggering event — deep
+    // nesting is intentional there — and top-level ones get no anchor.
+    // DMs are always 1:1 with a human, so they always anchor.
     // `ReplyRoute::accepts_steer` mirrors this DM rule; keep them in sync.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
@@ -4964,11 +4969,12 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_agent_to_agent_in_thread_is_none() {
-        // Agent pings agent inside a thread → no forced anchor (deep nesting ok).
+    fn test_anchor_agent_to_agent_in_thread_uses_triggering_event() {
+        // Agent pings agent inside a thread → reply to the triggering event:
+        // stays in the thread, nesting allowed.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
         let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
-        assert_eq!(anchor, None);
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
     #[test]
@@ -5000,7 +5006,7 @@ mod tests {
         // agent — this is the regression Pinky flagged.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
         let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
-        assert_eq!(anchor, None);
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
     #[test]
