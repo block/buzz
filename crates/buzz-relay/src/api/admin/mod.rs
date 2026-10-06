@@ -4036,8 +4036,9 @@ mod postgres_tests {
     }
 
     /// Staffing is Operator-only for signed callers: a DB-rostered Moderator
-    /// gets 403 on every `/operators` route and leaves the roster untouched,
-    /// while a config Operator succeeds on the same requests. This is the only
+    /// gets 403 on every `/operators` route and writes neither the target's
+    /// roster row nor its audit log, while a config Operator succeeds on the
+    /// same requests. This is the only
     /// test that tells `.staff()` apart from `.act()`; unsigned and
     /// disabled-mode requests are refused by both.
     #[tokio::test]
@@ -4083,6 +4084,18 @@ mod postgres_tests {
                 .await
                 .expect("count roster rows")
         };
+        // The target's full roster row plus its audit-row count. The target is
+        // a fresh key, so scoping the audit count to it ignores concurrent tests.
+        let target_snapshot = || async {
+            sqlx::query_as::<_, (Option<String>, i64)>(
+                "SELECT (SELECT r::text FROM relay_operators r WHERE r.pubkey = $1), \
+                        (SELECT COUNT(*) FROM relay_operator_audit WHERE target_pubkey = $1)",
+            )
+            .bind(&target_bytes)
+            .fetch_one(&pool)
+            .await
+            .expect("snapshot target roster and audit")
+        };
 
         // Roster the Moderator in the DB, and the target too so DELETE has a row.
         for keys in [&moderator_keys, &target_keys] {
@@ -4097,18 +4110,19 @@ mod postgres_tests {
             ("PUT", target_path.as_str()),
             ("DELETE", target_path.as_str()),
         ] {
+            let before = target_snapshot().await;
             let denied = send(&moderator_keys, method, path).await;
             assert_eq!(
                 denied.status(),
                 StatusCode::FORBIDDEN,
                 "Moderator {method} {path} must be refused"
             );
+            assert_eq!(
+                target_snapshot().await,
+                before,
+                "refused Moderator {method} {path} must not write the roster or audit log"
+            );
         }
-        assert_eq!(
-            target_rows().await,
-            1,
-            "Moderator requests must not change the roster"
-        );
 
         for (method, path) in [
             ("GET", "/operators"),
