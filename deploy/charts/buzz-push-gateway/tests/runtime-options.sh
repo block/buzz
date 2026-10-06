@@ -101,6 +101,7 @@ policy = {'apiVersion' => 'networking.k8s.io/v1', 'kind' => 'NetworkPolicy',
                      'policyTypes' => %w[Ingress Egress], 'ingress' => [], 'egress' => []}}
 File.write("#{ARGV[0]}/combined.yaml", (resources + [policy]).map(&:to_yaml).join)
 variants = {
+  'hook-policy' => ->(p) { p['metadata']['annotations'] = {'helm.sh/hook' => 'pre-install', 'helm.sh/hook-delete-policy' => 'hook-succeeded'} },
   'misspelled' => ->(p) { p['metadata']['name'] = 'typo' },
   'wrong-selector' => ->(p) { p['spec']['podSelector']['matchLabels']['app.kubernetes.io/instance'] = 'other' },
   'empty-selector' => ->(p) { p['spec']['podSelector'] = {} },
@@ -119,7 +120,7 @@ gate <"$out/default.yaml" >"$out/gated.yaml"
 cmp "$out/default.yaml" "$out/gated.yaml"
 gate <"$out/combined.yaml" >"$out/gated.yaml"
 cmp "$out/combined.yaml" "$out/gated.yaml"
-for mutation in external misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+for mutation in external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
   if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
     echo "expected combined-render gate to reject $mutation" >&2
     exit 1
@@ -134,7 +135,7 @@ helm template push "$chart" --namespace tenant-runtime --set networkPolicy.enabl
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
 resources = YAML.load_stream(File.read("#{ARGV[0]}/tenant.yaml")).compact
 policy = YAML.load_stream(File.read("#{ARGV[0]}/combined.yaml")).compact.last
-{'omitted' => nil, 'explicit' => 'tenant-runtime', 'default' => 'default', 'wrong' => 'other'}.each do |variant, namespace|
+{'omitted' => nil, 'empty' => '', 'explicit' => 'tenant-runtime', 'default' => 'default', 'wrong' => 'other'}.each do |variant, namespace|
   candidate = Marshal.load(Marshal.dump(policy))
   candidate['metadata']['namespace'] = namespace if namespace
   File.write("#{ARGV[0]}/tenant-#{variant}.yaml", (resources + [candidate]).map(&:to_yaml).join)
@@ -143,7 +144,7 @@ end
 resources.find { |r| r['kind'] == 'Deployment' }['metadata']['annotations'].delete('buzz.block.xyz/release-namespace')
 File.write("#{ARGV[0]}/tenant-missing-annotation.yaml", (resources + [policy]).map(&:to_yaml).join)
 RUBY
-for variant in omitted explicit; do
+for variant in omitted empty explicit; do
   gate <"$out/tenant-$variant.yaml" >"$out/gated.yaml"
   cmp "$out/tenant-$variant.yaml" "$out/gated.yaml"
 done
