@@ -6,8 +6,11 @@
 /// :::
 /// ```
 ///
-/// Mirrors desktop's `remarkDetails`: markers count only at column 0,
-/// outside fenced code, in matched pairs and at most [maxDetailsDepth] deep.
+/// Mirrors desktop's `remarkDetails`: markers count at the start of a line
+/// after up to three spaces (pasting into the composer can pull a marker into
+/// the list item above it, indented as a continuation line; four spaces is
+/// indented code), outside fenced code, in matched pairs and at most
+/// [maxDetailsDepth] deep.
 /// Anything else stays text. A marker line wrapped in emphasis as a whole
 /// (`**:::details Title**`, `**:::**`, what the composer sends with bold
 /// switched on) still counts. A title may carry inline formatting and start
@@ -21,8 +24,12 @@ final _openRe = RegExp(r'^:::details[ \t]+(\S.*)$');
 final _closeRe = RegExp(r'^:::[ \t]*$');
 final _wrappedRe = RegExp(r'^(\*\*|__|\*|_)(:::.*?)\1[ \t]*$');
 final _headingRe = RegExp(r'^(#{1,6})[ \t]+');
-final _fenceOpenRe = RegExp(r'^ {0,3}(`{3,}|~{3,})(.*)$');
-final _fenceCloseRe = RegExp(r'^ {0,3}(`{3,}|~{3,})[ \t]*$');
+final _indentRe = RegExp(r'^ {1,3}');
+// Any indentation: a fence nested in a list item may sit deeper than the
+// markers it contains. Reading indented code as a fence only keeps markers
+// as text, the safe direction.
+final _fenceOpenRe = RegExp(r'^[ \t]*(`{3,}|~{3,})(.*)$');
+final _fenceCloseRe = RegExp(r'^[ \t]*(`{3,}|~{3,})[ \t]*$');
 
 sealed class DetailsSegment {
   const DetailsSegment();
@@ -132,9 +139,11 @@ String flattenDetailsBlocks(String content) {
   return text;
 }
 
-/// The marker a line stands for, with a whole-line emphasis wrapper moved
-/// into the title (`**:::details X**` → `:::details **X**`), or null.
-String? normalizeMarkerLine(String line) {
+/// The marker a line stands for, unindented and with a whole-line emphasis
+/// wrapper moved into the title (`**:::details X**` → `:::details **X**`),
+/// or null.
+String? normalizeMarkerLine(String rawLine) {
+  final line = rawLine.replaceFirst(_indentRe, '');
   if (_openRe.hasMatch(line) || _closeRe.hasMatch(line)) return line;
   final wrapped = _wrappedRe.firstMatch(line);
   if (wrapped == null) return null;

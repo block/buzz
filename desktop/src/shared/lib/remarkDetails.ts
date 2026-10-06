@@ -9,9 +9,11 @@
  * marker line as its own paragraph (a `:::` right under a list item would
  * otherwise be read as a lazy continuation of that item). `remarkDetails`
  * then turns the marker paragraphs into a custom node rendered as a
- * disclosure by `markdown.tsx`. Markers are recognised only at column 0,
- * outside fenced code, in matched pairs and at most `MAX_DETAILS_DEPTH`
- * deep; anything else stays text. A marker line wrapped in emphasis as a
+ * disclosure by `markdown.tsx`. Markers are recognised at the start of a
+ * line after up to three spaces (pasting into the composer can pull a marker
+ * into the list item above it, indented as a continuation line; four spaces
+ * is indented code), outside fenced code, in matched pairs and at most
+ * `MAX_DETAILS_DEPTH` deep; anything else stays text. A marker line wrapped in emphasis as a
  * whole (`**:::details Title**`, `**:::**`, what the composer sends with bold
  * switched on) still counts. A title may carry inline formatting and start
  * with `#`..`######` to render as a heading. Mobile mirrors these rules in
@@ -31,9 +33,11 @@ const CLOSE_RE = /^:::[ \t]*$/;
 const WRAPPED_RE = /^(\*\*|__|\*|_)(:::.*?)\1[ \t]*$/;
 const HEADING_RE = /^(#{1,6})[ \t]+/;
 
-/** The marker a line stands for, with a whole-line emphasis wrapper moved
- * into the title (`**:::details X**` → `:::details **X**`), or null. */
-export function normalizeMarkerLine(line: string): string | null {
+/** The marker a line stands for, unindented and with a whole-line emphasis
+ * wrapper moved into the title (`**:::details X**` → `:::details **X**`),
+ * or null. */
+export function normalizeMarkerLine(rawLine: string): string | null {
+  const line = rawLine.replace(/^ {1,3}/, "");
   if (OPEN_RE.test(line) || CLOSE_RE.test(line)) return line;
   const wrapped = WRAPPED_RE.exec(line);
   if (!wrapped) return null;
@@ -44,8 +48,11 @@ export function normalizeMarkerLine(line: string): string | null {
   const heading = HEADING_RE.exec(title)?.[0] ?? "";
   return `:::details ${heading}${mark}${title.slice(heading.length)}${mark}`;
 }
-const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+// Any indentation: a fence nested in a list item may sit deeper than the
+// markers it contains. Reading indented code as a fence only keeps markers
+// as text, the safe direction.
+const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE_RE = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
 
 /** The fence a line opens, or null. Backtick info strings may not contain a
  * backtick (CommonMark). */

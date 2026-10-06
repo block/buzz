@@ -69,9 +69,33 @@ test("remarkDetails: ignores markers inside fenced code", () => {
   assert.doesNotMatch(render(content), /<section/);
 });
 
-test("remarkDetails: ignores indented or quoted markers", () => {
-  assert.doesNotMatch(render("  :::details Indented\nx\n  :::"), /<section/);
+test("remarkDetails: ignores quoted markers and indented code", () => {
   assert.doesNotMatch(render("> :::details Quoted\n> x\n> :::"), /<section/);
+  const code = "Code:\n\n    :::details Not a section\n    x\n    :::";
+  assert.equal(prepareDetailsBlocks(code), code);
+  assert.doesNotMatch(render(code), /<section/);
+  for (const listFence of [
+    "- item\n\n    ```\n    :::details Not a section\n    :::\n    ```",
+    "- item\n\n    ```\n  :::details Not a section\n  secret\n  :::\n    ```",
+  ]) {
+    assert.equal(prepareDetailsBlocks(listFence), listFence);
+    assert.doesNotMatch(render(listFence), /<section/);
+  }
+});
+
+test("remarkDetails: accepts markers a composer paste indented into a list item", () => {
+  // What the composer sends after pasting a section that ends in a list: the
+  // closer becomes a continuation line of the last item.
+  const html = render(
+    ":::details **Fleet working** (2)\n\n- model routing\n" +
+      "- OpenClaw upgrade\n  :::\n\n- x\n  :::details Next\nbody\n:::",
+  );
+  assert.equal(
+    html,
+    '<section data-key="0:Fleet working (2)"><h6><strong>Fleet working</strong> (2)</h6>' +
+      "<ul>\n<li>model routing</li>\n<li>OpenClaw upgrade</li>\n</ul></section>\n" +
+      '<ul>\n<li>x</li>\n</ul>\n<section data-key="0:Next"><h6>Next</h6><p>body</p></section>',
+  );
 });
 
 test("prepareDetailsBlocks: leaves content without markers untouched", () => {

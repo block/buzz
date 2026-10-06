@@ -40,16 +40,33 @@ void main() {
     expect((segments[1] as DetailsBlock).title, 'Closed');
   });
 
-  test('ignores markers inside fenced code, indented, or quoted', () {
+  test('ignores markers inside fenced or indented code, or quoted', () {
     for (final content in [
       '```\n:::details Not a section\n:::\n```',
-      '  :::details Indented\nx\n  :::',
+      'Code:\n\n    :::details Not a section\n    x\n    :::',
+      '- item\n\n    ```\n    :::details Not a section\n    :::\n    ```',
+      '- item\n\n    ```\n  :::details Not a section\n  secret\n  :::\n    ```',
       '> :::details Quoted\n> x\n> :::',
     ]) {
       final segments = splitDetailsBlocks(content);
       expect(segments.single, isA<DetailsText>(), reason: content);
       expect((segments.single as DetailsText).text, content);
     }
+  });
+
+  test('accepts markers a composer paste indented into a list item', () {
+    // What the composer sends after pasting a section that ends in a list:
+    // the closer becomes a continuation line of the last item.
+    final segments = splitDetailsBlocks(
+      ':::details **Fleet working** (2)\n\n- model routing\n'
+      '- OpenClaw upgrade\n  :::\n\n- x\n  :::details Next\nbody\n:::',
+    );
+    expect(segments, hasLength(3));
+    final first = segments[0] as DetailsBlock;
+    expect(first.title, 'Fleet working (2)');
+    expect(first.body, '\n- model routing\n- OpenClaw upgrade');
+    expect((segments[1] as DetailsText).text, '\n- x');
+    expect((segments[2] as DetailsBlock).title, 'Next');
   });
 
   test('flattens sections for previews', () {
