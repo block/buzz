@@ -212,3 +212,15 @@ test("a stored soundEnabled of false round-trips", () => {
     true,
   );
 });
+
+test("the retired slotAlertsSnapshot key is read past and no longer persisted", () => {
+  // Settings saved by the old master switch carry a snapshot of the rows it
+  // bulk-disabled. The sanitizer must tolerate it and drop it from the result.
+  const settings = sanitizeNotificationSettings({
+    slotAlertsEnabled: { dm: false },
+    slotAlertsSnapshot: { dm: true, mention: true },
+  });
+
+  assert.equal(settings.slotAlertsEnabled.dm, false);
+  assert.equal("slotAlertsSnapshot" in settings, false);
+});
