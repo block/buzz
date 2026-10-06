@@ -336,13 +336,54 @@ test("actions-identity: a signer change remounts the controller and drops the fr
   }
 });
 
-test("actions-disabled-auth: without a staff principal, community browsing and its actions are hidden", async () => {
-  // Mutation: set canBrowse = true in the panel → RED.
+test("actions-disabled-auth: with admin auth disabled, community pages render read-only", async () => {
+  // Mutation: drop `!canMutate` from any community-page control's disabled
+  // gate, or restore a Communities-tab gate on canMutate → RED.
+  const banned = "29".repeat(32);
+  setIpcHandler("admin_list_restrictions", () =>
+    Promise.resolve({
+      items: [
+        {
+          pubkey: banned,
+          banned: true,
+          banExpiresAt: null,
+          banReason: "spam",
+          mutedUntil: "2099-01-01T00:00:00Z",
+          muteReason: "noise",
+          actorPubkey: "aa".repeat(32),
+          updatedAt: "2024-06-01T09:00:00Z",
+        },
+      ],
+      nextCursor: null,
+    }),
+  );
   const { container: c, unmount } = await mountActions({ canMutate: false });
   try {
-    assert.ok(!q(c, "admin-tab-communities"), "no Communities tab");
-    assert.ok(!q(c, "community-page"), "no community page");
-    assert.ok(!q(c, "direct-review-btn"), "no direct actions");
+    await openActions(c);
+    assert.ok(q(c, "community-page"), "community page renders");
+    for (const id of [
+      "direct-action-ban",
+      "direct-action-timeout",
+      "direct-action-delete",
+      "direct-member-input",
+      "direct-reason-input",
+      "direct-review-btn",
+    ]) {
+      assert.ok(q(c, id)?.disabled, `${id} must be disabled`);
+    }
+    await click(c, "community-section-members");
+    await pickKey(c, TARGET);
+    for (const id of ["member-ban", "member-timeout"]) {
+      assert.ok(q(c, id)?.disabled, `${id} must be disabled`);
+    }
+    await click(c, "community-section-restrictions");
+    await settle(50);
+    for (const id of [
+      `restrictions-lift-ban-btn-${banned}`,
+      `restrictions-lift-timeout-btn-${banned}`,
+    ]) {
+      assert.ok(q(c, id)?.disabled, `${id} must be disabled`);
+    }
   } finally {
     await unmount();
   }

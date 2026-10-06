@@ -158,11 +158,13 @@ function RestrictionTypeBadge({
  * relay or identity switch fails before sending instead of retargeting.
  */
 export function RestrictionsSection({
+  canMutate,
   origin,
   communityHost,
   pubkey,
   generation,
 }: {
+  canMutate: boolean;
   origin: string;
   communityHost: string;
   /** Active signer; frozen into each lift. */
@@ -380,7 +382,7 @@ export function RestrictionsSection({
                 {isBanned && (
                   <Button
                     data-testid={`restrictions-lift-ban-btn-${row.pubkey}`}
-                    disabled={isWorking}
+                    disabled={!canMutate || isWorking}
                     onClick={() => freezeLift(row.pubkey, "ban")}
                     size="sm"
                     type="button"
@@ -396,7 +398,7 @@ export function RestrictionsSection({
                 {isTimedOut && (
                   <Button
                     data-testid={`restrictions-lift-timeout-btn-${row.pubkey}`}
-                    disabled={isWorking}
+                    disabled={!canMutate || isWorking}
                     onClick={() => freezeLift(row.pubkey, "timeout")}
                     size="sm"
                     type="button"
@@ -708,7 +710,7 @@ export function StaffingTab({
                     aria-label={`Change role for ${displayName}`}
                     className="rounded-md border border-border/60 bg-background px-1.5 py-0.5 text-xs"
                     data-testid={`staffing-role-select-${op.pubkey}`}
-                    disabled={isWorking}
+                    disabled={!canMutate || isWorking}
                     onChange={(e) =>
                       void handleRoleChange(
                         op,

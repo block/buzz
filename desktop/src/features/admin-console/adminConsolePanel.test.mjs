@@ -1043,7 +1043,7 @@ const PROBE_ROLE_ROWS = [
   },
   {
     name: "probe-no-role",
-    desc: "disabled-mode panel renders without staffing tab",
+    desc: "disabled-mode panel renders Communities but not Staffing",
     pubkey: "e4".repeat(32),
     savedOrigin: "https://admin-disabled.example.com",
     probeResult: { state: "disabled" },
@@ -1052,6 +1052,11 @@ const PROBE_ROLE_ROWS = [
       assert.ok(
         container.querySelector("[data-testid='admin-console-panel']") !== null,
         "panel must render in disabled mode",
+      );
+      assert.ok(
+        container.querySelector("[data-testid='admin-tab-communities']") !==
+          null,
+        "Communities tab must render in disabled mode",
       );
       assert.equal(
         container.querySelector("[data-testid='admin-tab-operators']"),

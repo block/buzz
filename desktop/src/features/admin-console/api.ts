@@ -617,7 +617,7 @@ export async function liftAdminRestriction(
   return invokeTauri<void>("admin_lift_restriction", { intent });
 }
 
-// ── Community reads (staff-only) ──────────────────────────────────────────
+// ── Community reads ──────────────────────────────────────────────────────
 
 /**
  * Rejection payload of the read commands below: the relay's status, whether

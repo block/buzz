@@ -1,4 +1,4 @@
-//! Staff-only community reads: the directory, member search and lookup, and
+//! Community reads: the directory, member search and lookup, and
 //! the message preview before a delete.
 //!
 //! Each command returns a structured [`AdminReadError`] so the UI can tell a

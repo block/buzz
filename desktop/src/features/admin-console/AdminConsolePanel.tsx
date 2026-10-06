@@ -6,8 +6,8 @@
  * (product feedback with optional image attachments), Communities (the
  * directory, and a page per community with its reports, restrictions, members
  * and direct actions), and Operators (Operator-only operator management).
- * Community browsing needs a staff principal, so it is hidden when admin auth
- * is disabled.
+ * With admin auth disabled the whole console, community pages included, is
+ * read-only: every action control is disabled because the relay refuses writes.
  *
  * All query/UI state is keyed by `(pubkey, origin)`. In-flight native requests
  * are fenced by an effect-local `active` flag that is set to `false` in the
@@ -147,23 +147,19 @@ export function AdminConsolePanel({
   const [community, setCommunity] = useState<CommunityRef | null>(
     initialCommunity ?? null,
   );
-  // Browsing needs a staff principal: none exists in disabled-auth mode.
-  const canBrowse = canMutate;
   const { activeCommunity } = useCommunities();
   const connectedHost = useConnectedHost(activeCommunity?.relayUrl ?? "");
   const nav = {
-    open: canBrowse
-      ? (next: CommunityRef) => {
-          setCommunity(next);
-          setActiveTab("communities");
-        }
-      : null,
+    open: (next: CommunityRef) => {
+      setCommunity(next);
+      setActiveTab("communities");
+    },
     connectedHost,
   };
   const visibleTabs = new Set<Tab>([
     "reports",
     "feedback",
-    ...(canBrowse ? (["communities"] as Tab[]) : []),
+    "communities",
     ...(isOperator ? (["operators"] as Tab[]) : []),
   ]);
 
@@ -218,7 +214,6 @@ export function AdminConsolePanel({
             />
           )}
           {activeTab === "communities" &&
-            canBrowse &&
             (community ? (
               <CommunityPage
                 canMutate={canMutate}

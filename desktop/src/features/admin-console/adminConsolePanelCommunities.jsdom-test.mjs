@@ -259,7 +259,8 @@ test("community-badge: a report's badge opens its community, with a host-initial
   }
 });
 
-test("community-badge-disabled-auth: without a staff principal badges don't navigate", async () => {
+test("community-badge-disabled-auth: with admin auth disabled badges still open the community page", async () => {
+  // Mutation: gate the panel's nav.open on canMutate → RED (badge is a span).
   makeOpenReportFixtures("00000000-0000-0000-0000-0000000000a2", {
     communityId: TEST_COMMUNITY.id,
   });
@@ -272,7 +273,9 @@ test("community-badge-disabled-auth: without a staff principal badges don't navi
   await settle(30);
   try {
     const badge = q(panel.container, `community-badge-${TEST_COMMUNITY.host}`);
-    assert.equal(badge?.tagName, "SPAN");
+    assert.equal(badge?.tagName, "BUTTON");
+    await click(badge);
+    assert.ok(q(panel.container, "community-page"), "badge opens the page");
   } finally {
     await panel.unmount();
   }

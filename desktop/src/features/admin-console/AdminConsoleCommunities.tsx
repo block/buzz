@@ -251,6 +251,7 @@ export function CommunityPage({
       )}
       {section === "restrictions" && (
         <RestrictionsSection
+          canMutate={canMutate}
           communityHost={community.host}
           generation={generation}
           origin={origin}
