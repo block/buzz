@@ -100,6 +100,9 @@ policy = {'apiVersion' => 'networking.k8s.io/v1', 'kind' => 'NetworkPolicy',
           'spec' => {'podSelector' => {'matchLabels' => pod.dig('spec', 'selector', 'matchLabels').dup},
                      'policyTypes' => %w[Ingress Egress], 'ingress' => [], 'egress' => []}}
 File.write("#{ARGV[0]}/combined.yaml", (resources + [policy]).map(&:to_yaml).join)
+list = {'apiVersion' => 'v1', 'kind' => 'List', 'items' => [policy]}
+File.write("#{ARGV[0]}/list.yaml", (resources + [list]).map(&:to_yaml).join)
+File.write("#{ARGV[0]}/duplicate-list.yaml", (resources + [policy, list]).map(&:to_yaml).join)
 variants = {
   'hook-policy' => ->(p) { p['metadata']['annotations'] = {'helm.sh/hook' => 'pre-install', 'helm.sh/hook-delete-policy' => 'hook-succeeded'} },
   'misspelled' => ->(p) { p['metadata']['name'] = 'typo' },
@@ -120,7 +123,9 @@ gate <"$out/default.yaml" >"$out/gated.yaml"
 cmp "$out/default.yaml" "$out/gated.yaml"
 gate <"$out/combined.yaml" >"$out/gated.yaml"
 cmp "$out/combined.yaml" "$out/gated.yaml"
-for mutation in external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+gate <"$out/list.yaml" >"$out/gated.yaml"
+cmp "$out/list.yaml" "$out/gated.yaml"
+for mutation in duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
   if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
     echo "expected combined-render gate to reject $mutation" >&2
     exit 1
@@ -181,3 +186,30 @@ if gate <"$out/ruby-object.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
 fi
 test ! -s "$out/gated.yaml"
 grep -q 'DisallowedClass' "$out/gate-error"
+
+# Helm 3 excludes hooks from post-renderer stdin. The complete template stream
+# must reject a hook colliding with an otherwise valid ordinary replacement.
+mkdir -p "$out/parent/templates"
+printf 'apiVersion: v2\nname: policy-hook-fixture\nversion: 0.1.0\n' >"$out/parent/Chart.yaml"
+cp "$out/combined.yaml" "$out/parent/templates/runtime.yaml"
+cat >"$out/parent/templates/hook.yaml" <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-runtime
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+YAML
+if [[ $(helm version --short) == v3.* ]]; then
+  helm template push "$out/parent" --is-upgrade --post-renderer "$chart/tests/check-external-policy.rb" >"$out/post-rendered.yaml"
+fi
+if helm template push "$out/parent" --is-upgrade | gate >"$out/gated.yaml" 2>"$out/gate-error"; then
+  echo 'expected complete render to reject a hook collision' >&2
+  exit 1
+fi
+test ! -s "$out/gated.yaml"
+grep -q 'external policy' "$out/gate-error"

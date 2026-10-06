@@ -8,6 +8,15 @@ resources = YAML.parse_stream(input).children.map do |doc|
   stream.children << doc
   YAML.safe_load(stream.to_yaml, permitted_classes: [Date, Time], aliases: true)
 end.compact
+# Helm's Kubernetes builder recursively expands List objects before applying them.
+def flatten_resources(resource)
+  if resource.is_a?(Hash) && resource['apiVersion'] == 'v1' && resource['kind'] == 'List'
+    resource.fetch('items').flat_map { |item| flatten_resources(item) }
+  else
+    [resource]
+  end
+end
+resources = resources.flat_map { |resource| flatten_resources(resource) }
 annotation = 'buzz.block.xyz/external-network-policy'
 resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
   name = deployment.dig('metadata', 'annotations', annotation)

@@ -14,8 +14,24 @@ check: the parent must render and validate a policy selecting the runtime pods
 before deployment. Supplying a replacement name while the upstream policy is
 enabled is rejected. The migration NetworkPolicy remains enabled independently.
 
-External-policy releases must run `tests/check-external-policy.rb` as a Helm
-post-renderer on the **complete parent release**, before install or upgrade.
+External-policy releases must run `tests/check-external-policy.rb` on the
+**complete parent render including hooks**, before install or upgrade. Helm 3
+excludes hooks from its post-renderer input, so `--post-renderer` alone is not a
+sufficient gate. Render without `--no-hooks` or resource filtering, using the
+same chart, release name, namespace, values and capabilities as the deployment:
+
+```sh
+set -o pipefail
+helm template RELEASE PARENT_CHART --namespace NAMESPACE -f VALUES.yaml \
+  | ruby tests/check-external-policy.rb > validated-release.yaml
+```
+
+For upgrade preflight, include `--is-upgrade`. Deployment automation must stop if
+this pipeline fails and must not change the chart or rendering inputs between
+validation and deployment. Run the post-renderer additionally during Helm
+install/upgrade to check ordinary resources, but retain the full-render preflight
+to detect hook collisions. GitOps render pipelines must validate the complete
+hook-inclusive output before submitting it to their reconciler.
 The Deployment records the required policy name. The gate rejects a missing,
 misspelled, duplicate, wrong-namespace or non-selecting replacement, and requires
 both ingress and egress isolation. It emits no manifests on failure and preserves
