@@ -1128,10 +1128,9 @@ fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Resul
 
 async fn store_group_members_event(
     state: &Arc<AppState>,
-    channel_id: Uuid,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
 ) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
-    let group_id = channel_id.to_string();
+    let group_id = member_snapshot.channel_id().to_string();
     let tags = group_members_tags(&group_id, &member_snapshot.members)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1295,7 +1294,7 @@ pub async fn emit_group_discovery_events(
         .db
         .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
         .await?;
-    let stored_members = store_group_members_event(state, channel_id, &mut member_snapshot).await?;
+    let stored_members = store_group_members_event(state, &mut member_snapshot).await?;
     member_snapshot.release().await?;
     dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
@@ -3335,8 +3334,7 @@ pub async fn reconcile_large_channel_member_snapshots(
                 .lock_member_snapshot(candidate.community_id, channel_id, &relay_pubkey.to_bytes())
                 .await?;
             let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
-            let stored_members =
-                store_group_members_event(state, channel_id, &mut member_snapshot).await?;
+            let stored_members = store_group_members_event(state, &mut member_snapshot).await?;
             member_snapshot.release().await?;
             dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
             Ok::<bool, anyhow::Error>(true)

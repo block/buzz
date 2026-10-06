@@ -284,6 +284,11 @@ pub struct LockedMemberSnapshot {
 }
 
 impl LockedMemberSnapshot {
+    /// The channel whose membership lock this guard holds.
+    pub fn channel_id(&self) -> Uuid {
+        self.channel_id
+    }
+
     /// Return the newest relay-authored member snapshot timestamp for the
     /// locked coordinate, using this guard's existing connection.
     pub async fn latest_member_event_timestamp(&mut self) -> Result<Option<u64>> {
@@ -307,7 +312,9 @@ impl LockedMemberSnapshot {
     ) -> Result<(buzz_core::StoredEvent, bool)> {
         let community_id = self.tx.community();
         let channel_id = self.channel_id;
-        if event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice() {
+        if event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+            || crate::event::extract_d_tag(event) != Some(channel_id.to_string())
+        {
             return Err(DbError::InvalidData(
                 "member snapshot replacement does not match its locked coordinate".into(),
             ));
@@ -2954,6 +2961,20 @@ mod postgres_tests {
             ])
             .sign_with_keys(&relay_keys)
             .expect("sign roster");
+        let other_channel = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
+            .tags(vec![
+                nostr::Tag::parse(["d", &Uuid::new_v4().to_string()]).expect("d tag"),
+                nostr::Tag::parse(["p", &hex::encode(&owner), "", "owner"]).expect("p tag"),
+            ])
+            .sign_with_keys(&relay_keys)
+            .expect("sign roster for another channel");
+        assert!(
+            matches!(
+                snapshot.replace_member_event(&other_channel).await,
+                Err(DbError::InvalidData(_))
+            ),
+            "a roster whose d tag names another channel must not replace the locked one"
+        );
         let (_, inserted) = snapshot
             .replace_member_event(&event)
             .await
