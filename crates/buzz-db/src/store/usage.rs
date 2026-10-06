@@ -240,7 +240,12 @@ pub struct CommunityUserCounts {
 /// Return active (non-deactivated) user counts per community, split by type.
 ///
 /// Agent discriminator: `agent_owner_pubkey IS NOT NULL`.
-pub async fn user_counts(pool: &PgPool) -> Result<Vec<CommunityUserCounts>> {
+///
+/// `relay_pubkey` is the relay's own signing key. Its "`<host>` Moderation"
+/// kind-0 projects a `users` row like any publisher's so people search can
+/// find it, but the relay is not a user: the row is excluded so the gauge
+/// counts exactly what it did before that row existed.
+pub async fn user_counts(pool: &PgPool, relay_pubkey: &[u8]) -> Result<Vec<CommunityUserCounts>> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
     // Single GROUP BY query; two conditional SUMs avoid two round-trips.
@@ -252,9 +257,11 @@ pub async fn user_counts(pool: &PgPool) -> Result<Vec<CommunityUserCounts>> {
             COUNT(*) FILTER (WHERE agent_owner_pubkey IS NOT NULL) AS agent
         FROM users
         WHERE deactivated_at IS NULL
+          AND pubkey <> $1
         GROUP BY community_id
         "#,
     )
+    .bind(relay_pubkey)
     .fetch_all(&mut *connection)
     .await?;
 
@@ -465,9 +472,15 @@ pub struct CommunityActiveUsers {
 ///
 /// `interval_sql` must be a trusted literal (e.g. `"1 day"`, `"7 days"`) —
 /// it is not user-controlled; callers are in the relay process.
+///
+/// `relay_pubkey` is the relay's own signing key; see [`user_counts`]. Its
+/// `users` row is kept out of the join, so its events (moderation notices,
+/// its kind-0) classify as `unknown` exactly as they did before the relay had
+/// a row.
 pub async fn active_user_counts(
     pool: &PgPool,
     interval_sql: &'static str,
+    relay_pubkey: &[u8],
 ) -> Result<Vec<CommunityActiveUsers>> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
@@ -489,12 +502,14 @@ pub async fn active_user_counts(
         FROM events e
         LEFT JOIN users u
             ON u.community_id = e.community_id AND u.pubkey = e.pubkey
+           AND u.pubkey <> $1
         WHERE e.created_at >= NOW() - INTERVAL '{interval_sql}'
           AND e.deleted_at IS NULL
         GROUP BY e.community_id
         "#
     );
     let rows = sqlx::query_as::<_, (Uuid, i64, i64, i64)>(sqlx::AssertSqlSafe(sql))
+        .bind(relay_pubkey)
         .fetch_all(&mut *connection)
         .await?;
 
@@ -701,10 +716,11 @@ impl Db {
         community_count(&self.pool).await
     }
 
-    /// Return per-community user counts split by human/agent.
+    /// Return per-community user counts split by human/agent, excluding the
+    /// relay's own identity row (see [`user_counts`]).
     #[datastore_span(name = "usage_user_counts", system = "postgresql")]
-    pub async fn usage_user_counts(&self) -> Result<Vec<CommunityUserCounts>> {
-        user_counts(&self.pool).await
+    pub async fn usage_user_counts(&self, relay_pubkey: &[u8]) -> Result<Vec<CommunityUserCounts>> {
+        user_counts(&self.pool, relay_pubkey).await
     }
 
     /// Return per-community channel counts by type.
@@ -737,15 +753,17 @@ impl Db {
         git_repo_counts(&self.pool).await
     }
 
-    /// Return per-community distinct active-user counts for a given SQL interval.
+    /// Return per-community distinct active-user counts for a given SQL interval,
+    /// classifying the relay's own identity as `unknown` (see [`active_user_counts`]).
     ///
     /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
     #[datastore_span(name = "usage_active_user_counts", system = "postgresql")]
     pub async fn usage_active_user_counts(
         &self,
         interval_sql: &'static str,
+        relay_pubkey: &[u8],
     ) -> Result<Vec<CommunityActiveUsers>> {
-        active_user_counts(&self.pool, interval_sql).await
+        active_user_counts(&self.pool, interval_sql, relay_pubkey).await
     }
 
     /// Return per-community active-channel counts for a given SQL interval.
@@ -999,7 +1017,9 @@ mod postgres_tests {
         .await
         .expect("insert agent user b");
 
-        let counts = user_counts(&pool).await.expect("user_counts");
+        let counts = user_counts(&pool, &random_pubkey())
+            .await
+            .expect("user_counts");
 
         let a = counts.iter().find(|r| r.community_id == comm_a_uuid);
         let b = counts.iter().find(|r| r.community_id == comm_b_uuid);
@@ -1035,7 +1055,9 @@ mod postgres_tests {
         .await
         .expect("deactivate user");
 
-        let counts = user_counts(&pool).await.expect("user_counts");
+        let counts = user_counts(&pool, &random_pubkey())
+            .await
+            .expect("user_counts");
         let row = counts
             .iter()
             .find(|r| r.community_id == comm_uuid)
@@ -1293,7 +1315,7 @@ mod postgres_tests {
             .expect("insert event");
         }
 
-        let counts = active_user_counts(&pool, "1 day")
+        let counts = active_user_counts(&pool, "1 day", &random_pubkey())
             .await
             .expect("active_user_counts");
         let row = counts.iter().find(|r| r.community_id == comm_uuid);

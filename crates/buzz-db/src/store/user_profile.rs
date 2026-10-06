@@ -5,8 +5,10 @@
 //! `nip05_handle`, `metadata_event_id`) so people search can run over a small
 //! table instead of the events partitions. The projection is written inside
 //! the kind-0 replace transaction ([`Db::replace_profile_event`]) so an
-//! accepted profile and its `users` row commit or roll back together; the
-//! batched backfill here repopulates rows that predate that seam.
+//! accepted profile and its `users` row commit or roll back together, and
+//! un-projected inside the soft-delete transaction when the head itself is
+//! deleted ([`clear_profile_projection_for_deleted_head`]); the batched
+//! backfill here repopulates rows that predate that seam.
 
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
@@ -136,10 +138,11 @@ fn is_unique_violation(error: &DbError) -> bool {
 /// inside a savepoint so the violation cannot abort the surrounding event
 /// transaction. The conflict is then judged against the holder's current
 /// kind-0 head, not its row: a holder whose head still carries the handle
-/// keeps it and this row projects without it (NIP-05 resolution is
-/// identity-bearing, so a live claim is never displaced); a holder whose head
-/// no longer carries it — a row that predates the projection seam, or was
-/// left behind when its owner moved on — is stale and releases it, so the
+/// keeps it and this row projects with `nip05_handle = NULL` (NIP-05
+/// resolution is identity-bearing, so a live claim is never displaced, and
+/// the row never keeps a handle its head no longer claims); a holder whose
+/// head no longer carries it — a row that predates the projection seam, or
+/// was left behind when its owner moved on — is stale and releases it, so the
 /// claim lands in this pass instead of waiting for the holder to be
 /// re-projected and the claimant to be written again.
 pub(crate) async fn upsert_profile_in_transaction(
@@ -266,8 +269,15 @@ async fn upsert_profile_on(
     profile: &ProfileProjection,
     write_nip05: bool,
 ) -> Result<bool> {
+    // The row is the projection of the head and nothing else. A handle the
+    // head claims but this write may not take (`write_nip05 == false`, the
+    // contested case) is written as NULL, not left at whatever the row held
+    // before: that previous handle came from a head that no longer claims it,
+    // and keeping it would let `/.well-known/nostr.json` resolve it to a
+    // pubkey whose profile says otherwise.
+    let nip05_handle = profile.nip05_handle.as_deref().filter(|_| write_nip05);
     // `xmax = 0` on the returned row distinguishes INSERT from the UPDATE arm.
-    let sql = if write_nip05 {
+    let row = sqlx::query(
         "INSERT INTO users (community_id, pubkey, name, display_name, avatar_url, about, \
                             nip05_handle, metadata_event_id, updated_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) \
@@ -276,30 +286,57 @@ async fn upsert_profile_on(
              avatar_url = EXCLUDED.avatar_url, about = EXCLUDED.about, \
              nip05_handle = EXCLUDED.nip05_handle, \
              metadata_event_id = EXCLUDED.metadata_event_id, updated_at = NOW() \
-         RETURNING (xmax = 0) AS created"
-    } else {
-        "INSERT INTO users (community_id, pubkey, name, display_name, avatar_url, about, \
-                            nip05_handle, metadata_event_id, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, NULL, $8, NOW()) \
-         ON CONFLICT (community_id, pubkey) DO UPDATE SET \
-             name = EXCLUDED.name, display_name = EXCLUDED.display_name, \
-             avatar_url = EXCLUDED.avatar_url, about = EXCLUDED.about, \
-             nip05_handle = users.nip05_handle, \
-             metadata_event_id = EXCLUDED.metadata_event_id, updated_at = NOW() \
-         RETURNING (xmax = 0) AS created"
-    };
-    let row = sqlx::query(sql)
-        .bind(community_id.as_uuid())
-        .bind(pubkey)
-        .bind(profile.name.as_deref())
-        .bind(profile.display_name.as_deref())
-        .bind(profile.avatar_url.as_deref())
-        .bind(profile.about.as_deref())
-        .bind(profile.nip05_handle.as_deref())
-        .bind(profile.metadata_event_id.as_slice())
-        .fetch_one(conn)
-        .await?;
+         RETURNING (xmax = 0) AS created",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .bind(profile.name.as_deref())
+    .bind(profile.display_name.as_deref())
+    .bind(profile.avatar_url.as_deref())
+    .bind(profile.about.as_deref())
+    .bind(nip05_handle)
+    .bind(profile.metadata_event_id.as_slice())
+    .fetch_one(conn)
+    .await?;
     Ok(row.try_get::<bool, _>("created")?)
+}
+
+/// Un-project a pubkey's row when `deleted_head` — the kind-0 event its
+/// `metadata_event_id` points at — has just been soft-deleted (a NIP-09 kind-5
+/// on the author's own profile). Runs inside the caller's delete transaction,
+/// so the event and its projection leave together.
+///
+/// Only the head-bound columns clear: `metadata_event_id`, so the row leaves
+/// the `users`-backed search set and the precheck instead of taking a page
+/// slot that hydrates to nothing (`search_users` requires a projected head,
+/// and no live kind-0 exists to hydrate to), and `nip05_handle`, so the
+/// handle is free for its next claimant. `name`, `display_name`,
+/// `avatar_url`, and `about` are deliberately kept as the last-known profile:
+/// readers that label a pubkey (`channel_members`, `dm`, media attribution)
+/// keep showing a name rather than a bare hex key for messages that remain.
+///
+/// The `metadata_event_id = deleted_head` guard makes this a no-op when the
+/// deleted row is not the projected head — a stale duplicate, or a head a
+/// concurrent replace has already moved on from — so a later projection is
+/// never undone by an older row's deletion. Returns `true` when the row was
+/// cleared.
+pub(crate) async fn clear_profile_projection_for_deleted_head(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    deleted_head: &[u8],
+) -> Result<bool> {
+    let cleared = sqlx::query(
+        "UPDATE users SET metadata_event_id = NULL, nip05_handle = NULL, updated_at = NOW() \
+         WHERE community_id = $1 AND pubkey = $2 AND metadata_event_id = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .bind(deleted_head)
+    .execute(conn)
+    .await?
+    .rows_affected();
+    Ok(cleared == 1)
 }
 
 /// Each pubkey's current channel-less kind-0 head, resolved like the replace
@@ -699,11 +736,13 @@ mod postgres_tests {
         );
     }
 
-    /// A handle another user already holds is dropped from the projection
-    /// (the row keeps whatever handle it had) and the event is still accepted.
+    /// A handle another user's live head holds is not taken: the claimant
+    /// projects with `nip05_handle = NULL` — not the handle its row held from
+    /// a previous head, which this head no longer claims — and the event is
+    /// still accepted.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn replace_profile_event_keeps_existing_handle_when_nip05_is_contested() {
+    async fn replace_profile_event_projects_a_null_handle_when_nip05_is_contested() {
         let db = setup_db().await;
         let (community, host) = make_community(&db.pool).await;
         let holder = Keys::generate();
@@ -745,9 +784,9 @@ mod postgres_tests {
             "other fields still project"
         );
         assert_eq!(
-            row.4,
-            Some(format!("claimant@{host}")),
-            "the contested handle is not taken; the existing one is kept"
+            row.4, None,
+            "the contested handle is not taken, and the previous one is not kept: \
+             the current head claims neither"
         );
         assert_eq!(row.5, Some(contested.id.as_bytes().to_vec()));
         assert_eq!(
@@ -756,6 +795,122 @@ mod postgres_tests {
                 .and_then(|row| row.4),
             Some(format!("shared@{host}")),
             "the holder keeps the handle"
+        );
+    }
+
+    /// A kind-5 on the author's own head reaches
+    /// `soft_delete_event_and_update_thread`, which un-projects the row in the
+    /// delete transaction: `metadata_event_id` and `nip05_handle` clear, so
+    /// the pubkey leaves `search_users` and the precheck and the handle is
+    /// free for the next claimant, while the labels stay as last-known.
+    /// Deleting a live kind-0 that is *not* the projected head changes
+    /// nothing, and the author's next profile re-projects the row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn soft_deleting_the_head_clears_the_projection_and_releases_the_handle() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_bytes();
+
+        let head = kind0(
+            &keys,
+            &format!(
+                r#"{{"name":"wes","display_name":"Wes","picture":"https://a/p.png","about":"hi","nip05":"wes@{host}"}}"#
+            ),
+            1_700_000_010,
+        );
+        replace_profile(&db, community, &host, &head).await;
+
+        // A second live kind-0 for the same pubkey only exists as a historical
+        // anomaly (the replace path soft-deletes superseded rows), so store
+        // one directly to exercise the `metadata_event_id = deleted` guard.
+        let stray = kind0(&keys, r#"{"name":"stray"}"#, 1_700_000_005);
+        db.insert_event(community, &stray, None)
+            .await
+            .expect("insert the stray live kind-0");
+        assert!(db
+            .soft_delete_event_and_update_thread(community, stray.id.as_bytes(), None, None)
+            .await
+            .expect("delete the stray row"));
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey)
+                .await
+                .and_then(|row| row.5),
+            Some(head.id.as_bytes().to_vec()),
+            "deleting a row that is not the projected head leaves the projection alone"
+        );
+
+        assert!(db
+            .soft_delete_event_and_update_thread(community, head.id.as_bytes(), None, None)
+            .await
+            .expect("delete the head"));
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey).await,
+            Some((
+                Some("wes".into()),
+                Some("Wes".into()),
+                Some("https://a/p.png".into()),
+                Some("hi".into()),
+                None,
+                None,
+            )),
+            "head-bound columns clear; labels and avatar stay as last-known"
+        );
+        let hits = db
+            .search_users(
+                community,
+                &crate::SearchUsersParams {
+                    query: "wes",
+                    authors: None,
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .await
+            .expect("search users");
+        assert!(
+            hits.is_empty(),
+            "a row without a live head is not a search candidate: {hits:?}"
+        );
+        let after = precheck_for(&db, community).await;
+        assert_eq!(
+            (
+                after.kind0_publishers,
+                after.users_rows,
+                after.unprojected_publishers
+            ),
+            (0, 1, 0),
+            "no live head means nothing to project: {after:?}"
+        );
+
+        let claimant = Keys::generate();
+        replace_profile(
+            &db,
+            community,
+            &host,
+            &kind0(
+                &claimant,
+                &format!(r#"{{"name":"claimant","nip05":"wes@{host}"}}"#),
+                1_700_000_020,
+            ),
+        )
+        .await;
+        assert_eq!(
+            users_row(&db.pool, community, &claimant.public_key().to_bytes())
+                .await
+                .and_then(|row| row.4),
+            Some(format!("wes@{host}")),
+            "the released handle is free for the next claimant"
+        );
+        let again = kind0(&keys, r#"{"name":"wes again"}"#, 1_700_000_030);
+        replace_profile(&db, community, &host, &again).await;
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey)
+                .await
+                .and_then(|row| row.5),
+            Some(again.id.as_bytes().to_vec()),
+            "the author's next profile re-projects the row"
         );
     }
 

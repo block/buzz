@@ -434,6 +434,7 @@ mod tests {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use nostr::Keys;
 
     async fn precheck(state: &AppState, tenant: &TenantContext) -> (i64, i64, i64) {
         let row = state
@@ -525,5 +526,103 @@ mod postgres_tests {
             .await
             .expect("publish after restart");
         assert_eq!(precheck(&restarted, &tenant).await, (2, 2, 0));
+    }
+
+    /// One real user plus one moderation notice: the relay's projected
+    /// moderation profile gives it a `users` row, but the relay is not a user.
+    /// The adoption gauges count exactly what they did before that row
+    /// existed — one human, and the relay's own events as `unknown` — while
+    /// the precheck still sees every publisher projected.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn moderation_notice_does_not_count_the_relay_as_a_user() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let community_id = Uuid::new_v4();
+        let host = format!("moderation-usage-{}.example", community_id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+        let tenant = TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(community_id),
+            host.clone(),
+        );
+        let state = crate::state::tests::test_state_with_database_pool(pool).await;
+        let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+
+        // One human: an AUTH row plus a kind-0 head published now, so they
+        // count in both the stock and the 1-day active gauges.
+        let human = Keys::generate();
+        let human_pubkey = human.public_key().to_bytes();
+        state
+            .db
+            .ensure_user(tenant.community(), &human_pubkey)
+            .await
+            .expect("human users row");
+        let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"wes"}"#)
+            .sign_with_keys(&human)
+            .expect("sign kind-0");
+        state
+            .db
+            .replace_profile_event(
+                tenant.community(),
+                &profile,
+                &buzz_db::ProfileProjection::from_kind0_event(&profile, tenant.host()),
+            )
+            .await
+            .expect("human profile");
+
+        send_moderation_notice(
+            &tenant,
+            &state,
+            &human_pubkey,
+            ModerationNotice::ReportResolved {
+                report_id: Uuid::new_v4(),
+                status: "resolved".into(),
+                summary: "Thanks for the report.".into(),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("send moderation notice");
+        assert_eq!(
+            precheck(&state, &tenant).await,
+            (2, 2, 0),
+            "the human and the relay are both projected"
+        );
+
+        let users = state
+            .db
+            .usage_user_counts(&relay_pubkey)
+            .await
+            .expect("user counts");
+        let row = users
+            .iter()
+            .find(|row| row.community_id == community_id)
+            .expect("community in user counts");
+        assert_eq!(
+            (row.human, row.agent),
+            (1, 0),
+            "the relay's identity row is not a user"
+        );
+
+        let active = state
+            .db
+            .usage_active_user_counts("1 day", &relay_pubkey)
+            .await
+            .expect("active user counts");
+        let row = active
+            .iter()
+            .find(|row| row.community_id == community_id)
+            .expect("community in active counts");
+        assert_eq!(
+            (row.human, row.agent, row.unknown),
+            (1, 0, 1),
+            "the relay's own events classify as unknown, as they did before it had a row"
+        );
     }
 }

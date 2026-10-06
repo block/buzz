@@ -1573,10 +1573,11 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     let community_id = tx.community();
     use crate::store::replaceable::event_replacement_lock_key;
 
-    // Derive the target event's kind and channel_id inside the transaction so
-    // that the serialization decision cannot be bypassed by any caller.
-    let target: Option<(i32, Option<Uuid>)> = sqlx::query_as(
-        "SELECT kind, channel_id FROM events \
+    // Derive the target event's kind, channel_id, and pubkey inside the
+    // transaction so that the serialization decision cannot be bypassed by any
+    // caller.
+    let target: Option<(i32, Option<Uuid>, Vec<u8>)> = sqlx::query_as(
+        "SELECT kind, channel_id, pubkey FROM events \
          WHERE community_id = $1 AND id = $2",
     )
     .bind(community_id.as_uuid())
@@ -1585,17 +1586,17 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     .await?;
 
     // Relay-signed move removals are the source channel's only replay record.
-    if target.is_some_and(|(kind, _)| kind == 45011) {
+    if target.as_ref().is_some_and(|(kind, _, _)| *kind == 45011) {
         return Err(DbError::InvalidData(
             "artifact removal markers cannot be deleted".into(),
         ));
     }
 
-    if let Some((kind, Some(channel_id))) = target {
-        if kind == KIND_CANVAS as i32 {
+    if let Some((kind, Some(channel_id), _)) = &target {
+        if *kind == KIND_CANVAS as i32 {
             let lock_key = event_replacement_lock_key(
                 community_id,
-                kind,
+                *kind,
                 &[],
                 Some(channel_id.as_bytes().as_slice()),
             );
@@ -1606,7 +1607,10 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
         }
     }
 
-    let purged = if target.is_some_and(|(kind, _)| may_be_retention_free(kind)) {
+    let purged = if target
+        .as_ref()
+        .is_some_and(|(kind, _, _)| may_be_retention_free(*kind))
+    {
         purge_retention_free_events(tx, RetentionFreeTarget::Id(event_id)).await?
     } else {
         0
@@ -1627,6 +1631,19 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     if deleted {
         sqlx::query("UPDATE artifact_heads SET modified_at=clock_timestamp() WHERE community_id=$1 AND artifact_id=(SELECT artifact_id FROM artifact_revisions WHERE community_id=$1 AND event_id=$2) AND event_id=$2")
             .bind(community_id.as_uuid()).bind(event_id).execute(tx.conn()).await?;
+        // A user's kind-0 head is projected into `users` by the replace path;
+        // deleting it un-projects the row in this same transaction (a no-op
+        // unless this row is the projected head).
+        if let Some((0, None, pubkey)) = &target {
+            crate::store::user_profile::clear_profile_projection_for_deleted_head(
+                tx.conn(),
+                community_id,
+                pubkey,
+                event_id,
+            )
+            .await?;
+        }
+
         if let Some(pid) = parent_event_id {
             sqlx::query(
                 "UPDATE thread_metadata \

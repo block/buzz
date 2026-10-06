@@ -2938,16 +2938,27 @@ async fn emit_db_usage_metrics(
     // fresh/stale snapshot where later gauges retain their last value while
     // earlier ones are updated.
 
+    // The relay's own identity (its projected moderation profile) is not a user.
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
     let community_total = state.db.usage_community_count().await?;
-    let user_rows = state.db.usage_user_counts().await?;
+    let user_rows = state.db.usage_user_counts(&relay_pubkey).await?;
     let channel_rows = state.db.usage_channel_counts().await?;
     let message_rows = state.db.usage_message_counts().await?;
     let relay_member_rows = state.db.usage_relay_member_counts().await?;
     let workflow_rows = state.db.usage_workflow_counts().await?;
     let git_repo_rows = state.db.usage_git_repo_counts().await?;
-    let active_users_1d = state.db.usage_active_user_counts("1 day").await?;
-    let active_users_7d = state.db.usage_active_user_counts("7 days").await?;
-    let active_users_30d = state.db.usage_active_user_counts("30 days").await?;
+    let active_users_1d = state
+        .db
+        .usage_active_user_counts("1 day", &relay_pubkey)
+        .await?;
+    let active_users_7d = state
+        .db
+        .usage_active_user_counts("7 days", &relay_pubkey)
+        .await?;
+    let active_users_30d = state
+        .db
+        .usage_active_user_counts("30 days", &relay_pubkey)
+        .await?;
     let active_channels_1d = state.db.usage_active_channel_counts("1 day").await?;
     let active_channels_7d = state.db.usage_active_channel_counts("7 days").await?;
 

@@ -42,15 +42,27 @@ seam, including the relay's own "`<host>` Moderation" profile (re-published
 with every moderation notice), so the relay's own writes never add an
 unprojected publisher.
 
+A NIP-09 kind-5 that deletes the author's **current head** un-projects the row
+in the same transaction as the soft delete (`soft_delete_event_and_update_thread`,
+which every deletion path uses): `metadata_event_id` and `nip05_handle` are
+cleared, so the pubkey leaves the `users`-backed search set and the precheck
+(there is no live head to hydrate to) and the handle is free for its next
+claimant. `name`, `display_name`, `avatar_url`, and `about` are kept as the
+last-known profile so readers that label a pubkey keep showing a name for the
+messages that remain. Deleting a kind-0 that is not the projected head changes
+nothing; the author's next kind-0 re-projects the row.
+
 A NIP-05 handle another row already holds is written under a savepoint and
 then resolved against the **holder's current kind-0 head**, not its row. A
 holder whose head still carries the handle keeps it, and the new profile
-projects without it (NIP-05 resolution is identity-bearing, so a live claim is
-never displaced). A holder whose head no longer carries it — a row that
-predates this seam, or was left behind when its owner moved on — is stale and
-releases the handle, so the claim lands on the first write. The holder's head
-is read under the holder's own replace lock; a holder mid-replace is treated
-as contested and the claimant's next write or backfill pass picks it up.
+projects with `nip05_handle` NULL — never the handle its row held from an
+earlier head, which the current head no longer claims (NIP-05 resolution is
+identity-bearing, so a live claim is never displaced and a stale one is never
+served). A holder whose head no longer carries it — a row that predates this
+seam, or was left behind when its owner moved on — is stale and releases the
+handle, so the claim lands on the first write. The holder's head is read under
+the holder's own replace lock; a holder mid-replace is treated as contested and
+the claimant's next write or backfill pass picks it up.
 
 ## Semantics on the `users` path
 
@@ -92,6 +104,17 @@ matching what the FTS scope would have produced.
 Filters with any other `kinds`, or no `kinds`, and every search with the
 setting off, keep the FTS path in `buzz-search` unchanged.
 
+## The relay's own identity
+
+The relay's "`<host>` Moderation" kind-0 is projected like any other so people
+search finds it on both paths, but the relay is not a user. The adoption
+gauges (`buzz_community_users{type:human}` and the active-user counts) exclude
+the relay keypair's pubkey by value, so they report what they did before the
+row existed: the row is not counted, and the relay's own events classify as
+`unknown`. The exclusion is keyed on the running relay's key; a row left
+behind by a previous relay key (a rotated `BUZZ_RELAY_PRIVATE_KEY`) is an
+ordinary row to the gauges and would count as one human until it is removed.
+
 ## Rollout
 
 The row source must be complete before the switch flips, or people with a
@@ -127,11 +150,14 @@ kind-0 but no projected row vanish from search. The order is:
    without the handle and picks it up on its next publish or backfill pass.
    Moderation profiles published by builds that predate this seam are
    ordinary unprojected publishers and are projected like any other.
-4. **Re-run the precheck.** It should read `unprojected 0` for every
-   community after a single pass; a non-zero count means kind-0 heads landed
-   through a path that bypassed the projection (file a bug), not that another
-   pass is due. Relay traffic does not move the count either: its moderation
-   profile is projected when it is published.
+4. **Re-run the precheck.** `unprojected 0` means every head is projected
+   after the single pass; a non-zero count means kind-0 heads landed through
+   a path that bypassed the projection (file a bug). Relay traffic does not
+   move the count: its moderation profile is projected when it is published.
+   The precheck cannot see a handle lost to the mid-replace race in step 3
+   (that claimant's head *is* projected, just without its handle); a re-run
+   restores it and is otherwise a no-op over current heads, so a second pass
+   under live traffic is cheap and harmless, never required.
 5. **Enable** the setting on the relay (`BUZZ_PROFILE_SEARCH_USERS_TABLE=true`;
    in the Helm deployment, via `relay.extraEnv`) and restart.
 

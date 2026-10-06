@@ -4739,6 +4739,61 @@ mod profile_search_postgres_tests {
         );
     }
 
+    /// Setting on: a kind-5 on the author's own head, through the production
+    /// deletion seam (`handle_side_effects` → `handle_standard_deletion_event`
+    /// → `soft_delete_event_and_update_thread`), un-projects the row in the
+    /// delete transaction, so the pubkey leaves people search instead of
+    /// taking a page slot that hydrates to nothing. The labels stay on the
+    /// row as last-known.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn users_backed_search_drops_a_pubkey_whose_head_was_deleted() {
+        let fx = fixture(true).await;
+        let keys = Keys::generate();
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("wes-{unique}");
+        let head = fx
+            .publish_profile(&keys, &format!(r#"{{"name":"{name}"}}"#), 1_700_000_000)
+            .await;
+        let reader = Keys::generate();
+        assert_eq!(
+            fx.search_profiles(&reader, &name)
+                .await
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![head.id],
+            "the head is found before the deletion"
+        );
+
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([nostr::Tag::parse(["e", &head.id.to_hex()]).expect("e tag")])
+            .sign_with_keys(&keys)
+            .expect("sign kind-5");
+        crate::handlers::side_effects::handle_side_effects(&fx.tenant, 5, &deletion, &fx.state)
+            .await
+            .expect("kind-5 side effects");
+
+        let after = fx.search_profiles(&reader, &name).await;
+        assert!(
+            after.is_empty(),
+            "a pubkey without a live head must leave the users-backed search: {after:?}"
+        );
+        let row: Option<(Option<String>, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT name, metadata_event_id FROM users WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(fx.tenant.community().as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .fetch_optional(fx.state.db.pool())
+        .await
+        .expect("read users row");
+        assert_eq!(
+            row,
+            Some((Some(name), None)),
+            "the row keeps its last-known name and no longer points at a head"
+        );
+    }
+
     /// Setting off: the same data still goes through FTS, where the
     /// about-only profile matches on its `about` lexeme.
     #[tokio::test]
