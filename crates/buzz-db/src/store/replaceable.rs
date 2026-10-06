@@ -2164,6 +2164,54 @@ mod postgres_tests {
                 );
             }
         }
+
+        // A read-state-shaped row whose `d_tag` column was never backfilled:
+        // the purge predicate is NULL, which the triggers treat as false. The
+        // id path must still soft-delete it (the `COALESCE` in the generic
+        // soft delete), not silently skip it. Coordinate deletes key on
+        // `d_tag`, so only the id path can reach this row.
+        let null_d_tag_row = || async {
+            let (_, id, _) = store(
+                "nip-rs with NULL d_tag column",
+                nip_rs,
+                read_state_d.clone(),
+                vec![tag(&["d", &read_state_d]), t_read_state.clone()],
+            )
+            .await;
+            sqlx::query("UPDATE events SET d_tag = NULL WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(&id)
+                .execute(&db.pool)
+                .await
+                .expect("clear d_tag column");
+            id
+        };
+        if migration {
+            let id = null_d_tag_row().await;
+            sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(&id)
+                .execute(&db.pool)
+                .await
+                .expect("legacy soft delete");
+            assert_eq!(
+                state(id).await,
+                expected(false),
+                "NULL d_tag: trigger classification"
+            );
+        }
+        let id = null_d_tag_row().await;
+        assert!(
+            event::soft_delete_event_and_update_thread(&db.pool, community, &id, None, None)
+                .await
+                .expect("id delete"),
+            "NULL d_tag/Id: deletion must report success"
+        );
+        assert_eq!(
+            state(id).await,
+            expected(false),
+            "NULL d_tag/Id: app classification"
+        );
     }
 
     /// A coordinate deletion racing a NIP-RS replacement must never leave a

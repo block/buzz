@@ -3870,13 +3870,55 @@ async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
         }
     };
 
+    // Pin in-transaction indexing: the mention insert must run in the same
+    // top-level transaction that inserted the event row. A post-commit index
+    // runs in a later transaction, raises here, is logged as a warning, and
+    // leaves zero mentions.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION test_require_event_tx_mentions() RETURNS trigger AS $$ \
+         BEGIN \
+             IF NEW.community_id = '{}'::uuid AND NOT EXISTS ( \
+                 SELECT 1 FROM events \
+                 WHERE community_id = NEW.community_id AND id = NEW.event_id \
+                   AND xmin = pg_current_xact_id()::xid) THEN \
+                 RAISE EXCEPTION 'test: post-commit mention'; \
+             END IF; \
+             RETURN NEW; \
+         END; $$ LANGUAGE plpgsql",
+        community.as_uuid()
+    )))
+    .execute(&db.pool)
+    .await
+    .expect("create same-transaction mention function");
+    sqlx::query(
+        "CREATE TRIGGER trg_test_require_event_tx_mentions BEFORE INSERT ON event_mentions \
+         FOR EACH ROW EXECUTE FUNCTION test_require_event_tx_mentions()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install same-transaction mention trigger");
+
     let indexed = build("indexed");
-    let (_, inserted) = db
+    let result = db
         .insert_event_with_serving_write_guard(&lease, &indexed, None)
+        .await;
+
+    sqlx::query("DROP TRIGGER trg_test_require_event_tx_mentions ON event_mentions")
+        .execute(&db.pool)
         .await
-        .expect("guarded insert");
+        .expect("drop same-transaction mention trigger");
+    sqlx::query("DROP FUNCTION test_require_event_tx_mentions()")
+        .execute(&db.pool)
+        .await
+        .expect("drop same-transaction mention function");
+
+    let (_, inserted) = result.expect("guarded insert");
     assert!(inserted);
-    assert_eq!(counts(indexed.id.as_bytes().to_vec()).await, (1, 1));
+    assert_eq!(
+        counts(indexed.id.as_bytes().to_vec()).await,
+        (1, 1),
+        "mentions must be indexed in the event's own transaction"
+    );
 
     // Make mention indexing fail for this community only. Without the
     // savepoint the aborted statement poisons the event transaction and the
