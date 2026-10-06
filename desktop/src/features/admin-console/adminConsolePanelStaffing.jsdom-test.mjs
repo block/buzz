@@ -1,7 +1,7 @@
 /**
  * Staffing tab behavior tests for AdminConsolePanel. Covers operator
  * add/remove/role-change, display-name integration, self-removal callback,
- * dialog confirmation, canMutate gates, and tab reset on role downgrade.
+ * dialog confirmation, and tab reset on role downgrade.
  */
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
@@ -22,50 +22,11 @@ import {
   mountStaffingPanel,
   TEST_COMMUNITY,
   settle,
-  CM_ORIGIN,
-  CM_PUBKEY,
-  CM_OP_PUBKEY,
   TEST_RELAY_WS_URL,
   deferred,
 } from "./adminConsolePanelTestHelpers.jsdom.mjs";
 
 afterEach(resetTestState);
-
-test("canMutate-false-staffing: staffing add/remove absent in disabled mode", async () => {
-  // Mutation: remove {canMutate && …} guards on staffing add/remove → buttons render → RED.
-  setIpcHandler("admin_list_reports", () => Promise.resolve([]));
-  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
-  setIpcHandler("admin_list_operators", () =>
-    Promise.resolve([
-      { pubkey: CM_OP_PUBKEY, effectiveRole: "moderator", sources: ["db"] },
-    ]),
-  );
-  const { container, doRender, unmount } = mountPanel({
-    origin: CM_ORIGIN,
-    pubkey: CM_PUBKEY,
-    canMutate: false,
-    role: "operator",
-    initialTab: "operators",
-  });
-  try {
-    await doRender();
-    await settle(30);
-    assert.equal(
-      container.querySelector("[data-testid='staffing-add-btn']"),
-      null,
-      "staffing-add-btn must be absent when canMutate=false",
-    );
-    assert.equal(
-      container.querySelector(
-        `[data-testid='staffing-remove-btn-${CM_OP_PUBKEY}']`,
-      ),
-      null,
-      "staffing-remove-btn must be absent when canMutate=false",
-    );
-  } finally {
-    await unmount();
-  }
-});
 
 // ── P1: Staffing remove confirmation dialog ───────────────────────────────────
 //

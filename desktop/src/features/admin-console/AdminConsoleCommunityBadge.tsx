@@ -11,14 +11,14 @@ import { useAsyncLoad } from "./AdminConsolePanelHelpers";
 export type CommunityRef = { id: string; host: string; icon?: string | null };
 
 type CommunityNav = {
-  /** Opens a community's page; `null` when browsing is unavailable. */
-  open: ((community: CommunityRef) => void) | null;
+  /** Opens a community's page. */
+  open: (community: CommunityRef) => void;
   /** Host the active relay serves, resolved natively. */
   connectedHost: string | null;
 };
 
 export const CommunityNavContext = createContext<CommunityNav>({
-  open: null,
+  open: () => {},
   connectedHost: null,
 });
 
@@ -33,8 +33,8 @@ export function useConnectedHost(key: string): string | null {
 }
 
 /**
- * Host plus icon (or the host's first letter). Opens the community's page
- * when navigation is available; a row whose source community was purged
+ * Host plus icon (or the host's first letter). Opens the community's page;
+ * a row whose source community was purged
  * (`id` null) gets a non-navigable "community removed" badge.
  */
 export function CommunityBadge({
@@ -76,13 +76,6 @@ export function CommunityBadge({
       </span>
     </>
   );
-  if (!open) {
-    return (
-      <span className={base} data-testid={`community-badge-${host}`}>
-        {content}
-      </span>
-    );
-  }
   return (
     <button
       className={cn(base, "hover:bg-muted/50")}

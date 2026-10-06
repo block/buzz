@@ -132,7 +132,7 @@ export function CommunitiesTab({
       <button
         className="flex w-full items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-left text-sm hover:bg-muted/40"
         data-testid={`community-row-${c.host}`}
-        onClick={() => open?.(c)}
+        onClick={() => open(c)}
         type="button"
       >
         <span className="flex-1 truncate">{c.host}</span>

@@ -390,7 +390,7 @@ test("actions-disabled-auth: with admin auth disabled, community pages render re
 });
 
 test("actions-review-race: a late second Review never replaces the submitted intent", async () => {
-  // Mutation: drop the in-flight guard at the top of handleReview → RED
+  // Mutation: drop the in-flight guard in DirectActionsProvider.locked() → RED
   // (the second Review re-freezes with a new requestId and Retry sends it).
   // Relay reads answer at once while the page mounts, then are held from
   // the first Review on so the two Reviews race.

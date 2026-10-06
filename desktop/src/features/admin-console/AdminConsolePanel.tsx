@@ -229,7 +229,6 @@ export function AdminConsolePanel({
             ))}
           {activeTab === "operators" && isOperator && (
             <StaffingTab
-              canMutate={canMutate}
               origin={origin}
               pubkey={pubkey}
               generation={generation}
