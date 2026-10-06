@@ -996,9 +996,7 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
-            .await
-            .expect("mint bounded invite");
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1)).await;
         let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
@@ -1042,9 +1040,7 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
-            .await
-            .expect("mint bounded invite");
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1)).await;
         let hash = hash_v2_code(&invite.code);
 
         let (first_outcome, second_outcome) = tokio::join!(
@@ -1086,9 +1082,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let invite = mint_unrestricted_invite(&pool, community_a, "owner", 3600, Some(2))
-            .await
-            .expect("mint invite");
+        let invite = mint_unrestricted_invite(&pool, community_a, "owner", 3600, Some(2)).await;
         let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
@@ -1123,12 +1117,8 @@ mod postgres_tests {
     async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
-            .await
-            .expect("mint old invite");
-        let recent = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
-            .await
-            .expect("mint recent invite");
+        let old = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1)).await;
+        let recent = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1)).await;
         let cutoff = Utc::now() - chrono::Duration::days(30);
 
         sqlx::query("UPDATE relay_invites SET expires_at = $1 WHERE community_id = $2 AND id = $3")
@@ -1228,9 +1218,7 @@ mod postgres_tests {
     async fn unlimited_invites_count_each_new_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, None)
-            .await
-            .expect("mint unlimited invite");
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, None).await;
         let hash = hash_v2_code(&invite.code);
 
         for (expected_count, pubkey) in [(1, test_pubkey()), (2, test_pubkey())] {
@@ -1254,9 +1242,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let pubkey = test_pubkey();
-        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
-            .await
-            .expect("mint bounded invite");
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1)).await;
         let hash = hash_v2_code(&invite.code);
 
         let error = claim_relay_invite(&pool, community, &hash, &pubkey, Some("too-short"))
@@ -1356,12 +1342,8 @@ mod postgres_tests {
         let issuer_bytes = hex::decode(&issuer).expect("issuer hex");
         let actor = [42; 32];
 
-        let invite_a = mint_unrestricted_invite(&pool, community_a, &issuer, 3600, Some(1))
-            .await
-            .expect("mint tenant A invite");
-        let invite_b = mint_unrestricted_invite(&pool, community_b, &issuer, 3600, Some(1))
-            .await
-            .expect("mint tenant B invite");
+        let invite_a = mint_unrestricted_invite(&pool, community_a, &issuer, 3600, Some(1)).await;
+        let invite_b = mint_unrestricted_invite(&pool, community_b, &issuer, 3600, Some(1)).await;
         let hash_a = hash_v2_code(&invite_a.code);
         let hash_b = hash_v2_code(&invite_b.code);
 
@@ -1404,9 +1386,8 @@ mod postgres_tests {
             "unban must not restore the old invitation"
         );
 
-        let replacement = mint_unrestricted_invite(&pool, community_a, &issuer, 3600, Some(1))
-            .await
-            .expect("mint replacement after unban");
+        let replacement =
+            mint_unrestricted_invite(&pool, community_a, &issuer, 3600, Some(1)).await;
         assert!(matches!(
             claim_relay_invite(
                 &pool,
@@ -1500,9 +1481,8 @@ mod postgres_tests {
             MintOutcome::Minted(invite) => invite,
             MintOutcome::Restricted => panic!("unrestricted agent should mint"),
         };
-        let unrelated_invite = mint_unrestricted_invite(&pool, community, &issuer, 3600, Some(1))
-            .await
-            .expect("mint unrelated invite");
+        let unrelated_invite =
+            mint_unrestricted_invite(&pool, community, &issuer, 3600, Some(1)).await;
         let agent_hash = hash_v2_code(&agent_invite.code);
         let unrelated_hash = hash_v2_code(&unrelated_invite.code);
 
@@ -1584,9 +1564,7 @@ mod postgres_tests {
         let issuer_bytes = hex::decode(&issuer).expect("issuer hex");
         let actor = [44_u8; 32];
         let claimer = test_pubkey();
-        let invite = mint_unrestricted_invite(&pool, community, &issuer, 3600, Some(1))
-            .await
-            .expect("mint race invite");
+        let invite = mint_unrestricted_invite(&pool, community, &issuer, 3600, Some(1)).await;
         let token_hash = hash_v2_code(&invite.code);
 
         let mut ban_tx = pool.begin().await.expect("begin ban transaction");
