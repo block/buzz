@@ -1,6 +1,48 @@
 part of '../channel_detail_page_test.dart';
 
 void _loadingReviewTests() {
+  testWidgets(
+    'empty thread keeps its original message visible during loading',
+    (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final root = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Original message',
+      );
+      final query = Completer<List<NostrEvent>>();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          pendingThreadReplies: {'thread-root': query.future},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.longPress(find.text('Original message').hitTestable());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reply').hitTestable());
+      await tester.pumpAndSettle();
+
+      void expectOriginalVisible() {
+        final gate = find.byKey(const ValueKey('thread-initial-viewport-gate'));
+        expect(tester.widget<Opacity>(gate).opacity, 1);
+        expect(find.text('Original message').hitTestable(), findsOneWidget);
+      }
+
+      expectOriginalVisible();
+      await tester.pump(const Duration(seconds: 2));
+      expectOriginalVisible();
+      query.complete([]);
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        expectOriginalVisible();
+      }
+      expect(find.text('0 replies'), findsOneWidget);
+    },
+  );
+
   testWidgets('loaded page rebuild formats the timeline once', (tester) async {
     var transforms = 0;
     debugOnFormatTimeline = () => transforms++;

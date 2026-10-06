@@ -57,6 +57,7 @@ part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
+part 'thread_detail_page/read_state.dart';
 
 const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
@@ -285,9 +286,12 @@ class ThreadDetailPage extends HookConsumerWidget {
     final navigationBottomInset = composerDockHeight.value + settledImeLift;
     // Keep the route snapshot usable while the relay query is pending. Once
     // authoritative replies arrive, suppress only the frame(s) used to place
-    // the hydrated target, then reveal the settled viewport.
+    // the hydrated target. An ordinary empty thread has no target to place:
+    // keep its original message visible across hydration.
     final threadViewportVisible =
-        !relayRepliesAvailable || initialViewportReady.value;
+        !relayRepliesAvailable ||
+        (initialMessageId == null && replies.isEmpty) ||
+        initialViewportReady.value;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
@@ -685,22 +689,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry]);
-    final readState = ref.watch(readStateProvider);
-    final visibleReplyReadKey = replies
-        .map((reply) => '${reply.id}:${reply.createdAt}')
-        .join(',');
-
-    useEffect(() {
-      if (!readState.isReady || replies.isEmpty) return null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        for (final reply in replies) {
-          ref
-              .read(readStateProvider.notifier)
-              .markContextRead(msgContextKey(reply.id), reply.createdAt);
-        }
-      });
-      return null;
-    }, [threadHead.id, readState.isReady, visibleReplyReadKey]);
+    _useThreadReplyReadState(ref, threadHead.id, replies);
 
     // Thread-scoped typing indicators (exclude self).
     final allTyping = ref.watch(channelTypingProvider(channelId));
