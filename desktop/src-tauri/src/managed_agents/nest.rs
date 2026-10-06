@@ -60,13 +60,27 @@ const NEST_SKILL_VERSION: u32 = 7;
 /// Bump when changing `nest_memory_skill.md` to refresh existing installs.
 const NEST_MEMORY_SKILL_VERSION: u32 = 1;
 
-const BUNDLED_SKILLS: &[(&str, &str, u32)] = &[
-    ("buzz-cli", BUZZ_CLI_SKILL_MD, NEST_SKILL_VERSION),
-    (
-        "buzz-memory",
-        BUZZ_MEMORY_SKILL_MD,
-        NEST_MEMORY_SKILL_VERSION,
-    ),
+/// A skill template installed into every nest.
+struct BundledSkill {
+    /// Directory name under `.agents/skills`.
+    name: &'static str,
+    /// Embedded `SKILL.md` content.
+    template: &'static str,
+    /// Template version recorded in `.skill-version`.
+    version: u32,
+}
+
+const BUNDLED_SKILLS: &[BundledSkill] = &[
+    BundledSkill {
+        name: "buzz-cli",
+        template: BUZZ_CLI_SKILL_MD,
+        version: NEST_SKILL_VERSION,
+    },
+    BundledSkill {
+        name: "buzz-memory",
+        template: BUZZ_MEMORY_SKILL_MD,
+        version: NEST_MEMORY_SKILL_VERSION,
+    },
 ];
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
@@ -207,8 +221,8 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
 
     // Install each skill independently, including on existing nests whose
     // other skill templates are already current.
-    for &(name, content, _) in BUNDLED_SKILLS {
-        let agents_skill_dir = root.join(CANONICAL_SKILLS_DIR).join(name);
+    for skill in BUNDLED_SKILLS {
+        let agents_skill_dir = root.join(CANONICAL_SKILLS_DIR).join(skill.name);
         fs::create_dir_all(&agents_skill_dir)
             .map_err(|e| format!("create {}: {e}", agents_skill_dir.display()))?;
 
@@ -220,7 +234,7 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         {
             Ok(mut file) => {
                 use std::io::Write;
-                file.write_all(content.as_bytes())
+                file.write_all(skill.template.as_bytes())
                     .map_err(|e| format!("write {}: {e}", skill_md.display()))?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -237,8 +251,8 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
 
     // Refresh static content if the embedded template version is newer.
     refresh_agents_md_if_stale(root)?;
-    for &(name, content, version) in BUNDLED_SKILLS {
-        refresh_skill_md_if_stale(root, name, content, version)?;
+    for skill in BUNDLED_SKILLS {
+        refresh_skill_md_if_stale(root, skill)?;
     }
 
     // Set owner-only permissions on root and all subdirectories.
@@ -275,12 +289,13 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         // Skill directory trees inside root get 700.
         // Build the list from canonical path + all known provider skill dirs.
         let mut skill_perm_dirs = Vec::new();
-        for &(name, _, _) in BUNDLED_SKILLS {
-            let mut accumulated = std::path::PathBuf::new();
-            for component in Path::new(CANONICAL_SKILLS_DIR).join(name).components() {
-                accumulated.push(component);
-                skill_perm_dirs.push(root.join(&accumulated));
-            }
+        let mut accumulated = std::path::PathBuf::new();
+        for component in Path::new(CANONICAL_SKILLS_DIR).components() {
+            accumulated.push(component);
+            skill_perm_dirs.push(root.join(&accumulated));
+        }
+        for skill in BUNDLED_SKILLS {
+            skill_perm_dirs.push(root.join(CANONICAL_SKILLS_DIR).join(skill.name));
         }
         for skill_dir in known_skill_dirs() {
             // Ensure every ancestor dir gets 700, not just the leaf.
@@ -313,7 +328,8 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
     for skill_dir in known_skill_dirs() {
         let parent = root.join(skill_dir);
         fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        for &(name, _, _) in BUNDLED_SKILLS {
+        for skill in BUNDLED_SKILLS {
+            let name = skill.name;
             let link = parent.join(name);
             if link.symlink_metadata().is_ok() {
                 continue; // symlink or real path exists — skip
@@ -465,12 +481,12 @@ fn refresh_agents_md_if_stale(root: &Path) -> Result<(), String> {
 /// Refresh SKILL.md if the template version has changed.
 ///
 /// SKILL.md has no user-editable sections — it is fully overwritten on version bump.
-fn refresh_skill_md_if_stale(
-    root: &Path,
-    name: &str,
-    template: &str,
-    version: u32,
-) -> Result<(), String> {
+fn refresh_skill_md_if_stale(root: &Path, skill: &BundledSkill) -> Result<(), String> {
+    let BundledSkill {
+        name,
+        template,
+        version,
+    } = *skill;
     let agents_skill_dir = root.join(CANONICAL_SKILLS_DIR).join(name);
     let version_path = agents_skill_dir.join(".skill-version");
     if read_version_file(&version_path) >= version {

@@ -155,14 +155,14 @@ The [Agent Memory Repo file structure spec](https://github.com/AgentMemoryRepo/a
 
 Keep `core.profile` short: put context needed across sessions first, followed by an `## Index` heading with descriptive links to cold memories. Each cold memory remains a slug/value record, rather than a file. A `[[mem/projects/payments]]` link names the target slug in the same agent-owner namespace; readers resolve it to that record's current value using *Reading*. Descriptions stay outside the brackets, and file extensions or display-label syntax are not added to the slug.
 
-In memory text, write each entry as a bullet on one line, with optional metadata at the end in `[key: value; key: value]` form. Keys are open. Useful keys are `source`, identifying the conversation or artifact where the fact was learned, and `added`, the date saved as `YYYY-MM-DD`. Metadata stays inside the encrypted text, not public event tags; it is a text convention, not additional JSON body fields. An added date does not establish freshness or authority.
+In memory text, write each entry as a bullet on one line, with optional metadata at the end in `[key: value; key: value]` form. Keys are open. Useful keys are `source`, identifying the conversation or artifact where the fact was learned (in Buzz, a `buzz://message` link to the message that taught it), and `added`, the date saved as `YYYY-MM-DD`. Metadata stays inside the encrypted text, not public event tags; it is a text convention, not additional JSON body fields. An added date does not establish freshness or authority.
 
 For example, `core.profile` can contain:
 
 ```markdown
 # Memory
 
-- The owner prefers concise summaries. [source: https://example.com/sessions/100; added: 2026-10-06]
+- The owner prefers concise summaries. [source: buzz://message?channel=<channel-uuid>&id=<event-id>; added: 2026-10-06]
 
 ## Index
 - [[mem/team-structure]] — Team responsibilities and contacts.
@@ -172,7 +172,7 @@ For example, `core.profile` can contain:
 The value at `mem/projects/payments` can contain:
 
 ```markdown
-- Priya coordinates the billing launch; see [[mem/team-structure]]. [source: https://example.com/sessions/101; added: 2026-10-06]
+- Priya coordinates the billing launch; see [[mem/team-structure]]. [source: buzz://message?channel=<channel-uuid>&id=<event-id>; added: 2026-10-06]
 ```
 
 Keep facts in one place and link to them elsewhere. Preserve provenance and update affected links when reorganizing entries. Publish replacements and reference updates before tombstoning old targets. An index is a navigation aid, not an authoritative enumeration of every memory.

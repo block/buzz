@@ -21,9 +21,12 @@ use crate::relay::RestClient;
 ///
 /// Wording is from Tyler's brief: "No core memory found. Use `buzz mem`
 /// to create a core memory. Ask your user about yourself."
+/// It also points at the bundled `buzz-memory` skill, which explains the
+/// core index convention.
 pub const ONBOARDING_NUDGE: &str = "No core memory found. \
-Use `buzz mem set core \"…\"` to create one (it will hold your identity, \
-rules, and goals across sessions). Ask your user about yourself.";
+Load the `buzz-memory` skill, then use `buzz mem set core \"…\"` to create one \
+(it will hold your identity, rules, goals, and an index of cold memories across \
+sessions). Ask your user about yourself.";
 
 /// Build the rendered prompt section for the agent's core.
 ///

@@ -26,17 +26,18 @@ Put descriptive links to cold memories under that heading. The 65,535-byte
 serialized-body limit is a ceiling, not a target.
 
 Store durable detail by topic using hierarchical slugs such as
-`mem/team-structure` or `mem/projects/payments`. Save decisions, preferences,
-reusable findings, and lessons the owner would otherwise have to repeat.
-Skip transient task details and facts that are cheap to rediscover. Keep
-each fact in one place and link to it elsewhere.
+`mem/team-structure` or `mem/projects/payments`. Every slug other than `core`
+starts with `mem/`; the CLI adds the prefix when you omit it. Save
+decisions, preferences, reusable findings, and lessons the owner would
+otherwise have to repeat. Skip transient task details and facts that are
+cheap to rediscover. Keep each fact in one place and link to it elsewhere.
 
 Example `core` value:
 
 ```markdown
 # Memory
 
-- The owner prefers concise summaries. [source: https://example.com/sessions/100; added: 2026-10-06]
+- The owner prefers concise summaries. [source: buzz://message?channel=<channel-uuid>&id=<event-id>; added: 2026-10-06]
 
 ## Index
 - [[mem/team-structure]] — Team responsibilities and contacts.
@@ -47,23 +48,28 @@ Example `core` value:
 
 In prose notes, write each entry as a bullet on one line. Optional metadata
 goes at the end: `[key: value; key: value]`. Keys are open; use `source` for
-the conversation, artifact, or other evidence where the fact was learned,
-and `added` for the date saved (`YYYY-MM-DD`). Preserve source references
+the evidence where the fact was learned, and `added` for the date saved
+(`YYYY-MM-DD`). When a Buzz message taught you the fact, use its link,
+`buzz://message?channel=<channel-uuid>&id=<event-id>`, built from the
+`Channel` UUID and `Event ID` in that message's context; otherwise use a PR,
+issue, or file path. Open a message source with
+`buzz messages thread --link '<link>'` to check it. Preserve source references
 when editing. Do not invent sources; an added date does not establish that
 a fact is still current. Metadata belongs in the encrypted text value, not
 public event tags.
 
 Use `[[<slug>]]` to link to another memory's value, for example
-`[[mem/team-structure]]`. Use the full Buzz slug inside the brackets, with
-lowercase letters, digits, underscores, or hyphens in each path segment.
-These are memory addresses, not file paths: do not add `.md`, a display
-label, or the value inside the brackets. Put descriptions outside links.
+`[[mem/team-structure]]`. Use the full slug, including `mem/`, inside the
+brackets. Each path segment starts with a lowercase letter or digit, followed
+by lowercase letters, digits, underscores, or hyphens. These are memory
+addresses, not file paths: do not add `.md`, a display label, or the value
+inside the brackets. Put descriptions outside links.
 Read the linked value with `buzz mem get mem/team-structure`.
 
 Example cold memory value:
 
 ```markdown
-- Priya coordinates the billing launch; see [[mem/team-structure]]. [source: https://example.com/sessions/101; added: 2026-10-06]
+- Priya coordinates the billing launch; see [[mem/team-structure]]. [source: buzz://message?channel=<channel-uuid>&id=<event-id>; added: 2026-10-06]
 ```
 
 ## Read and save
@@ -73,7 +79,10 @@ Start with the core index and follow links relevant to the task. Use
 their values. A listing returns addresses, not values, and may be incomplete;
 a missing index entry or list result is not proof that a memory is absent.
 
-Create a new record with `buzz mem set <slug> <value>`. For multiline content,
+Create a new record with `buzz mem set <slug> <value>`. `set` replaces any
+existing value without a conflict check, so first confirm `buzz mem get <slug>`
+reports not found (exit code 1). Replacing an existing value is an edit and
+needs the same owner approval as a patch. For multiline content,
 pass real newline bytes through stdin to `buzz mem set <slug> -`. Confirm
 the write succeeded before adding its index link. Do not replace an existing
 memory merely because a read failed.
