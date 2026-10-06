@@ -397,6 +397,8 @@ test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
+    # Shared Huddle transport, codec, and loopback authentication regressions.
+    cargo test -p buzz-audio-client
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-audit --lib
