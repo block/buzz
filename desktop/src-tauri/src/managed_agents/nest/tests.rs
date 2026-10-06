@@ -141,29 +141,36 @@ fn ensure_nest_rejects_symlink_root() {
 
 #[test]
 fn ensure_nest_creates_skill_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join(".buzz");
-    ensure_nest_at(&root).unwrap();
+    for existing_cli in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        if existing_cli {
+            let cli_dir = root.join(".agents/skills/buzz-cli");
+            fs::create_dir_all(&cli_dir).unwrap();
+            fs::write(cli_dir.join("SKILL.md"), BUZZ_CLI_SKILL_MD).unwrap();
+            fs::write(
+                cli_dir.join(".skill-version"),
+                NEST_SKILL_VERSION.to_string(),
+            )
+            .unwrap();
+        }
+        ensure_nest_at(&root).unwrap();
 
-    // Canonical location under .agents.
-    let skill = root.join(".agents/skills/buzz-cli/SKILL.md");
-    assert!(skill.exists(), "SKILL.md should exist at .agents path");
-    let content = fs::read_to_string(&skill).unwrap();
-    assert_eq!(content, BUZZ_CLI_SKILL_MD);
+        for (name, expected) in [
+            ("buzz-cli", BUZZ_CLI_SKILL_MD),
+            ("buzz-memory", include_str!("../nest_memory_skill.md")),
+        ] {
+            let skill = root.join(".agents/skills").join(name).join("SKILL.md");
+            assert!(skill.exists(), "{name} should be installed");
+            assert_eq!(fs::read_to_string(&skill).unwrap(), expected);
 
-    // On unix, harness-specific symlinks should resolve to the canonical dir.
-    #[cfg(unix)]
-    {
-        for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
-            let link = root.join(dir).join("buzz-cli");
-            assert!(
-                link.symlink_metadata().unwrap().file_type().is_symlink(),
-                "{dir}/buzz-cli should be a symlink"
-            );
-            assert!(
-                link.join("SKILL.md").exists(),
-                "symlink at {dir}/buzz-cli should resolve to dir with SKILL.md"
-            );
+            // Read through each provider's discovery path, not just the canonical file.
+            #[cfg(unix)]
+            for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
+                let link = root.join(dir).join(name);
+                assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+                assert_eq!(fs::read_to_string(link.join("SKILL.md")).unwrap(), expected);
+            }
         }
     }
 }
@@ -174,11 +181,16 @@ fn ensure_nest_does_not_overwrite_skill_file() {
     let root = tmp.path().join(".buzz");
     ensure_nest_at(&root).unwrap();
 
-    let skill = root.join(".agents/skills/buzz-cli/SKILL.md");
-    fs::write(&skill, "custom skill content").unwrap();
+    for name in ["buzz-cli", "buzz-memory"] {
+        let skill = root.join(".agents/skills").join(name).join("SKILL.md");
+        fs::write(&skill, "custom skill content").unwrap();
+    }
 
     ensure_nest_at(&root).unwrap();
-    assert_eq!(fs::read_to_string(&skill).unwrap(), "custom skill content");
+    for name in ["buzz-cli", "buzz-memory"] {
+        let skill = root.join(".agents/skills").join(name).join("SKILL.md");
+        assert_eq!(fs::read_to_string(&skill).unwrap(), "custom skill content");
+    }
 }
 
 #[cfg(unix)]
@@ -194,6 +206,7 @@ fn ensure_nest_skill_dir_has_700_permissions() {
         ".agents",
         ".agents/skills",
         ".agents/skills/buzz-cli",
+        ".agents/skills/buzz-memory",
         ".goose",
         ".goose/skills",
         ".claude",
@@ -286,24 +299,22 @@ fn ensure_skill_symlinks_are_idempotent() {
     ensure_nest_at(&root).unwrap();
     // All symlinks still valid and point to relative targets.
     for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
-        let link = root.join(dir).join("buzz-cli");
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert!(
-            link.join("SKILL.md").exists(),
-            "symlink at {dir}/buzz-cli should resolve to dir with SKILL.md"
-        );
-        let target = fs::read_link(&link).unwrap();
-        assert_eq!(
-            target.to_str().unwrap(),
-            format!("../../{CANONICAL_SKILL_DIR}"),
-            "symlink at {dir}/buzz-cli should use relative target"
-        );
+        for name in ["buzz-cli", "buzz-memory"] {
+            let link = root.join(dir).join(name);
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+            assert!(link.join("SKILL.md").exists());
+            assert_eq!(
+                fs::read_link(&link).unwrap(),
+                PathBuf::from(format!("../../{CANONICAL_SKILLS_DIR}/{name}")),
+                "symlink at {dir}/{name} should use relative target"
+            );
+        }
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn ensure_skill_symlinks_skips_existing_path_during_initial_pass() {
+fn ensure_nest_migrates_legacy_cli_and_preserves_custom_memory_skill() {
     // ensure_skill_symlinks skips any path where symlink_metadata succeeds.
     // However, refresh_skill_md_if_stale (called after ensure_skill_symlinks)
     // migrates pre-existing real directories at .claude/skills/buzz-cli to
@@ -316,6 +327,17 @@ fn ensure_skill_symlinks_skips_existing_path_during_initial_pass() {
     fs::create_dir_all(&real_dir).unwrap();
     // Place SKILL.md so migration preserves it.
     fs::write(real_dir.join("SKILL.md"), "custom skill content").unwrap();
+
+    // Memory has no historical Buzz layout to migrate. Preserve an installed
+    // skill's supporting files along with its entry point.
+    let memory_dir = root.join(".claude/skills/buzz-memory");
+    fs::create_dir_all(memory_dir.join("references")).unwrap();
+    fs::write(memory_dir.join("SKILL.md"), "See references/custom.md").unwrap();
+    fs::write(
+        memory_dir.join("references/custom.md"),
+        "custom memory guide",
+    )
+    .unwrap();
 
     ensure_nest_at(&root).unwrap();
 
@@ -333,6 +355,19 @@ fn ensure_skill_symlinks_skips_existing_path_during_initial_pass() {
     assert_eq!(
         fs::read_to_string(&canonical).unwrap(),
         "custom skill content"
+    );
+    assert!(memory_dir.symlink_metadata().unwrap().file_type().is_dir());
+    assert_eq!(
+        fs::read_to_string(memory_dir.join("SKILL.md")).unwrap(),
+        "See references/custom.md"
+    );
+    assert_eq!(
+        fs::read_to_string(memory_dir.join("references/custom.md")).unwrap(),
+        "custom memory guide"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".agents/skills/buzz-memory/SKILL.md")).unwrap(),
+        include_str!("../nest_memory_skill.md")
     );
 }
 
@@ -490,8 +525,19 @@ fn refresh_skill_md_writes_version_file() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
     ensure_nest_at(&root).unwrap();
-    let version = fs::read_to_string(root.join(".agents/skills/buzz-cli/.skill-version")).unwrap();
-    assert_eq!(version.trim(), NEST_SKILL_VERSION.to_string());
+    for (name, expected) in [
+        ("buzz-cli", NEST_SKILL_VERSION),
+        ("buzz-memory", NEST_MEMORY_SKILL_VERSION),
+    ] {
+        let path = root
+            .join(".agents/skills")
+            .join(name)
+            .join(".skill-version");
+        assert_eq!(
+            fs::read_to_string(path).unwrap().trim(),
+            expected.to_string()
+        );
+    }
 }
 
 #[test]
@@ -551,21 +597,32 @@ fn refresh_skips_when_version_current() {
 
 #[test]
 fn refresh_skill_overwrites_on_version_bump() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join(".buzz");
-    ensure_nest_at(&root).unwrap();
+    for (stale_name, expected, current_name) in [
+        ("buzz-cli", BUZZ_CLI_SKILL_MD, "buzz-memory"),
+        ("buzz-memory", BUZZ_MEMORY_SKILL_MD, "buzz-cli"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        ensure_nest_at(&root).unwrap();
 
-    let skill_md = root.join(".agents/skills/buzz-cli/SKILL.md");
-    fs::write(&skill_md, "stale skill content").unwrap();
+        let stale_dir = root.join(".agents/skills").join(stale_name);
+        let current_skill = root
+            .join(".agents/skills")
+            .join(current_name)
+            .join("SKILL.md");
+        fs::write(stale_dir.join("SKILL.md"), "stale skill content").unwrap();
+        fs::write(&current_skill, "custom current content").unwrap();
+        fs::write(stale_dir.join(".skill-version"), "0\n").unwrap();
 
-    // Remove version file to simulate upgrade.
-    let _ = fs::remove_file(root.join(".agents/skills/buzz-cli/.skill-version"));
+        ensure_nest_at(&root).unwrap();
 
-    ensure_nest_at(&root).unwrap();
-
-    let content = fs::read_to_string(&skill_md).unwrap();
-    assert_eq!(
-        content, BUZZ_CLI_SKILL_MD,
-        "SKILL.md must be refreshed on version bump"
-    );
+        assert_eq!(
+            fs::read_to_string(stale_dir.join("SKILL.md")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(current_skill).unwrap(),
+            "custom current content"
+        );
+    }
 }

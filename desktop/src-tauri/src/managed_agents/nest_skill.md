@@ -3,7 +3,7 @@ name: buzz-cli
 description: >
   Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
   channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
-  uploads, and agent memory.
+  and uploads. For persistent memory, use the bundled buzz-memory skill.
 version: 1
 ---
 
@@ -127,8 +127,6 @@ buzz messages send --channel <UUID> \
 4. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
 5. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
-7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
-8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
 
 ## Forum Posts
 
@@ -149,19 +147,12 @@ Message content is rendered as GitHub-flavored Markdown on both desktop and mobi
 - **Mentions**: plain `@name` — do NOT bold or italicize (formatting prevents alert delivery).
 - **Links, images, tables, blockquotes, headings**: standard GFM.
 
-## Mem Patch Workflow
+## Agent Memory
 
-For safe concurrent writes, use hash-based conflict detection:
-
-```bash
-HASH=$(buzz mem hash <slug>)                                    # 1. get current SHA-256
-# ... build unified diff ...
-buzz mem patch <slug> --base-hash "$HASH" --patch-file diff.patch  # 2. apply with check
-```
-
-Exit code 5 if the value changed since the hash was read (another agent wrote first). Retry by re-reading, re-diffing, and re-patching.
-
-Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit empty result after patch.
+Load the bundled `buzz-memory` skill when recalling past decisions or preferences,
+saving lessons, or editing and organizing persistent memory. Its canonical file
+is `.agents/skills/buzz-memory/SKILL.md` in the workspace. It covers `buzz mem`
+operations, the core index, metadata, cross-links, and hash-checked patches.
 
 ## Catching Up
 
