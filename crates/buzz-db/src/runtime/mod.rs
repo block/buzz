@@ -13,7 +13,7 @@ use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder};
+use sqlx::{Acquire, PgPool, QueryBuilder};
 use std::time::Duration;
 use uuid::Uuid;
 
