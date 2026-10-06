@@ -391,11 +391,15 @@ impl Db {
             channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
         );
 
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            observability::TransactionOperation::ReplaceAddressableEvent,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer = observability::TransactionTimer::start(
+            observability::TransactionOperation::ReplaceAddressableEvent,
+        );
 
         transaction_timer
             .observe(async {
@@ -556,11 +560,14 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            TransactionOperation::ReplaceParameterizedEvent,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer =
+            observability::TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
         transaction_timer
             .observe(async {
                 let result = self
@@ -999,6 +1006,111 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn replaceable_writes_fail_closed_when_community_is_fenced() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let store = db.deletion_store();
+        let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("load community host");
+        let submitted = store
+            .submit(&host, "test-operator", Some("replaceable fence regression"))
+            .await
+            .expect("submit deletion request");
+        let empty_digest = crate::deletion::KeyStreamDigest::new().finish().0;
+        let empty_storage = crate::deletion::StorageManifest {
+            version: 4,
+            prefixes: vec![
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_meta/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_uploads/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("repos/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest,
+                },
+            ],
+        };
+        let inventory = crate::deletion::FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("inventory schema"),
+            storage: empty_storage,
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "test-approver", Some("approved"))
+            .await
+            .expect("approve request");
+        let claim = store
+            .claim_specific(
+                request.id,
+                "test-executor",
+                crate::deletion::DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("claim request")
+            .expect("claim winner");
+        store
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("begin quiescing");
+        store.fence(&claim.lease).await.expect("fence community");
+
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+        let addressable = EventBuilder::new(Kind::Custom(0), "fenced-addressable")
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign addressable event");
+        let addressable_error = db
+            .replace_addressable_event(community, &addressable, None)
+            .await
+            .expect_err("fenced community must reject addressable replacement");
+        assert!(
+            matches!(&addressable_error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {addressable_error:#}"
+        );
+
+        let d_tag = format!("read-state:{}", "f".repeat(32));
+        let parameterized = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "fenced-parameterized",
+        )
+        .tags(vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")])
+        .custom_created_at(Timestamp::from(base + 1))
+        .sign_with_keys(&keys)
+        .expect("sign parameterized event");
+        let parameterized_error = db
+            .replace_parameterized_event(community, &parameterized, &d_tag, None)
+            .await
+            .expect_err("fenced community must reject parameterized replacement");
+        assert!(
+            matches!(&parameterized_error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {parameterized_error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn migration_schema_nip_rs_transaction_operation_restores_hard_delete_opt_in() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -1039,7 +1151,7 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let result = db
@@ -1110,7 +1222,7 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin replacement tx");
         let outcome = db
@@ -1146,7 +1258,7 @@ mod postgres_tests {
         assert_eq!(live_id, old.id.as_bytes().to_vec());
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin stale revision tx");
         let mismatch = db
@@ -1180,7 +1292,7 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign missing project");
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin missing revision tx");
         let missing_result = db
@@ -1258,7 +1370,7 @@ mod postgres_tests {
         .expect("install failure injection");
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let error = db
@@ -1339,7 +1451,7 @@ mod postgres_tests {
             .expect("soft-delete duplicate row");
 
         let mut seed_tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin seed transaction");
         let (_, was_inserted) =
@@ -1350,7 +1462,7 @@ mod postgres_tests {
         seed_tx.commit().await.expect("commit older live head");
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let result = db

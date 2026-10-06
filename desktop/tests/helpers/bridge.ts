@@ -611,6 +611,10 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  /** Delay (ms) before `discover_agent_models` settles. */
+  discoverAgentModelsDelayMs?: number;
+  /** Config surface returned for every agent instead of the per-runtime mocks. */
+  agentConfigSurface?: Record<string, unknown>;
   /** ACP commands returned by `discover_acp_commands`. Defaults to `[]`. */
   acpCommands?: Array<{ command: string; binaryPath: string }>;
   /**

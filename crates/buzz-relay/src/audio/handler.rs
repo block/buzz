@@ -3050,8 +3050,12 @@ async fn commit_participant_join(
         })?;
     let event_id_hex = event.id.to_hex();
 
-    // 2. Begin a caller-owned DB transaction.
-    let mut tx = state.db.begin_event_write_transaction().await?;
+    // 2. Begin a caller-owned DB transaction admitted for this community,
+    //    before any channel-row or huddle-link lock below.
+    let mut tx = state
+        .db
+        .begin_event_write_transaction(tenant.community())
+        .await?;
 
     // 3. Archive re-check (ALL paths): re-read archived_at inside the
     //    transaction before any write, taking a row-level write lock
@@ -7758,6 +7762,112 @@ mod tests {
                 row_count, 0,
                 "F2a: no 48101 row must be committed into an archived channel; found {row_count}"
             );
+        }
+
+        /// A quiescing community rejects the 48101 join at transaction entry,
+        /// before the channels-row lock the join takes next.
+        ///
+        /// A second transaction holds that row lock for the whole call. If the
+        /// join took the row lock (or any write) before community admission,
+        /// it would queue behind the holder and the bounded call would time
+        /// out instead of returning the admission rejection.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn quiescing_community_rejects_join_at_admission_before_channel_row_lock() {
+            use chrono::{Duration, Utc};
+            use uuid::Uuid;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
+            let community_id = tenant.community();
+
+            // Quiesce inside the deletion executor's scope; the database
+            // rejects ad-hoc lifecycle changes outside it.
+            let mut quiesce = pool.begin().await.expect("begin quiesce");
+            sqlx::query(
+                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                 set_config('buzz.deletion_fence_generation', \
+                     (SELECT deletion_fence_generation::text FROM communities WHERE id = $2), true)",
+            )
+            .bind(community_id.to_string())
+            .bind(community_id.as_uuid())
+            .execute(&mut *quiesce)
+            .await
+            .expect("enter deletion executor scope");
+            sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+                .bind(community_id.as_uuid())
+                .execute(&mut *quiesce)
+                .await
+                .expect("quiesce community");
+            quiesce.commit().await.expect("commit quiesce");
+
+            let mut holder = pool.begin().await.expect("begin row-lock holder");
+            sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR UPDATE")
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .execute(&mut *holder)
+                .await
+                .expect("hold channels row lock");
+
+            let member_bytes = member_key.public_key().to_bytes().to_vec();
+            let member_hex = member_key.public_key().to_hex();
+            let membership = MembershipAdmission::Existing {
+                parent_channel_id: channel_id,
+            };
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                Utc::now() + Duration::hours(1),
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let room = std::sync::Arc::new(crate::audio::room::Room::new(
+                tenant.community(),
+                channel_id,
+            ));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                commit_participant_join(
+                    &state,
+                    &tenant,
+                    channel_id,
+                    channel_id,
+                    &member_hex,
+                    &member_bytes,
+                    Uuid::new_v4(),
+                    0u8,
+                    0u8,
+                    1u64,
+                    "1",
+                    &membership,
+                    &gate,
+                    &room,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("admission must reject before waiting on the channels row lock");
+            holder.rollback().await.expect("release channels row lock");
+
+            assert!(
+                matches!(
+                    &result,
+                    Err(JoinCommitError::Db(buzz_db::DbError::AccessDenied(message)))
+                        if message.contains("write-fenced (quiescing)")
+                ),
+                "a quiescing community must reject the join at admission; got: {result:?}"
+            );
+            let row_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM events \
+                 WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .expect("row count query");
+            assert_eq!(row_count, 0, "a rejected join must persist no 48101 row");
         }
 
         /// F2b: join holds the FOR UPDATE lock (Existing path) — concurrent

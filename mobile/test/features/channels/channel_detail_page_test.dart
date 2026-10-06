@@ -568,7 +568,7 @@ void main() {
               };
               final keys = [
                 first,
-                second.toUpperCase(),
+                second,
                 sibling,
                 if (bystander != null) 'd' * 64,
               ];
@@ -4003,6 +4003,62 @@ void main() {
       expect(summaryText.maxLines, 2);
       expect(summaryText.overflow, TextOverflow.ellipsis);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('channel catch-up hides the oldest unread jump', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      // The channel mark is older than msg21, but the web app's catch-up
+      // mark covers it.
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020, 'activity:$_channelId': 1039},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
     });
 
     testWidgets('jumps to the oldest unread with compact inverse controls', (

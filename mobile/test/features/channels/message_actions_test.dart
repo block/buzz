@@ -4,7 +4,9 @@ import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
 
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
@@ -30,6 +32,7 @@ TimelineMessage _message({
   int createdAt = 1000,
   bool isSystem = false,
   String? rootId,
+  List<List<String>> tags = const [],
 }) => TimelineMessage(
   id: id,
   pubkey: pubkey,
@@ -37,7 +40,25 @@ TimelineMessage _message({
   content: 'hello world',
   isSystem: isSystem,
   rootId: rootId,
+  tags: tags,
 );
+
+final _listedChannel = Channel(
+  id: _channelId,
+  name: 'general',
+  channelType: 'stream',
+  visibility: 'open',
+  description: '',
+  createdBy: 'creator',
+  createdAt: DateTime(2026),
+  memberCount: 2,
+  isMember: true,
+);
+
+class _ListedChannelsNotifier extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [_listedChannel];
+}
 
 class _FakeReadStateNotifier extends ReadStateNotifier {
   final ReadStateState _initialState;
@@ -120,6 +141,8 @@ Future<void> _pumpSheet(
   ReminderService? reminderService,
   Rect? anchorRect,
   bool nativePresentation = false,
+  String? currentPubkey = 'self',
+  bool listChannel = false,
 }) async {
   Future<void>? presentation;
   await tester.pumpWidget(
@@ -136,33 +159,40 @@ Future<void> _pumpSheet(
         // No signing identity → "Remind me" hidden by default; individual
         // tests opt in by passing a stub service.
         reminderServiceProvider.overrideWithValue(reminderService),
+        if (listChannel)
+          channelsProvider.overrideWith(_ListedChannelsNotifier.new),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
         home: Scaffold(
           body: Consumer(
-            builder: (context, ref, _) => TextButton(
-              onPressed: () => presentation = showMessageActions(
-                context: context,
-                ref: ref,
-                message: message,
-                channelId: _channelId,
-                canManageMessage: canManageMessage,
-                anchorRect: anchorRect,
-                captureAnchorSnapshot: nativePresentation
-                    ? _testMessageSnapshot
-                    : null,
-                allMessages: allMessages,
-                currentPubkey: 'self',
-                isMember: true,
-              ),
-              child: const Text('open'),
-            ),
+            builder: (context, ref, _) {
+              // The channel page keeps the channel list alive.
+              if (listChannel) ref.watch(channelsProvider);
+              return TextButton(
+                onPressed: () => presentation = showMessageActions(
+                  context: context,
+                  ref: ref,
+                  message: message,
+                  channelId: _channelId,
+                  canManageMessage: canManageMessage,
+                  anchorRect: anchorRect,
+                  captureAnchorSnapshot: nativePresentation
+                      ? _testMessageSnapshot
+                      : null,
+                  allMessages: allMessages,
+                  currentPubkey: currentPubkey,
+                  isMember: true,
+                ),
+                child: const Text('open'),
+              );
+            },
           ),
         ),
       ),
     ),
   );
+  if (listChannel) await tester.pump();
   if (nativePresentation) {
     await tester.runAsync(() async {
       await tester.tap(find.text('open'));
@@ -242,40 +272,46 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   bool launcherOnNestedRoute = false,
   ChannelActions Function(Ref ref)? createChannelActions,
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
+  String? currentPubkey = 'self',
+  bool listChannel = false,
 }) async {
   final sourceHidden = ValueNotifier(false);
 
   Widget launcherPage() => Scaffold(
     key: const ValueKey('message-actions-underlying-page'),
     body: Consumer(
-      builder: (context, ref, _) => Column(
-        children: [
-          if (composerFocusNode != null)
-            TextField(focusNode: composerFocusNode),
-          TextButton(
-            key: const ValueKey('open-message-actions-popover'),
-            onPressed: () => showMessageActions(
-              context: context,
-              ref: ref,
-              message: message,
-              channelId: _channelId,
-              canManageMessage: canManageMessage,
-              allMessages: allMessages,
-              currentPubkey: 'self',
-              isMember: true,
-              anchorRect: anchorRect,
-              captureAnchorSnapshot:
-                  captureAnchorSnapshot ?? _testMessageSnapshot,
-              onPopoverPreviewVisibilityChanged: (visible) =>
-                  sourceHidden.value = visible,
-              onPopoverDismissed: () => sourceHidden.value = false,
-              composerFocusNode: composerFocusNode,
-              restoreComposerFocus: composerFocusNode?.requestFocus,
+      builder: (context, ref, _) {
+        // The channel page keeps the channel list alive.
+        if (listChannel) ref.watch(channelsProvider);
+        return Column(
+          children: [
+            if (composerFocusNode != null)
+              TextField(focusNode: composerFocusNode),
+            TextButton(
+              key: const ValueKey('open-message-actions-popover'),
+              onPressed: () => showMessageActions(
+                context: context,
+                ref: ref,
+                message: message,
+                channelId: _channelId,
+                canManageMessage: canManageMessage,
+                allMessages: allMessages,
+                currentPubkey: currentPubkey,
+                isMember: true,
+                anchorRect: anchorRect,
+                captureAnchorSnapshot:
+                    captureAnchorSnapshot ?? _testMessageSnapshot,
+                onPopoverPreviewVisibilityChanged: (visible) =>
+                    sourceHidden.value = visible,
+                onPopoverDismissed: () => sourceHidden.value = false,
+                composerFocusNode: composerFocusNode,
+                restoreComposerFocus: composerFocusNode?.requestFocus,
+              ),
+              child: const Text('open message actions'),
             ),
-            child: const Text('open message actions'),
-          ),
-        ],
-      ),
+          ],
+        );
+      },
     ),
   );
 
@@ -293,6 +329,8 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
         reminderServiceProvider.overrideWithValue(reminderService),
         if (createChannelActions != null)
           channelActionsProvider.overrideWith(createChannelActions),
+        if (listChannel)
+          channelsProvider.overrideWith(_ListedChannelsNotifier.new),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -331,6 +369,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
     composerFocusNode!.requestFocus();
     await tester.pump();
   }
+  if (listChannel) await tester.pump();
   await tester.tap(find.byKey(const ValueKey('open-message-actions-popover')));
   await tester.pumpAndSettle();
   final container = ProviderScope.containerOf(
@@ -370,6 +409,18 @@ class _FakeChannelActions extends ChannelActions {
 }
 
 void main() {
+  // Some sheets build the app lifecycle, which listens for network changes.
+  // That listen is asynchronous, so a missing plugin fails whichever test
+  // happens to be running. Flutter documents mock handlers as cleared after
+  // each test, so install it before every test.
+  setUp(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('dev.fluttercommunity.plus/connectivity_status'),
+          (_) async => null,
+        );
+  });
+
   testWidgets(
     'message long press keeps taps and scrolling while repeated holds win',
     (tester) async {
@@ -642,6 +693,46 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  testWidgets('the native menu uses channel catch-up without a profile', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    Map<Object?, Object?>? payload;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        if (call.method == 'supportsMessage') return {'supported': true};
+        payload = call.arguments as Map<Object?, Object?>;
+        return <String, Object?>{};
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpSheet(
+      tester,
+      message: _message(createdAt: 900),
+      prefs: await _mockPrefs(),
+      readStateOverride: () => _FakeReadStateNotifier(
+        _readState(const {_channelId: 500, 'activity:$_channelId': 2000}),
+      ),
+      anchorRect: const Rect.fromLTWH(20, 200, 300, 80),
+      nativePresentation: true,
+      currentPubkey: null,
+      listChannel: true,
+    );
+    final actions = (payload!['actions'] as List).cast<Map<Object?, Object?>>();
+    expect(
+      actions.firstWhere((a) => a['id'] == 'read')['title'],
+      'Mark unread',
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('system messages use the native tray without action rows', (
     tester,
@@ -1702,6 +1793,13 @@ void main() {
       );
       expect(trayRect.top, greaterThanOrEqualTo(safeTop));
       expect(trayRect.bottom, lessThanOrEqualTo(visibleBottom));
+
+      // Close the popover so its presentation guard does not block later
+      // tests.
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
     });
 
     testWidgets('shows Edit/Delete only with manage rights', (tester) async {
@@ -1828,6 +1926,54 @@ void main() {
       final readState = notifier.state;
       expect(readState.forcedUnreadContexts, {_channelId: _channelId});
       expect(readState.locallyForcedChannelIds, {_channelId});
+    });
+
+    // A signed-in user may have no published profile, so the caller passes
+    // a null currentPubkey. Catch-up must still classify mentions with the
+    // signing key, like the badge and channel list do.
+    for (final (label, tags, expected) in [
+      ('an ordinary message', const <List<String>>[], 'Mark unread'),
+      (
+        'a mention',
+        const [
+          ['p', 'self'],
+        ],
+        'Mark read',
+      ),
+    ]) {
+      testWidgets('without a profile, channel catch-up reads $label', (
+        tester,
+      ) async {
+        await _pumpSheet(
+          tester,
+          message: _message(createdAt: 900, tags: tags),
+          prefs: await _mockPrefs(),
+          readStateOverride: () => _FakeReadStateNotifier(
+            _readState(const {_channelId: 500, 'activity:$_channelId': 2000}),
+          ),
+          currentPubkey: null,
+          listChannel: true,
+        );
+
+        expect(find.text(expected), findsOneWidget);
+      });
+    }
+
+    testWidgets('the popover uses channel catch-up without a profile', (
+      tester,
+    ) async {
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(createdAt: 900),
+        prefs: await _mockPrefs(),
+        readStateOverride: () => _FakeReadStateNotifier(
+          _readState(const {_channelId: 500, 'activity:$_channelId': 2000}),
+        ),
+        currentPubkey: null,
+        listChannel: true,
+      );
+
+      expect(find.text('Mark unread'), findsOneWidget);
     });
 
     testWidgets('hides read-state row while read state is not ready', (

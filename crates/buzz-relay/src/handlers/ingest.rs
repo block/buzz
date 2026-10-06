@@ -3396,7 +3396,7 @@ async fn ingest_event_inner(
         };
         let (stored_event, status) = state
             .db
-            .insert_channel_head_checked(tenant.community(), &event, channel, precondition)
+            .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
         match status {
@@ -6213,7 +6213,7 @@ mod postgres_tests {
     //   - Removing the `canvas_revision_spec` branch makes tagged writes fall
     //     through to the generic append; the stale-head step no longer returns
     //     a conflict: rejection, causing the assert! below to fail.
-    //   - Replacing `insert_channel_head_checked` with `insert_event_with_thread_metadata`
+    //   - Replacing `insert_canvas_head_checked` with `insert_event_with_thread_metadata`
     //     has the same effect — no conflict is surfaced.
     //
     // Requires Postgres (and does NOT need Redis — the fake replay guard fires
@@ -6685,7 +6685,7 @@ mod postgres_tests {
 
         // ── Step 4: untagged write still appends unconditionally ──────────────
         // No expected-revision tag → the event is routed through the generic
-        // append path, NOT through insert_channel_head_checked. It must succeed
+        // append path, NOT through insert_canvas_head_checked. It must succeed
         // regardless of the current head state.
         let untagged =
             nostr::EventBuilder::new(Kind::Custom(KIND_CANVAS as u16), "# unconditional")

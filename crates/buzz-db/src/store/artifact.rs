@@ -98,7 +98,7 @@ impl Db {
         authorized_source: Option<Uuid>,
         relay_keys: &Keys,
     ) -> Result<ArtifactOutcome> {
-        let mut tx = self.begin_event_write_transaction().await?;
+        let mut tx = self.begin_event_write_transaction(community).await?;
         sqlx::query("SET LOCAL statement_timeout='5s'")
             .execute(&mut *tx)
             .await?;
