@@ -1,9 +1,9 @@
 //! Private deployment moderation API.
 //!
-//! Every route is a view (moderation read), act (mutation) or staff
+//! Every route is a view (moderation read), act (mutation) or operator
 //! (`/operators`) route; see [`auth`] for the rule. In `nip98` mode every route
 //! needs a signed, rostered staff member. In `disabled` mode every moderation
-//! read is served to whoever can reach the relay, and act and staff routes
+//! read is served to whoever can reach the relay, and act and operator routes
 //! answer 403.
 
 mod auth;
@@ -14,7 +14,7 @@ mod reads;
 use std::sync::Arc;
 
 use auth::{
-    admin_role_str, admin_source_str, authorize, authorize_read, AdminAccess, AdminRole,
+    admin_role_str, admin_source_str, authorize_read, authorize_write, AdminAccess, AdminRole,
     AdminSource,
 };
 use axum::{
@@ -443,6 +443,7 @@ fn compute_timeout_until(secs: u64) -> Result<DateTime<Utc>, ApiError> {
 /// - delete/kick/ban/timeout: server-side enforcement state machine.
 async fn resolve_report(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
@@ -453,16 +454,9 @@ async fn resolve_report(
         resolve_report_with_enforcement, ResolutionError,
     };
 
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "POST",
-        Some(&body_bytes),
-    )
-    .await?
-    .act()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     let body: ResolveReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_e| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -670,6 +664,7 @@ struct ReopenReportBody {
 /// records a durable `reopen` audit row. `409` if the report is not terminal.
 async fn reopen_report(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
@@ -677,16 +672,9 @@ async fn reopen_report(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use buzz_db::relay_admin_actions::ReopenResult;
 
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "POST",
-        Some(&body_bytes),
-    )
-    .await?
-    .act()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     let body: ReopenReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -755,21 +743,15 @@ struct CancelReportBody {
 /// `activeAction: null`.
 async fn cancel_report(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<axum::http::Response<axum::body::Body>, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "POST",
-        Some(&body_bytes),
-    )
-    .await?
-    .act()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     let body: CancelReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -830,21 +812,15 @@ async fn cancel_report(
 /// Update product_feedback status. Requires nip98 auth.
 async fn update_feedback_status(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let _principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "PATCH",
-        Some(&body_bytes),
-    )
-    .await?
-    .act()?;
+    let _principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -897,7 +873,7 @@ async fn list_operators(
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
     authorize_read(&state, &headers, &method, &uri)
         .await?
-        .staff()?;
+        .operator()?;
 
     let config = state
         .config
@@ -966,21 +942,15 @@ struct UpsertOperatorBody {
 /// Requires nip98 auth + Operator role.
 async fn upsert_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
 ) -> Result<Json<OperatorEntry>, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "PUT",
-        Some(&body_bytes),
-    )
-    .await?
-    .staff()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .operator()?;
 
     // Canonicalize the path param once: validate it decodes to 32 bytes, then
     // lowercase it. Config-backed pubkeys are lowercased at parse, so the 409
@@ -1043,20 +1013,14 @@ async fn upsert_operator(
 /// Requires nip98 auth + Operator role.
 async fn delete_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "DELETE",
-        None,
-    )
-    .await?
-    .staff()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, None)
+        .await?
+        .operator()?;
 
     // Canonicalize the path param once (validate + lowercase) so the 409 check
     // and the DB delete use the same form config-backed pubkeys are stored in;
@@ -1273,21 +1237,15 @@ async fn list_member_restrictions(
 /// Requires nip98 auth.
 async fn unban_member(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "DELETE",
-        None,
-    )
-    .await?
-    .act()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, None)
+        .await?
+        .act()?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1320,21 +1278,15 @@ async fn unban_member(
 /// Requires nip98 auth.
 async fn untimeout_member(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "DELETE",
-        None,
-    )
-    .await?
-    .act()?;
+    let principal = authorize_write(&state, &headers, &method, &uri, None)
+        .await?
+        .act()?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -4039,7 +3991,7 @@ mod postgres_tests {
     /// gets 403 on every `/operators` route and writes neither the target's
     /// roster row nor its audit log, while a config Operator succeeds on the
     /// same requests. This is the only
-    /// test that tells `.staff()` apart from `.act()`; unsigned and
+    /// test that tells `.operator()` apart from `.act()`; unsigned and
     /// disabled-mode requests are refused by both.
     #[tokio::test]
     #[ignore = "requires Postgres — moderator DB lookup"]

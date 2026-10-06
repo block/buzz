@@ -7,7 +7,7 @@
 //! |-------|--------|---------|------------|
 //! | view  | every moderation read | any staff role | served to any caller |
 //! | act   | every mutation | staff, then role checks | 403 |
-//! | staff | `/operators` | Operator | 403 |
+//! | operator | `/operators` | Operator | 403 |
 //!
 //! # NIP-98 mode (default)
 //!
@@ -35,7 +35,7 @@
 //! `authorize()` checks no credential and returns
 //! [`AdminAccess::NetworkTrusted`]: whoever can reach the relay may view every
 //! moderation read. There is no identity, so [`AdminAccess::act`] and
-//! [`AdminAccess::staff`] refuse with 403; an anonymous caller is never given
+//! [`AdminAccess::operator`] refuse with 403; an anonymous caller is never given
 //! a principal.
 
 use axum::http::{header, HeaderMap, Method, Uri};
@@ -200,7 +200,7 @@ fn method_has_body(method: &str) -> bool {
 /// nip98 mode — the `payload` sha256 tag would be skipped.
 ///
 /// `Ok(_)` is the view check: the caller may read. Writes and staffing then
-/// call [`AdminAccess::act`] or [`AdminAccess::staff`]. `Err(_)` means
+/// call [`AdminAccess::act`] or [`AdminAccess::operator`]. `Err(_)` means
 /// authentication or authorization failed.
 pub async fn authorize(
     state: &AppState,
@@ -262,10 +262,34 @@ pub async fn authorize_read(
     method: &Method,
     uri: &Uri,
 ) -> Result<AdminAccess, ApiError> {
-    let target = uri
-        .path_and_query()
-        .map_or_else(|| uri.path(), |pq| pq.as_str());
-    authorize(state, headers, target, method.as_str(), None).await
+    authorize(state, headers, request_target(uri), method.as_str(), None).await
+}
+
+/// [`authorize`] for a mutation, bound to the request's real method and full
+/// target. Hardcoding the method would reject every correctly signed request
+/// to a handler mounted on a second method. `raw_body` follows [`authorize`]'s
+/// contract: the buffered body bytes, or `None` only for a bodyless `DELETE`.
+pub async fn authorize_write(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, ApiError> {
+    authorize(
+        state,
+        headers,
+        request_target(uri),
+        method.as_str(),
+        raw_body,
+    )
+    .await
+}
+
+/// The full request target NIP-98 clients sign: path plus any query string.
+fn request_target(uri: &Uri) -> &str {
+    uri.path_and_query()
+        .map_or_else(|| uri.path(), |pq| pq.as_str())
 }
 
 /// Resolve a 32-byte pubkey to an `AdminPrincipal` using config + DB.
@@ -378,8 +402,8 @@ impl AdminAccess {
         }
     }
 
-    /// The staff check: roster routes need a signed Operator.
-    pub fn staff(self) -> Result<AdminPrincipal, ApiError> {
+    /// The operator check: roster routes need a signed Operator.
+    pub fn operator(self) -> Result<AdminPrincipal, ApiError> {
         let principal = self.act()?;
         if principal.role == AdminRole::Operator {
             Ok(principal)
