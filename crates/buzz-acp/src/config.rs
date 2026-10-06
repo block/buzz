@@ -356,14 +356,13 @@ pub struct CliArgs {
     pub dedup: DedupMode,
 
     /// How ACP provider sessions are scoped in channels.
-    /// channel (default): one provider session per channel (legacy behavior).
-    /// thread: each canonical channel thread gets an isolated provider session;
-    /// direct messages stay conversation-scoped either way. Ships as `channel`
-    /// so thread scoping can be canaried and rolled back without code changes.
+    /// thread (default): each canonical channel thread gets an isolated provider
+    /// session. channel: one provider session per channel (legacy behavior).
+    /// Direct messages stay conversation-scoped either way.
     #[arg(
         long,
         env = "BUZZ_ACP_SESSION_POLICY",
-        default_value = "channel",
+        default_value = "thread",
         value_enum
     )]
     pub session_policy: crate::scope::SessionPolicy,
@@ -2709,10 +2708,22 @@ channels = "ALL"
     // ── Session policy parsing + default ──────────────────────────────────────
 
     #[test]
-    fn test_session_policy_default_is_channel() {
-        // Ships dark: the default must be `channel` so thread scoping is opt-in
-        // and can be rolled back without code changes.
+    fn test_session_policy_default_is_thread() {
+        // One session per thread is the Buzz 1.0 default; `channel` stays
+        // available as a rollback without code changes.
         let args = CliArgs::parse_from(["buzz-acp", "--private-key", &"0".repeat(64)]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
+    }
+
+    #[test]
+    fn test_session_policy_channel_flag_parses() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-policy",
+            "channel",
+        ]);
         assert_eq!(args.session_policy, crate::scope::SessionPolicy::Channel);
     }
 

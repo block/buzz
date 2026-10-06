@@ -16,9 +16,9 @@
 //! | Repeated mention in the same thread | reuse that thread scope                 |
 //! | Direct message                      | `Conversation(channel_id)`              |
 //!
-//! Under [`SessionPolicy::Channel`] (the current default / rollback path) every
-//! surface collapses to `Conversation(channel_id)`, preserving today's
-//! channel-keyed behavior exactly.
+//! Under [`SessionPolicy::Channel`] (the rollback path) every surface collapses
+//! to `Conversation(channel_id)`, preserving the legacy channel-keyed behavior
+//! exactly.
 
 use nostr::Event;
 use uuid::Uuid;
@@ -28,16 +28,16 @@ use crate::queue::{reply_thread, ResolvedEdit};
 /// Operator policy controlling how ACP provider sessions are scoped.
 ///
 /// Selected via `--session-policy` / `BUZZ_ACP_SESSION_POLICY`. Defaults to
-/// [`Channel`](SessionPolicy::Channel) so the feature ships dark and can be
-/// canaried, then flipped, then rolled back without code changes.
+/// [`Thread`](SessionPolicy::Thread); `channel` remains available as a
+/// rollback path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum SessionPolicy {
     /// Legacy behavior: one provider session per channel. Every event in a
     /// channel shares a `Conversation(channel_id)` scope.
-    #[default]
     Channel,
     /// Thread-scoped: each canonical channel thread gets an isolated provider
     /// session. DMs remain conversation-scoped.
+    #[default]
     Thread,
 }
 
