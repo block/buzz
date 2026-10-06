@@ -1923,7 +1923,8 @@ mod postgres_tests {
         let t_read_state = tag(&["t", "read-state"]);
         let k_mesh = tag(&["k", "buzz-mesh-status"]);
         // (label, kind, column d_tag, tags, physically purged)
-        let cases: Vec<(&str, u16, String, Vec<Vec<String>>, bool)> = vec![
+        type Case = (&'static str, u16, String, Vec<Vec<String>>, bool);
+        let cases: Vec<Case> = vec![
             (
                 "nip-rs",
                 nip_rs,
@@ -2101,7 +2102,13 @@ mod postgres_tests {
                 (rows, live, mentions)
             }
         };
-        let expected = |purged: bool| -> (i64, i64, i64) { if purged { (0, 0, 0) } else { (1, 0, 1) } };
+        let expected = |purged: bool| -> (i64, i64, i64) {
+            if purged {
+                (0, 0, 0)
+            } else {
+                (1, 0, 1)
+            }
+        };
 
         for (label, kind, d_tag, tags, purged) in cases {
             if migration {
@@ -2142,13 +2149,19 @@ mod postgres_tests {
                         .expect("id delete"),
                     }
                 };
-                assert!(delete().await, "{label}/{mode:?}: deletion must report success");
+                assert!(
+                    delete().await,
+                    "{label}/{mode:?}: deletion must report success"
+                );
                 assert_eq!(
                     state(id.clone()).await,
                     expected(purged),
                     "{label}/{mode:?}: app classification"
                 );
-                assert!(!delete().await, "{label}/{mode:?}: repeated deletion is a no-op");
+                assert!(
+                    !delete().await,
+                    "{label}/{mode:?}: repeated deletion is a no-op"
+                );
             }
         }
     }
