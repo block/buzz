@@ -4,7 +4,7 @@
 //! [`CommunityId`](buzz_core::CommunityId). Keep ordinary moderation reads in
 //! [`crate::moderation`] tenant-fenced.
 
-use buzz_core::kind::{AUTHOR_ONLY_KINDS, RESULT_GATED_KINDS};
+use buzz_core::kind::{AUTHOR_ONLY_KINDS, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -16,6 +16,19 @@ use crate::Db;
 
 /// Maximum rows accepted by one admin query.
 pub const MAX_PAGE_SIZE: i64 = 200;
+
+/// Kinds no admin read may reveal: author-only, result-gated, `#p`-gated and
+/// shared-gated events. The whole shared-gated set is hidden, shared or not;
+/// moderators cannot act on these kinds, so admin reads treat them as absent.
+fn admin_hidden_kinds() -> Vec<i32> {
+    AUTHOR_ONLY_KINDS
+        .iter()
+        .chain(RESULT_GATED_KINDS)
+        .chain(P_GATED_KINDS)
+        .chain(SHARED_GATED_KINDS)
+        .map(|&kind| kind as i32)
+        .collect()
+}
 
 fn bounded_limit(limit: i64) -> i64 {
     limit.clamp(1, MAX_PAGE_SIZE)
@@ -210,6 +223,7 @@ pub async fn list_reports(
             WHERE r.target_kind = 'event'
               AND e.community_id = r.community_id
               AND e.id = r.target_event_id
+              AND e.kind <> ALL($10)
             ORDER BY e.created_at DESC
             LIMIT 1
         ) target ON TRUE
@@ -233,6 +247,7 @@ pub async fn list_reports(
     .bind(cursor_time)
     .bind(cursor_id)
     .bind(bounded_limit(limit))
+    .bind(admin_hidden_kinds())
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(row_to_report).collect()
@@ -272,6 +287,7 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
             WHERE r.target_kind = 'event'
               AND e.community_id = r.community_id
               AND e.id = r.target_event_id
+              AND e.kind <> ALL($2)
             ORDER BY e.created_at DESC
             LIMIT 1
         ) target ON TRUE
@@ -291,6 +307,7 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
         "#,
     )
     .bind(report_id)
+    .bind(admin_hidden_kinds())
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
@@ -498,9 +515,10 @@ pub struct AdminEventPreview {
 
 /// Fetch event `id` from `community` only (same lookup as the report detail).
 ///
-/// Author-only and result-gated kinds are never returned: the relay must not
-/// reveal that such an event exists to anyone but its author or `#p` reader,
-/// so a matching row is reported as absent.
+/// Kinds in [`admin_hidden_kinds`] are never returned: the relay must not
+/// reveal that such an event exists to anyone but its permitted readers, so a
+/// matching row is reported as absent, exactly as the report list and detail
+/// treat a hidden target.
 pub async fn get_event_preview(
     pool: &PgPool,
     community_id: Uuid,
@@ -517,13 +535,7 @@ pub async fn get_event_preview(
     )
     .bind(community_id)
     .bind(id)
-    .bind(
-        AUTHOR_ONLY_KINDS
-            .iter()
-            .chain(RESULT_GATED_KINDS)
-            .map(|&kind| kind as i32)
-            .collect::<Vec<_>>(),
-    )
+    .bind(admin_hidden_kinds())
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
@@ -842,6 +854,84 @@ mod postgres_tests {
             .expect("delete event fixtures");
         delete_report_fixture(&pool, report_community).await;
         delete_report_fixture(&pool, other_community).await;
+    }
+
+    /// A report on a hidden-kind event exposes neither the event's content nor
+    /// its author, in the list or the detail; a report on a message does.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_reads_hide_private_kind_targets() {
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "hidden-target").await;
+        let author = [5_u8; 32];
+        let mut hidden = Vec::new();
+        for (i, kind) in admin_hidden_kinds().into_iter().enumerate() {
+            let event_id = vec![0x40 + i as u8; 32];
+            sqlx::query(
+                r#"
+                INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig)
+                VALUES ($1, $2, $3, now(), $4, '[["shared","true"]]'::jsonb, 'private', $5)
+                "#,
+            )
+            .bind(community_id)
+            .bind(&event_id)
+            .bind(author)
+            .bind(kind)
+            .bind(vec![3_u8; 64])
+            .execute(&pool)
+            .await
+            .expect("insert hidden event");
+            hidden.push((
+                kind,
+                insert_event_report(&pool, community_id, &event_id).await,
+            ));
+        }
+        let visible_id = vec![0x3f_u8; 32];
+        insert_event(&pool, community_id, &visible_id, &author, "public", None).await;
+        let visible = insert_event_report(&pool, community_id, &visible_id).await;
+
+        let reports = list_reports(
+            &pool,
+            Some(community_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            100,
+        )
+        .await
+        .expect("list reports");
+        let author_of = |id: Uuid| {
+            reports
+                .iter()
+                .find(|r| r.id == id)
+                .expect("report listed")
+                .target_author_pubkey
+                .clone()
+        };
+        for &(kind, report_id) in &hidden {
+            assert_eq!(author_of(report_id), None, "list, kind {kind}");
+            let detail = get_report(&pool, report_id)
+                .await
+                .expect("query report")
+                .expect("report exists");
+            assert!(detail.message.is_none(), "detail, kind {kind}");
+        }
+        assert_eq!(author_of(visible), Some(hex::encode(author)));
+        let detail = get_report(&pool, visible)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        assert_eq!(detail.message.expect("message shown").content, "public");
+
+        sqlx::query("DELETE FROM events WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete event fixtures");
+        delete_report_fixture(&pool, community_id).await;
     }
 
     #[tokio::test]

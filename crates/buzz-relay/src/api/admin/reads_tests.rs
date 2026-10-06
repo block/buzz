@@ -264,24 +264,12 @@ async fn seed_profile(pool: &sqlx::PgPool, c: CommunityId, pubkey: &[u8], name: 
 /// A raw kind-1 event row: the same id may be stored in two communities with
 /// different content, which is exactly what isolation must not leak.
 async fn seed_event(pool: &sqlx::PgPool, c: CommunityId, id: &[u8], content: &str, deleted: bool) {
-    seed_event_of_kind(pool, c, id, 1, content, deleted).await;
-}
-
-async fn seed_event_of_kind(
-    pool: &sqlx::PgPool,
-    c: CommunityId,
-    id: &[u8],
-    kind: u32,
-    content: &str,
-    deleted: bool,
-) {
     sqlx::query(
         "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, deleted_at) \
-         VALUES ($1, $2, $2, now(), $3, '[]', $4, $2, CASE WHEN $5 THEN now() END)",
+         VALUES ($1, $2, $2, now(), 1, '[]', $3, $2, CASE WHEN $4 THEN now() END)",
     )
     .bind(c.as_uuid())
     .bind(id)
-    .bind(kind as i32)
     .bind(content)
     .bind(deleted)
     .execute(pool)
@@ -722,11 +710,14 @@ async fn event_preview_reports_the_stored_event_and_its_deletion() {
     );
 }
 
-/// An author-only or result-gated event is answered as absent, even to staff.
+/// Every author-only, result-gated, `#p`-gated and shared-gated event is
+/// answered as absent, even to staff and even when shared; a message is not.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn event_preview_hides_author_only_and_result_gated_kinds() {
-    use buzz_core::kind::{AUTHOR_ONLY_KINDS, RESULT_GATED_KINDS};
+async fn event_preview_hides_every_private_kind() {
+    use buzz_core::kind::{
+        AUTHOR_ONLY_KINDS, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    };
     let (pool, state) = fixture().await;
     let keys = test_operator_keys();
     let host = unique_host("preview-hidden");
@@ -734,10 +725,21 @@ async fn event_preview_hides_author_only_and_result_gated_kinds() {
     for (i, &kind) in AUTHOR_ONLY_KINDS
         .iter()
         .chain(RESULT_GATED_KINDS)
+        .chain(P_GATED_KINDS)
+        .chain(SHARED_GATED_KINDS)
         .enumerate()
     {
         let id = [0x80 + i as u8; 32];
-        seed_event_of_kind(&pool, c, &id, kind, "hidden", false).await;
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             VALUES ($1, $2, $2, now(), $3, '[[\"shared\",\"true\"]]', 'hidden', $2)",
+        )
+        .bind(c.as_uuid())
+        .bind(id)
+        .bind(kind as i32)
+        .execute(&pool)
+        .await
+        .expect("seed hidden event");
         let uri = format!("/events/{}?communityHost={host}", hex::encode(id));
         let (status, body) = get(&state, &keys, &uri).await;
         assert_eq!(
@@ -746,6 +748,13 @@ async fn event_preview_hides_author_only_and_result_gated_kinds() {
             "kind {kind}: {body}"
         );
     }
+
+    let id = [0x7f_u8; 32];
+    seed_event(&pool, c, &id, "visible", false).await;
+    let uri = format!("/events/{}?communityHost={host}", hex::encode(id));
+    let (status, body) = get(&state, &keys, &uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["content"], "visible", "{body}");
 }
 
 /// Every query struct refuses an unknown field, on reads and on a write; the
