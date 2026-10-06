@@ -168,6 +168,16 @@ metadata:
 data:
   first: &shared "value"
   second: *shared
+  date: 2026-10-06
+  timestamp: 2026-10-06T16:00:00Z
 YAML
 gate <"$out/aliases.yaml" >"$out/gated.yaml"
 cmp "$out/aliases.yaml" "$out/gated.yaml"
+# Standard YAML scalars must not enable arbitrary Ruby object construction.
+printf '%s\n' '--- !ruby/object:Object {}' >"$out/ruby-object.yaml"
+if gate <"$out/ruby-object.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
+  echo 'expected Ruby object tag to be rejected' >&2
+  exit 1
+fi
+test ! -s "$out/gated.yaml"
+grep -q 'DisallowedClass' "$out/gate-error"

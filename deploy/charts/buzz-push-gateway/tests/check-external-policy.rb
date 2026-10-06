@@ -1,11 +1,12 @@
 #!/usr/bin/env ruby
 # Helm post-renderer: validate external runtime policy ownership in the full release.
 require 'yaml'
+require 'date'
 input = STDIN.read
 resources = YAML.parse_stream(input).children.map do |doc|
   stream = Psych::Nodes::Stream.new
   stream.children << doc
-  YAML.safe_load(stream.to_yaml, permitted_classes: [], aliases: true)
+  YAML.safe_load(stream.to_yaml, permitted_classes: [Date, Time], aliases: true)
 end.compact
 annotation = 'buzz.block.xyz/external-network-policy'
 resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
