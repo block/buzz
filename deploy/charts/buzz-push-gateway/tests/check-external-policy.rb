@@ -16,10 +16,17 @@ resources = YAML.parse_stream(input).children.map do |doc|
 end.compact
 # Match Kubernetes Unstructured.IsList: an items array, including typed lists.
 # https://github.com/kubernetes/apimachinery/blob/v0.34.1/pkg/apis/meta/v1/unstructured/unstructured.go
-def flatten_resources(resource)
-  if resource.is_a?(Hash) && resource['items'].is_a?(Array)
-    resource.fetch('items').flat_map { |item| flatten_resources(item) }
+def flatten_resources(resource, enclosing_hooks = {})
+  annotations = resource.dig('metadata', 'annotations') || {}
+  hooks = enclosing_hooks.merge(annotations.select { |k, _| %w[helm.sh/hook argocd.argoproj.io/hook].include?(k) })
+  if resource['items'].is_a?(Array)
+    resource.fetch('items').flat_map { |item| flatten_resources(item, hooks) }
   else
+    unless hooks.empty?
+      resource = Marshal.load(Marshal.dump(resource))
+      resource['metadata'] ||= {}
+      resource['metadata']['annotations'] = annotations.merge(hooks)
+    end
     [resource]
   end
 end
@@ -89,7 +96,12 @@ resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
               end
     abort "external policy #{name}: expression does not match runtime" unless matches
   end
-  abort "external policy #{name}: must isolate ingress and egress" unless %w[Ingress Egress].all? { |t| spec.fetch('policyTypes', []).include?(t) }
+  types = spec['policyTypes']
+  if types.nil? || types.empty?
+    types = ['Ingress']
+    types << 'Egress' unless spec.fetch('egress', []).empty?
+  end
+  abort "external policy #{name}: must isolate ingress and egress" unless %w[Ingress Egress].all? { |t| types.include?(t) }
 end
 # Preserve Helm output byte-for-byte only after every deployment passes.
 STDOUT.write(input)

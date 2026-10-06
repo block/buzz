@@ -110,6 +110,15 @@ expression_policy = Marshal.load(Marshal.dump(policy))
 identity = expression_policy['spec']['podSelector'].delete('matchLabels')
 expression_policy['spec']['podSelector']['matchExpressions'] = identity.map { |k, v| {'key' => k, 'operator' => 'In', 'values' => [v]} }
 File.write("#{ARGV[0]}/expression-identity.yaml", (resources + [expression_policy]).map(&:to_yaml).join)
+%w[helm.sh/hook argocd.argoproj.io/hook].each_with_index do |key, i|
+  wrapped = Marshal.load(Marshal.dump(typed_list))
+  wrapped['metadata'] = {'annotations' => {key => i == 0 ? 'pre-upgrade' : 'PreSync'}}
+  File.write("#{ARGV[0]}/wrapped-hook-#{i}.yaml", (resources + [wrapped]).map(&:to_yaml).join)
+end
+defaulted = Marshal.load(Marshal.dump(policy))
+defaulted['spec'].delete('policyTypes')
+defaulted['spec']['egress'] = [{'ports' => [{'protocol' => 'TCP', 'port' => 443}]}]
+File.write("#{ARGV[0]}/defaulted-types.yaml", (resources + [defaulted]).map(&:to_yaml).join)
 variants = {
   'invalid-key' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'bad key', 'operator' => 'DoesNotExist'}] },
   'invalid-value' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'NotIn', 'values' => ['bad value']}] },
@@ -140,11 +149,11 @@ gate <"$out/combined.yaml" >"$out/gated.yaml"
 cmp "$out/combined.yaml" "$out/gated.yaml"
 gate <"$out/list.yaml" >"$out/gated.yaml"
 cmp "$out/list.yaml" "$out/gated.yaml"
-for valid in typed-list expression-identity; do
+for valid in defaulted-types typed-list expression-identity; do
   gate <"$out/$valid.yaml" >"$out/gated.yaml"
   cmp "$out/$valid.yaml" "$out/gated.yaml"
 done
-for mutation in duplicate-typed-list argo-skip argo-presync invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+for mutation in wrapped-hook-0 wrapped-hook-1 duplicate-typed-list argo-skip argo-presync invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
   if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
     echo "expected combined-render gate to reject $mutation" >&2
     exit 1
