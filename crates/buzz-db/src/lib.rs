@@ -36,7 +36,7 @@ pub use runtime::{
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
-pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] =
     runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
 
 /// Raw Prometheus series ceiling per relay pod for the operation-aware contract.

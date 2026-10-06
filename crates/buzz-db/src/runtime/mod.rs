@@ -1359,7 +1359,10 @@ impl Db {
         if newest.committed_at.elapsed() > budget {
             return skip("stale");
         }
-        match self.proved_reader(read_pool).await {
+        match self
+            .proved_reader(read_pool, observability::ReaderOperation::Maintenance)
+            .await
+        {
             Ok((tx, entry)) if entry.committed_at.elapsed() <= budget => Some((tx, "fresh")),
             Ok((_tx, _entry)) => skip("stale"),
             Err(reason) => skip(reason),

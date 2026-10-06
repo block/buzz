@@ -281,7 +281,7 @@ maximum gauges when diagnosing total capacity pressure.
 Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
 `bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
 `authorization`, `subscription_history`, `event_write`, and `maintenance`.
-Only the following eleven pairs are valid:
+Only the following twelve pairs are valid:
 
 ```text
 writer/bootstrap                 reader/bootstrap
@@ -291,12 +291,12 @@ writer/authentication
 writer/authorization             reader/authorization
 writer/subscription_history      reader/subscription_history
 writer/event_write
-writer/maintenance
+writer/maintenance               reader/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 198
-raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 216
+raw Prometheus series per pod: `12 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.

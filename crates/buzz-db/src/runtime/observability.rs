@@ -28,6 +28,7 @@ enum PoolOperation {
     ReaderSubscriptionHistory,
     WriterEventWrite,
     WriterMaintenance,
+    ReaderMaintenance,
 }
 
 /// Writer-pool operations. Reader-only combinations cannot be constructed.
@@ -76,14 +77,17 @@ pub(crate) enum ReaderOperation {
     Bootstrap,
     Authorization,
     SubscriptionHistory,
+    /// Leader-only background reads such as fleet usage telemetry.
+    Maintenance,
 }
 
 impl ReaderOperation {
     #[cfg(test)]
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::Bootstrap,
         Self::Authorization,
         Self::SubscriptionHistory,
+        Self::Maintenance,
     ];
 
     const fn pair(self) -> PoolOperation {
@@ -91,12 +95,13 @@ impl ReaderOperation {
             Self::Bootstrap => PoolOperation::ReaderBootstrap,
             Self::Authorization => PoolOperation::ReaderAuthorization,
             Self::SubscriptionHistory => PoolOperation::ReaderSubscriptionHistory,
+            Self::Maintenance => PoolOperation::ReaderMaintenance,
         }
     }
 }
 
 impl PoolOperation {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::WriterBootstrap,
         Self::ReaderBootstrap,
         Self::WriterReadiness,
@@ -108,13 +113,15 @@ impl PoolOperation {
         Self::ReaderSubscriptionHistory,
         Self::WriterEventWrite,
         Self::WriterMaintenance,
+        Self::ReaderMaintenance,
     ];
 
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
-            Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
-                DbPoolRole::Reader.as_str()
-            }
+            Self::ReaderBootstrap
+            | Self::ReaderAuthorization
+            | Self::ReaderSubscriptionHistory
+            | Self::ReaderMaintenance => DbPoolRole::Reader.as_str(),
             _ => DbPoolRole::Writer.as_str(),
         }
     }
@@ -130,7 +137,7 @@ impl PoolOperation {
                 "subscription_history"
             }
             Self::WriterEventWrite => "event_write",
-            Self::WriterMaintenance => "maintenance",
+            Self::WriterMaintenance | Self::ReaderMaintenance => "maintenance",
         }
     }
 
@@ -139,7 +146,7 @@ impl PoolOperation {
     }
 }
 
-pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
+pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
     (DbPoolRole::Writer.as_str(), "bootstrap"),
     (DbPoolRole::Reader.as_str(), "bootstrap"),
     (DbPoolRole::Writer.as_str(), "readiness"),
@@ -151,9 +158,10 @@ pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
     (DbPoolRole::Reader.as_str(), "subscription_history"),
     (DbPoolRole::Writer.as_str(), "event_write"),
     (DbPoolRole::Writer.as_str(), "maintenance"),
+    (DbPoolRole::Reader.as_str(), "maintenance"),
 ];
 
-/// Eleven valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+/// Twelve valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
 pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -610,9 +618,10 @@ mod tests {
                 PoolOperation::ReaderBootstrap,
                 PoolOperation::ReaderAuthorization,
                 PoolOperation::ReaderSubscriptionHistory,
+                PoolOperation::ReaderMaintenance,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 198);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 216);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
