@@ -1156,9 +1156,7 @@ async fn store_group_members_event(
         .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|error| anyhow::anyhow!("failed to sign member snapshot: {error}"))?;
-    let (stored, inserted) = member_snapshot
-        .replace_member_event(&event)
-        .await?;
+    let (stored, inserted) = member_snapshot.replace_member_event(&event).await?;
     Ok(inserted.then_some(stored))
 }
 
@@ -1297,8 +1295,7 @@ pub async fn emit_group_discovery_events(
         .db
         .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
         .await?;
-    let stored_members =
-        store_group_members_event(state, channel_id, &mut member_snapshot).await?;
+    let stored_members = store_group_members_event(state, channel_id, &mut member_snapshot).await?;
     member_snapshot.release().await?;
     dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
