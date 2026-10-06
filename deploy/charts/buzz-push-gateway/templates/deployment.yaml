@@ -5,6 +5,7 @@ metadata:
   labels: {{- include "push.runtimeLabels" . | nindent 4 }}
   {{- if not .Values.networkPolicy.enabled }}
   annotations:
+    buzz.block.xyz/release-namespace: {{ .Release.Namespace | quote }}
     buzz.block.xyz/external-network-policy: {{ .Values.networkPolicy.externalPolicyName | quote }}
   {{- end }}
 spec:

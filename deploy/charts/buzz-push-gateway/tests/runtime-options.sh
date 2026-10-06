@@ -127,3 +127,31 @@ for mutation in external misspelled wrong-selector empty-selector wrong-namespac
   test ! -s "$out/gated.yaml"
   grep -q 'external policy' "$out/gate-error"
 done
+
+# Helm assigns omitted namespaces to the actual release namespace.
+helm template push "$chart" --namespace tenant-runtime --set networkPolicy.enabled=false \
+  --set networkPolicy.externalPolicyName=platform-runtime >"$out/tenant.yaml"
+env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
+resources = YAML.load_stream(File.read("#{ARGV[0]}/tenant.yaml")).compact
+policy = YAML.load_stream(File.read("#{ARGV[0]}/combined.yaml")).compact.last
+{'omitted' => nil, 'explicit' => 'tenant-runtime', 'default' => 'default', 'wrong' => 'other'}.each do |variant, namespace|
+  candidate = Marshal.load(Marshal.dump(policy))
+  candidate['metadata']['namespace'] = namespace if namespace
+  File.write("#{ARGV[0]}/tenant-#{variant}.yaml", (resources + [candidate]).map(&:to_yaml).join)
+end
+# Missing release metadata must fail closed rather than assume default.
+resources.find { |r| r['kind'] == 'Deployment' }['metadata']['annotations'].delete('buzz.block.xyz/release-namespace')
+File.write("#{ARGV[0]}/tenant-missing-annotation.yaml", (resources + [policy]).map(&:to_yaml).join)
+RUBY
+for variant in omitted explicit; do
+  gate <"$out/tenant-$variant.yaml" >"$out/gated.yaml"
+  cmp "$out/tenant-$variant.yaml" "$out/gated.yaml"
+done
+for variant in default wrong missing-annotation; do
+  if gate <"$out/tenant-$variant.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
+    echo "expected release-namespace gate to reject $variant" >&2
+    exit 1
+  fi
+  test ! -s "$out/gated.yaml"
+  grep -q 'external policy' "$out/gate-error"
+done

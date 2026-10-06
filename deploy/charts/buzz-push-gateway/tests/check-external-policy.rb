@@ -11,10 +11,12 @@ annotation = 'buzz.block.xyz/external-network-policy'
 resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
   name = deployment.dig('metadata', 'annotations', annotation)
   next unless name
-  namespace = deployment.dig('metadata', 'namespace') || 'default'
+  release_namespace = deployment.dig('metadata', 'annotations', 'buzz.block.xyz/release-namespace')
+  abort "external policy #{name}: missing release namespace" if !release_namespace.is_a?(String) || release_namespace.empty?
+  namespace = deployment.dig('metadata', 'namespace') || release_namespace
   policies = resources.select do |r|
     r['apiVersion'] == 'networking.k8s.io/v1' && r['kind'] == 'NetworkPolicy' &&
-      r.dig('metadata', 'name') == name && (r.dig('metadata', 'namespace') || 'default') == namespace
+      r.dig('metadata', 'name') == name && (r.dig('metadata', 'namespace') || release_namespace) == namespace
   end
   abort "external policy #{name}: expected exactly one replacement in #{namespace}" unless policies.length == 1
   spec = policies.first.fetch('spec')
