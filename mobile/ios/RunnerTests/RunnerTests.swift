@@ -118,20 +118,70 @@ class RunnerTests: XCTestCase {
     let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
     XCTAssertGreaterThan(title.frame.width, 0)
     XCTAssertGreaterThan(title.intrinsicContentSize.width, 0)
-    XCTAssertLessThanOrEqual(title.intrinsicContentSize.width, 240)
     _ = bar.view()
   }
 
   @MainActor
-  func testLongGroupTitleIsCappedAndTruncates() {
+  func testLongGroupTitleFitsAvailableWidthAndTruncates() {
     let title = NavigationTitleView(title: String(repeating: "Long participant name, ", count: 12), subtitle: "12 members", color: .label)
-    title.maximumWidth = 180
-    XCTAssertEqual(title.intrinsicContentSize.width, 180)
-    title.frame = CGRect(origin: .zero, size: title.intrinsicContentSize)
+    XCTAssertGreaterThan(title.intrinsicContentSize.width, 240)
+    let fitted = title.sizeThatFits(CGSize(width: 180, height: 44))
+    XCTAssertEqual(fitted.width, 180)
+    title.frame = CGRect(origin: .zero, size: fitted)
     title.layoutIfNeeded()
     for label in title.contentView.subviews.compactMap({ $0 as? UILabel }) {
       XCTAssertEqual(label.lineBreakMode, .byTruncatingTail)
       XCTAssertTrue(title.bounds.contains(label.frame))
+    }
+  }
+
+  @MainActor
+  func testConversationTitleUsesAvailableSpaceAfterInheritingTextSize() throws {
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let messenger = NavigationTestMessenger()
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    var arguments: [String: Any] = ["title": "buzz-onboarding", "subtitle": "27 members",
+      "back": true, "titleEnabled": true,
+      "actions": [["id": "huddle", "label": "Huddle", "symbol": "headphones", "enabled": true]]]
+    let bar = factory.create(withFrame: CGRect(x: 0, y: 0, width: 393, height: 160),
+      viewIdentifier: 999991, arguments: arguments)
+    parent.view.addSubview(bar.view())
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    parent.setOverrideTraitCollection(UITraitCollection(preferredContentSizeCategory: .extraExtraExtraLarge),
+      forChild: navigation)
+    parent.view.layoutIfNeeded()
+    bar.view().layoutIfNeeded()
+    let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
+    let label = try XCTUnwrap(title.contentView.subviews.compactMap { $0 as? UILabel }.first)
+    XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
+
+    arguments["title"] = String(repeating: "Long channel name ", count: 12)
+    messenger.configure(arguments)
+    for width in [320.0, 393.0, 600.0] {
+      bar.view().frame.size.width = width
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let longTitle = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
+      let titleFrame = longTitle.convert(longTitle.bounds, to: navigation.navigationBar)
+      func controls(_ view: UIView) -> [UIView] {
+        (view is UIControl ? [view] : []) + view.subviews.flatMap(controls)
+      }
+      let buttons = controls(navigation.navigationBar)
+      let back = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Back" })
+      let huddle = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Huddle" })
+      let backFrame = back.convert(back.bounds, to: navigation.navigationBar)
+      let huddleFrame = huddle.convert(huddle.bounds, to: navigation.navigationBar)
+      XCTAssertGreaterThan(titleFrame.minX, backFrame.maxX)
+      XCTAssertLessThan(titleFrame.maxX, huddleFrame.minX)
+      // A long name uses the available slot, leaving only UIKit's button gaps.
+      XCTAssertLessThan(titleFrame.minX - backFrame.maxX, 24)
+      XCTAssertLessThan(huddleFrame.minX - titleFrame.maxX, 24)
+      if width >= 393 { XCTAssertGreaterThan(titleFrame.width, 240) }
     }
   }
 

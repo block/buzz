@@ -23,9 +23,6 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
 }
 
 final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate {
-  var maximumWidth: CGFloat = 240 {
-    didSet { if maximumWidth != oldValue { invalidateIntrinsicContentSize() } }
-  }
   var onActivate: (() -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
@@ -42,10 +39,8 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     clipsToBounds = true
     layer.cornerCurve = .continuous
     titleLabel.text = title
-    titleLabel.font = .preferredFont(forTextStyle: .headline)
     titleLabel.textColor = color
     subtitleLabel.text = subtitle
-    subtitleLabel.font = .preferredFont(forTextStyle: .caption1)
     subtitleLabel.textColor = .secondaryLabel
     for label in [titleLabel, subtitleLabel] {
       label.textAlignment = .center
@@ -53,6 +48,7 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
       label.adjustsFontForContentSizeCategory = false
       contentView.addSubview(label)
     }
+    updateFonts()
     // Flutter creates platform views with a zero frame. Keep a nonzero
     // intrinsic width and let UINavigationBar compress it between its items.
     setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -125,13 +121,28 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: min(maximumWidth, max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width + (subtitlePresenceView == nil ? 0 : 12)) + 24 + (avatarView == nil ? 0 : 40)),
+    CGSize(width: max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width + (subtitlePresenceView == nil ? 0 : 12)) + 24 + (avatarView == nil ? 0 : 40),
            height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
   }
 
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    layer.cornerRadius = bounds.height / 2
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+      updateFonts()
+      invalidateIntrinsicContentSize()
+      // UINavigationBar also caches the title view's frame for fitting.
+      // Refresh that proposal; UIKit still constrains it between the buttons.
+      frame.size = intrinsicContentSize
+      setNeedsLayout()
+    }
+  }
+
+  override func sizeThatFits(_ size: CGSize) -> CGSize {
+    let desired = intrinsicContentSize
+    return CGSize(width: min(size.width, desired.width), height: desired.height)
+  }
+
+  private func updateFonts() {
     // Compact navigation remains a 44pt toolbar. Scale within that budget;
     // the complete title/subtitle remains available as one VoiceOver label.
     titleLabel.font = UIFontMetrics(forTextStyle: .headline).scaledFont(
@@ -140,6 +151,11 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     subtitleLabel.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
       for: .systemFont(ofSize: 12), maximumPointSize: 14,
       compatibleWith: traitCollection)
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    layer.cornerRadius = bounds.height / 2
     let titleHeight = titleLabel.intrinsicContentSize.height
     let subtitleHeight = subtitleLabel.intrinsicContentSize.height
     let top = (bounds.height - titleHeight - subtitleHeight) / 2
