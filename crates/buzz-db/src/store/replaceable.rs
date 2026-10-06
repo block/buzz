@@ -3,7 +3,6 @@
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::Acquire;
 use uuid::Uuid;
 
 use crate::observability::{self, LockType, TransactionOperation};
@@ -252,117 +251,141 @@ async fn replace_parameterized_event_in_transaction_impl(
         ));
     }
 
-    let mut savepoint = tx.begin().await?;
-    if existing.is_some() {
-        let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
-            sqlx::query_scalar(
-                "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
-            )
-            .fetch_one(&mut *savepoint)
-            .await?
-        } else {
-            None
-        };
-        if is_nip_rs {
-            sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-                .execute(&mut *savepoint)
+    // Everything from the supersede through the mention index runs under one
+    // savepoint on the admitted transaction. A duplicate insert or any failure
+    // (including mention indexing) rolls the whole replacement back and leaves
+    // the caller's transaction usable with the previous live head restored.
+    sqlx::query("SAVEPOINT parameterized_replace")
+        .execute(&mut **tx)
+        .await?;
+    let written: Result<bool> = async {
+        if existing.is_some() {
+            let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
+                sqlx::query_scalar(
+                    "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
+                )
+                .fetch_one(&mut **tx)
+                .await?
+            } else {
+                None
+            };
+            if is_nip_rs {
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            let statement = if hard_delete_superseded {
+                "DELETE FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            } else {
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            };
+            sqlx::query(statement)
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(d_tag)
+                .execute(&mut **tx)
                 .await?;
+
+            if is_nip_rs {
+                let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
+                    .bind(previous_value)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+
+            if hard_delete_superseded {
+                if let Some((_, existing_id)) = &existing {
+                    sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
+                        .bind(community_id.as_uuid())
+                        .bind(existing_id)
+                        .execute(&mut **tx)
+                        .await?;
+                }
+            }
         }
-        let statement = if hard_delete_superseded {
-            "DELETE FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-        } else {
-            "UPDATE events SET deleted_at = NOW() \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-        };
-        sqlx::query(statement)
+
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(incoming_id)
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(d_tag)
+        .bind(crate::event::extract_not_before(event))
+        .execute(&mut **tx)
+        .await?;
+
+        if insert_result.rows_affected() == 0 {
+            return Ok(false);
+        }
+
+        if is_nip_rs {
+            sqlx::query(
+                "INSERT INTO parameterized_event_watermarks \
+                     (community_id, kind, pubkey, d_tag, created_at, event_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                     created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+            )
             .bind(community_id.as_uuid())
             .bind(kind_i32)
             .bind(pubkey_bytes.as_slice())
             .bind(d_tag)
-            .execute(&mut *savepoint)
+            .bind(created_at)
+            .bind(incoming_id)
+            .execute(&mut **tx)
             .await?;
+        }
 
-        if is_nip_rs {
-            let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
-            sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
-                .bind(previous_value)
-                .execute(&mut *savepoint)
+        crate::insert_mentions_in_transaction(&mut *tx, event, channel_id).await?;
+        Ok(true)
+    }
+    .await;
+
+    let status = match written {
+        Ok(true) => ParameterizedReplaceStatus::Inserted,
+        Ok(false) => {
+            sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
+                .execute(&mut **tx)
                 .await?;
+            ParameterizedReplaceStatus::Duplicate
         }
-
-        if hard_delete_superseded {
-            if let Some((_, existing_id)) = &existing {
-                sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
-                    .bind(community_id.as_uuid())
-                    .bind(existing_id)
-                    .execute(&mut *savepoint)
-                    .await?;
+        Err(error) => {
+            // Restore the caller's transaction; the original error is the
+            // one worth reporting if the rollback itself also fails.
+            if let Err(rollback_error) = sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
+                .execute(&mut **tx)
+                .await
+            {
+                tracing::warn!(error = %rollback_error, "parameterized replacement savepoint rollback failed");
             }
+            return Err(error);
         }
-    }
-
-    let sig_bytes = event.sig.serialize();
-    let tags_json = serde_json::to_value(&event.tags)?;
-    let insert_result = sqlx::query(
-        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(community_id.as_uuid())
-    .bind(incoming_id)
-    .bind(pubkey_bytes.as_slice())
-    .bind(created_at)
-    .bind(kind_i32)
-    .bind(&tags_json)
-    .bind(&event.content)
-    .bind(sig_bytes.as_slice())
-    .bind(received_at)
-    .bind(channel_id)
-    .bind(d_tag)
-    .bind(crate::event::extract_not_before(event))
-    .execute(&mut *savepoint)
-    .await?;
-
-    if insert_result.rows_affected() == 0 {
-        savepoint.rollback().await?;
-        return Ok(ParameterizedReplaceResult::new(
-            event,
-            received_at,
-            channel_id,
-            ParameterizedReplaceStatus::Duplicate,
-        ));
-    }
-
-    if is_nip_rs {
-        sqlx::query(
-            "INSERT INTO parameterized_event_watermarks \
-                 (community_id, kind, pubkey, d_tag, created_at, event_id) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
-                 created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .bind(created_at)
-        .bind(incoming_id)
-        .execute(&mut *savepoint)
+    };
+    sqlx::query("RELEASE SAVEPOINT parameterized_replace")
+        .execute(&mut **tx)
         .await?;
-    }
-
-    savepoint.commit().await?;
-    // The savepoint only exists so a duplicate insert can undo the supersede
-    // above. Mentions index the inserted event on the caller's admitted
-    // transaction, so they still commit or roll back with it.
-    crate::insert_mentions_in_transaction(tx, event, channel_id).await?;
 
     Ok(ParameterizedReplaceResult::new(
         event,
         received_at,
         channel_id,
-        ParameterizedReplaceStatus::Inserted,
+        status,
     ))
 }
 
