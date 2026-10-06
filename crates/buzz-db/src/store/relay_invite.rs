@@ -120,28 +120,6 @@ fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
     Ok(())
 }
 
-/// Mint a v2 invite: generate a 32-byte random secret, hash it, persist the
-/// row, and return the plaintext code plus metadata.
-///
-/// `ttl_secs` must be in the shared invite lifetime range.
-/// `max_uses` must be `None` (unlimited) or `Some(1..=10000)`.
-pub async fn mint_relay_invite(
-    pool: &PgPool,
-    community: CommunityId,
-    created_by: &str,
-    ttl_secs: u64,
-    max_uses: Option<i32>,
-) -> Result<MintedInvite> {
-    match mint_relay_invite_with_owner(pool, community, created_by, None, ttl_secs, max_uses)
-        .await?
-    {
-        MintOutcome::Minted(invite) => Ok(invite),
-        MintOutcome::Restricted => Err(crate::error::DbError::AccessDenied(
-            "a banned principal cannot mint relay invites".into(),
-        )),
-    }
-}
-
 /// Mint a v2 invite while atomically checking the issuer and optional NIP-OA owner.
 ///
 /// `owner_pubkey` must be a previously verified owner credential from the
@@ -690,22 +668,6 @@ pub async fn claim_legacy_relay_membership_with_owner(
 }
 
 impl Db {
-    /// Mints a v2 use-limited relay invite. The plaintext code is returned
-    /// exactly once; only its SHA-256 hash is persisted.
-    ///
-    /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
-    /// `ttl_secs` must be in the shared invite lifetime range.
-    #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
-    pub async fn mint_relay_invite(
-        &self,
-        community: CommunityId,
-        created_by: &str,
-        ttl_secs: u64,
-        max_uses: Option<i32>,
-    ) -> Result<MintedInvite> {
-        mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
-    }
-
     /// Mints an invite after atomically checking the issuer and optional
     /// verified NIP-OA owner against current community bans.
     #[datastore_span(name = "mint_relay_invite_with_owner", system = "postgresql")]
@@ -897,6 +859,22 @@ mod postgres_tests {
         format!("{:064x}", Uuid::new_v4().as_u128())
     }
 
+    async fn mint_unrestricted_invite(
+        pool: &PgPool,
+        community: CommunityId,
+        created_by: &str,
+        ttl_secs: u64,
+        max_uses: Option<i32>,
+    ) -> MintedInvite {
+        match mint_relay_invite_with_owner(pool, community, created_by, None, ttl_secs, max_uses)
+            .await
+            .expect("mint test invite")
+        {
+            MintOutcome::Minted(invite) => invite,
+            MintOutcome::Restricted => panic!("test issuer unexpectedly restricted"),
+        }
+    }
+
     async fn use_count(pool: &PgPool, community: CommunityId, invite_id: Uuid) -> i32 {
         sqlx::query_scalar(
             "SELECT use_count FROM relay_invites WHERE community_id = $1 AND id = $2",
@@ -993,7 +971,7 @@ mod postgres_tests {
             .await
             .expect("begin quiescing");
 
-        let error = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let error = mint_relay_invite_with_owner(&pool, community, "owner", None, 3600, Some(1))
             .await
             .expect_err("quiescing must reject invite minting");
         assert!(matches!(error, crate::error::DbError::AccessDenied(_)));
@@ -1018,7 +996,7 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -1064,7 +1042,7 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -1108,7 +1086,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2))
+        let invite = mint_unrestricted_invite(&pool, community_a, "owner", 3600, Some(2))
             .await
             .expect("mint invite");
         let hash = hash_v2_code(&invite.code);
@@ -1145,10 +1123,10 @@ mod postgres_tests {
     async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let old = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint old invite");
-        let recent = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let recent = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint recent invite");
         let cutoff = Utc::now() - chrono::Duration::days(30);
@@ -1250,7 +1228,7 @@ mod postgres_tests {
     async fn unlimited_invites_count_each_new_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, None)
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, None)
             .await
             .expect("mint unlimited invite");
         let hash = hash_v2_code(&invite.code);
@@ -1276,7 +1254,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let pubkey = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -1301,6 +1279,75 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn v2_and_legacy_claims_keep_policy_evidence_on_fenced_paths() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let policy_member = test_pubkey();
+        let legacy_member = test_pubkey();
+        let version = "a".repeat(64);
+        let invite = mint_unrestricted_invite(&pool, community, "owner", 3600, Some(1)).await;
+        let hash = hash_v2_code(&invite.code);
+
+        assert_eq!(
+            claim_relay_invite_with_owner(
+                &pool,
+                community,
+                &hash,
+                &policy_member,
+                None,
+                Some(&version),
+            )
+            .await
+            .expect("v2 invite claim"),
+            ClaimOutcome::Joined {
+                use_count: 1,
+                uses_remaining: Some(0),
+            }
+        );
+        assert!(crate::relay_members::has_join_policy_acceptance(
+            &pool,
+            community,
+            &policy_member,
+            &version,
+        )
+        .await
+        .expect("v2 policy acceptance lookup"));
+        assert!(is_relay_member(&pool, community, &policy_member)
+            .await
+            .expect("v2 member lookup"));
+
+        let expires_at = chrono::Utc::now().timestamp().max(0) as u64 + 3600;
+        assert_eq!(
+            claim_legacy_relay_membership_with_owner(
+                &pool,
+                community,
+                &legacy_member,
+                None,
+                expires_at,
+                None,
+                None,
+            )
+            .await
+            .expect("legacy invite claim"),
+            LegacyClaimOutcome::Joined
+        );
+        assert!(!crate::relay_members::has_join_policy_acceptance(
+            &pool,
+            community,
+            &legacy_member,
+            &version,
+        )
+        .await
+        .expect("legacy policy acceptance lookup"));
+        assert!(is_relay_member(&pool, community, &legacy_member)
+            .await
+            .expect("legacy member lookup"));
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn bans_permanently_revoke_only_the_issuer_tenant_invites() {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
@@ -1309,10 +1356,10 @@ mod postgres_tests {
         let issuer_bytes = hex::decode(&issuer).expect("issuer hex");
         let actor = [42; 32];
 
-        let invite_a = mint_relay_invite(&pool, community_a, &issuer, 3600, Some(1))
+        let invite_a = mint_unrestricted_invite(&pool, community_a, &issuer, 3600, Some(1))
             .await
             .expect("mint tenant A invite");
-        let invite_b = mint_relay_invite(&pool, community_b, &issuer, 3600, Some(1))
+        let invite_b = mint_unrestricted_invite(&pool, community_b, &issuer, 3600, Some(1))
             .await
             .expect("mint tenant B invite");
         let hash_a = hash_v2_code(&invite_a.code);
@@ -1357,7 +1404,7 @@ mod postgres_tests {
             "unban must not restore the old invitation"
         );
 
-        let replacement = mint_relay_invite(&pool, community_a, &issuer, 3600, Some(1))
+        let replacement = mint_unrestricted_invite(&pool, community_a, &issuer, 3600, Some(1))
             .await
             .expect("mint replacement after unban");
         assert!(matches!(
@@ -1453,7 +1500,7 @@ mod postgres_tests {
             MintOutcome::Minted(invite) => invite,
             MintOutcome::Restricted => panic!("unrestricted agent should mint"),
         };
-        let unrelated_invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
+        let unrelated_invite = mint_unrestricted_invite(&pool, community, &issuer, 3600, Some(1))
             .await
             .expect("mint unrelated invite");
         let agent_hash = hash_v2_code(&agent_invite.code);
@@ -1537,7 +1584,7 @@ mod postgres_tests {
         let issuer_bytes = hex::decode(&issuer).expect("issuer hex");
         let actor = [44_u8; 32];
         let claimer = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
+        let invite = mint_unrestricted_invite(&pool, community, &issuer, 3600, Some(1))
             .await
             .expect("mint race invite");
         let token_hash = hash_v2_code(&invite.code);

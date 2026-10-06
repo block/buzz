@@ -773,14 +773,19 @@ check can make still-valid v1 links redeemable again; a rollback-capable version
 that can mint v1 also restarts the drain clock if it serves traffic.
 
 For the first rollout, pause invite claims and ban changes while relay versions
-that do not participate in the community admission lock are serving. Apply the
-migration and bring the updated lock-aware fleet up before resuming those
-operations; mixed versions can bypass the ordering guarantee. The migration
-also backfills v2 revocation from active bans and retained community/deployment
-ban audit rows; an older ban that was lifted without any retained audit record
-cannot be reconstructed from current state alone. Because legacy v1 tokens lack
-issuer identity, the related security finding remains open until the drain is
-complete or its scope is explicitly revised.
+that do not participate in the community admission lock are serving. An older
+claim racing a new ban can acquire locks in the inverse order and cause
+PostgreSQL to abort either transaction, including the ban. Treat a failed ban
+transaction as unapplied: observe the failure and retry the ban after the
+conflicting transaction has ended. Keep those operations paused until rollout
+is complete and every serving relay is lock-aware; only then resume them. Mixed
+versions can bypass the ordering guarantee. The migration also backfills v2
+revocation from active bans and retained community/deployment ban audit rows; an
+older ban that was lifted without any retained audit record cannot be
+reconstructed from current state alone. Because legacy v1 tokens lack issuer
+identity, the related security finding remains open until the natural drain
+completes or an operator-selected cutoff is enforced by every serving and
+rollback-capable version, or its scope is explicitly revised.
 
 **Constants:**
 

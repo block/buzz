@@ -1961,10 +1961,22 @@ mod postgres_tests {
             .await
             .expect("create test community")
             .id;
-        let invite = normal_db
-            .mint_relay_invite(community, &issuer.public_key().to_hex(), 3600, Some(1))
+        let invite = match normal_db
+            .mint_relay_invite_with_owner(
+                community,
+                &issuer.public_key().to_hex(),
+                None,
+                3600,
+                Some(1),
+            )
             .await
-            .expect("seed invite");
+            .expect("seed invite")
+        {
+            buzz_db::relay_invite::MintOutcome::Minted(invite) => invite,
+            buzz_db::relay_invite::MintOutcome::Restricted => {
+                panic!("unrestricted issuer should mint")
+            }
+        };
         let token_hash = buzz_core::invite::hash_v2_code(&invite.code);
         let state = invite_test_state_with_db(&host, failing_db.clone(), admin.clone())
             .await
@@ -2109,11 +2121,17 @@ mod postgres_tests {
             .await
             .expect("lookup")
             .expect("community exists");
-        let invite = state
+        let invite = match state
             .db
-            .mint_relay_invite(community.id, "owner", 3600, Some(1))
+            .mint_relay_invite_with_owner(community.id, "owner", None, 3600, Some(1))
             .await
-            .expect("mint v2 invite");
+            .expect("mint v2 invite")
+        {
+            buzz_db::relay_invite::MintOutcome::Minted(invite) => invite,
+            buzz_db::relay_invite::MintOutcome::Restricted => {
+                panic!("unrestricted issuer should mint")
+            }
+        };
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());
