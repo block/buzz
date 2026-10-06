@@ -392,11 +392,14 @@ test("actions-disabled-auth: with admin auth disabled, community pages render re
 test("actions-review-race: a late second Review never replaces the submitted intent", async () => {
   // Mutation: drop the in-flight guard at the top of handleReview → RED
   // (the second Review re-freezes with a new requestId and Retry sends it).
+  // Relay reads answer at once while the page mounts, then are held from
+  // the first Review on so the two Reviews race.
   const relays = [];
-  setIpcHandler(
-    "get_relay_ws_url",
-    () =>
-      new Promise((resolve) => relays.push(() => resolve(TEST_RELAY_WS_URL))),
+  let hold = false;
+  setIpcHandler("get_relay_ws_url", () =>
+    hold
+      ? new Promise((resolve) => relays.push(() => resolve(TEST_RELAY_WS_URL)))
+      : Promise.resolve(TEST_RELAY_WS_URL),
   );
   const ids = [];
   const replies = [
@@ -408,15 +411,10 @@ test("actions-review-race: a late second Review never replaces the submitted int
     ids.push(intent.requestId);
     return replies[ids.length - 1]();
   });
-  const mounted = mountActions();
-  await settle();
-  // Release any relay read made while mounting.
-  await act(async () => {
-    for (const resolve of relays.splice(0)) resolve();
-  });
-  const { container: c, unmount } = await mounted;
+  const { container: c, unmount } = await mountActions();
   try {
     await fillTimeout(c);
+    hold = true;
     await act(async () => {
       fireEvent.click(q(c, "direct-review-btn"));
       fireEvent.click(q(c, "direct-review-btn"));

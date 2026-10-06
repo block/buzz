@@ -47,6 +47,7 @@ if (globalThis.window && globalThis.window !== globalThis) {
 
 // ── Production imports ───────────────────────────────────────────────────────
 
+import assert from "node:assert/strict";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
@@ -322,14 +323,18 @@ export function mountCommunityPanel(
   });
   const doRender = async (opts) => {
     await m.doRender(opts);
-    const btn = m.container.querySelector(
-      `[data-testid='community-section-${section}']`,
-    );
-    if (btn) {
-      await act(async () => {
-        fireEvent.click(btn);
-      });
+    // The page's section nav renders only after its async reads settle, so
+    // wait for it rather than racing a fixed delay on slow runners.
+    const selector = `[data-testid='community-section-${section}']`;
+    let btn = m.container.querySelector(selector);
+    for (let i = 0; !btn && i < 100; i++) {
+      await settle(10);
+      btn = m.container.querySelector(selector);
     }
+    assert.ok(btn, `community section ${section} never rendered`);
+    await act(async () => {
+      fireEvent.click(btn);
+    });
   };
   return { ...m, doRender };
 }
