@@ -1627,6 +1627,8 @@ mod tests {
     ) -> (Result<Config, ConfigError>, String) {
         use std::sync::{Arc, Mutex};
 
+        let _tracing = crate::test_support::tracing_dispatch_lock();
+
         #[derive(Clone)]
         struct CapturingMakeWriter {
             buf: Arc<Mutex<Vec<u8>>>,

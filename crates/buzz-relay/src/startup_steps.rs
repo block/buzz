@@ -232,7 +232,11 @@ mod tests {
     use crate::lifecycle::StartupPhase;
 
     /// Gauge values keyed by `(metric, phase)` after running `body`.
+    ///
+    /// Holds the tracing dispatch lock: `body` fires the step log callsites
+    /// with no dispatcher, which must not race a `finished_records` capture.
     fn gauges(body: impl FnOnce()) -> HashMap<(String, String), f64> {
+        let _tracing = crate::test_support::tracing_dispatch_lock();
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, body);
@@ -280,6 +284,7 @@ mod tests {
 
     /// `(phase, status)` of every `Startup phase finished` record `body` emits.
     fn finished_records(body: impl FnOnce()) -> Vec<(String, String)> {
+        let _tracing = crate::test_support::tracing_dispatch_lock();
         let logs = CapturedLogs::default();
         let subscriber = tracing_subscriber::fmt()
             .json()

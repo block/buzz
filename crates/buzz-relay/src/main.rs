@@ -840,7 +840,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 info!(
                     count = summary.repaired,
                     failed = summary.failed,
-                    "large channel member snapshots repaired"
+                    "large channel member snapshots reconciled on startup"
                 );
             }
         }
