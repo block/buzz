@@ -3,7 +3,8 @@
 //! [`crate::lifecycle`] covers the earliest phases, which run before the
 //! metrics exporter exists, as log-only records. Everything after
 //! `metrics_bind` runs with a working recorder and structured logging, so
-//! each step here produces a log line and two gauges:
+//! each step logs `Startup phase finished` (`phase`, `elapsed_ms`, `status`)
+//! and sets two gauges:
 //!
 //! - `buzz_startup_phase_current{phase}` is `1` while the step runs and `0`
 //!   once it ends, so a pod that is still starting shows which step it is on.
@@ -124,9 +125,9 @@ impl StartupStep {
     }
 }
 
-/// How a startup step ended.
+/// How a startup step ended (same values as `buzz_process_lifecycle` `status`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StepOutcome {
+enum StepStatus {
     Succeeded,
     /// Non-fatal error; startup continued.
     Degraded,
@@ -134,7 +135,7 @@ enum StepOutcome {
     Failed,
 }
 
-impl StepOutcome {
+impl StepStatus {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
@@ -175,15 +176,15 @@ impl StepTimer {
 
     /// End the step as `succeeded`, or `degraded` if [`Self::degrade`] was called.
     pub fn finish(mut self) {
-        let outcome = if self.degraded {
-            StepOutcome::Degraded
+        let status = if self.degraded {
+            StepStatus::Degraded
         } else {
-            StepOutcome::Succeeded
+            StepStatus::Succeeded
         };
-        self.end(outcome);
+        self.end(status);
     }
 
-    fn end(&mut self, outcome: StepOutcome) {
+    fn end(&mut self, status: StepStatus) {
         if self.ended {
             return;
         }
@@ -193,20 +194,20 @@ impl StepTimer {
         metrics::gauge!(SECONDS_METRIC, "phase" => phase).set(elapsed.as_secs_f64());
         metrics::gauge!(CURRENT_METRIC, "phase" => phase).set(0.0);
         let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-        match outcome {
-            StepOutcome::Succeeded => {
+        match status {
+            StepStatus::Succeeded => {
                 info!(
                     phase,
                     elapsed_ms,
-                    outcome = outcome.as_str(),
+                    status = status.as_str(),
                     "Startup phase finished"
                 )
             }
-            StepOutcome::Degraded | StepOutcome::Failed => {
+            StepStatus::Degraded | StepStatus::Failed => {
                 warn!(
                     phase,
                     elapsed_ms,
-                    outcome = outcome.as_str(),
+                    status = status.as_str(),
                     "Startup phase finished"
                 )
             }
@@ -216,13 +217,14 @@ impl StepTimer {
 
 impl Drop for StepTimer {
     fn drop(&mut self) {
-        self.end(StepOutcome::Failed);
+        self.end(StepStatus::Failed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
 
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
@@ -253,6 +255,53 @@ mod tests {
             .collect()
     }
 
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// `(phase, status)` of every `Startup phase finished` record `body` emits.
+    fn finished_records(body: impl FnOnce()) -> Vec<(String, String)> {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(logs.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = logs
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["fields"]["message"] == "Startup phase finished")
+            .map(|record| {
+                let field = |name: &str| record["fields"][name].as_str().unwrap_or("").to_owned();
+                (field("phase"), field("status"))
+            })
+            .collect()
+    }
+
     fn get(gauges: &HashMap<(String, String), f64>, metric: &str, phase: &str) -> Option<f64> {
         gauges.get(&(metric.to_owned(), phase.to_owned())).copied()
     }
@@ -279,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn dropped_and_degraded_steps_still_end_once() {
+    fn dropped_and_degraded_steps_clear_current_and_record_duration() {
         let gauges = gauges(|| {
             drop(StepTimer::start(StartupStep::RedisConnect));
             let mut step = StepTimer::start(StartupStep::PartitionEnsure);
@@ -290,6 +339,36 @@ mod tests {
             assert_eq!(get(&gauges, CURRENT_METRIC, phase), Some(0.0));
             assert!(get(&gauges, SECONDS_METRIC, phase).is_some());
         }
+    }
+
+    #[test]
+    fn each_terminal_path_logs_exactly_one_finished_record_with_its_status() {
+        let records = finished_records(|| {
+            StepTimer::start(StartupStep::DbConnect).finish();
+            let mut degraded = StepTimer::start(StartupStep::PartitionEnsure);
+            degraded.degrade();
+            degraded.finish();
+            drop(StepTimer::start(StartupStep::RedisConnect));
+        });
+        let expected = [
+            ("db_connect", "succeeded"),
+            ("partition_ensure", "degraded"),
+            ("redis_connect", "failed"),
+        ]
+        .map(|(phase, status)| (phase.to_owned(), status.to_owned()));
+        assert_eq!(records, expected);
+    }
+
+    #[test]
+    fn a_panic_inside_a_step_logs_it_failed() {
+        let records = finished_records(|| {
+            let result = std::panic::catch_unwind(|| {
+                let _step = StepTimer::start(StartupStep::MeshBoot);
+                panic!("step body panicked");
+            });
+            assert!(result.is_err());
+        });
+        assert_eq!(records, [("mesh_boot".to_owned(), "failed".to_owned())]);
     }
 
     #[test]

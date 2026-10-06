@@ -709,8 +709,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             "NIP-FI: warming JWKS snapshots"
         );
         let issuer_ids: Vec<String> = jwks_configs.iter().map(|c| c.issuer.clone()).collect();
-        let step = StepTimer::start(StartupStep::NipFiJwksWarm);
+        let mut step = StepTimer::start(StartupStep::NipFiJwksWarm);
         let warmed = warm_nip_fi_jwks_snapshots(&jwks_source, &issuer_ids).await;
+        if warmed.iter().any(|ok| !ok) {
+            // FI ingress fails closed until the refresh loop lands a snapshot.
+            step.degrade();
+        }
         step.finish();
         let issuers = jwks_configs
             .iter()
@@ -828,8 +832,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     let mut step = StepTimer::start(StartupStep::LargeRosterReconcile);
     match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
     {
-        Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),
-        Ok(_) => {}
+        Ok(summary) => {
+            if summary.failed > 0 {
+                step.degrade();
+            }
+            if summary.repaired > 0 || summary.failed > 0 {
+                info!(
+                    count = summary.repaired,
+                    failed = summary.failed,
+                    "large channel member snapshots repaired"
+                );
+            }
+        }
         Err(error) => {
             step.degrade();
             tracing::warn!(%error, "large channel member snapshot startup reconciliation failed")
@@ -849,7 +863,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         )
         .await
         {
-            Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
+            Ok(summary) => {
+                if summary.failed > 0 {
+                    step.degrade();
+                }
+                info!(
+                    count = summary.repaired,
+                    failed = summary.failed,
+                    "NIP-43 membership snapshots reconciled on startup"
+                );
+            }
             Err(error) => {
                 step.degrade();
                 tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
@@ -874,8 +897,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 )
                 .await
                 {
-                    Ok(count) if count > 0 => {
-                        info!(count, "NIP-43 membership snapshots repaired")
+                    Ok(summary) if summary.repaired > 0 => {
+                        info!(count = summary.repaired, "NIP-43 membership snapshots repaired")
                     }
                     Ok(_) => {}
                     Err(error) => tracing::warn!(
