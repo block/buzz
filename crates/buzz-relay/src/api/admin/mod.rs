@@ -467,10 +467,11 @@ async fn resolve_report(
         return Err(ApiError::bad_request("invalid_action", "unknown action"));
     }
 
-    // Load report globally to derive target provenance.
+    // Load report globally to derive target provenance. Enforcement needs the
+    // real target author, so this read is unfiltered and never returned.
     let report_detail = state
         .db
-        .admin_get_report(report_id)
+        .admin_get_report_for_enforcement(report_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
 
@@ -7305,6 +7306,175 @@ mod postgres_tests {
         .await
         .expect("ban existence");
         assert!(banned, "the stored author must be banned");
+    }
+
+    /// Seed an event report in the `admin.example` community whose target is a
+    /// hidden (shared-gated) kind authored by `author`. Returns the report id.
+    async fn seed_hidden_kind_event_report(pool: &sqlx::PgPool, author: &[u8]) -> Uuid {
+        let host_report = seed_admin_host_report(pool, "open").await;
+        let community_id: Uuid =
+            sqlx::query_scalar("SELECT community_id FROM moderation_reports WHERE id = $1")
+                .bind(host_report)
+                .fetch_one(pool)
+                .await
+                .expect("admin.example community");
+        cleanup_admin_host_report(pool, host_report).await;
+        let (report_id, _channel_id, target_event_id) =
+            e2e_event_report_with_author(pool, community_id, author).await;
+        sqlx::query(
+            r#"UPDATE events SET kind = $3, tags = '[["shared","true"]]'::jsonb
+               WHERE community_id = $1 AND id = $2"#,
+        )
+        .bind(community_id)
+        .bind(target_event_id.as_slice())
+        .bind(buzz_core::kind::SHARED_GATED_KINDS[0] as i32)
+        .execute(pool)
+        .await
+        .expect("make target a hidden kind");
+        report_id
+    }
+
+    /// Ban through the real resolve route on a report whose target is a hidden
+    /// kind: the real author is banned, and report detail still hides it.
+    #[tokio::test]
+    #[ignore = "requires Postgres — resolve ban on a hidden-kind target bans the author, detail stays hidden"]
+    async fn resolve_ban_on_hidden_kind_target_bans_author_without_revealing_it() {
+        let keys = nostr::Keys::generate();
+        let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+        let pool = e2e_pool().await;
+        let author = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let report_id = seed_hidden_kind_event_report(&pool, &author).await;
+
+        let path = format!("/reports/{report_id}/resolve");
+        let body = serde_json::json!({ "action": "ban", "requestId": Uuid::new_v4() }).to_string();
+        let response = status_for(
+            state.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_post(&keys, &path, body.as_bytes()),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "ban must be accepted");
+
+        let banned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM community_bans b JOIN moderation_reports r \
+             ON r.community_id = b.community_id WHERE r.id = $1 AND b.pubkey = $2)",
+        )
+        .bind(report_id)
+        .bind(&author)
+        .fetch_one(&pool)
+        .await
+        .expect("ban existence");
+        assert!(banned, "the hidden target's author must be banned");
+
+        let detail_path = format!("/reports/{report_id}");
+        let response = status_for(
+            state,
+            Request::builder()
+                .uri(&detail_path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, make_nostr_auth(&keys, &detail_path))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert!(detail["message"].is_null(), "detail must hide the target");
+        assert!(detail["targetAuthorPubkey"].is_null());
+    }
+
+    /// An accepted-but-unfinished ban on a hidden-kind target converges in the
+    /// recovery worker, which re-derives the author from the report.
+    #[tokio::test]
+    #[ignore = "requires Postgres — stranded ban on a hidden-kind target recovers"]
+    async fn stranded_ban_on_hidden_kind_target_recovers_via_worker() {
+        let pool = e2e_pool().await;
+        let author = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let report_id = seed_hidden_kind_event_report(&pool, &author).await;
+        let (community_id, channel_id): (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT community_id, channel_id FROM moderation_reports WHERE id = $1")
+                .bind(report_id)
+                .fetch_one(&pool)
+                .await
+                .expect("report row");
+        let actor = vec![0x61u8; 32];
+
+        let action_id = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            buzz_core::CommunityId::from_uuid(community_id),
+            report_id,
+            Uuid::new_v4(),
+            &actor,
+            "operator",
+            "ban",
+            None,
+            None,
+            "resolve:ban",
+            "relay_operator",
+            Some(author.as_slice()),
+            None,
+            channel_id,
+        )
+        .await
+        .expect("claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let _ = buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        sqlx::query(
+            "UPDATE relay_admin_actions SET action_lease_expires_at = $2, action_lease_token = NULL WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(300))
+        .execute(&pool)
+        .await
+        .expect("expire lease");
+
+        let claim = buzz_db::relay_admin_actions::claim_stranded_action_batch(
+            &pool,
+            "e2e-stranded-ban-hidden",
+            chrono::Utc::now() + chrono::Duration::seconds(120),
+            1000,
+        )
+        .await
+        .expect("claim_stranded_action_batch")
+        .into_iter()
+        .find(|c| c.record.id == action_id)
+        .expect("stranded action must appear in batch");
+        let state = state_from_pool(pool.clone()).await;
+        crate::handlers::admin_action_worker::recover_one(&state, claim).await;
+
+        let final_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("exists");
+        assert_eq!(final_rec.state, "succeeded", "stranded ban must converge");
+        let banned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM community_bans WHERE community_id = $1 AND pubkey = $2)",
+        )
+        .bind(community_id)
+        .bind(&author)
+        .fetch_one(&pool)
+        .await
+        .expect("ban existence");
+        assert!(banned, "the hidden target's author must be banned");
     }
 
     #[tokio::test]

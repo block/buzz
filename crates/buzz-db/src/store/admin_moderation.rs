@@ -18,8 +18,9 @@ use crate::Db;
 pub const MAX_PAGE_SIZE: i64 = 200;
 
 /// Kinds no admin read may reveal: author-only, result-gated, `#p`-gated and
-/// shared-gated events. The whole shared-gated set is hidden, shared or not;
-/// moderators cannot act on these kinds, so admin reads treat them as absent.
+/// shared-gated events. The whole shared-gated set is hidden, shared or not.
+/// Moderators can still act on these kinds (direct delete by event ID, report
+/// enforcement); they just cannot read them, so admin reads treat them as absent.
 fn admin_hidden_kinds() -> Vec<i32> {
     AUTHOR_ONLY_KINDS
         .iter()
@@ -254,7 +255,12 @@ pub async fn list_reports(
 }
 
 /// Fetch one report globally by its row id, including its event target content.
-pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminReportDetail>> {
+/// Targets whose kind is in `hidden_kinds` come back as `message: None`.
+async fn get_report(
+    pool: &PgPool,
+    report_id: Uuid,
+    hidden_kinds: &[i32],
+) -> Result<Option<AdminReportDetail>> {
     let row = sqlx::query(
         r#"
         SELECT r.id, r.community_id, c.host AS community_host,
@@ -307,7 +313,7 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
         "#,
     )
     .bind(report_id)
-    .bind(admin_hidden_kinds())
+    .bind(hidden_kinds)
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
@@ -581,10 +587,22 @@ impl Db {
         .await
     }
 
-    /// Fetch one report for the deployment-global read-only admin plane.
+    /// Fetch one report for any admin HTTP response. Hidden-kind targets come
+    /// back as `message: None`, exactly like a missing event.
     #[datastore_span(name = "admin_get_report", system = "postgresql")]
     pub async fn admin_get_report(&self, id: Uuid) -> Result<Option<AdminReportDetail>> {
-        get_report(&self.pool, id).await
+        get_report(&self.pool, id, &admin_hidden_kinds()).await
+    }
+
+    /// Fetch one report with its target unfiltered, for report enforcement and
+    /// action recovery only, which need the real target author. Never serialize
+    /// this result into an HTTP response; use [`Self::admin_get_report`].
+    #[datastore_span(name = "admin_get_report_for_enforcement", system = "postgresql")]
+    pub async fn admin_get_report_for_enforcement(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<AdminReportDetail>> {
+        get_report(&self.pool, id, &[]).await
     }
 
     /// List feedback for the deployment-global read-only admin plane.
@@ -769,7 +787,7 @@ mod postgres_tests {
         .await;
         let report_id = insert_event_report(&pool, report_community, &event_id).await;
 
-        let detail = get_report(&pool, report_id)
+        let detail = get_report(&pool, report_id, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
@@ -865,7 +883,15 @@ mod postgres_tests {
         let community_id = insert_community(&pool, "hidden-target").await;
         let author = [5_u8; 32];
         let mut hidden = Vec::new();
-        for (i, kind) in admin_hidden_kinds().into_iter().enumerate() {
+        // Enumerate the core sets directly so a set dropped from
+        // `admin_hidden_kinds()` still gets a fixture and fails the test.
+        let private_kinds = AUTHOR_ONLY_KINDS
+            .iter()
+            .chain(RESULT_GATED_KINDS)
+            .chain(P_GATED_KINDS)
+            .chain(SHARED_GATED_KINDS)
+            .map(|&kind| kind as i32);
+        for (i, kind) in private_kinds.enumerate() {
             let event_id = vec![0x40 + i as u8; 32];
             sqlx::query(
                 r#"
@@ -913,14 +939,14 @@ mod postgres_tests {
         };
         for &(kind, report_id) in &hidden {
             assert_eq!(author_of(report_id), None, "list, kind {kind}");
-            let detail = get_report(&pool, report_id)
+            let detail = get_report(&pool, report_id, &admin_hidden_kinds())
                 .await
                 .expect("query report")
                 .expect("report exists");
             assert!(detail.message.is_none(), "detail, kind {kind}");
         }
         assert_eq!(author_of(visible), Some(hex::encode(author)));
-        let detail = get_report(&pool, visible)
+        let detail = get_report(&pool, visible, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
@@ -941,7 +967,7 @@ mod postgres_tests {
         let community_id = insert_community(&pool, "pubkey-target").await;
         let report_id = insert_pubkey_report(&pool, community_id).await;
 
-        let detail = get_report(&pool, report_id)
+        let detail = get_report(&pool, report_id, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
@@ -959,7 +985,7 @@ mod postgres_tests {
         let missing_event_id = vec![8_u8; 32];
         let report_id = insert_event_report(&pool, community_id, &missing_event_id).await;
 
-        let detail = get_report(&pool, report_id)
+        let detail = get_report(&pool, report_id, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
@@ -1026,7 +1052,7 @@ mod postgres_tests {
         .await;
         set_report_status(&pool, community_id, report_id, "dismissed").await;
 
-        let detail = get_report(&pool, report_id)
+        let detail = get_report(&pool, report_id, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
@@ -1066,7 +1092,7 @@ mod postgres_tests {
         .await;
         set_report_status(&pool, community_id, report_id, "resolved").await;
 
-        let detail = get_report(&pool, report_id)
+        let detail = get_report(&pool, report_id, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
@@ -1100,7 +1126,7 @@ mod postgres_tests {
         )
         .await;
 
-        let detail = get_report(&pool, report_id)
+        let detail = get_report(&pool, report_id, &admin_hidden_kinds())
             .await
             .expect("query report")
             .expect("report exists");
