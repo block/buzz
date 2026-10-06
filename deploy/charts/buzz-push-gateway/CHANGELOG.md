@@ -1,3 +1,5 @@
+# Chart release notes
+
 ## 0.3.4
 
 Adds runtime Pod labels, a service account name, and a configurable termination
@@ -5,7 +7,8 @@ grace period of at least 60 seconds. Reserved selector labels cannot be overridd
 
 Allows a platform to replace the runtime NetworkPolicy by explicitly naming its
 replacement. External policy mode supports PodMonitor without requiring unused
-chart-owned monitoring selectors or APNs destinations. The complete-render gate requires exactly one ordinary replacement NetworkPolicy
+chart-owned monitoring selectors or APNs destinations. The complete-render gate
+requires exactly one ordinary replacement NetworkPolicy
 in the effective release namespace, selecting the runtime Pods and declaring
 both ingress and egress policy types. Helm and Argo CD hook policies are rejected.
 External-policy callers must supply independent Deployment, policy and namespace
@@ -18,3 +21,20 @@ and DNS destinations. Runtime settings do not change migration Pod identity.
 Default runtime rendering is unchanged.
 
 Implemented in [#8113](https://github.com/block/buzz/pull/8113).
+
+## 0.3.3
+
+`gatewayOrigin` is now only an HTTPRoute routing input. It is optional unless
+`httpRoute.enabled=true`, and is no longer passed to the gateway container as
+`BUZZ_PUSH_GATEWAY_ORIGIN`. Implemented in
+[#7877](https://github.com/block/buzz/pull/7877).
+
+Adds optional `migration.podAnnotations` for the migration Job's Pod template.
+The default is empty. Annotation values must be strings, and migration Pod
+annotations are independent of runtime Deployment Pod annotations and Job hook
+metadata.
+
+For example, operators can set `migration.podAnnotations.sidecar.istio.io/inject`
+to the string `"false"` to opt migration Pods out of Istio sidecar injection.
+
+Implemented in [#8105](https://github.com/block/buzz/pull/8105).
