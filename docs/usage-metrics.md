@@ -14,13 +14,19 @@ missing, stale, or unavailable reader skips the telemetry query; the relay never
 falls back to the writer for these aggregates. Set the telemetry budget to `0`
 to disable the database-backed families explicitly.
 
+A deployment with no `READ_DATABASE_URL`, or whose reader fails verification,
+therefore emits none of the database-backed fleet totals (`buzz_total_users`,
+`buzz_total_channels`, `buzz_total_active_users`, and the rest of the stock
+family) and reports both families unavailable. That includes local compose and
+single-node self-hosts. Configure a verified reader where those totals are
+needed.
+
 ## Availability
 
 Dashboards and monitors must pair values with these fixed-cardinality gauges:
 
 - `buzz_usage_snapshot_available{family="stock"}`
 - `buzz_usage_snapshot_available{family="activity"}`
-- `buzz_storage_community_breakdown_available`
 
 Database and storage gauges are leader-only. In a multi-pod deployment, first
 filter them to the pod where `buzz_usage_poller_is_leader == 1`; do not take an
@@ -28,14 +34,19 @@ unfiltered maximum across pods. A demoted pod clears its snapshot availability,
 but previously exported value series remain scrape-visible until the recorder
 evicts them.
 
-A value of `0` means the corresponding snapshot was not collected. It must not
-be interpreted as all usage being zero. Failed stock or activity collections
-retry after 60 seconds; successful collections resume their normal hourly and
-daily cadences.
+Availability reports whether the latest due collection of that family
+succeeded. A value of `0` means it was skipped or failed; it must not be
+interpreted as all usage being zero. The last successful values stay
+scrape-visible while availability is `0`, and
+`buzz_usage_snapshot_age_seconds{family=...}` reports how old they are. Failed
+stock or activity collections retry after 60 seconds; a successful retry
+restores availability and resumes the normal hourly and daily cadences.
 
-In totals-only storage mode, the relay does not calculate community attribution
-and therefore does not emit `buzz_storage_unmapped_community_bytes`. The
-breakdown-availability gauge communicates that omission.
+Storage totals come from the `buzz-admin` worker snapshot and carry their own
+`buzz_storage_snapshot_load_ok` and `buzz_storage_snapshot_age_seconds` health
+gauges. In fleet-only mode the relay does not attribute storage to communities,
+so it emits neither `buzz_community_storage_*` series nor
+`buzz_storage_unmapped_community_bytes`.
 
 ## Rollout and rollback
 
@@ -49,7 +60,11 @@ breakdown-availability gauge communicates that omission.
 `BUZZ_USAGE_METRICS_PER_COMMUNITY=all` temporarily restores the prior
 per-community emission for rollback or dashboard migration. It also restores
 the associated memory and monitoring-cardinality growth, so it is not the
-steady-state configuration.
+steady-state configuration. In this mode every leader tick collects all
+families, so a successful collection reports both availability gauges as `1`
+and a failed one demotes the leader and reports `0`; dashboards gated on
+availability keep working through a rollback. It emits the exact
+`buzz_communities_total` instead of `buzz_communities_estimated`.
 
 ## Leader election
 

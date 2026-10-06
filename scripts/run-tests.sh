@@ -179,6 +179,11 @@ run_unit_tests() {
   run_test_step "buzz-relay storage snapshot tests" \
     cargo test -p buzz-relay --lib storage_sweep::tests:: -- --nocapture
 
+  run_test_step "buzz-relay usage metrics replica budget config test" \
+    cargo test -p buzz-relay --lib \
+      config::tests::usage_metrics_replica_budget_defaults_on_independently_of_serving_reads \
+      -- --exact --nocapture
+
   # Mirror the four audio/FI suites from `just test-unit`'s nextest expression.
   # These are infra-free (no DB, no Redis); the `#[ignore]`-gated DB witnesses
   # are excluded by cargo test's default filter. Keep in step with the Justfile
