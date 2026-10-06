@@ -24,6 +24,19 @@ pub enum ParameterizedReplaceStatus {
     RevisionMismatch,
     /// An exact replay was required, but the event is not the live head.
     ReplayOnlyMiss,
+    /// NIP-AT: the coordinate was deleted at this Unix second, and the event
+    /// is dated at or before it. A delete stays in effect: an older copy of a
+    /// deleted object can never come back.
+    DeletedAt(i64),
+}
+
+/// `event_id` stored in `parameterized_event_watermarks` when the watermark
+/// comes from a NIP-09 delete rather than an accepted version. Every event ID
+/// sorts at or after it, so an event dated in the delete's second is dominated.
+const DELETE_WATERMARK_ID: [u8; 32] = [0; 32];
+
+fn keeps_watermark(kind_i32: i32) -> bool {
+    kind_i32 == buzz_core::kind::KIND_AGENT_ATTENTION as i32
 }
 
 /// Structural precondition for a parameterized-replaceable write.
@@ -177,7 +190,7 @@ async fn replace_parameterized_event_in_transaction_impl(
     .bind(d_tag)
     .fetch_optional(&mut **tx)
     .await?;
-    let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs {
+    let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs || keeps_watermark(kind_i32) {
         sqlx::query_as(
             "SELECT created_at, event_id FROM parameterized_event_watermarks \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
@@ -233,6 +246,18 @@ async fn replace_parameterized_event_in_transaction_impl(
                 status,
             ));
         }
+    }
+
+    if let Some((deleted_at, _)) = watermark
+        .as_ref()
+        .filter(|(at, id)| id.as_slice() == DELETE_WATERMARK_ID && created_at <= *at)
+    {
+        return Ok(ParameterizedReplaceResult::new(
+            event,
+            received_at,
+            channel_id,
+            ParameterizedReplaceStatus::DeletedAt(deleted_at.timestamp()),
+        ));
     }
 
     let dominated = existing
@@ -333,7 +358,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         ));
     }
 
-    if is_nip_rs {
+    if is_nip_rs || keeps_watermark(kind_i32) {
         sqlx::query(
             "INSERT INTO parameterized_event_watermarks \
                  (community_id, kind, pubkey, d_tag, created_at, event_id) \
@@ -363,6 +388,72 @@ async fn replace_parameterized_event_in_transaction_impl(
 }
 
 impl Db {
+    /// NIP-AT delete: soft-delete the coordinate's versions dated at or before
+    /// the delete and raise the coordinate's watermark to the delete's time, in
+    /// one transaction under the coordinate's replacement lock. Later writes
+    /// dated at or before the delete are then rejected with
+    /// [`ParameterizedReplaceStatus::DeletedAt`]. Returns whether a live row
+    /// was deleted.
+    #[datastore_span(name = "delete_watermarked_coordinate", system = "postgresql")]
+    pub async fn delete_watermarked_coordinate(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+        deletion_created_at_secs: i64,
+    ) -> Result<bool> {
+        let deleted_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let lock_key =
+            event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
+        observability::observe_advisory_lock(
+            LockType::Replacement,
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx),
+        )
+        .await?;
+        let result = sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+             AND deleted_at IS NULL AND created_at <= $5",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind)
+        .bind(pubkey)
+        .bind(d_tag)
+        .bind(deleted_at)
+        .execute(&mut *tx)
+        .await?;
+        // A delete at or after the current watermark's second replaces it; an
+        // older (late) delete leaves a newer accepted version's mark alone.
+        sqlx::query(
+            "INSERT INTO parameterized_event_watermarks \
+                 (community_id, kind, pubkey, d_tag, created_at, event_id) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                 created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id \
+             WHERE EXCLUDED.created_at >= parameterized_event_watermarks.created_at",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind)
+        .bind(pubkey)
+        .bind(d_tag)
+        .bind(deleted_at)
+        .bind(DELETE_WATERMARK_ID.as_slice())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
     /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).
     ///
@@ -560,6 +651,22 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
+        let result = self
+            .replace_parameterized_event_with_status(community_id, event, d_tag, channel_id)
+            .await?;
+        let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
+        Ok((result.event, was_inserted))
+    }
+
+    /// [`Self::replace_parameterized_event`], returning why an event that was
+    /// not inserted was refused (duplicate, superseded, or NIP-AT deleted).
+    pub async fn replace_parameterized_event_with_status(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+    ) -> Result<ParameterizedReplaceResult> {
         let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community_id,
@@ -580,13 +687,12 @@ impl Db {
                         ParameterizedReplacePrecondition::Unconditional,
                     )
                     .await?;
-                let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
-                if was_inserted {
+                if result.status == ParameterizedReplaceStatus::Inserted {
                     tx.commit().await?;
                 } else {
                     tx.rollback().await?;
                 }
-                Ok((result.event, was_inserted))
+                Ok(result)
             })
             .await
     }

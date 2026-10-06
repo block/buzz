@@ -12,29 +12,29 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    is_relay_admin_kind, KIND_AGENT_ATTENTION, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE,
+    KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST,
+    KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -501,7 +501,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
+        | KIND_AGENT_ATTENTION | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
         | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
@@ -707,6 +707,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_EMOJI_LIST
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
+            // NIP-AT agent attention config uses the NIP-AE address shape; never channel-scoped.
+            | KIND_AGENT_ATTENTION
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
             | KIND_EVENT_REMINDER
             // Agent profile (10100): user-owned replaceable, keyed by pubkey.
@@ -1507,6 +1509,67 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
     // replacement and then be silently discarded by readers.
     validate_engram_nip44_content(&event.content)?;
     Ok(())
+}
+
+/// NIP-AT envelope: exactly one `d` (64 lowercase hex), at most one `p`
+/// (64 lowercase hex owner; absent for an agent with no owner), exactly one
+/// NIP-70 `["-"]`, exactly one `alt`, no other tags, NIP-44 v2 content.
+///
+/// The strict tag set keeps the format closed: an `expiration` tag would let
+/// the object disappear without a delete, and an `h` tag would scope it to a
+/// channel.
+fn validate_agent_attention_envelope(event: &Event) -> Result<(), String> {
+    let lower_hex_64 = |v: &str| {
+        v.len() == 64
+            && v.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    };
+    let (mut d, mut p, mut protected, mut alt) = (0usize, 0usize, 0usize, 0usize);
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        match (parts.first().map(String::as_str), parts.len()) {
+            (Some("d"), 2) if lower_hex_64(&parts[1]) => d += 1,
+            (Some("d"), _) => {
+                return Err("agent-attention `d` tag must be 64 lowercase hex chars".into())
+            }
+            (Some("p"), 2) if lower_hex_64(&parts[1]) => p += 1,
+            (Some("p"), _) => {
+                return Err(
+                    "agent-attention `p` tag must be 64 lowercase hex chars (pubkey)".into(),
+                )
+            }
+            (Some("-"), 1) => protected += 1,
+            (Some("alt"), 2) => alt += 1,
+            (name, _) => {
+                return Err(format!(
+                    "agent-attention event has a tag that is not allowed: {}",
+                    name.unwrap_or("(empty)")
+                ))
+            }
+        }
+    }
+    if d != 1 || p > 1 || protected != 1 || alt != 1 {
+        return Err(format!(
+            "agent-attention event must have exactly one `d`, `-` and `alt` tag and at most one `p` tag (got d={d}, p={p}, -={protected}, alt={alt})"
+        ));
+    }
+    validate_engram_nip44_content(&event.content)
+        .map_err(|e| e.replacen("agent-engram", "agent-attention", 1))
+}
+
+/// NIP-AT write refusals. A writer must learn that its event did not become
+/// the object's version: an address deleted at or after the event (the writer
+/// re-dates after `t`), or a newer version already stored. An exact duplicate
+/// stays a success, as for every kind.
+fn agent_attention_write_outcome(
+    status: &buzz_db::replaceable::ParameterizedReplaceStatus,
+) -> Result<(), String> {
+    use buzz_db::replaceable::ParameterizedReplaceStatus as S;
+    match status {
+        S::DeletedAt(t) => Err(format!("invalid: agent-attention address deleted at {t}")),
+        S::Superseded => Err("invalid: agent-attention address has a newer version".into()),
+        _ => Ok(()),
+    }
 }
 
 /// Enforce the `shared`-tag shape shared by every kind in
@@ -2942,6 +3005,16 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_AGENT_ATTENTION {
+        if !state.config.agent_attention_enabled {
+            return Err(IngestError::Rejected(
+                "blocked: agent-attention is not enabled on this relay".into(),
+            ));
+        }
+        validate_agent_attention_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     if kind_u32 == KIND_AGENT_TURN_METRIC {
         validate_agent_turn_metric_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3377,11 +3450,17 @@ async fn ingest_event_inner(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
-        state
+        let result = state
             .db
-            .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+            .replace_parameterized_event_with_status(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+        if kind_u32 == KIND_AGENT_ATTENTION {
+            agent_attention_write_outcome(&result.status).map_err(IngestError::Rejected)?;
+        }
+        let was_inserted =
+            result.status == buzz_db::replaceable::ParameterizedReplaceStatus::Inserted;
+        (result.event, was_inserted)
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3559,7 +3638,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
         let state = crate::state::tests::test_state_with_database_url(
-            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1
         )
         .await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
@@ -4151,6 +4230,17 @@ mod postgres_tests {
     }
 
     #[test]
+    fn agent_attention_kind_is_global_user_data() {
+        let event = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_AGENT_ATTENTION, &event),
+            Ok(Scope::UsersWrite)
+        );
+        assert!(is_global_only_kind(KIND_AGENT_ATTENTION));
+        assert!(!requires_h_channel_scope(KIND_AGENT_ATTENTION));
+    }
+
+    #[test]
     fn ephemeral_kinds_not_in_scope_allowlist() {
         assert!(required_scope_for_kind(KIND_PRESENCE_UPDATE, &make_dummy_event()).is_err());
     }
@@ -4586,6 +4676,124 @@ mod postgres_tests {
         let mut s = String::from("Ag");
         s.push_str(&"A".repeat(130));
         s
+    }
+
+    fn make_attention(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(KIND_AGENT_ATTENTION, &fake_nip44_v2(), tags)
+    }
+
+    #[test]
+    fn attention_envelope_accepts_owned_and_ownerless() {
+        let (d, p) = ("a".repeat(64), "b".repeat(64));
+        let alt: &[&str] = &["alt", "encrypted agent attention configuration"];
+        let owned = make_attention(&[&["d", &d], &["p", &p], &["-"], alt]);
+        assert_eq!(validate_agent_attention_envelope(&owned), Ok(()));
+        let ownerless = make_attention(&[&["d", &d], &["-"], alt]);
+        assert_eq!(validate_agent_attention_envelope(&ownerless), Ok(()));
+    }
+
+    #[test]
+    fn attention_envelope_rejects_extra_missing_and_malformed_tags() {
+        let (d, p, upper) = ("a".repeat(64), "b".repeat(64), "A".repeat(64));
+        let (d, p, upper) = (d.as_str(), p.as_str(), upper.as_str());
+        let cases: Vec<(&str, Vec<Vec<&str>>)> = vec![
+            (
+                "expiration",
+                vec![
+                    vec!["d", d],
+                    vec!["p", p],
+                    vec!["-"],
+                    vec!["alt", "x"],
+                    vec!["expiration", "1"],
+                ],
+            ),
+            (
+                "h",
+                vec![
+                    vec!["d", d],
+                    vec!["p", p],
+                    vec!["-"],
+                    vec!["alt", "x"],
+                    vec!["h", "c"],
+                ],
+            ),
+            ("no -", vec![vec!["d", d], vec!["p", p], vec!["alt", "x"]]),
+            ("no alt", vec![vec!["d", d], vec!["p", p], vec!["-"]]),
+            ("no d", vec![vec!["p", p], vec!["-"], vec!["alt", "x"]]),
+            (
+                "two d",
+                vec![vec!["d", d], vec!["d", d], vec!["-"], vec!["alt", "x"]],
+            ),
+            (
+                "two p",
+                vec![
+                    vec!["d", d],
+                    vec!["p", p],
+                    vec!["p", p],
+                    vec!["-"],
+                    vec!["alt", "x"],
+                ],
+            ),
+            (
+                "two -",
+                vec![vec!["d", d], vec!["-"], vec!["-"], vec!["alt", "x"]],
+            ),
+            (
+                "upper d",
+                vec![vec!["d", upper], vec!["-"], vec!["alt", "x"]],
+            ),
+            (
+                "short p",
+                vec![vec!["d", d], vec!["p", "abcd"], vec!["-"], vec!["alt", "x"]],
+            ),
+            (
+                "p marker",
+                vec![
+                    vec!["d", d],
+                    vec!["p", p, "", "owner"],
+                    vec!["-"],
+                    vec!["alt", "x"],
+                ],
+            ),
+            (
+                "- value",
+                vec![vec!["d", d], vec!["-", "x"], vec!["alt", "x"]],
+            ),
+        ];
+        for (name, tags) in cases {
+            let tags: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
+            let ev = make_attention(&tags);
+            assert!(
+                validate_agent_attention_envelope(&ev).is_err(),
+                "{name} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn attention_envelope_rejects_plaintext_content() {
+        let d = "a".repeat(64);
+        let ev = make_event_with_tags(
+            KIND_AGENT_ATTENTION,
+            "{\"plain\":true}",
+            &[&["d", &d], &["-"], &["alt", "x"]],
+        );
+        let err = validate_agent_attention_envelope(&ev).unwrap_err();
+        assert!(err.contains("agent-attention"), "got: {err}");
+    }
+
+    #[test]
+    fn attention_write_outcome_refuses_deleted_and_superseded() {
+        use buzz_db::replaceable::ParameterizedReplaceStatus as S;
+        assert_eq!(
+            agent_attention_write_outcome(&S::DeletedAt(1_700_000_000)),
+            Err("invalid: agent-attention address deleted at 1700000000".into())
+        );
+        assert!(agent_attention_write_outcome(&S::Superseded)
+            .unwrap_err()
+            .starts_with("invalid:"));
+        assert_eq!(agent_attention_write_outcome(&S::Inserted), Ok(()));
+        assert_eq!(agent_attention_write_outcome(&S::Duplicate), Ok(()));
     }
 
     #[test]

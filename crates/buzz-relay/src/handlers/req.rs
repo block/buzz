@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    is_unshared_gated_event, AGENT_OWNER_READ_KINDS, AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC,
     KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
     SHARED_GATED_KINDS,
 };
@@ -373,8 +373,9 @@ pub async fn handle_req(
     // Registration above is one uncancellable unit; the history read below is
     // read-only delivery and races gate cancellation, so expiry drops it and
     // releases the permit without sending another EVENT or EOSE. It returns
-    // whether a statement timeout ended it: retirement then runs after the
-    // race, because a dropped retirement would leak its unreleased topics.
+    // the CLOSED reason when a failed read ended it (a statement timeout, or a
+    // failed NIP-AT read): retirement then runs after the race, because a
+    // dropped retirement would leak its unreleased topics.
     let history = async {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_req_history(conn.tenant.community()).await;
@@ -452,11 +453,15 @@ pub async fn handle_req(
                 Ok(evs) => evs,
                 Err(e) => {
                     warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                    if e.is_statement_cancelled() {
-                        return true;
+                    let reason = history_failure_closed_reason(
+                        e.is_statement_cancelled(),
+                        state.config.agent_attention_enabled,
+                        &filters,
+                    );
+                    if reason.is_none() {
+                        conn.send(RelayMessage::eose(&sub_id));
                     }
-                    conn.send(RelayMessage::eose(&sub_id));
-                    return false;
+                    return reason;
                 }
             };
 
@@ -533,7 +538,7 @@ pub async fn handle_req(
 
                 let msg = RelayMessage::event(&sub_id, &stored.event);
                 if !conn.send(msg) {
-                    return false;
+                    return None;
                 }
                 total_sent += 1;
                 if total_sent.is_multiple_of(100) {
@@ -550,13 +555,15 @@ pub async fn handle_req(
             count = total_sent,
             "EOSE sent after historical delivery"
         );
-        false
+        None
     };
     let outcome = unless_cancelled(&conn, history).await;
     drop(_req_permit);
     match outcome {
-        Some(false) => {}
-        Some(true) => close_timed_out_subscription(&sub_id, owner, &conn, &state).await,
+        Some(None) => {}
+        Some(Some(reason)) => {
+            super::close::close_if_owner(&sub_id, owner, Some(reason), &conn, &state).await;
+        }
         None => {
             super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         }
@@ -1467,6 +1474,36 @@ async fn close_timed_out_subscription(
     super::close::close_if_owner(sub_id, owner, Some(QUERY_TIMED_OUT_CLOSED), conn, state).await;
 }
 
+/// CLOSED reason when the stored-event read fails for a subscription that can
+/// match NIP-AT agent attention config. Readers keep their last good objects
+/// and subscribe again.
+pub(crate) const AGENT_ATTENTION_READ_FAILED_CLOSED: &str =
+    "error: agent-attention stored events could not be read";
+
+/// CLOSED reason for a failed stored-event read, or `None` to end it with
+/// EOSE as before. NIP-AT readers treat EOSE as a complete object set, so a
+/// failed read that can match the kind must not look like an empty one.
+fn history_failure_closed_reason(
+    statement_cancelled: bool,
+    agent_attention_enabled: bool,
+    filters: &[Filter],
+) -> Option<&'static str> {
+    if statement_cancelled {
+        Some(QUERY_TIMED_OUT_CLOSED)
+    } else if agent_attention_enabled && filters.iter().any(filter_can_match_agent_attention) {
+        Some(AGENT_ATTENTION_READ_FAILED_CLOSED)
+    } else {
+        None
+    }
+}
+
+fn filter_can_match_agent_attention(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| u32::from(k.as_u16()) == buzz_core::kind::KIND_AGENT_ATTENTION)
+    })
+}
+
 /// Stable CLOSED reason for a read cancelled by its server statement deadline.
 /// Clients match it to skip retrying the same expensive query.
 pub(crate) const QUERY_TIMED_OUT_CLOSED: &str = "error: query timed out";
@@ -1546,9 +1583,10 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
     })
 }
 
-/// Authorize read access for filters that can match KIND_AGENT_ENGRAM events.
+/// Authorize read access for filters that can match an
+/// [`AGENT_OWNER_READ_KINDS`] event (NIP-AE engrams, NIP-AT attention config).
 ///
-/// NIP-AE engrams are global (no channel scope) and have encrypted content,
+/// NIP-AE engrams (and NIP-AT attention config, which uses the same envelope) are global (no channel scope) and have encrypted content,
 /// but their public `#p` (owner) and timestamps still leak who-pairs-with-whom
 /// plus write-activity patterns. Only the agent (the event's author) or the
 /// owner (the `#p` value) should be able to enumerate them.
@@ -1564,7 +1602,7 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
 /// signed envelope, which only the agent could have produced).
 ///
 /// Mixed-kind filters (e.g. `{kinds:[30174, 9]}`) are evaluated under this
-/// gate when KIND_AGENT_ENGRAM is present; matching events of other kinds in
+/// gate when one of those kinds is present; matching events of other kinds in
 /// the same filter is also restricted, but that is the conservative choice
 /// — clients should query engrams in a dedicated filter.
 pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
@@ -1575,10 +1613,10 @@ pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &
             return true;
         }
 
-        let can_match_engram = filter
-            .kinds
-            .as_ref()
-            .is_none_or(|ks| ks.iter().any(|k| k.as_u16() as u32 == KIND_AGENT_ENGRAM));
+        let can_match_engram = filter.kinds.as_ref().is_none_or(|ks| {
+            ks.iter()
+                .any(|k| AGENT_OWNER_READ_KINDS.contains(&(k.as_u16() as u32)))
+        });
         if !can_match_engram {
             return true;
         }
@@ -1747,6 +1785,7 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::kind::{KIND_AGENT_ATTENTION, KIND_AGENT_ENGRAM};
     use nostr::{Alphabet, Filter, SingleLetterTag};
 
     fn lifecycle_conn() -> (
@@ -3103,6 +3142,62 @@ mod tests {
             .author(nostr::PublicKey::from_hex(&agent).unwrap())
             .custom_tags(p_tag, [&owner]);
         assert!(!engram_filters_authorized(&[f], &attacker));
+    }
+
+    #[test]
+    fn engram_gate_covers_agent_attention_kind() {
+        // NIP-AT config uses the NIP-AE envelope and the same read rule:
+        // only the agent (authors=[self]) or the owner (#p=[self]) may read.
+        let (agent, owner, attacker) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let kind = nostr::Kind::Custom(KIND_AGENT_ATTENTION as u16);
+        let agent_pk = nostr::PublicKey::from_hex(&agent).unwrap();
+        let by_author = Filter::new().kind(kind).author(agent_pk);
+        let by_owner = Filter::new().kind(kind).custom_tags(p_tag, [&owner]);
+        let bare = Filter::new().kind(kind);
+        let mixed = Filter::new()
+            .kinds([kind, nostr::Kind::Custom(9)])
+            .search("x");
+
+        assert!(engram_filters_authorized(
+            std::slice::from_ref(&by_author),
+            &agent
+        ));
+        assert!(engram_filters_authorized(
+            std::slice::from_ref(&by_owner),
+            &owner
+        ));
+        assert!(!engram_filters_authorized(&[by_author], &attacker));
+        assert!(!engram_filters_authorized(&[by_owner], &attacker));
+        assert!(!engram_filters_authorized(&[bare], &agent));
+        assert!(!engram_filters_authorized(&[mixed], &agent));
+    }
+
+    #[test]
+    fn failed_history_read_closes_agent_attention_subscriptions() {
+        let attention = Filter::new().kind(nostr::Kind::Custom(KIND_AGENT_ATTENTION as u16));
+        let text = Filter::new().kind(nostr::Kind::TextNote);
+        let any_kind = Filter::new();
+        let mixed = vec![text.clone(), attention.clone()];
+
+        assert_eq!(
+            history_failure_closed_reason(false, true, &mixed),
+            Some(AGENT_ATTENTION_READ_FAILED_CLOSED)
+        );
+        assert_eq!(
+            history_failure_closed_reason(false, true, std::slice::from_ref(&any_kind)),
+            Some(AGENT_ATTENTION_READ_FAILED_CLOSED),
+            "a filter without kinds can match the kind"
+        );
+        assert!(AGENT_ATTENTION_READ_FAILED_CLOSED.starts_with("error:"));
+        // Other kinds and a disabled flag keep the old EOSE.
+        assert_eq!(history_failure_closed_reason(false, true, &[text]), None);
+        assert_eq!(history_failure_closed_reason(false, false, &mixed), None);
+        // A statement timeout keeps its own reason.
+        assert_eq!(
+            history_failure_closed_reason(true, true, &mixed),
+            Some(QUERY_TIMED_OUT_CLOSED)
+        );
     }
 
     #[test]
