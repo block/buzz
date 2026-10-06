@@ -4035,12 +4035,98 @@ mod postgres_tests {
         );
     }
 
-    /// Moderator cannot access staffing endpoints.
+    /// Staffing is Operator-only for signed callers: a DB-rostered Moderator
+    /// gets 403 on every `/operators` route and leaves the roster untouched,
+    /// while a config Operator succeeds on the same requests. This is the only
+    /// test that tells `.staff()` apart from `.act()`; unsigned and
+    /// disabled-mode requests are refused by both.
     #[tokio::test]
     #[ignore = "requires Postgres — moderator DB lookup"]
     async fn moderator_cannot_access_staffing_endpoints() {
-        // This test needs DB to resolve moderator role.
-        // Covered by negative-matrix integration test suite.
+        let operator_keys = nostr::Keys::generate();
+        let state = nip98_state(vec![operator_keys.public_key().to_hex()]).await;
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect to test DB");
+        let moderator_keys = nostr::Keys::generate();
+        let target_keys = nostr::Keys::generate();
+        let target_hex = target_keys.public_key().to_hex();
+        let target_bytes = target_keys.public_key().to_bytes().to_vec();
+        let grant_body = r#"{"role":"moderator"}"#.as_bytes();
+
+        let send = |keys: &nostr::Keys, method: &str, path: &str| {
+            let auth = match method {
+                "GET" => make_nostr_auth(keys, path),
+                "PUT" => make_nostr_auth_put(keys, path, grant_body),
+                "DELETE" => make_nostr_auth_delete(keys, path),
+                other => unreachable!("unexpected method {other}"),
+            };
+            let body = if method == "PUT" {
+                Body::from(grant_body.to_vec())
+            } else {
+                Body::empty()
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .expect("request");
+            status_for(state.clone(), request)
+        };
+        let target_rows = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM relay_operators WHERE pubkey = $1")
+                .bind(&target_bytes)
+                .fetch_one(&pool)
+                .await
+                .expect("count roster rows")
+        };
+
+        // Roster the Moderator in the DB, and the target too so DELETE has a row.
+        for keys in [&moderator_keys, &target_keys] {
+            let path = format!("/operators/{}", keys.public_key().to_hex());
+            let granted = send(&operator_keys, "PUT", &path).await;
+            assert_eq!(granted.status(), StatusCode::OK, "seed grant {path}");
+        }
+
+        let target_path = format!("/operators/{target_hex}");
+        for (method, path) in [
+            ("GET", "/operators"),
+            ("PUT", target_path.as_str()),
+            ("DELETE", target_path.as_str()),
+        ] {
+            let denied = send(&moderator_keys, method, path).await;
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "Moderator {method} {path} must be refused"
+            );
+        }
+        assert_eq!(
+            target_rows().await,
+            1,
+            "Moderator requests must not change the roster"
+        );
+
+        for (method, path) in [
+            ("GET", "/operators"),
+            ("PUT", target_path.as_str()),
+            ("DELETE", target_path.as_str()),
+        ] {
+            let allowed = send(&operator_keys, method, path).await;
+            assert_eq!(allowed.status(), StatusCode::OK, "Operator {method} {path}");
+        }
+        assert_eq!(
+            target_rows().await,
+            0,
+            "Operator DELETE must remove the row"
+        );
+
+        let moderator_path = format!("/operators/{}", moderator_keys.public_key().to_hex());
+        let cleanup = send(&operator_keys, "DELETE", &moderator_path).await;
+        assert_eq!(cleanup.status(), StatusCode::OK, "cleanup revoke");
     }
 
     /// Config-backed pubkey upsert → 409 Conflict.

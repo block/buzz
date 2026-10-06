@@ -736,6 +736,13 @@ fn unsigned_request(method: &str, uri: &str) -> Request<Body> {
 
 /// nip98 demands a credential on every route; disabled mode serves every view
 /// route and refuses every act and staff route.
+///
+/// The route list is written by hand: a new route must be added here on
+/// purpose. View rows only prove no credential is asked for (they accept 404
+/// or 500); `community_reads_serve_disabled_mode_within_the_selected_community`
+/// is what proves the reads return data. Unsigned and disabled-mode requests
+/// cannot tell `.staff()` from `.act()`; `moderator_cannot_access_staffing_endpoints`
+/// covers that boundary.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn every_route_makes_its_check_in_both_auth_modes() {
