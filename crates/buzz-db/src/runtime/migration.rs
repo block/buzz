@@ -1573,6 +1573,11 @@ mod postgres_tests {
                             panic!("{file} may only hold CREATE TABLE/INDEX: {statement:.80}")
                         });
                     assert!(
+                        !index.starts_with("IF NOT EXISTS ")
+                            && !index.starts_with("CONCURRENTLY "),
+                        "{file} must use a plain CREATE INDEX (SchemaBot refuses IF NOT EXISTS and CONCURRENTLY): {statement:.80}"
+                    );
+                    assert!(
                         index.contains(&format!(" ON {table} ")),
                         "{file} may only index {table}: {statement:.80}"
                     );

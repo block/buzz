@@ -1,8 +1,8 @@
 -- Desired-state database manifest.
 --
 -- `tables/public/<table>.sql` declares one table per file: its CREATE TABLE
--- and the CREATE INDEX statements on it, the declarative shape SchemaBot
--- applies. `tables/` is the SchemaBot schema directory and `public` is its
+-- and the CREATE INDEX statements on it, the one-table-per-file shape SchemaBot
+-- reads. `tables/` is the SchemaBot schema directory and `public` is its
 -- namespace, so nothing else may live under it.
 --
 -- Everything SchemaBot cannot apply lives in this directory's other
@@ -14,7 +14,9 @@
 -- `./bin/pgschema apply --file schema/schema.sql` resolves the `\i` includes
 -- relative to this file (it refuses `..`). `pgschema` skips INSERTs and some
 -- storage parameters, so every apply caller must then run
--- `scripts/reconcile-schema-after-pgschema.sql`.
+-- `scripts/reconcile-schema-after-pgschema.sql`. Raw `psql` resolves `\i`
+-- against the working directory instead, so run it from here:
+-- `cd schema && psql -f schema.sql`.
 --
 -- Adding a table: add `tables/public/<table>.sql` and include it below after
 -- the tables it references; put its partitions, triggers, and seed rows in the

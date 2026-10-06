@@ -1,5 +1,13 @@
 -- Attach the universal fence to every existing table carrying community_id,
 -- including deployment-private sidecars whose community_id is provenance.
+--
+-- Desired-state schema application does not replay migration history, so the
+-- explicit `SELECT attach_community_write_fence('<table>')` calls in
+-- `triggers/<table>.sql` stay as first-class catalog declarations. They also
+-- make the fence contract visible to migration linting instead of hiding it
+-- only in this dynamic bootstrap loop. This loop runs last, so it fences every
+-- desired-state table regardless: a fenced desired state does not prove the
+-- migration path attaches the fence. Keep the explicit calls.
 DO $$
 DECLARE
     target REGCLASS;
