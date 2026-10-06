@@ -298,14 +298,32 @@
             "app.kubernetes.io/instance",
             "app.kubernetes.io/component"
           ]
-        }
+        },
+        "maxLength": 317,
+        "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$",
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "pattern": "^[^/]+$"
+              },
+              {
+                "pattern": "^[^/]{1,253}/"
+              }
+            ]
+          }
+        ]
       },
       "additionalProperties": {
-        "type": "string"
+        "type": "string",
+        "maxLength": 63,
+        "pattern": "^([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?$"
       }
     },
     "serviceAccountName": {
-      "type": "string"
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?$"
     },
     "terminationGracePeriodSeconds": {
       "type": "integer",

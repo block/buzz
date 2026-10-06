@@ -73,3 +73,19 @@ reject --set networkPolicy.enabled=false --set networkPolicy.externalPolicyName=
 reject --set networkPolicy.enabled=false --set networkPolicy.externalPolicyName=platform-runtime \
   --set networkPolicy.dns=null
 reject --set terminationGracePeriodSeconds=null
+
+# Kubernetes DNS-subdomain service accounts and qualified label keys.
+for name in '' runtime.platform.example "$long_name"; do
+  helm template push "$chart" --set-string "serviceAccountName=$name" >/dev/null
+done
+for name in INVALID_NAME ' ' "$long_name"x .runtime runtime. runtime..example; do
+  reject --set-string "serviceAccountName=$name"
+done
+long_label=$(printf '%063d' 0)
+for key in 'example.com/Runtime_v1' "$long_label" "$long_name/$long_label"; do
+  helm template push "$chart" --set-json "podLabels={\"$key\":\"valid_value\"}" >/dev/null
+done
+for key in 'bad key' '/name' 'prefix/' 'UPPER.example/name' 'a/b/c' "$long_label"x "$long_name"x/name; do
+  reject --set-json "podLabels={\"$key\":\"value\"}"
+done
+reject --set-json 'podLabels={"valid":"bad value"}'
