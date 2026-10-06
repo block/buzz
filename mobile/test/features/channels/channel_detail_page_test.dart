@@ -2232,6 +2232,101 @@ void main() {
       expect(readState.markedContexts[_channelId], 1300);
     });
 
+    for (final covered in ['a sheet', 'the app switcher']) {
+      testWidgets('a DM behind $covered reads a new reply only '
+          'when shown again', (tester) async {
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final first = _textMsg(
+          id: 'msg1',
+          pubkey: 'alice',
+          content: 'First',
+          createdAt: 1100,
+        );
+        final messages = _FakeMessagesNotifier([first]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messages,
+            channel: Channel(
+              id: _channelId,
+              name: 'DM',
+              channelType: 'dm',
+              visibility: 'private',
+              description: 'Direct message',
+              createdBy: 'self',
+              createdAt: DateTime(2025),
+              memberCount: 2,
+              participants: const ['Self', 'Alice'],
+              participantPubkeys: const ['self', 'alice'],
+              isMember: true,
+            ),
+            relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            readStateNotifier: readState,
+          ),
+        );
+        await tester.pump();
+        expect(readState.markedContexts[_channelId], 1100);
+
+        if (covered == 'a sheet') {
+          // A sheet keeps the page on screen, so its providers stay live.
+          unawaited(
+            showModalBottomSheet<void>(
+              context: tester.element(find.byType(ChannelDetailPage)),
+              builder: (_) => const Text('Cover'),
+            ),
+          );
+          await tester.pumpAndSettle();
+        } else {
+          // Inactive, unlike paused, still draws frames.
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.inactive,
+          );
+          await tester.pump();
+        }
+        messages.setMessages([
+          first,
+          _textMsg(
+            id: 'reply1',
+            pubkey: 'alice',
+            content: 'Unseen reply',
+            createdAt: 1300,
+            extraTags: const [
+              ['e', 'msg1', '', 'reply'],
+            ],
+          ),
+        ]);
+        await tester.pump();
+        await tester.pump();
+
+        // The reply loaded while the DM was covered, so it stays unread.
+        expect(readState.markedContexts[_channelId], 1100);
+
+        if (covered == 'a sheet') {
+          Navigator.of(tester.element(find.text('Cover'))).pop();
+          await tester.pumpAndSettle();
+        } else {
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+          await tester.pump();
+          await tester.pump();
+        }
+
+        // Shown again, the DM reads through the reply.
+        expect(readState.markedContexts[_channelId], 1300);
+      });
+    }
+
     testWidgets('reading away from the bottom marks only visible rows', (
       tester,
     ) async {

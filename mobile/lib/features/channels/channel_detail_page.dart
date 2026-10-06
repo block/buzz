@@ -542,8 +542,14 @@ class ChannelDetailPage extends HookConsumerWidget {
       ],
     );
 
+    // Opening reads only while this page is in front and the app is in use.
+    // A covered or backgrounded DM must not read a reply that loads meanwhile;
+    // it reads through it when it is shown again.
+    final openReadActive =
+        isAppInUse(useAppLifecycleState()) &&
+        (ModalRoute.of(context)?.isCurrent ?? true);
     useEffect(() {
-      if (!readState.isReady || openReadTimestamp == null) {
+      if (!readState.isReady || !openReadActive || openReadTimestamp == null) {
         return null;
       }
       return deferReadStateUpdate(context, () {
@@ -554,7 +560,7 @@ class ChannelDetailPage extends HookConsumerWidget {
             .read(channelsProvider.notifier)
             .clearObservedUnreadCoveredByRead(channel.id, openReadTimestamp);
       });
-    }, [channel.id, readState.isReady, openReadTimestamp]);
+    }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
     final dmHeader = resolvedChannel.isDm
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)

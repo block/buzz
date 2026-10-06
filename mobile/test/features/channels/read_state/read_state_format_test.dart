@@ -232,6 +232,74 @@ void main() {
       );
     });
 
+    test('keeps each carried group with its frontier under pressure', () {
+      // A legal 240-byte context ID, and a raw ID that NIP-RS escapes.
+      final long = 'c' * 240;
+      final carried = {
+        'ov_s:$long': 2,
+        'ov_c:$long': 1,
+        'ov_b:$long': 100,
+        'ov_c:ov_x': 7,
+        'esc:ov_x': 60,
+      };
+      // 2,000 newer channel marks fill the slot many times over.
+      final contexts = {
+        long: 100,
+        for (var index = 0; index < 2000; index++)
+          'channel-${index.toString().padLeft(36, '0')}': 1000 + index,
+      };
+
+      final retained = retainReadStateContexts(
+        contexts,
+        clientId: 'client-a',
+        recent: {
+          for (final key in contexts.keys)
+            if (key != long) key: 5000,
+        },
+        carried: carried,
+      )!;
+
+      expect(retained[long], 100);
+      for (final entry in carried.entries) {
+        expect(retained[entry.key], entry.value);
+      }
+      expect(retained.length, lessThan(contexts.length));
+      expect(
+        publishedBytes(retained),
+        lessThanOrEqualTo(readStatePlaintextBytes),
+      );
+    });
+
+    test('leaves out incomplete carried override groups', () {
+      final retained = retainReadStateContexts(
+        {'partial': 50, 'live': 60, 'dead': 70},
+        clientId: 'client-a',
+        carried: const {
+          // No ov_c:, so the whole group is rejected.
+          'ov_s:partial': 3,
+          'ov_b:partial': 50,
+          'ov_s:live': 2,
+          'ov_c:live': 1,
+          'ov_b:live': 60,
+          // A tombstone is ov_c: alone.
+          'ov_c:dead': 4,
+          // A tombstone with a baseline is not a legal shape.
+          'ov_c:odd': 4,
+          'ov_b:odd': 9,
+        },
+      )!;
+
+      expect(retained, {
+        'partial': 50,
+        'live': 60,
+        'dead': 70,
+        'ov_s:live': 2,
+        'ov_c:live': 1,
+        'ov_b:live': 60,
+        'ov_c:dead': 4,
+      });
+    });
+
     test('returns null instead of splitting carried override keys', () {
       final carried = {
         for (var index = 0; index < 320; index++) ...{

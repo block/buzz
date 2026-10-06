@@ -282,12 +282,12 @@ class ReadStateManager {
     }
   }
 
-  /// Merges the override keys of this device's own slot into
-  /// [_carriedOverrides] by `max()`, the NIP-RS merge rule.
+  /// Merges the complete override groups of this device's own slot into
+  /// [_carriedOverrides] by `max()`, the NIP-RS merge rule. An incomplete
+  /// group is rejected whole (see [completeOverrideGroups]).
   bool _carryOwnOverrides(Map<String, int> contexts) {
     var changed = false;
-    for (final entry in contexts.entries) {
-      if (!isOverrideContext(entry.key)) continue;
+    for (final entry in completeOverrideGroups(contexts).entries) {
       if (entry.value > (_carriedOverrides[entry.key] ?? -1)) {
         _carriedOverrides[entry.key] = entry.value;
         changed = true;
@@ -563,6 +563,11 @@ class ReadStateManager {
         contexts[entry.key] = entry.value;
       }
     }
+    // A carried group's frontier travels with it, even a merged `msg:` mark
+    // that would not be republished on its own.
+    for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
+      if (_effectiveState[key] case final frontier?) contexts[key] = frontier;
+    }
     return retainReadStateContexts(
       contexts,
       clientId: _clientId,
@@ -577,12 +582,13 @@ class ReadStateManager {
     // them in this device's slot, so publishable ones are carried.
     _carriedOverrides
       ..clear()
-      ..addEntries(
-        stored.contexts.entries.where(
-          (entry) =>
-              isOverrideContext(entry.key) &&
-              stored.publishableContextIds.contains(entry.key),
-        ),
+      ..addAll(
+        completeOverrideGroups({
+          for (final entry in stored.contexts.entries)
+            if (isOverrideContext(entry.key) &&
+                stored.publishableContextIds.contains(entry.key))
+              entry.key: entry.value,
+        }),
       );
     _effectiveState
       ..clear()
@@ -605,6 +611,10 @@ class ReadStateManager {
       _effectiveState,
       nowUnixSeconds: currentUnixSeconds(),
     )..addAll(_carriedOverrides);
+    // A carried group's frontier is never pruned away from it.
+    for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
+      if (_effectiveState[key] case final frontier?) saved[key] = frontier;
+    }
     _storage.write(
       pubkey,
       saved,

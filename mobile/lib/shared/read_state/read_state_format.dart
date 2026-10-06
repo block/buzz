@@ -81,6 +81,54 @@ Map<String, int> pruneStaleContexts(
 bool isOverrideContext(String contextId) =>
     contextId.startsWith('ov_') || contextId.startsWith('esc:');
 
+const _overridePrefixes = ['ov_s:', 'ov_c:', 'ov_b:'];
+
+/// The raw context ID of an override counter key, or null for other keys.
+String? _overrideTarget(String key) {
+  for (final prefix in _overridePrefixes) {
+    if (key.startsWith(prefix)) return key.substring(prefix.length);
+  }
+  return null;
+}
+
+/// The frontier key of raw context [contextId] on the wire. NIP-RS escapes
+/// a raw ID that begins with `ov_` or `esc:` by prepending `esc:`.
+String overrideFrontierKey(String contextId) =>
+    contextId.startsWith('ov_') || contextId.startsWith('esc:')
+    ? 'esc:$contextId'
+    : contextId;
+
+/// The override keys of [contexts] that this app may carry. NIP-RS accepts
+/// an override group only whole: exactly `ov_s:`, `ov_c:` and `ov_b:` for
+/// one context, or `ov_c:` alone as a tombstone. Any other shape is
+/// rejected as a group, so none of its keys is carried. Escaped frontiers
+/// (`esc:`) are frontier keys, not counters, so each is carried as it is.
+Map<String, int> completeOverrideGroups(Map<String, int> contexts) {
+  final groups = <String, Map<String, int>>{};
+  final kept = <String, int>{};
+  for (final entry in contexts.entries) {
+    final target = _overrideTarget(entry.key);
+    if (target != null) {
+      (groups[target] ??= {})[entry.key] = entry.value;
+    } else if (entry.key.startsWith('esc:')) {
+      kept[entry.key] = entry.value;
+    }
+  }
+  for (final MapEntry(key: target, value: group) in groups.entries) {
+    final live = group.length == _overridePrefixes.length;
+    final tombstone = group.length == 1 && group.containsKey('ov_c:$target');
+    if (live || tombstone) kept.addAll(group);
+  }
+  return kept;
+}
+
+/// The frontier keys that must travel with the complete override groups in
+/// [contexts] (NIP-RS's co-location rule).
+Set<String> overrideGroupFrontierKeys(Map<String, int> contexts) => {
+  for (final key in completeOverrideGroups(contexts).keys)
+    if (_overrideTarget(key) case final target?) overrideFrontierKey(target),
+};
+
 /// Whether this device republishes a mark it merged from another device's
 /// slot. Message marks are not republished: each covers one message, and the
 /// web app prunes them once a catch-up mark reads the message. Broad marks
@@ -116,9 +164,12 @@ const _scopedShare = 0.75;
 /// so reading old history still syncs. A slot over NIP-44's limit cannot be
 /// encrypted, so without this cap sync would stop.
 ///
-/// [carried] override keys are kept whole, ahead of every mark. If they do
-/// not fit, this returns null, and the caller must leave the slot as it is
-/// instead of publishing part of an override group.
+/// [carried] override groups are kept whole, ahead of every mark, together
+/// with each group's frontier from [contexts]: NIP-RS requires a context's
+/// frontier and its override keys in the same event. Incomplete groups are
+/// left out (see [completeOverrideGroups]). If the groups do not fit, this
+/// returns null, and the caller must leave the slot as it is instead of
+/// publishing part of a group.
 Map<String, int>? retainReadStateContexts(
   Map<String, int> contexts, {
   required String clientId,
@@ -128,13 +179,21 @@ Map<String, int>? retainReadStateContexts(
 }) {
   // JSON-encoded bytes, so escaped characters are counted as published.
   int bytesOf(Object? value) => utf8.encode(jsonEncode(value)).length;
+  final groups = completeOverrideGroups(carried);
+  final reserved = <String, int>{...groups};
+  for (final key in overrideGroupFrontierKeys(groups)) {
+    final frontier = contexts[key];
+    if (frontier != null && frontier > (reserved[key] ?? -1)) {
+      reserved[key] = frontier;
+    }
+  }
   final fixedBytes = bytesOf(
-    ReadStateBlob(clientId: clientId, contexts: carried).toJson(),
+    ReadStateBlob(clientId: clientId, contexts: reserved).toJson(),
   );
-  if (fixedBytes > maxBytes || carried.length > _maxContexts) return null;
+  if (fixedBytes > maxBytes || reserved.length > _maxContexts) return null;
   // Marks share what the carried keys leave.
   final markBytes = maxBytes - fixedBytes;
-  final markCount = _maxContexts - carried.length;
+  final markCount = _maxContexts - reserved.length;
   var used = 0;
   var count = 0;
   bool take(MapEntry<String, int> entry, double share) {
@@ -155,10 +214,10 @@ Map<String, int>? retainReadStateContexts(
     return byTime != 0 ? byTime : a.key.compareTo(b.key);
   }
 
-  final retained = <String, int>{...carried};
+  final retained = <String, int>{...reserved};
   final scoped =
       contexts.entries
-          .where((entry) => !carried.containsKey(entry.key))
+          .where((entry) => !reserved.containsKey(entry.key))
           .toList()
         ..sort((a, b) {
           final byScope = _retentionScope(
@@ -174,7 +233,7 @@ Map<String, int>? retainReadStateContexts(
   }
   final byRecent =
       contexts.entries
-          .where((entry) => !carried.containsKey(entry.key))
+          .where((entry) => !reserved.containsKey(entry.key))
           .toList()
         ..sort(byUse);
   for (final entry in byRecent) {

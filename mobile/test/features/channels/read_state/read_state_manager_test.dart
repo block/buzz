@@ -312,6 +312,8 @@ void main() {
       'ov_c:channel-1': 1,
       'ov_b:channel-1': 90,
     };
+    final oldMessage = 'msg:${'d' * 64}';
+    final oldMessageGroup = {'ov_c:$oldMessage': 96};
     final session = _FakeRelaySession()
       ..historyEvents = [
         _readStateEvent(
@@ -319,7 +321,16 @@ void main() {
           crypto: crypto,
           clientId: clientId,
           slotId: slotId,
-          contexts: {'channel-1': 90, ...ownGroup},
+          // `ov_s:channel-9` alone is a partial group, rejected whole.
+          contexts: {
+            'channel-1': 90,
+            ...ownGroup,
+            'ov_s:channel-9': 3,
+            // Older than the local save horizon, so saving prunes it unless
+            // its group protects it.
+            oldMessage: 95,
+            ...oldMessageGroup,
+          },
           createdAt: 100,
         ),
         _readStateEvent(
@@ -355,6 +366,9 @@ void main() {
     expect(published, containsPair('ov_s:channel-1', 2));
     expect(published, containsPair('ov_c:channel-1', 1));
     expect(published, containsPair('ov_b:channel-1', 90));
+    // The group's frontier travels with it.
+    expect(published, containsPair('channel-1', 90));
+    expect(published, isNot(contains('ov_s:channel-9')));
     expect(published, isNot(contains('ov_c:channel-2')));
     expect(published, isNot(contains('esc:ov_x')));
     expect(manager.getEffectiveTimestamp('ov_s:channel-1'), isNull);
@@ -379,6 +393,10 @@ void main() {
     for (final entry in ownGroup.entries) {
       expect(republished, containsPair(entry.key, entry.value));
     }
+    expect(republished, containsPair('channel-1', 90));
+    expect(republished, containsPair(oldMessage, 95));
+    expect(republished, containsPair('ov_c:$oldMessage', 96));
+    expect(republished, isNot(contains('ov_s:channel-9')));
     expect(republished, isNot(contains('ov_c:channel-2')));
   });
 
