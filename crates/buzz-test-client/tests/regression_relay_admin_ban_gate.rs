@@ -1,17 +1,14 @@
 //! Regression test for the NIP-43 relay-admin durable-ban bypass
 //! (BUZZ-SEC-007 class, reported 2026-07-27).
 //!
-//! `ingest_event` exempts relay-admin kinds 9030-9033 from its durable
-//! write-path restriction gate so a *timed out* admin keeps its administrative
-//! capability. That exemption was ban-blind, so a **banned** admin could still
-//! add/remove relay members and change the workspace icon via signed NIP-98
-//! `POST /events`. The ban is now enforced inside
-//! `relay_admin::handle_relay_admin_event`; this test pins both halves of that
-//! contract — bans refused, timeouts still admitted.
+//! `ingest_event` runs the durable write-restriction gate before relay-admin
+//! kinds 9030-9033. Bans and active timeouts must reject those commands, while
+//! an unrestricted admin can still mutate the roster and workspace icon via
+//! signed NIP-98 `POST /events`.
 //!
-//! Requires a running relay and its Postgres. Ignored by default:
+//! Requires a running relay and its Postgres. Export `DATABASE_URL` for a
+//! disposable local database, then run (ignored by default):
 //!   REPRO_RELAY_HTTP=http://localhost:3999 REPRO_HOST=localhost:3999 \
-//!   DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz_relay_admin_regression \
 //!   cargo test -p buzz-test-client --test regression_relay_admin_ban_gate \
 //!     -- --ignored --nocapture
 
@@ -123,14 +120,14 @@ async fn seed(p: &sqlx::Pool<sqlx::Postgres>, cid: Uuid, keys: &Keys, role: &str
 /// Asserts the full contract rather than just "the exploit stopped":
 /// - banned admin: 403 + exact `blocked:` prefix on 9030/9031/9033, and a
 ///   banned *owner* likewise on 9032 (owner-only kind), covering all four
-///   exempt kinds,
+///   relay-admin kinds,
 /// - no roster, role, or icon mutation from any of those attempts,
-/// - a *timed-out* admin still reaches relay-admin authorization (the ingest
-///   exemption's whole purpose — the fix must not silently widen to timeouts),
+/// - a *timed-out* admin gets 403 + the `restricted:` timeout prefix on 9031,
+///   and the target member remains in the roster,
 /// - an unrestricted admin's behaviour is unchanged, mutation included.
 #[tokio::test]
 #[ignore]
-async fn banned_admin_is_refused_but_timed_out_admin_still_administers() {
+async fn banned_and_timed_out_admins_are_refused_but_unrestricted_admin_can_administer() {
     let p = pool().await;
     let cid = community_id(&p).await;
 
@@ -290,7 +287,7 @@ async fn banned_admin_is_refused_but_timed_out_admin_still_administers() {
         "9033: banned admin must not change the workspace icon, got {icon:?}"
     );
 
-    // ── Timed-out admin: still administers (ingest exemption preserved). ──
+    // ── Timed-out admin: relay-admin and content writes are refused. ──
     let (ts, tb) = post_event(
         &timed_out_admin,
         &signed(
@@ -302,13 +299,22 @@ async fn banned_admin_is_refused_but_timed_out_admin_still_administers() {
     .await;
     println!("[timed-out] 9031 remove -> {ts} {tb}");
     assert_eq!(
-        ts, 200,
-        "timed-out admin must still administer the roster: {tb}"
+        ts, 403,
+        "timed-out admin must be refused relay-admin commands: {tb}"
+    );
+    let timeout_message: serde_json::Value = serde_json::from_str(&tb).unwrap_or_default();
+    let timeout_text = timeout_message
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&tb);
+    assert!(
+        timeout_text.starts_with("restricted: you are timed out"),
+        "timed-out admin denial must use the timeout restriction prefix: {tb}"
     );
     assert_eq!(
-        role_of(&victim2).await,
-        None,
-        "timed-out admin's removal must take effect"
+        role_of(&victim2).await.as_deref(),
+        Some("member"),
+        "timed-out admin must not remove a member"
     );
 
     // Control: the same timed-out admin is still write-blocked for content.

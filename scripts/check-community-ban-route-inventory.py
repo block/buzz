@@ -75,7 +75,7 @@ REQUIRED_REGRESSIONS = {
     "git_fail_closed",
     "ingest_owner_ban",
     "moderation_owner_ban",
-    "timeout_control",
+    "timeout_admin_denial",
     "http_tenant_isolation",
 }
 RAW_STRING_PREFIX = re.compile(r"(?:b)?r(#+)?\"")
