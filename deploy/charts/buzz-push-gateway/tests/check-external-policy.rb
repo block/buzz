@@ -14,9 +14,10 @@ resources = YAML.parse_stream(input).children.map do |doc|
   stream.children << doc
   YAML.safe_load(stream.to_yaml, permitted_classes: [Date, Time], aliases: true)
 end.compact
-# Helm's Kubernetes builder recursively expands List objects before applying them.
+# Match Kubernetes Unstructured.IsList: an items array, including typed lists.
+# https://github.com/kubernetes/apimachinery/blob/v0.34.1/pkg/apis/meta/v1/unstructured/unstructured.go
 def flatten_resources(resource)
-  if resource.is_a?(Hash) && resource['apiVersion'] == 'v1' && resource['kind'] == 'List'
+  if resource.is_a?(Hash) && resource['items'].is_a?(Array)
     resource.fetch('items').flat_map { |item| flatten_resources(item) }
   else
     [resource]
@@ -66,7 +67,11 @@ resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
   # Require the immutable runtime identity explicitly, not a namespace-wide policy.
   identity = deployment.dig('spec', 'selector', 'matchLabels')
   match = selector.fetch('matchLabels', {})
-  abort "external policy #{name}: missing runtime identity selector" unless identity.all? { |k, v| match[k] == v }
+  expressions = selector.fetch('matchExpressions', [])
+  identity_bound = identity.all? do |k, v|
+    match[k] == v || expressions.any? { |e| e['key'] == k && e['operator'] == 'In' && e['values'] == [v] }
+  end
+  abort "external policy #{name}: missing runtime identity selector" unless identity_bound
   abort "external policy #{name}: selector does not match runtime" unless match.all? { |k, v| labels[k] == v }
   selector.fetch('matchExpressions', []).each do |expression|
     key = expression.fetch('key')

@@ -103,6 +103,13 @@ File.write("#{ARGV[0]}/combined.yaml", (resources + [policy]).map(&:to_yaml).joi
 list = {'apiVersion' => 'v1', 'kind' => 'List', 'items' => [policy]}
 File.write("#{ARGV[0]}/list.yaml", (resources + [list]).map(&:to_yaml).join)
 File.write("#{ARGV[0]}/duplicate-list.yaml", (resources + [policy, list]).map(&:to_yaml).join)
+typed_list = {'apiVersion' => 'networking.k8s.io/v1', 'kind' => 'NetworkPolicyList', 'items' => [policy]}
+File.write("#{ARGV[0]}/typed-list.yaml", (resources + [typed_list]).map(&:to_yaml).join)
+File.write("#{ARGV[0]}/duplicate-typed-list.yaml", (resources + [policy, typed_list]).map(&:to_yaml).join)
+expression_policy = Marshal.load(Marshal.dump(policy))
+identity = expression_policy['spec']['podSelector'].delete('matchLabels')
+expression_policy['spec']['podSelector']['matchExpressions'] = identity.map { |k, v| {'key' => k, 'operator' => 'In', 'values' => [v]} }
+File.write("#{ARGV[0]}/expression-identity.yaml", (resources + [expression_policy]).map(&:to_yaml).join)
 variants = {
   'invalid-key' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'bad key', 'operator' => 'DoesNotExist'}] },
   'invalid-value' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'NotIn', 'values' => ['bad value']}] },
@@ -133,7 +140,11 @@ gate <"$out/combined.yaml" >"$out/gated.yaml"
 cmp "$out/combined.yaml" "$out/gated.yaml"
 gate <"$out/list.yaml" >"$out/gated.yaml"
 cmp "$out/list.yaml" "$out/gated.yaml"
-for mutation in argo-skip argo-presync invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+for valid in typed-list expression-identity; do
+  gate <"$out/$valid.yaml" >"$out/gated.yaml"
+  cmp "$out/$valid.yaml" "$out/gated.yaml"
+done
+for mutation in duplicate-typed-list argo-skip argo-presync invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
   if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
     echo "expected combined-render gate to reject $mutation" >&2
     exit 1
