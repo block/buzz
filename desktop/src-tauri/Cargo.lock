@@ -1096,6 +1096,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-audio-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "neteq",
+ "opus",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+]
+
+[[package]]
 name = "buzz-core"
 version = "0.1.0"
 dependencies = [
@@ -1128,6 +1140,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "buzz-agent",
+ "buzz-audio-client",
  "buzz-core",
  "buzz-media",
  "buzz-persona",
