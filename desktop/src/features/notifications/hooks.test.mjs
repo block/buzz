@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { sanitizeNotificationSettings } from "./hooks.ts";
 import {
   buildHomeBadgeFeedItems,
   isHomeBadgeFeedItemUnread,
@@ -169,6 +170,45 @@ test("home badge subtotal counts locally unread rows before channel exclusion", 
       highPriorityChannelIds,
       true,
     ),
+    true,
+  );
+});
+
+test("notification settings default to sound on", () => {
+  assert.equal(sanitizeNotificationSettings(undefined).soundEnabled, true);
+  assert.equal(
+    sanitizeNotificationSettings("not an object").soundEnabled,
+    true,
+  );
+});
+
+test("stored settings without a soundEnabled key read as sound on", () => {
+  // Settings persisted before the switch existed carry no `soundEnabled`;
+  // they must keep chiming rather than go silent on upgrade.
+  const legacy = {
+    desktopEnabled: true,
+    homeBadgeEnabled: false,
+    slotAlertsEnabled: { dm: false },
+  };
+
+  const settings = sanitizeNotificationSettings(legacy);
+
+  assert.equal(settings.soundEnabled, true);
+  assert.equal(settings.homeBadgeEnabled, false);
+  assert.equal(settings.slotAlertsEnabled.dm, false);
+});
+
+test("a stored soundEnabled of false round-trips", () => {
+  const stored = JSON.parse(
+    JSON.stringify({
+      ...sanitizeNotificationSettings(undefined),
+      soundEnabled: false,
+    }),
+  );
+
+  assert.equal(sanitizeNotificationSettings(stored).soundEnabled, false);
+  assert.equal(
+    sanitizeNotificationSettings({ soundEnabled: "no" }).soundEnabled,
     true,
   );
 });

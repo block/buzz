@@ -88,7 +88,7 @@ const STUB_PROPS = {
   onSetHomeBadgeEnabled: () => {},
   onSetSlotAlertsEnabled: () => {},
   onSetNotifyWhileViewing: () => {},
-  onSetAllSlotAlertsEnabled: () => {},
+  onSetSoundEnabled: () => {},
   onSetSoundForSlot: () => {},
 };
 

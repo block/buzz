@@ -34,7 +34,8 @@ import {
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
 
 // v2: settings model reworked around per-event rows (flutter default sound,
-// slotAlertsEnabled, no singleSound/soundEnabled) — v1 values are abandoned.
+// slotAlertsEnabled, no singleSound) — v1 values are abandoned. `soundEnabled`
+// returned later as the chime-only switch; a stored v2 without it reads as on.
 const NOTIFICATION_SETTINGS_STORAGE_KEY = "buzz-notification-settings.v2";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 const EMPTY_FEED_ID_SET: ReadonlySet<string> = new Set();
@@ -43,6 +44,12 @@ export type NotificationSettings = {
   desktopEnabled: boolean;
   homeBadgeEnabled: boolean;
   notifyWhileViewing: boolean;
+  /**
+   * Whether an alert that fires also plays its slot sound. Banners are
+   * governed by `desktopEnabled` and `slotAlertsEnabled`; this only mutes
+   * the chime.
+   */
+  soundEnabled: boolean;
   sounds: SlotSounds;
   slotAlertsEnabled: Record<SoundSlot, boolean>;
   /**
@@ -57,6 +64,7 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   desktopEnabled: true,
   homeBadgeEnabled: true,
   notifyWhileViewing: false,
+  soundEnabled: true,
   sounds: { ...DEFAULT_SLOT_SOUNDS },
   slotAlertsEnabled: { ...DEFAULT_SLOT_ALERTS_ENABLED },
   slotAlertsSnapshot: null,
@@ -94,7 +102,13 @@ function notificationSettingsStorageKey(pubkey: string) {
   return `${NOTIFICATION_SETTINGS_STORAGE_KEY}:${pubkey}`;
 }
 
-function sanitizeNotificationSettings(value: unknown): NotificationSettings {
+/**
+ * Coerce a stored (or foreign) value into a complete `NotificationSettings`,
+ * falling back to the defaults for anything missing or malformed.
+ */
+export function sanitizeNotificationSettings(
+  value: unknown,
+): NotificationSettings {
   if (!value || typeof value !== "object") {
     return DEFAULT_NOTIFICATION_SETTINGS;
   }
@@ -113,6 +127,10 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
       typeof candidate.notifyWhileViewing === "boolean"
         ? candidate.notifyWhileViewing
         : DEFAULT_NOTIFICATION_SETTINGS.notifyWhileViewing,
+    soundEnabled:
+      typeof candidate.soundEnabled === "boolean"
+        ? candidate.soundEnabled
+        : DEFAULT_NOTIFICATION_SETTINGS.soundEnabled,
     sounds: sanitizeSoundsMap(candidate.sounds),
     slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled),
     slotAlertsSnapshot:
@@ -311,6 +329,13 @@ export function useNotificationSettings(pubkey?: string) {
     }));
   }, []);
 
+  const setSoundEnabled = React.useCallback((enabled: boolean) => {
+    setSettings((current) => ({
+      ...current,
+      soundEnabled: enabled,
+    }));
+  }, []);
+
   const setAllSlotAlertsEnabled = React.useCallback((enabled: boolean) => {
     setSettings((current) => {
       const next = { ...current.slotAlertsEnabled };
@@ -375,6 +400,7 @@ export function useNotificationSettings(pubkey?: string) {
     setAllSlotAlertsEnabled,
     setNotifyWhileViewing,
     setSlotAlertsEnabled,
+    setSoundEnabled,
     setSoundForSlot,
     settings,
   };
