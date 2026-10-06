@@ -1,7 +1,13 @@
 #!/usr/bin/env ruby
-# Helm post-renderer: validate external runtime policy ownership in the full release.
+# Validate the complete release; strict external callers supply --expect.
 require 'yaml'
 require 'date'
+# Strict callers provide expectations independently of rendered annotations.
+expectations = []
+until ARGV.empty?
+  abort 'usage: check-external-policy.rb [--expect DEPLOYMENT POLICY NAMESPACE]...' unless ARGV.shift == '--expect' && ARGV.length >= 3
+  expectations << ARGV.shift(3)
+end
 input = STDIN.read
 resources = YAML.parse_stream(input).children.map do |doc|
   stream = Psych::Nodes::Stream.new
@@ -17,7 +23,28 @@ def flatten_resources(resource)
   end
 end
 resources = resources.flat_map { |resource| flatten_resources(resource) }
+def label_value?(value)
+  value.is_a?(String) && value.length <= 63 && (value.empty? || /\A[A-Za-z0-9](?:[-_.A-Za-z0-9]*[A-Za-z0-9])?\z/.match?(value))
+end
+
+def label_key?(key)
+  return false unless key.is_a?(String)
+  parts = key.split('/', -1)
+  return false unless [1, 2].include?(parts.length) && !parts.last.empty? && label_value?(parts.last)
+  return true if parts.length == 1
+  prefix = parts.first
+  prefix.length <= 253 && /\A[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*\z/.match?(prefix)
+end
 annotation = 'buzz.block.xyz/external-network-policy'
+expectations.each do |deployment_name, policy_name, namespace|
+  candidates = resources.select do |r|
+    r['kind'] == 'Deployment' && r.dig('metadata', 'name') == deployment_name &&
+      (r.dig('metadata', 'namespace').to_s.empty? ? namespace : r.dig('metadata', 'namespace')) == namespace
+  end
+  abort "external policy #{policy_name}: expected exactly one deployment #{deployment_name}" unless candidates.length == 1
+  annotations = candidates.first.dig('metadata', 'annotations') || {}
+  abort "external policy #{policy_name}: missing or overwritten ownership marker" unless annotations[annotation] == policy_name && annotations['buzz.block.xyz/release-namespace'] == namespace
+end
 resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
   name = deployment.dig('metadata', 'annotations', annotation)
   next unless name
@@ -43,7 +70,11 @@ resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
   selector.fetch('matchExpressions', []).each do |expression|
     key = expression.fetch('key')
     values = expression.fetch('values', [])
-    matches = case expression.fetch('operator')
+    operator = expression.fetch('operator')
+    valid_values = values.is_a?(Array) && values.all? { |v| label_value?(v) }
+    valid_values &&= %w[In NotIn].include?(operator) ? !values.empty? : (%w[Exists DoesNotExist].include?(operator) && values.empty?)
+    abort "external policy #{name}: invalid selector expression" unless label_key?(key) && valid_values
+    matches = case operator
               when 'In' then labels.key?(key) && values.include?(labels[key])
               when 'NotIn' then !labels.key?(key) || !values.include?(labels[key])
               when 'Exists' then labels.key?(key)

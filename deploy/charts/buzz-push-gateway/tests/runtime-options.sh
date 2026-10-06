@@ -104,6 +104,12 @@ list = {'apiVersion' => 'v1', 'kind' => 'List', 'items' => [policy]}
 File.write("#{ARGV[0]}/list.yaml", (resources + [list]).map(&:to_yaml).join)
 File.write("#{ARGV[0]}/duplicate-list.yaml", (resources + [policy, list]).map(&:to_yaml).join)
 variants = {
+  'invalid-key' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'bad key', 'operator' => 'DoesNotExist'}] },
+  'invalid-value' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'NotIn', 'values' => ['bad value']}] },
+  'numeric-value' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'NotIn', 'values' => [123]}] },
+  'unknown-operator' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'Unknown'}] },
+  'empty-notin' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'NotIn', 'values' => []}] },
+  'valued-exists' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'app.kubernetes.io/name', 'operator' => 'Exists', 'values' => ['buzz-push-gateway']}] },
   'hook-policy' => ->(p) { p['metadata']['annotations'] = {'helm.sh/hook' => 'pre-install', 'helm.sh/hook-delete-policy' => 'hook-succeeded'} },
   'misspelled' => ->(p) { p['metadata']['name'] = 'typo' },
   'wrong-selector' => ->(p) { p['spec']['podSelector']['matchLabels']['app.kubernetes.io/instance'] = 'other' },
@@ -125,7 +131,7 @@ gate <"$out/combined.yaml" >"$out/gated.yaml"
 cmp "$out/combined.yaml" "$out/gated.yaml"
 gate <"$out/list.yaml" >"$out/gated.yaml"
 cmp "$out/list.yaml" "$out/gated.yaml"
-for mutation in duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+for mutation in invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
   if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
     echo "expected combined-render gate to reject $mutation" >&2
     exit 1
@@ -213,3 +219,17 @@ if helm template push "$out/parent" --is-upgrade | gate >"$out/gated.yaml" 2>"$o
 fi
 test ! -s "$out/gated.yaml"
 grep -q 'external policy' "$out/gate-error"
+
+# External-mode callers must bind expectations independently of the marker.
+env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
+resources = YAML.load_stream(File.read("#{ARGV[0]}/combined.yaml")).compact
+pod = resources.find { |r| r['kind'] == 'Deployment' }
+pod['metadata'].delete('annotations')
+File.write("#{ARGV[0]}/missing-marker.yaml", resources.map(&:to_yaml).join)
+RUBY
+if env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby "$chart/tests/check-external-policy.rb" --expect push-buzz-push-gateway platform-runtime default <"$out/missing-marker.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
+  echo 'expected strict gate to reject removed marker' >&2
+  exit 1
+fi
+test ! -s "$out/gated.yaml"
+grep -q 'missing or overwritten ownership marker' "$out/gate-error"

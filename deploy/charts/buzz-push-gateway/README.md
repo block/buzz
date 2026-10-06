@@ -23,8 +23,15 @@ same chart, release name, namespace, values and capabilities as the deployment:
 ```sh
 set -o pipefail
 helm template RELEASE PARENT_CHART --namespace NAMESPACE -f VALUES.yaml \
-  | ruby tests/check-external-policy.rb > validated-release.yaml
+  | ruby tests/check-external-policy.rb --expect DEPLOYMENT POLICY NAMESPACE > validated-release.yaml
 ```
+
+`--expect` is mandatory for external-policy deployment and CI invocations.
+Provide the intended Deployment name, replacement policy name and release namespace
+from deployment configuration, not by extracting the annotations being checked.
+Repeat it for each external-policy Deployment. Missing Deployments or removed or
+overwritten markers then fail closed. No-argument mode is only for renders that
+intentionally have no external-policy requirement, such as default-mode tests.
 
 For upgrade preflight, include `--is-upgrade`. Deployment automation must stop if
 this pipeline fails and must not change the chart or rendering inputs between
