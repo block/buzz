@@ -47,10 +47,12 @@ with a TypeScript lookup table or an id comparison in a component.
    `BUZZ_AGENT_THINKING_EFFORT` literal in UI code. `currentPersistence` is
    where the value lives *today*; `targetApplication` is how the harness
    *should* receive it. They intentionally differ until PR 2.7 migrates
-   Goose/Claude — do not "fix" one to match the other without doing the
+   Goose — do not "fix" one to match the other without doing the
    migration work.
-3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
+3. **Field absence has a named reason, not a boolean.** With legacy catalog
+   metadata, Codex effort is `ownedByModelId` and Claude effort is
+   `deferredUntilNativeOptionsAvailable`. Catalog entries declaring the ACP
+   effort transport key expose `acpSession` options discovered for the model.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
@@ -221,8 +223,8 @@ with a TypeScript lookup table or an id comparison in a component.
    hosting location, availability, or permission. Keep all identity surfaces on
    the shared provenance context, without per-row directory subscriptions. See
    [the provenance contract](../../../../docs/agent-management-provenance.md).
-14. **Thinking effort has two surfaces: a local-only WRITE control and a
-   read-only two-facts DISPLAY.** The write control is `EffortPickerField`
+14. **Per-instance thinking effort has a local-only WRITE control and a
+   read-only two-facts DISPLAY.** The instance write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
    `AgentInstanceEditDialog` beside the Model block. It is **Save-gated, not
    direct-write**: the control is fully controlled by the parent dialog
@@ -245,8 +247,10 @@ with a TypeScript lookup table or an id comparison in a component.
    spawn will launch with) and, when a running ACP session differs,
    `field.overriddenValue` struck through (the live session's current effort).
    No component owns "configured vs current" logic; the reader's canonical tier
-   ordering feeds both facts. Do not add a second effort write path or restate
-   the two-facts logic in a component.
+   ordering feeds both facts. Do not add a second per-instance effort write path
+   or restate the two-facts logic in a component. Global and definition defaults
+   use their existing Save-gated config mutations and the descriptor persistence
+   key; instance effort continues to outrank those inherited defaults.
 
    **Cut invariant — live mid-conversation effort machinery was deliberately
    removed.** Effort is spawn-scoped only: the worker holds one `startup_effort`
@@ -433,3 +437,25 @@ matches the code is worse than no rule; a new pattern that isn't written down
 here will be broken by the next agent that never learns it existed. Reviewers:
 treat a config-behavior diff without a matching AGENTS.md diff (or an explicit
 "no rules changed" note) as incomplete.
+
+## Harness defaults and native ACP effort
+
+Unconfigured definitions inherit `global.preferred_runtime` at resolution time;
+never persist that resolved value as a new profile or instance pin. Global
+restart comparison includes the resolved command as well as its environment.
+The defaults mode submits an absent runtime/model/provider and clears profile
+effort overrides; explicit harness-only profiles open in Customize.
+
+Codex and Claude expose `BUZZ_ACP_EFFORT_LEVEL` as their catalog-declared
+effort persistence/transport key. Their vocabulary comes from the selected
+model's ACP `thought_level` descriptor, discovered by the companion's
+`models --model` probe. Global and profile effort choices flow through the
+existing launch projection; the canonical per-instance effort still overrides
+inherited defaults. Changing the model resets its dependent effort only on the
+explicit user action. A delayed catalog response never clears saved settings.
+
+An explicit adapter `default` option is distinct from inheriting global effort.
+Profile effort edits replace native and legacy aliases together; Advanced must
+not render a duplicate editor for descriptor-owned keys. Selected-model probes
+are debounced, serialized per mounted discovery hook, and generation-fenced so
+a superseded response cannot repopulate another model's choices.

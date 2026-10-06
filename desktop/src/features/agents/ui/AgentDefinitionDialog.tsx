@@ -1,3 +1,10 @@
+import { withEffortValue } from "./discoveredEffort";
+import { PersonaEffortField } from "./PersonaEffortField";
+import {
+  deriveAgentConfigFieldModel,
+  getRenderableEffortField,
+  effortPersistenceKeys,
+} from "../lib/agentConfigCore";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -257,17 +264,17 @@ export function AgentDefinitionDialog({
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
-  // Keep an inherited Create runtime synced with defaults saved in-place.
+  // Keep an inherited runtime synced with defaults saved in-place.
   React.useEffect(() => {
     if (
       !open ||
       !initialValues ||
-      "id" in initialValues ||
-      initialValues.runtime?.trim() ||
       aiConfigurationMode !== "defaults" ||
+      // The initial-values effect hydrates Customize in this same commit.
+      // Only follow defaults after an inherited seed or an explicit Defaults click.
+      !hasSeededForOpenRef.current ||
       runtimesLoading ||
-      defaultRuntime === null ||
-      (runtime.trim().length > 0 && !isRuntimeAutoSeededRef.current)
+      defaultRuntime === null
     ) {
       return;
     }
@@ -329,6 +336,7 @@ export function AgentDefinitionDialog({
       model: modelForSubmit,
       provider: providerForSubmit,
     } = buildRuntimeModelProviderPayload({
+      inheritHarness: aiConfigurationMode === "defaults",
       runtime,
       model: aiConfigurationMode === "defaults" ? "" : model,
       provider: aiConfigurationMode === "defaults" ? "" : provider,
@@ -385,6 +393,22 @@ export function AgentDefinitionDialog({
   }
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const effortField = getRenderableEffortField(
+    deriveAgentConfigFieldModel({
+      scope: "definition",
+      runtime: selectedRuntime,
+      config: {
+        env_vars: envVars,
+        model,
+        provider,
+        preferred_runtime: runtime,
+      },
+    }),
+  );
+  const acpEffortField =
+    effortField?.optionSource === "acpSession" ? effortField : undefined;
+  const effortKeys = effortPersistenceKeys(effortField);
+
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
@@ -401,6 +425,12 @@ export function AgentDefinitionDialog({
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setHasUserChanges(true);
     setAiConfigurationMode(nextMode);
+    if (nextMode === "custom") isRuntimeAutoSeededRef.current = false;
+    if (nextMode === "defaults") {
+      hasSeededForOpenRef.current = true;
+      setRuntime(defaultRuntime?.id ?? "");
+      setEnvVars((previous) => withEffortValue(previous, effortKeys));
+    }
     setIsCustomProviderEditing(false);
     setIsCustomModelEditing(false);
     const nextPair = agentAiConfigurationPairForMode({
@@ -410,7 +440,13 @@ export function AgentDefinitionDialog({
             provider: inheritedProviderDefault.value,
             model: inheritedModelDefault.value,
           }
-        : { provider: "", model: runtimeFileConfig?.model?.trim() ?? "" },
+        : {
+            provider: "",
+            model:
+              globalConfig.model?.trim() ||
+              runtimeFileConfig?.model?.trim() ||
+              "",
+          },
       mode: nextMode,
       needsProviderSelection: runtimeCanChooseLlmProvider,
     });
@@ -508,9 +544,11 @@ export function AgentDefinitionDialog({
   );
   const {
     discoveredModelOptions,
+    discoveredEffortOption,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
+    model: acpEffortField !== undefined ? model || undefined : undefined,
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
@@ -709,13 +747,18 @@ export function AgentDefinitionDialog({
 
   function handleModelDropdownChange(nextValue: string) {
     setHasUserChanges(true);
-    applySelection(
-      selectionOnModelDropdownChange(selection, {
-        nextValue,
-        clearKnownModelOnCustomEntry: true,
-        isModelCustom,
-      }),
-    );
+    const next = selectionOnModelDropdownChange(selection, {
+      nextValue,
+      clearKnownModelOnCustomEntry: true,
+      isModelCustom,
+    });
+    applySelection({
+      ...next,
+      envVars:
+        acpEffortField && next.model !== model
+          ? withEffortValue(next.envVars, effortKeys)
+          : next.envVars,
+    });
   }
 
   const footer = (
@@ -888,7 +931,14 @@ export function AgentDefinitionDialog({
                 modelDiscoveryStatus={modelDiscoveryStatus}
                 modelDropdownOptions={modelDropdownOptions}
                 modelSelectValue={modelSelectValue}
-                onCustomModelChange={setModel}
+                onCustomModelChange={(value) => {
+                  setHasUserChanges(true);
+                  setModel(value);
+                  if (acpEffortField && value !== model)
+                    setEnvVars((previous) =>
+                      withEffortValue(previous, effortKeys),
+                    );
+                }}
                 showSharedComputeAutoHint={
                   isRelayMesh && modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE
                 }
@@ -899,6 +949,20 @@ export function AgentDefinitionDialog({
             ) : null}
           </AnimatePresence>
 
+          {aiConfigurationMode === "custom" && acpEffortField ? (
+            <PersonaEffortField
+              field={acpEffortField}
+              envVars={envVars}
+              globalConfig={globalConfig}
+              option={discoveredEffortOption}
+              disabled={isPending || modelDiscoveryLoading}
+              onChange={(next) => {
+                setHasUserChanges(true);
+                setEnvVars(next);
+              }}
+            />
+          ) : null}
+
           {aiConfigurationMode === "defaults" ? (
             <AgentCreateAiDefaultsSummary
               canChooseProvider={runtimeCanChooseLlmProvider}
@@ -906,7 +970,7 @@ export function AgentDefinitionDialog({
               inheritedModel={inheritedModelDefault}
               inheritedProvider={inheritedProviderDefault}
               isConfigured={localModeGate.satisfied}
-              model={runtimeFileConfig?.model}
+              model={globalConfig.model?.trim() || runtimeFileConfig?.model}
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}
             />
@@ -915,7 +979,7 @@ export function AgentDefinitionDialog({
 
         <AgentDefaultsDialog
           onOpenChange={setAiDefaultsOpen}
-          open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
+          open={aiDefaultsOpen}
           returnFocusRef={aiDefaultsTriggerRef}
         />
 
@@ -968,9 +1032,12 @@ export function AgentDefinitionDialog({
                   disabled={isPending}
                   envVars={envVars}
                   fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
-                  hiddenEnvKeys={
-                    topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                  }
+                  hiddenEnvKeys={[
+                    ...(topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []),
+                    ...(aiConfigurationMode === "custom" && acpEffortField
+                      ? effortKeys
+                      : []),
+                  ]}
                   inheritedEnvVars={inheritedEnvVarsForAdvanced}
                   model={model}
                   modelTuningRuntimeId={runtime}

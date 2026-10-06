@@ -2,6 +2,7 @@ import type { AgentModelsResponse } from "@/shared/api/types";
 import { invokeTauri } from "@/shared/api/tauri";
 
 export type DiscoverAgentModelsInput = {
+  model?: string;
   acpCommand?: string;
   agentCommand: string;
   agentArgs?: string[];

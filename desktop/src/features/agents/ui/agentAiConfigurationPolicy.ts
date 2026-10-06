@@ -6,9 +6,11 @@ export type AgentAiConfigurationPair = {
 };
 
 export function initialAgentAiConfigurationMode(
-  pair: Partial<AgentAiConfigurationPair>,
+  pair: Partial<AgentAiConfigurationPair> & { runtime?: string | null },
 ): AgentAiConfigurationMode {
-  return pair.provider?.trim() || pair.model?.trim() ? "custom" : "defaults";
+  return pair.runtime?.trim() || pair.provider?.trim() || pair.model?.trim()
+    ? "custom"
+    : "defaults";
 }
 
 export function agentAiConfigurationPairForMode({

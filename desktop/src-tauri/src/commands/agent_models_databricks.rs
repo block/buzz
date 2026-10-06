@@ -276,6 +276,7 @@ pub(super) fn databricks_models_response(
     }
 
     Ok(AgentModelsResponse {
+        effort_option: None,
         agent_name: provider_name.trim().to_string(),
         agent_version: "models-api".to_string(),
         models: entries

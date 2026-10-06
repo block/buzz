@@ -721,3 +721,26 @@ test("buzz_agent_optionSource_unchanged_still_buzzAgentCatalog", () => {
     "buzz-agent optionSource must remain buzzAgentCatalog",
   );
 });
+
+for (const scope of ["global", "onboarding", "definition", "instance"]) {
+  test(`ACP effort uses its native descriptor at ${scope} scope`, () => {
+    const model = deriveAgentConfigFieldModel({
+      config: {
+        ...config,
+        env_vars: {
+          BUZZ_ACP_EFFORT_LEVEL: "default",
+          BUZZ_AGENT_THINKING_EFFORT: "high",
+        },
+      },
+      runtime: runtime("claude", { thinkingEnvVar: "BUZZ_ACP_EFFORT_LEVEL" }),
+      scope,
+    });
+    const effort = field(model, "effort");
+    assert.equal(effort.optionSource, "acpSession");
+    assert.deepEqual(effort.currentPersistence, {
+      kind: "envVar",
+      key: "BUZZ_ACP_EFFORT_LEVEL",
+    });
+    assert.equal(effort.value, "default");
+  });
+}
