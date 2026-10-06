@@ -1405,3 +1405,165 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
         "guarded-table scan must exercise at least one file that writes a fenced table"
     );
 }
+
+// Rolled-back verification probes write `events` rows that never commit, so
+// they owe no push job or TTL refresh.
+const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
+    "pub async fn verify_floor_guard_behavior(",
+    "pub async fn verify_channel_roster_fence_behavior(",
+];
+
+/// Whether `source` inserts into `events` itself (not `event_mentions` or any
+/// other `events_*` table).
+fn inserts_events_row(source: &str) -> bool {
+    source
+        .match_indices("INSERT INTO events")
+        .any(|(index, marker)| {
+            source[index + marker.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
+        })
+}
+
+/// An events insert must run both follow-ups: the push enqueue and the
+/// pre-commit TTL refresh. `after_admitted_insert` does both; a writer that
+/// inserts inside a savepoint calls the two halves separately.
+fn runs_event_follow_ups(function_source: &str) -> bool {
+    function_source.contains("event_follow_up::after_admitted_insert(")
+        || (function_source.contains("event_follow_up::enqueue_push_match(")
+            && function_source.contains(".record_channel_event("))
+}
+
+fn event_insert_follow_up_violations(production_source: &str) -> Vec<String> {
+    function_slices(production_source)
+        .into_iter()
+        .filter(|function_source| {
+            let header = function_header(function_source);
+            inserts_events_row(function_source)
+                && !EVENT_INSERT_FOLLOW_UP_EXCEPTIONS
+                    .iter()
+                    .any(|exception| header.starts_with(exception))
+                && !runs_event_follow_ups(function_source)
+        })
+        .map(|function_source| function_header(function_source).to_owned())
+        .collect()
+}
+
+#[test]
+fn event_insert_follow_up_policy_rejects_writers_without_the_hook() {
+    let source = r#"
+pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events \
+                 (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+    crate::store::event_follow_up::enqueue_push_match(&mut **tx, community, id, kind)
+        .await
+        .expect("enqueue");
+}
+pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+        .await
+        .expect("follow up");
+}
+pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+    crate::store::event_follow_up::enqueue_push_match(&mut **tx, community, id, kind)
+        .await
+        .expect("enqueue");
+    tx.record_channel_event(channel, kind);
+}
+pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO event_mentions (community_id, event_id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+pub async fn verify_floor_guard_behavior(pool: &PgPool) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(pool)
+        .await
+        .expect("probe");
+}
+"#;
+
+    assert_eq!(
+        event_insert_follow_up_violations(source),
+        [
+            "pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
+        ],
+        "an events insert must run the push enqueue and record the TTL refresh"
+    );
+}
+
+#[test]
+fn every_production_event_insert_runs_the_follow_up_hook() {
+    use std::path::{Path, PathBuf};
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let path = entry.expect("read directory entry").path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if should_scan_guarded_write_source_file(&path) {
+                out.push(path);
+            }
+        }
+    }
+
+    let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate lives under crates/");
+    let mut files = Vec::new();
+    for crate_name in ["buzz-db", "buzz-relay", "buzz-admin"] {
+        collect_rs_files(&crates_root.join(crate_name).join("src"), &mut files);
+    }
+
+    let mut hooked_writers = 0usize;
+    let mut violations = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path).expect("read source file");
+        let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
+        if !inserts_events_row(production) {
+            continue;
+        }
+        for function_source in function_slices(production) {
+            if inserts_events_row(function_source) && runs_event_follow_ups(function_source) {
+                hooked_writers += 1;
+            }
+        }
+        violations.extend(
+            event_insert_follow_up_violations(production)
+                .into_iter()
+                .map(|header| format!("{}: {header}", path.display())),
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "production `INSERT INTO events` writers must call `event_follow_up` so the push \
+         enqueue and channel TTL refresh survive the trigger retirement: {violations:?}"
+    );
+    // The seven writers at the time of BUZZ-176. A lower count means the scan
+    // stopped seeing a writer, not that one was removed safely.
+    assert!(
+        hooked_writers >= 7,
+        "expected at least seven hooked event writers, found {hooked_writers}"
+    );
+}

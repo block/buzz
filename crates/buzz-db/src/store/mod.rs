@@ -20,6 +20,8 @@ pub mod deletion;
 pub mod dm;
 /// Event storage and retrieval.
 pub mod event;
+/// App-owned push enqueue and channel TTL refresh for inserted events.
+pub(crate) mod event_follow_up;
 /// Home feed queries.
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).

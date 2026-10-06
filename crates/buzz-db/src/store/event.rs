@@ -500,6 +500,15 @@ async fn insert_event_on(
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
+    if was_inserted {
+        crate::store::event_follow_up::after_admitted_insert(
+            tx,
+            id_bytes.as_slice(),
+            kind_i32,
+            channel_id,
+        )
+        .await?;
+    }
 
     Ok((
         StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
@@ -1744,6 +1753,14 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let was_inserted = result.rows_affected() > 0;
 
     if was_inserted {
+        crate::store::event_follow_up::after_admitted_insert(
+            tx,
+            id_bytes.as_slice(),
+            kind_i32,
+            channel_id,
+        )
+        .await?;
+
         if let Some(ref meta) = thread_meta {
             let broadcast_val: bool = meta.broadcast;
 
