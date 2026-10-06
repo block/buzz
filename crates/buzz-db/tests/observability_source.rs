@@ -1187,8 +1187,15 @@ fn admitted_tx_is_constructed_only_at_the_admission_chokepoints() {
             .to_string_lossy()
             .replace('\\', "/");
         let source = std::fs::read_to_string(&path).expect("read source file");
-        for _ in source.matches("AdmittedTx::admitted(") {
-            constructors.push(relative.clone());
+        // Comment lines are skipped so the `compile_fail` doctests on
+        // `AdmittedTx`, which name the constructor, are not counted as calls.
+        for line in source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+        {
+            for _ in line.matches("AdmittedTx::admitted(") {
+                constructors.push(relative.clone());
+            }
         }
     }
     // One wrap after `guard_transaction` in the shared chokepoint, one after
