@@ -1880,6 +1880,19 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn nip09_deletion_purges_retention_free_rows_and_mentions() {
+        assert_nip09_deletion_purges_retention_free_rows_and_mentions().await;
+    }
+
+    /// The same contract on a migration-built database, where the 0009/0011/
+    /// 0019 purge and hard-delete fence triggers are still installed. The app
+    /// purge must coexist with them until they are dropped.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_nip09_deletion_purges_retention_free_rows_and_mentions() {
+        assert_nip09_deletion_purges_retention_free_rows_and_mentions().await;
+    }
+
+    async fn assert_nip09_deletion_purges_retention_free_rows_and_mentions() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         #[derive(Clone, Copy, Debug)]
