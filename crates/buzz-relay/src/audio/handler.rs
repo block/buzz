@@ -3123,9 +3123,7 @@ async fn commit_participant_join(
         crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
 
         buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(
-            &mut tx,
-            tenant.community(),
-            channel_id,
+            &mut tx, channel_id,
         )
         .await?;
 
@@ -3153,13 +3151,9 @@ async fn commit_participant_join(
         // IMPORTANT 4b: Re-read parent membership under the lock. A parent
         // membership revocation in the same window would make the auto-add
         // unjustified; reject rather than grant access from stale authority.
-        let parent_still_member = buzz_db::channel_members::is_member_in_transaction(
-            &mut tx,
-            tenant.community(),
-            *parent_id,
-            pubkey_bytes,
-        )
-        .await?;
+        let parent_still_member =
+            buzz_db::channel_members::is_member_in_transaction(&mut tx, *parent_id, pubkey_bytes)
+                .await?;
 
         if !parent_still_member {
             retire_shadow();
@@ -3175,7 +3169,6 @@ async fn commit_participant_join(
         // an unlinked channel violates the "creator authority" invariant.
         let link_still_exists = buzz_db::event::huddle_started_link_exists_in_transaction(
             &mut tx,
-            tenant.community(),
             *parent_id,
             channel_id,
             channel_created_by.as_slice(),
@@ -3190,18 +3183,13 @@ async fn commit_participant_join(
 
         // Re-read child membership — a concurrent legitimate add may have
         // already provided access; do not overwrite role/provenance.
-        let still_absent = !buzz_db::channel_members::is_member_in_transaction(
-            &mut tx,
-            tenant.community(),
-            channel_id,
-            pubkey_bytes,
-        )
-        .await?;
+        let still_absent =
+            !buzz_db::channel_members::is_member_in_transaction(&mut tx, channel_id, pubkey_bytes)
+                .await?;
 
         if still_absent {
             buzz_db::channel_members::insert_auto_membership_in_transaction(
                 &mut tx,
-                tenant.community(),
                 channel_id,
                 pubkey_bytes,
                 channel_created_by.as_slice(),
@@ -3212,13 +3200,9 @@ async fn commit_participant_join(
     }
 
     // 5. Insert kind `48101` uncommitted.
-    let (stored, was_inserted) = buzz_db::event::insert_event_in_transaction(
-        &mut tx,
-        tenant.community(),
-        &event,
-        Some(parent_channel_id),
-    )
-    .await?;
+    let (stored, was_inserted) =
+        buzz_db::event::insert_event_in_transaction(&mut tx, &event, Some(parent_channel_id))
+            .await?;
 
     // 6. Acquire effect permit or rollback.
     //
@@ -3240,7 +3224,7 @@ async fn commit_participant_join(
 
     // 7. Commit while holding the permit.
     if let Err(e) = tx.commit().await {
-        return Err(JoinCommitError::Db(e.into()));
+        return Err(JoinCommitError::Db(e));
     }
     if let Some(shadow) = shadow {
         shadow.admit();

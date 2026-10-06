@@ -777,7 +777,6 @@ pub async fn execute_delete_with_marker(
     // action against an already-deleted target leaves them unchanged.
     crate::event::soft_delete_event_and_update_thread_in_tx(
         &mut tx,
-        community_id,
         target_event_id,
         parent_event_id,
         root_event_id,

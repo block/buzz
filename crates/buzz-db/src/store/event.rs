@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use buzz_core::kind::{
@@ -17,7 +17,7 @@ use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, Db};
 
 // Compatibility exports preserve the pre-extraction public event-store paths.
 pub use crate::reminder::{
@@ -373,12 +373,12 @@ async fn huddle_started_link_exists_with_operation(
 /// A `false` return means the link was deleted or was never inserted, and the
 /// caller should abort the surrounding transaction.
 pub async fn huddle_started_link_exists_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     parent_channel_id: Uuid,
     ephemeral_channel_id: Uuid,
     creator_pubkey: &[u8],
 ) -> Result<bool> {
+    let community_id = tx.community();
     let uuid_needle = format!("%{}%", ephemeral_channel_id);
     let candidates: Vec<String> = sqlx::query_scalar(
         r#"
@@ -426,35 +426,35 @@ pub async fn insert_event(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let result = insert_event_in_transaction(&mut tx, community_id, event, channel_id).await?;
+    let result = insert_event_in_transaction(&mut tx, event, channel_id).await?;
     tx.commit().await?;
     Ok(result)
 }
 
-/// Insert a Nostr event in a caller-owned PostgreSQL transaction.
+/// Insert a Nostr event in a caller-owned admitted transaction, scoped to the
+/// transaction's community.
 ///
 /// This is the transaction-composition seam for callers that must keep the
 /// event insert open while performing related work. The caller owns commit or
 /// rollback.
 pub async fn insert_event_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
-    let result = insert_event_on(tx.as_mut(), community_id, event, channel_id).await?;
+    let result = insert_event_on(tx, event, channel_id).await?;
     if result.1 {
-        crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
+        crate::operator_listener::enqueue_mentions_in_transaction(tx, event).await?;
     }
     Ok(result)
 }
 
 async fn insert_event_on(
-    connection: &mut PgConnection,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
+    let community_id = tx.community();
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);
 
@@ -496,7 +496,7 @@ async fn insert_event_on(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
-    .execute(connection)
+    .execute(&mut **tx)
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
@@ -1180,7 +1180,6 @@ pub async fn soft_delete_event_and_update_thread(
     .await?;
     let deleted = soft_delete_event_and_update_thread_in_tx(
         &mut tx,
-        community_id,
         event_id,
         parent_event_id,
         root_event_id,
@@ -1195,12 +1194,13 @@ pub async fn soft_delete_event_and_update_thread(
 /// Callers that must fence the delete with their own writes (e.g. the admin
 /// action lease/marker) run this inside their transaction; the caller commits.
 pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
-    tx: &mut PgConnection,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event_id: &[u8],
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
+    let community_id = tx.community();
+    let tx: &mut PgConnection = tx;
     use crate::store::replaceable::event_replacement_lock_key;
 
     // Derive the target event's kind and channel_id inside the transaction so
@@ -1552,12 +1552,12 @@ pub struct ThreadMetadataParams<'a> {
 }
 
 pub(crate) async fn insert_event_with_thread_metadata_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &Event,
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
 ) -> Result<(StoredEvent, bool)> {
+    let community_id = tx.community();
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);
 
@@ -1713,7 +1713,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             }
         }
 
-        crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
+        crate::operator_listener::enqueue_mentions_in_transaction(tx, event).await?;
     }
 
     Ok((
@@ -1723,8 +1723,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
 }
 
 pub(crate) async fn acquire_canvas_event_write_lock_if_needed(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
@@ -1736,16 +1735,13 @@ pub(crate) async fn acquire_canvas_event_write_lock_if_needed(
         return Ok(());
     };
 
-    acquire_canvas_coordinate_lock(tx, community_id, channel_id).await
+    acquire_canvas_coordinate_lock(tx, channel_id).await
 }
 
 /// Take the per-`(community, canvas kind, channel)` advisory lock that
 /// serializes canvas writes on one channel head, author excluded.
-async fn acquire_canvas_coordinate_lock(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
-    channel_id: Uuid,
-) -> Result<()> {
+async fn acquire_canvas_coordinate_lock(tx: &mut AdmittedTx, channel_id: Uuid) -> Result<()> {
+    let community_id = tx.community();
     use crate::store::replaceable::event_replacement_lock_key;
 
     let lock_key = event_replacement_lock_key(
@@ -1788,10 +1784,9 @@ pub async fn insert_event_with_thread_metadata(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, channel_id).await?;
+    acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
     let result =
-        insert_event_with_thread_metadata_tx(&mut tx, community_id, event, channel_id, thread_meta)
-            .await?;
+        insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta).await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -1879,7 +1874,7 @@ pub async fn insert_canvas_head_checked(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    acquire_canvas_coordinate_lock(&mut tx, community_id, channel_id).await?;
+    acquire_canvas_coordinate_lock(&mut tx, channel_id).await?;
 
     let head: Option<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, created_at FROM events \
@@ -1931,8 +1926,7 @@ pub async fn insert_canvas_head_checked(
     }
 
     let (stored, was_inserted) =
-        insert_event_with_thread_metadata_tx(&mut tx, community_id, event, Some(channel_id), None)
-            .await?;
+        insert_event_with_thread_metadata_tx(&mut tx, event, Some(channel_id), None).await?;
     if !was_inserted {
         // The primary-key row already exists. The idempotent-replay branch above
         // already returned `Duplicate` for the case where the incoming event is
@@ -1945,7 +1939,7 @@ pub async fn insert_canvas_head_checked(
         tx.rollback().await?;
         return Ok((stored, ChannelHeadWriteStatus::RevisionMismatch));
     }
-    crate::insert_mentions_in_transaction(&mut tx, community_id, event, Some(channel_id)).await?;
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
     tx.commit().await?;
 
     Ok((stored, ChannelHeadWriteStatus::Inserted))
@@ -1966,11 +1960,9 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        let result =
-            crate::event::insert_event_in_transaction(&mut tx, community_id, event, channel_id)
-                .await?;
+        let result = crate::event::insert_event_in_transaction(&mut tx, event, channel_id).await?;
         if result.1 {
-            crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
         tx.commit().await?;
         Ok(result)
@@ -2493,23 +2485,16 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        crate::event::acquire_canvas_event_write_lock_if_needed(
-            &mut tx,
-            community_id,
-            event,
-            channel_id,
-        )
-        .await?;
+        crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result = crate::event::insert_event_with_thread_metadata_tx(
             &mut tx,
-            community_id,
             event,
             channel_id,
             thread_meta,
         )
         .await?;
         if result.1 {
-            crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
         tx.commit().await?;
         Ok(result)
@@ -2858,8 +2843,14 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(community_uuid);
         let event = make_text_event("caller-owned transaction");
 
-        let mut tx = pool.begin().await.expect("begin event insert transaction");
-        let (_, was_inserted) = insert_event_in_transaction(&mut tx, community, &event, None)
+        let mut tx = crate::begin_community_event_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin event insert transaction");
+        let (_, was_inserted) = insert_event_in_transaction(&mut tx, &event, None)
             .await
             .expect("insert event in caller transaction");
         assert!(was_inserted);
@@ -3653,16 +3644,16 @@ mod postgres_tests {
         });
 
         // Open the join transaction and acquire FOR SHARE.
-        let mut tx = pool.begin().await.expect("begin join tx");
-        let exists = huddle_started_link_exists_in_transaction(
-            &mut tx,
+        let mut tx = crate::begin_community_event_write_transaction(
+            &pool,
             community_id,
-            parent,
-            session,
-            &creator,
+            crate::observability::WriterOperation::EventWrite,
         )
         .await
-        .expect("huddle_started_link_exists_in_transaction");
+        .expect("begin join tx");
+        let exists = huddle_started_link_exists_in_transaction(&mut tx, parent, session, &creator)
+            .await
+            .expect("huddle_started_link_exists_in_transaction");
         assert!(exists, "I4: link must exist before commit");
 
         // Signal the deleter to attempt its UPDATE now.

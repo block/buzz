@@ -3,10 +3,11 @@
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::{Acquire, Postgres, Transaction};
+use sqlx::Acquire;
 use uuid::Uuid;
 
 use crate::observability::{self, LockType, TransactionOperation};
+use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
 /// Result category for a parameterized-replaceable event write.
@@ -103,13 +104,13 @@ pub(crate) fn event_replacement_lock_key(
 /// current live head to have an exact event ID or restrict the operation to an
 /// idempotent replay.
 async fn replace_parameterized_event_in_transaction_impl(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &nostr::Event,
     d_tag: &str,
     channel_id: Option<Uuid>,
     precondition: ParameterizedReplacePrecondition<'_>,
 ) -> Result<ParameterizedReplaceResult> {
+    let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     let pubkey_bytes = event.pubkey.to_bytes();
     let created_at_secs = event.created_at.as_secs() as i64;
@@ -351,8 +352,11 @@ async fn replace_parameterized_event_in_transaction_impl(
         .await?;
     }
 
-    crate::insert_mentions_in_transaction(&mut savepoint, community_id, event, channel_id).await?;
     savepoint.commit().await?;
+    // The savepoint only exists so a duplicate insert can undo the supersede
+    // above. Mentions index the inserted event on the caller's admitted
+    // transaction, so they still commit or roll back with it.
+    crate::insert_mentions_in_transaction(tx, event, channel_id).await?;
 
     Ok(ParameterizedReplaceResult::new(
         event,
@@ -511,7 +515,7 @@ impl Db {
                 // The replaceable event and its denormalized mention index are one
                 // authoritative discovery write. An indexing error must roll back the
                 // new event and restore the previously-live event.
-                crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id)
+                crate::insert_mentions_in_transaction(&mut tx, event, channel_id)
                     .await?;
 
                 tx.commit().await?;
@@ -530,22 +534,14 @@ impl Db {
     /// in the internal state machine makes the advisory-lock contract explicit.
     pub async fn replace_parameterized_event_in_transaction(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
-        community_id: CommunityId,
+        tx: &mut AdmittedTx,
         event: &nostr::Event,
         d_tag: &str,
         channel_id: Option<Uuid>,
         precondition: ParameterizedReplacePrecondition<'_>,
     ) -> Result<ParameterizedReplaceResult> {
-        replace_parameterized_event_in_transaction_impl(
-            tx,
-            community_id,
-            event,
-            d_tag,
-            channel_id,
-            precondition,
-        )
-        .await
+        replace_parameterized_event_in_transaction_impl(tx, event, d_tag, channel_id, precondition)
+            .await
     }
 
     /// Atomically replace a NIP-33 parameterized replaceable event.
@@ -573,7 +569,6 @@ impl Db {
                 let result = self
                     .replace_parameterized_event_in_transaction(
                         &mut tx,
-                        community_id,
                         event,
                         d_tag,
                         channel_id,
@@ -1157,7 +1152,6 @@ mod postgres_tests {
         let result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &replace_d_tag,
                 None,
@@ -1228,7 +1222,6 @@ mod postgres_tests {
         let outcome = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &d_tag,
                 None,
@@ -1264,7 +1257,6 @@ mod postgres_tests {
         let mismatch = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &d_tag,
                 None,
@@ -1298,7 +1290,6 @@ mod postgres_tests {
         let missing_result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &missing,
                 &missing_d_tag,
                 None,
@@ -1376,7 +1367,6 @@ mod postgres_tests {
         let error = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &d_tag,
                 None,
@@ -1454,10 +1444,9 @@ mod postgres_tests {
             .begin_event_write_transaction(community)
             .await
             .expect("begin seed transaction");
-        let (_, was_inserted) =
-            event::insert_event_in_transaction(&mut seed_tx, community, &old, None)
-                .await
-                .expect("insert older live head");
+        let (_, was_inserted) = event::insert_event_in_transaction(&mut seed_tx, &old, None)
+            .await
+            .expect("insert older live head");
         assert!(was_inserted);
         seed_tx.commit().await.expect("commit older live head");
 
@@ -1468,7 +1457,6 @@ mod postgres_tests {
         let result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &duplicate,
                 &d_tag,
                 None,

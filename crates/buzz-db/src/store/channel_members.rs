@@ -4,12 +4,12 @@
 //! roster snapshots hold that same lock through replacement publication.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, Db};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
@@ -179,7 +179,7 @@ pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result
 /// transaction that then reads roles/owner counts and writes membership, so the
 /// whole check-then-write sequence is atomic against a concurrent one.
 async fn acquire_channel_membership_lock(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
@@ -191,7 +191,7 @@ async fn acquire_channel_membership_lock(
                 community_id.as_uuid(),
                 channel_id
             ))
-            .execute(&mut **tx),
+            .execute(&mut *tx),
     )
     .await?;
     Ok(())
@@ -205,10 +205,10 @@ async fn acquire_channel_membership_lock(
 /// for callers that need to compose multiple operations in one transaction
 /// (e.g., `commit_participant_join` in `audio/handler.rs`).
 pub async fn acquire_channel_membership_lock_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
 ) -> Result<()> {
+    let community_id = tx.community();
     acquire_channel_membership_lock(tx, community_id, channel_id).await
 }
 
@@ -217,11 +217,11 @@ pub async fn acquire_channel_membership_lock_in_transaction(
 /// Runs the same query as `is_member` but within the caller's transaction so
 /// the read is serialized with any concurrent membership writes on the same lock.
 pub async fn is_member_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<bool> {
+    let community_id = tx.community();
     let row = sqlx::query(
         "SELECT COUNT(*) as cnt FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
@@ -246,12 +246,12 @@ pub async fn is_member_in_transaction(
 /// Used by `commit_participant_join` to atomically add membership and the
 /// `48101` event in a single transaction under a session effect permit.
 pub async fn insert_auto_membership_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
     pubkey: &[u8],
     invited_by: &[u8],
 ) -> Result<()> {
+    let community_id = tx.community();
     sqlx::query(
         r#"
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -281,7 +281,7 @@ pub struct LockedMemberSnapshot {
     community_id: CommunityId,
     channel_id: Uuid,
     relay_pubkey: Vec<u8>,
-    tx: Transaction<'static, Postgres>,
+    tx: AdmittedTx,
 }
 
 impl LockedMemberSnapshot {
@@ -372,8 +372,7 @@ impl LockedMemberSnapshot {
                 "member snapshot event id already exists".into(),
             ));
         }
-        crate::insert_mentions_in_transaction(&mut self.tx, community_id, event, Some(channel_id))
-            .await?;
+        crate::insert_mentions_in_transaction(&mut self.tx, event, Some(channel_id)).await?;
         Ok((
             buzz_core::StoredEvent::with_received_at(
                 event.clone(),
@@ -1172,7 +1171,7 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
 
 /// Transaction-aware variant of [`get_active_role_tx`].
 async fn get_active_role_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
     pubkey: &[u8],
@@ -1184,14 +1183,14 @@ async fn get_active_role_tx(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await?;
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
 
 /// Transaction-aware variant of [`get_channel`].
 async fn get_channel_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<ChannelRecord> {
@@ -1209,7 +1208,7 @@ async fn get_channel_tx(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(DbError::ChannelNotFound(channel_id))?;
     row_to_channel_record(row)

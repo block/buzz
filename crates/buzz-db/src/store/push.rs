@@ -38,15 +38,12 @@ async fn begin_operation_transaction(
 /// domain from the audit lock and the lease address/author locks.
 const PUSH_GATE_LOCK_NAMESPACE: &str = "buzz_push_gate:";
 
-async fn acquire_push_gate_lock(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    community: CommunityId,
-) -> Result<()> {
+async fn acquire_push_gate_lock(tx: &mut sqlx::PgConnection, community: CommunityId) -> Result<()> {
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid()))
-            .execute(&mut **tx),
+            .execute(&mut *tx),
     )
     .await?;
     Ok(())
@@ -67,7 +64,7 @@ const PUSH_GATE_BACKFILL_SECS: i64 = 120;
 /// list mirrors the trigger allowlist; `ON CONFLICT DO NOTHING` dedups against
 /// rows the trigger already enqueued.
 async fn backfill_push_match_jobs(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut sqlx::PgConnection,
     community: CommunityId,
 ) -> Result<()> {
     sqlx::query(
@@ -81,7 +78,7 @@ async fn backfill_push_match_jobs(
     )
     .bind(community.as_uuid())
     .bind(PUSH_GATE_BACKFILL_SECS as f64)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await?;
     Ok(())
 }

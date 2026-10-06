@@ -182,19 +182,13 @@ impl Db {
         sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted")
             .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(&mut *tx).await?;
         let (stored, _) =
-            crate::event::insert_event_in_transaction(&mut tx, community, event, Some(env.home))
-                .await?;
-        crate::insert_mentions_in_transaction(&mut tx, community, event, Some(env.home)).await?;
+            crate::event::insert_event_in_transaction(&mut tx, event, Some(env.home)).await?;
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(env.home)).await?;
         let mut accepted = vec![stored];
         if let (ArtifactOp::Move, Some(source), Some(prev)) = (env.op, source, &env.prev) {
             let removal = removal_marker(relay_keys, env.id, source, prev)?;
-            let (stored, _) = crate::event::insert_event_in_transaction(
-                &mut tx,
-                community,
-                &removal,
-                Some(source),
-            )
-            .await?;
+            let (stored, _) =
+                crate::event::insert_event_in_transaction(&mut tx, &removal, Some(source)).await?;
             accepted.push(stored);
         }
         tx.commit().await?;

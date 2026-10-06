@@ -5,9 +5,10 @@
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::AdmittedTx;
 use crate::{
     error::Result,
     event::{insert_event_with_thread_metadata_tx, ThreadMetadataParams},
@@ -144,14 +145,14 @@ pub async fn add_reaction(
 /// statement as [`add_reaction`], preserving the new / re-activate / active-duplicate
 /// semantics while letting callers atomically couple the reaction row to other writes.
 pub(crate) async fn add_reaction_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    community: CommunityId,
+    tx: &mut AdmittedTx,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
+    let community = tx.community();
     let result = sqlx::query(ADD_REACTION_SQL)
         .bind(community.as_uuid())
         .bind(event_created_at)
@@ -207,7 +208,6 @@ pub async fn insert_reaction_event_with_thread_metadata(
     // Preserve add_reaction's exact new / re-activate / active-duplicate semantics.
     let reaction_inserted = add_reaction_tx(
         &mut tx,
-        community_id,
         target_event_id,
         target_created_at,
         actor_pubkey,
@@ -221,25 +221,14 @@ pub async fn insert_reaction_event_with_thread_metadata(
         return Ok(ReactionEventInsertOutcome::Duplicate);
     }
 
-    crate::event::acquire_canvas_event_write_lock_if_needed(
-        &mut tx,
-        community_id,
-        reaction_event,
-        channel_id,
-    )
-    .await?;
-    let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
-        &mut tx,
-        community_id,
-        reaction_event,
-        channel_id,
-        thread_meta,
-    )
-    .await?;
+    crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, reaction_event, channel_id)
+        .await?;
+    let (stored_event, was_inserted) =
+        insert_event_with_thread_metadata_tx(&mut tx, reaction_event, channel_id, thread_meta)
+            .await?;
 
     if was_inserted {
-        crate::insert_mentions_in_transaction(&mut tx, community_id, reaction_event, channel_id)
-            .await?;
+        crate::insert_mentions_in_transaction(&mut tx, reaction_event, channel_id).await?;
     }
 
     tx.commit().await?;

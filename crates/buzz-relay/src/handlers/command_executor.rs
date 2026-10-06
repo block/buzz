@@ -82,7 +82,7 @@ enum PersistResult {
     /// Event was already processed — return idempotent success.
     Duplicate,
     /// Event inserted — transaction is open, handler must commit after mutations.
-    Inserted(sqlx::Transaction<'static, sqlx::Postgres>),
+    Inserted(buzz_db::AdmittedTx),
 }
 
 /// Persist a command event inside a transaction. Returns the OPEN transaction
@@ -146,7 +146,6 @@ async fn persist_command_event(
         let result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                tenant.community(),
                 event,
                 d_tag,
                 channel_id,
@@ -183,10 +182,9 @@ async fn persist_command_event(
         };
     }
 
-    let (_, was_inserted) =
-        buzz_db::event::insert_event_in_transaction(&mut tx, tenant.community(), event, channel_id)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
+    let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(&mut tx, event, channel_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
     if was_inserted {
         Ok(PersistResult::Inserted(tx))
     } else {
@@ -1603,7 +1601,6 @@ mod postgres_tests {
             .expect("begin legacy seed");
         let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(
             &mut tx,
-            tenant.community(),
             &legacy,
             extract_channel_id(&legacy),
         )

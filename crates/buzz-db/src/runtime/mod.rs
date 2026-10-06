@@ -1,8 +1,10 @@
+mod admitted_tx;
 mod connection_observability;
 pub mod migration;
 pub(crate) mod observability;
 pub mod replica_fence;
 
+pub use admitted_tx::AdmittedTx;
 pub use connection_observability::{DbConnectionOutcome, DbConnectionStep};
 pub(crate) use connection_observability::{
     CONNECTION_DURATION_STEPS, CONNECTION_RAW_SERIES_PER_POD, CONNECTION_STARTED_STEPS,
@@ -41,20 +43,19 @@ pub async fn insert_mentions(
         observability::WriterOperation::EventWrite,
     )
     .await?;
-    insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
-    tx.commit().await?;
-    Ok(())
+    insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
+    tx.commit().await
 }
 
-/// Insert mention rows on the caller's transaction. Replacement writes use
-/// this so the authoritative event and its discovery index commit or roll back
-/// as one unit.
+/// Insert mention rows on the caller's admitted transaction. Replacement
+/// writes use this so the authoritative event and its discovery index commit
+/// or roll back as one unit.
 pub(crate) async fn insert_mentions_in_transaction(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
+    let community_id = tx.community();
     let p_tags: Vec<&str> = event
         .tags
         .iter()
@@ -135,7 +136,7 @@ async fn begin_community_event_write_transaction_with_metric_population(
     community: CommunityId,
     operation: observability::WriterOperation,
     metric_population: CommunityEventWriteMetricPopulation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+) -> Result<AdmittedTx> {
     let connection = match metric_population {
         CommunityEventWriteMetricPopulation::TypedOnly => {
             observability::acquire_writer(pool, operation).await?
@@ -148,7 +149,7 @@ async fn begin_community_event_write_transaction_with_metric_population(
     deletion::DeletionStore::new(pool.clone())
         .guard_transaction(&mut tx, community)
         .await?;
-    Ok(tx)
+    Ok(AdmittedTx::admitted(tx, community))
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +162,7 @@ pub(crate) async fn begin_community_event_write_transaction(
     pool: &PgPool,
     community: CommunityId,
     operation: observability::WriterOperation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+) -> Result<AdmittedTx> {
     begin_community_event_write_transaction_with_metric_population(
         pool,
         community,
@@ -175,7 +176,7 @@ pub(crate) async fn begin_community_event_write_transaction_with_legacy_metrics(
     pool: &PgPool,
     community: CommunityId,
     operation: observability::WriterOperation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+) -> Result<AdmittedTx> {
     begin_community_event_write_transaction_with_metric_population(
         pool,
         community,
@@ -1290,17 +1291,14 @@ impl Db {
     /// the shared community admission lock before returning, so callers that use
     /// it cannot take domain or row locks ahead of tenant admission, and a
     /// quiescing community rejects the write at entry rather than at its first
-    /// fenced statement. The compiler does not enforce this: a transaction
-    /// opened from [`Db::pool`] can still reach the public `*_in_transaction`
-    /// helpers, and only the source-policy tests and the commit-time database
-    /// fences, which remain the authoritative backstop, catch it.
-    ///
-    /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
-    /// The transaction holds an owned pool handle, not a borrow.
+    /// fenced statement. The returned [`AdmittedTx`] is the only type the
+    /// event-write `*_in_transaction` helpers accept, and it carries
+    /// `community`, so the compiler rejects a raw transaction or one admitted
+    /// for another community. [`AdmittedTx::commit`] is the only commit path.
     pub async fn begin_event_write_transaction(
         &self,
         community: CommunityId,
-    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+    ) -> Result<AdmittedTx> {
         begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community,
@@ -1338,16 +1336,10 @@ impl Db {
         self.deletion_store()
             .guard_transaction_with_serving_lease(&mut tx, lease)
             .await?;
-        event::acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, channel_id)
-            .await?;
-        let result = event::insert_event_with_thread_metadata_tx(
-            &mut tx,
-            community_id,
-            event,
-            channel_id,
-            None,
-        )
-        .await?;
+        let mut tx = AdmittedTx::admitted(tx, community_id);
+        event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
+        let result =
+            event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;
         tx.commit().await?;
         if result.1 {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
