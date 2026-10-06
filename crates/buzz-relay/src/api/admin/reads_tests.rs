@@ -1,7 +1,7 @@
-//! Tests for the staff-only community reads and the HEAD binding of every
-//! admin read. The unsigned, disabled-auth, HEAD and validation checks reject
-//! or answer before any database access; the rest are `#[ignore]`d and run in
-//! the PostgreSQL lane.
+//! Tests for the community reads, the HEAD binding of every admin read, and
+//! the view/act/staff classification of every admin route. The unsigned, HEAD
+//! and validation checks reject or answer before any database access; the rest
+//! are `#[ignore]`d and run in the PostgreSQL lane.
 
 use std::sync::Arc;
 
@@ -102,27 +102,10 @@ async fn new_reads_reject_unsigned_requests() {
     }
 }
 
-#[tokio::test]
-async fn new_reads_refuse_disabled_auth_mode() {
-    let state = disabled_mode_state().await;
-    for uri in new_routes("a.example") {
-        let request = Request::builder()
-            .uri(&uri)
-            .header(header::HOST, "admin.example")
-            .body(Body::empty())
-            .unwrap();
-        let (status, body) = send(&state, request).await;
-        assert_eq!(
-            (status, body["error"]["code"].as_str()),
-            (StatusCode::FORBIDDEN, Some("forbidden")),
-            "{uri}"
-        );
-    }
-}
-
-/// Every legacy GET read route, the status a HEAD-signed HEAD gets past auth,
-/// and whether producing that status needs the database.
-fn legacy_reads() -> Vec<(String, StatusCode, bool)> {
+/// The report, feedback, staffing and restriction GET routes, the status a
+/// HEAD-signed HEAD gets past auth, and whether producing that status needs
+/// the database.
+fn other_reads() -> Vec<(String, StatusCode, bool)> {
     let id = Uuid::new_v4();
     vec![
         ("/probe".to_owned(), StatusCode::OK, false),
@@ -149,14 +132,14 @@ fn legacy_reads() -> Vec<(String, StatusCode, bool)> {
 }
 
 /// Axum serves HEAD through GET handlers; the credential must be checked
-/// against the real method, so a GET-signed HEAD is refused on every legacy
-/// read, and a HEAD-signed HEAD passes auth wherever the answer needs no
+/// against the real method, so a GET-signed HEAD is refused on every
+/// one of these reads, and a HEAD-signed HEAD passes auth wherever the answer needs no
 /// database (the rest are covered by the Postgres lane below).
 #[tokio::test]
-async fn legacy_reads_authorize_head_with_the_real_method() {
+async fn other_reads_authorize_head_with_the_real_method() {
     let keys = test_operator_keys();
     let state = nip98_state(vec![keys.public_key().to_hex()]).await;
-    for (uri, want, needs_db) in legacy_reads() {
+    for (uri, want, needs_db) in other_reads() {
         let head = |signed: &str| signed_as(&keys, "HEAD", signed, &uri, &uri);
         assert_eq!(
             send(&state, head("GET")).await.0,
@@ -591,13 +574,13 @@ async fn member_search_returns_up_to_the_limit() {
 }
 
 /// The database-backed half of
-/// `legacy_reads_authorize_head_with_the_real_method`.
+/// `other_reads_authorize_head_with_the_real_method`.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn legacy_reads_serve_a_head_signed_head() {
+async fn other_reads_serve_a_head_signed_head() {
     let (_, state) = fixture().await;
     let keys = test_operator_keys();
-    for (uri, want, _) in legacy_reads().into_iter().filter(|r| r.2) {
+    for (uri, want, _) in other_reads().into_iter().filter(|r| r.2) {
         let head = signed_as(&keys, "HEAD", "HEAD", &uri, &uri);
         assert_eq!(send(&state, head).await.0, want, "HEAD {uri}");
     }
@@ -635,4 +618,148 @@ async fn event_preview_reports_the_stored_event_and_its_deletion() {
         event["deletedAt"].is_string() && event["channelId"].is_null(),
         "{event}"
     );
+}
+
+/// Disabled mode serves the community reads to an unsigned caller, and a
+/// query for one community still returns only that community's rows.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn community_reads_serve_disabled_mode_within_the_selected_community() {
+    let (pool, _) = fixture().await;
+    let state = disabled_mode_state().await;
+    let (host_a, host_b) = (unique_host("open-a"), unique_host("open-b"));
+    let (a, b) = (
+        community(&pool, &host_a).await,
+        community(&pool, &host_b).await,
+    );
+    let member = [0x71u8; 32];
+    let event = [0x72u8; 32];
+    let tag = Uuid::new_v4().simple().to_string();
+    seed_profile(&pool, a, &member, &format!("{tag} in a")).await;
+    seed_profile(&pool, b, &member, &format!("{tag} in b")).await;
+    seed_event(&pool, a, &event, "content in a", false).await;
+    seed_event(&pool, b, &event, "content in b", false).await;
+
+    let state = &state;
+    let unsigned = |uri: String| async move {
+        let request = Request::builder()
+            .uri(&uri)
+            .header(header::HOST, "admin.example")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, request).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        body
+    };
+
+    let directory = unsigned(format!("/communities?q={host_b}")).await;
+    assert_eq!(directory["items"][0]["host"], host_b.as_str());
+    assert_eq!(directory["items"].as_array().unwrap().len(), 1);
+
+    let found = unsigned(format!("/members/search?communityHost={host_b}&q={tag}")).await;
+    let names: Vec<&str> = found["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["displayName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, [format!("{tag} in b")]);
+
+    let profile = unsigned(format!(
+        "/members/{}?communityHost={host_b}",
+        hex::encode(member)
+    ))
+    .await;
+    assert_eq!(profile["profile"]["displayName"], format!("{tag} in b"));
+
+    let preview = unsigned(format!(
+        "/events/{}?communityHost={host_b}",
+        hex::encode(event)
+    ))
+    .await;
+    assert_eq!(preview["content"], "content in b");
+}
+
+/// Which check a route makes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Check {
+    /// Any access: signed staff in nip98, any caller in disabled mode.
+    View,
+    /// A signed staff member; refused in disabled mode.
+    Act,
+    /// A signed Operator; refused in disabled mode.
+    Staff,
+}
+
+/// Every route the admin API mounts, with its check. A new route must be
+/// added here, which forces a deliberate choice of policy.
+fn every_route() -> Vec<(&'static str, String, Check)> {
+    use Check::{Act, Staff, View};
+    let id = Uuid::nil();
+    let host = "communityHost=a.example";
+    vec![
+        ("GET", "/probe".into(), View),
+        ("GET", "/reports".into(), View),
+        ("GET", format!("/reports/{id}"), View),
+        ("POST", format!("/reports/{id}/resolve"), Act),
+        ("POST", format!("/reports/{id}/reopen"), Act),
+        ("POST", format!("/reports/{id}/cancel"), Act),
+        ("GET", "/feedback".into(), View),
+        ("GET", format!("/feedback/{id}"), View),
+        ("PATCH", format!("/feedback/{id}"), Act),
+        ("GET", format!("/feedback/{id}/attachments/{PK}"), View),
+        ("GET", "/operators".into(), Staff),
+        ("PUT", format!("/operators/{PK}"), Staff),
+        ("DELETE", format!("/operators/{PK}"), Staff),
+        ("GET", "/communities".into(), View),
+        ("GET", format!("/members/search?{host}&q=a"), View),
+        ("GET", format!("/members/{PK}?{host}"), View),
+        ("GET", format!("/events/{PK}?{host}"), View),
+        ("GET", format!("/members/restrictions?{host}"), View),
+        ("DELETE", format!("/members/{PK}/ban?{host}"), Act),
+        ("DELETE", format!("/members/{PK}/timeout?{host}"), Act),
+        ("POST", format!("/members/{PK}/ban?{host}"), Act),
+        ("POST", format!("/members/{PK}/timeout?{host}"), Act),
+        ("POST", format!("/events/{PK}/delete?{host}"), Act),
+    ]
+}
+
+fn unsigned_request(method: &str, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::HOST, "admin.example")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap()
+}
+
+/// nip98 demands a credential on every route; disabled mode serves every view
+/// route and refuses every act and staff route.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn every_route_makes_its_check_in_both_auth_modes() {
+    let signed = nip98_state(vec![test_operator_keys().public_key().to_hex()]).await;
+    let open = disabled_mode_state().await;
+    for (method, uri, check) in every_route() {
+        let (status, _) = send(&signed, unsigned_request(method, &uri)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "nip98 {method} {uri}");
+
+        let (status, body) = send(&open, unsigned_request(method, &uri)).await;
+        if check == Check::View {
+            assert!(
+                status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN,
+                "disabled {method} {uri} ({check:?}) answered {status}: {body}"
+            );
+        } else {
+            assert_eq!(
+                (status, body["error"]["message"].as_str()),
+                (
+                    StatusCode::FORBIDDEN,
+                    Some("this endpoint requires BUZZ_ADMIN_AUTH=nip98")
+                ),
+                "disabled {method} {uri} ({check:?})"
+            );
+        }
+    }
 }

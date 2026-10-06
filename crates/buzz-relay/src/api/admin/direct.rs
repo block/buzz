@@ -19,9 +19,7 @@ use buzz_db::relay_admin_actions::{AdminActionRecord, DirectActionInput, DirectC
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::auth::{
-    admin_role_str, authorize, lookup_admin_principal, require_mutation_principal, AdminRole,
-};
+use super::auth::{admin_role_str, authorize, lookup_admin_principal, AdminRole};
 use super::error::ApiError;
 use super::{compute_timeout_until, decode_hex_pubkey, CommunityQuery};
 use crate::handlers::report_resolution::{drive_direct_action, ResolutionError};
@@ -111,9 +109,9 @@ async fn direct_action(
     let path = uri
         .path_and_query()
         .map_or_else(|| uri.path(), |pq| pq.as_str());
-    let principal = require_mutation_principal(
-        authorize(&state, &headers, path, "POST", Some(&body_bytes)).await?,
-    )?;
+    let principal = authorize(&state, &headers, path, "POST", Some(&body_bytes))
+        .await?
+        .act()?;
     let body: DirectBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
     let target = decode_hex_pubkey(&target_hex)?;

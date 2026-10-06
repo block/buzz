@@ -153,9 +153,8 @@ emptied freely because config still guarantees an operator.
 
 ### Disabled mode (`BUZZ_ADMIN_AUTH=disabled`)
 
-Operators whose admin API is already protected at the network layer — for
-example by a corporate VPN such as WARP+Okta — can disable request
-authentication entirely:
+Disabled mode turns the admin API into a read-only window with no request
+authentication:
 
 ```text
 BUZZ_ADMIN_AUTH=disabled
@@ -163,23 +162,50 @@ BUZZ_ADMIN_AUTH=disabled
 
 Only the exact value `disabled` is accepted.
 
-In this mode the relay logs a `WARN` on every startup:
+| | `nip98` (default) | `disabled` |
+|---|---|---|
+| Moderation reads | signed, any staff role | served to anyone who can reach the relay |
+| Writes (resolve, ban, timeout, delete, lift, feedback status) | signed, role-checked | refused (`403`) |
+| Staffing (`/operators`) | signed Operator | refused (`403`) |
+
+**What disabled mode exposes**, in every community the relay hosts, to anyone
+who can send it an HTTP request:
+
+- reports, including reporter keys, private reporter notes, resolutions and the
+  full content of reported messages, deleted ones included
+- product feedback and its attachment bytes
+- bans and timeouts, with their private reasons and the acting moderator
+- the directory of every community
+- member search and member profiles, including role, ban and timeout state and
+  whether a key is relay staff
+- any stored message by event ID, regardless of channel membership and
+  including deleted messages (encrypted content stays ciphertext)
+
+**Who should be able to reach it:** only people allowed to see all moderation
+data in every community. A company-wide VPN is usually a much larger group.
+
+**The whole relay port must be private, not just the admin hostname.** The admin
+API is served on the relay's main listener, and the admin hostname check
+compares against the caller's own `Host` header, which any client can set. A
+relay whose port is reachable from the internet exposes everything above even if
+the admin hostname resolves only inside a VPN. If the relay must be public, use
+`nip98`.
+
+Disabled mode records no reader identity. To act on anything, switch to `nip98`.
+
+The relay logs a `WARN` on every startup in this mode:
 
 ```
-BUZZ_ADMIN_AUTH=disabled — the admin API is unauthenticated; the operator has
-asserted that access is controlled at the network layer
+BUZZ_ADMIN_AUTH=disabled — the admin API serves every moderation read without
+authentication to anyone who can reach the relay: reports, feedback and
+attachments, restrictions, the community directory, member profiles and any
+stored message by ID, in every community. Writes and staffing are refused. Keep
+the whole relay port private to people allowed to see all of that
 ```
 
-The `Host`/`Origin` checks remain active as defense-in-depth. The dashboard
-detects that no credential is needed on first load (probe returns `200`) and
-renders directly.
-
-**This mode relies entirely on the operator's network controls.** If the admin
-API is reachable by untrusted clients, the entire moderation and feedback dataset
-is exposed. Use nip98 mode instead.
-
-When using a reverse proxy in this mode, document the requirement and consider a
-proxy-injected shared secret or signed identity header for additional assurance.
+The `Host`/`Origin` checks remain active, but they are not authentication. The
+dashboard detects that no credential is needed on first load (probe returns
+`200`) and renders read-only.
 
 ### Mode selection and error behaviour
 

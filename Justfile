@@ -665,8 +665,11 @@ admin: bootstrap _ensure-migrations
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
     export BUZZ_ADMIN_WEB_DIR="${BUZZ_ADMIN_WEB_DIR:-{{justfile_directory()}}/admin-web/dist}"
-    # Default to disabled auth locally: localhost is the network boundary and a
-    # NIP-07 signer extension can't be assumed in dev. Override per run with
+    # Default to disabled auth locally: a NIP-07 signer extension can't be
+    # assumed in dev. Disabled mode serves every moderation read (reports,
+    # feedback, restrictions, community directory, member profiles, any stored
+    # message by ID) to anyone who can reach the relay port and refuses writes
+    # and staffing, so keep the relay port local-only. Override per run with
     # BUZZ_ADMIN_AUTH=nip98 (plus RELAY_OPERATOR_PUBKEYS or RELAY_OWNER_PUBKEY)
     # to exercise the authenticated path.
     export BUZZ_ADMIN_AUTH="${BUZZ_ADMIN_AUTH:-disabled}"

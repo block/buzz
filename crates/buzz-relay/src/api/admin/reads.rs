@@ -1,8 +1,8 @@
-//! Staff-only, read-only community reads for the Admin Console: the community
-//! directory, member search and lookup, and the delete preview.
+//! Read-only community reads for the Admin Console: the community directory,
+//! member search and lookup, and the delete preview.
 //!
-//! Unlike the legacy report reads, every route here requires a resolved
-//! operator or moderator principal, so disabled-auth mode answers 403. Each
+//! Like every moderation read, these make the view check: signed staff in
+//! `nip98` mode, any caller who can reach the relay in `disabled` mode. Each
 //! community-scoped route binds `communityHost` through the tenant binder and
 //! reads nothing outside that community.
 
@@ -19,25 +19,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::auth::{authorize_read, lookup_admin_principal, AdminPrincipal};
+use super::auth::{authorize_read, lookup_admin_principal};
 use super::error::ApiError;
 use super::{community_for_host, decode_hex_pubkey, limit, CommunityQuery};
 use crate::state::AppState;
 
 type AppStateRef = State<Arc<AppState>>;
-
-/// Authorize a read and require a staff principal. `authorize()` yields `None`
-/// in disabled-auth mode; these routes refuse it instead of serving anonymously.
-async fn require_staff(
-    state: &AppState,
-    headers: &HeaderMap,
-    method: &Method,
-    uri: &Uri,
-) -> Result<AdminPrincipal, ApiError> {
-    authorize_read(state, headers, method, uri)
-        .await?
-        .ok_or_else(ApiError::forbidden)
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -80,7 +67,7 @@ pub(super) async fn communities(
     headers: HeaderMap,
     Query(query): Query<CommunitiesQuery>,
 ) -> Result<Json<CommunitiesPage>, ApiError> {
-    require_staff(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     let limit = limit(query.limit, 50, 100)?;
     let after = query
         .cursor
@@ -134,7 +121,7 @@ pub(super) async fn search_members(
     headers: HeaderMap,
     Query(query): Query<MemberSearchQuery>,
 ) -> Result<Json<MemberSearchPage>, ApiError> {
-    require_staff(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     let q = query.q.trim();
     if q.is_empty() || q.chars().count() > 100 {
         return Err(ApiError::bad_request(
@@ -196,7 +183,7 @@ pub(super) async fn lookup_member(
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<Json<MemberLookup>, ApiError> {
-    require_staff(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     let pubkey = decode_hex_pubkey(&pubkey_hex)?;
     let pubkey_hex = hex::encode(&pubkey);
     let community = community_for_host(&state, &query.community_host).await?;
@@ -231,7 +218,7 @@ pub(super) async fn event_preview(
     Path(id_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<Json<AdminEventPreview>, ApiError> {
-    require_staff(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     let id = decode_hex_pubkey(&id_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
     state

@@ -1,10 +1,10 @@
 //! Private deployment moderation API.
 //!
-//! Legacy reads (reports, feedback, member restrictions) are available in both
-//! auth modes (nip98, disabled). Community reads (directory, member search and
-//! lookup, event preview), mutations and staffing routes require an
-//! authenticated `nip98` principal (per-person, attributed to the resolved
-//! operator).
+//! Every route is a view (moderation read), act (mutation) or staff
+//! (`/operators`) route; see [`auth`] for the rule. In `nip98` mode every route
+//! needs a signed, rostered staff member. In `disabled` mode every moderation
+//! read is served to whoever can reach the relay, and act and staff routes
+//! answer 403.
 
 mod auth;
 mod direct;
@@ -14,8 +14,8 @@ mod reads;
 use std::sync::Arc;
 
 use auth::{
-    admin_role_str, admin_source_str, authorize, authorize_read, require_mutation_principal,
-    require_operator, AdminRole, AdminSource,
+    admin_role_str, admin_source_str, authorize, authorize_read, AdminAccess, AdminRole,
+    AdminSource,
 };
 use axum::{
     body::Bytes,
@@ -43,11 +43,8 @@ pub(crate) use auth::admin_api_origin;
 
 /// Build the deployment-admin routes.
 ///
-/// Legacy reads (reports, feedback, member restrictions) are available in all
-/// auth modes.
-/// Community reads (/communities, /members/search, /members/{pubkey},
-/// /events/{id}), mutation routes and staffing routes (/operators) require an
-/// authenticated `nip98` principal.
+/// Moderation reads (GET) are served in both auth modes. Mutations and the
+/// staffing routes (/operators) require an authenticated `nip98` principal.
 pub fn router(state: Arc<crate::state::AppState>) -> Router {
     Router::new()
         .route("/probe", get(probe))
@@ -172,16 +169,10 @@ async fn probe(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ProbeResponse>, ApiError> {
-    let principal = authorize_read(&state, &headers, &method, &uri).await?;
-
-    let (auth_mode, role, source, can_act, can_staff) = match &state.config.admin {
-        Some(config) => match &config.auth {
-            crate::config::AdminAuth::Disabled => ("disabled", None, None, false, false),
-            crate::config::AdminAuth::Nip98 => {
-                // principal is Some in nip98 mode (authorize returns Ok(Some(_)))
-                let p = principal
-                    .as_ref()
-                    .expect("nip98 mode always resolves principal");
+    let (auth_mode, role, source, can_act, can_staff) =
+        match authorize_read(&state, &headers, &method, &uri).await? {
+            AdminAccess::NetworkTrusted => ("disabled", None, None, false, false),
+            AdminAccess::Staff(p) => {
                 let can_staff = p.role == AdminRole::Operator;
                 (
                     "nip98",
@@ -191,9 +182,7 @@ async fn probe(
                     can_staff,
                 )
             }
-        },
-        None => return Err(ApiError::not_found()),
-    };
+        };
 
     Ok(Json(ProbeResponse {
         status: "ok",
@@ -464,7 +453,7 @@ async fn resolve_report(
         resolve_report_with_enforcement, ResolutionError,
     };
 
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -472,9 +461,8 @@ async fn resolve_report(
         "POST",
         Some(&body_bytes),
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    .await?
+    .act()?;
 
     let body: ResolveReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_e| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -689,7 +677,7 @@ async fn reopen_report(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use buzz_db::relay_admin_actions::ReopenResult;
 
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -697,9 +685,8 @@ async fn reopen_report(
         "POST",
         Some(&body_bytes),
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    .await?
+    .act()?;
 
     let body: ReopenReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -773,7 +760,7 @@ async fn cancel_report(
     Path(report_id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<axum::http::Response<axum::body::Body>, ApiError> {
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -781,9 +768,8 @@ async fn cancel_report(
         "POST",
         Some(&body_bytes),
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    .await?
+    .act()?;
 
     let body: CancelReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -849,7 +835,7 @@ async fn update_feedback_status(
     Path(id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal_opt = authorize(
+    let _principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -857,9 +843,8 @@ async fn update_feedback_status(
         "PATCH",
         Some(&body_bytes),
     )
-    .await?;
-
-    let _principal = require_mutation_principal(principal_opt)?;
+    .await?
+    .act()?;
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -910,10 +895,9 @@ async fn list_operators(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
-    let principal_opt = authorize_read(&state, &headers, &method, &uri).await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
-    require_operator(&principal)?;
+    authorize_read(&state, &headers, &method, &uri)
+        .await?
+        .staff()?;
 
     let config = state
         .config
@@ -987,7 +971,7 @@ async fn upsert_operator(
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
 ) -> Result<Json<OperatorEntry>, ApiError> {
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -995,10 +979,8 @@ async fn upsert_operator(
         "PUT",
         Some(&body_bytes),
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
-    require_operator(&principal)?;
+    .await?
+    .staff()?;
 
     // Canonicalize the path param once: validate it decodes to 32 bytes, then
     // lowercase it. Config-backed pubkeys are lowercased at parse, so the 409
@@ -1065,7 +1047,7 @@ async fn delete_operator(
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -1073,10 +1055,8 @@ async fn delete_operator(
         "DELETE",
         None,
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
-    require_operator(&principal)?;
+    .await?
+    .staff()?;
 
     // Canonicalize the path param once (validate + lowercase) so the 409 check
     // and the DB delete use the same form config-backed pubkeys are stored in;
@@ -1298,7 +1278,7 @@ async fn unban_member(
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -1306,9 +1286,8 @@ async fn unban_member(
         "DELETE",
         None,
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    .await?
+    .act()?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1346,7 +1325,7 @@ async fn untimeout_member(
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal_opt = authorize(
+    let principal = authorize(
         &state,
         &headers,
         uri.path_and_query()
@@ -1354,9 +1333,8 @@ async fn untimeout_member(
         "DELETE",
         None,
     )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    .await?
+    .act()?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1617,6 +1595,10 @@ mod postgres_tests {
             "/feedback".to_string(),
             format!("/feedback/{id}"),
             format!("/feedback/{id}/attachments/{HASH}"),
+            "/communities".to_string(),
+            "/members/search?communityHost=a.example&q=a".to_string(),
+            format!("/members/{HASH}?communityHost=a.example"),
+            format!("/events/{HASH}?communityHost=a.example"),
         ]
     }
 
@@ -3981,8 +3963,8 @@ mod postgres_tests {
     }
 
     /// POST /reports/{id}/resolve in disabled mode → 403. Disabled mode is
-    /// always read-only: `authorize()` resolves no principal, so
-    /// `require_mutation_principal` rejects every mutation with 403.
+    /// read-only: `authorize()` returns `NetworkTrusted`, so the act check
+    /// rejects every mutation with 403.
     #[tokio::test]
     async fn mutation_routes_in_disabled_mode_return_403() {
         let state = disabled_mode_state().await;
