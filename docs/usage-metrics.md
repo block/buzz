@@ -56,11 +56,13 @@ gauges. In fleet-only mode the relay does not attribute storage to communities,
 so it emits neither `buzz_community_storage_*` series nor
 `buzz_storage_unmapped_community_bytes`.
 
-Every fleet telemetry query attempt is recorded in
+Every fleet telemetry query attempt that completes is recorded in
 `buzz_db_route_decision{path=~"usage_fleet_.*"}`: `replica/fresh` when it ran on
 a proved reader, `skipped/<reason>` when no fresh proved reader was available,
-and `skipped/replica_error` when the reader query itself failed. None of these
-paths fall back to the writer.
+and `skipped/replica_error` when the reader query itself failed. A collection
+the relay abandons at its deadline records no route decision; it appears only
+as `buzz_usage_query_skipped_total{reason="timeout"}`. None of these paths fall
+back to the writer.
 
 ## Rollout and rollback
 

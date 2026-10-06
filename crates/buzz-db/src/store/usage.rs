@@ -675,7 +675,7 @@ impl Db {
 
     /// Record the route outcome of a proved-reader telemetry query. A query
     /// error is a skipped attempt (`replica_error`), never a writer fallback,
-    /// so every attempt appears in `buzz_db_route_decision`.
+    /// so every attempt that completes appears in `buzz_db_route_decision`.
     fn finish_usage_read<T>(
         path: &'static str,
         reason: &'static str,

@@ -123,6 +123,11 @@ const FLEET_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 // above its statement timeout so the server-side error still wins normally.
 const FLEET_STOCK_COLLECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 const FLEET_ACTIVITY_COLLECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+// Keep each deadline above its statement timeout in `buzz_db::store::usage`
+// (5s stock, 15s activity) so a slow-but-healthy query reports the server-side
+// `query_error`, not `timeout`.
+const _: () = assert!(FLEET_STOCK_COLLECTION_DEADLINE.as_secs() > 5);
+const _: () = assert!(FLEET_ACTIVITY_COLLECTION_DEADLINE.as_secs() > 15);
 
 struct FleetUsageSchedule {
     next_stock: std::time::Instant,
@@ -3355,6 +3360,38 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn each_fleet_family_is_abandoned_at_its_own_deadline() {
+        let stock = || std::future::ready(Ok(Some(buzz_db::usage::FleetStockSnapshot::default())));
+        let activity = || {
+            std::future::ready(Ok(
+                Some(buzz_db::usage::FleetActiveUsersSnapshot::default()),
+            ))
+        };
+        let schedule = || {
+            FleetUsageSchedule::new_at(
+                std::time::Instant::now(),
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::from_secs(60),
+            )
+        };
+
+        let started = tokio::time::Instant::now();
+        refresh_due_fleet_usage(&mut schedule(), std::future::pending(), activity()).await;
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            FLEET_STOCK_COLLECTION_DEADLINE
+        );
+
+        let started = tokio::time::Instant::now();
+        refresh_due_fleet_usage(&mut schedule(), stock(), std::future::pending()).await;
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            FLEET_ACTIVITY_COLLECTION_DEADLINE
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stalled_fleet_collection_times_out_into_failed_refresh() {
         let retry = Duration::from_secs(60);
         let started = std::time::Instant::now();
@@ -3416,6 +3453,14 @@ mod tests {
             let key = format!("buzz_usage_query_skipped_total{{family={family},reason=timeout}}");
             assert_eq!(values.get(&key), Some(&1.0), "{key}");
         }
+        // An abandoned collection records no route decision; the documented
+        // signal is the timeout skip above.
+        assert!(
+            !values
+                .keys()
+                .any(|key| key.starts_with("buzz_db_route_decision")),
+            "a timed-out collection must not record a route decision"
+        );
         assert!(!schedule.stock_due(before + retry - Duration::from_millis(1)));
         assert!(!schedule.activity_due(before + retry - Duration::from_millis(1)));
         assert!(schedule.stock_due(after + retry));
