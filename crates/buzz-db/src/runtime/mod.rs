@@ -1348,12 +1348,23 @@ impl Db {
             None,
         )
         .await?;
-        tx.commit().await?;
         if result.1 {
-            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            // Index mentions in the event's own transaction so a concurrent
+            // deletion cannot strand an orphan row. A savepoint keeps the
+            // existing best-effort contract: an indexing failure never rejects
+            // an otherwise valid event.
+            let mut savepoint = tx.begin().await?;
+            match insert_mentions_in_transaction(&mut savepoint, community_id, event, channel_id)
+                .await
+            {
+                Ok(()) => savepoint.commit().await?,
+                Err(e) => {
+                    savepoint.rollback().await?;
+                    tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+                }
             }
         }
+        tx.commit().await?;
         Ok(result)
     }
 

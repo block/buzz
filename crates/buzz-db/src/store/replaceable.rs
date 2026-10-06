@@ -1871,4 +1871,183 @@ mod postgres_tests {
             assert_ne!(leaked.as_deref(), Some("on"));
         }
     }
+
+    /// NIP-09 deletion of a retention-free coordinate (NIP-RS read state, mesh
+    /// status) is physical in application code, so it holds on desired-state
+    /// databases that never installed the migration 0009/0019 purge triggers.
+    /// Ordinary addressable events, and look-alikes that fail classification,
+    /// keep the soft-delete contract.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip09_deletion_purges_retention_free_rows_and_mentions() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Delete {
+            Coordinate,
+            Id,
+        }
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let read_state_d = format!("read-state:{}", "b".repeat(32));
+        let cases: Vec<(&str, u16, Vec<Vec<String>>, bool)> = vec![
+            (
+                "nip-rs",
+                buzz_core::kind::KIND_READ_STATE as u16,
+                vec![
+                    vec!["d".into(), read_state_d.clone()],
+                    vec!["t".into(), "read-state".into()],
+                ],
+                true,
+            ),
+            (
+                "mesh-status",
+                buzz_core::kind::KIND_BOOKMARK_SET as u16,
+                vec![
+                    vec!["d".into(), "buzz-mesh-member-status:purge-test".into()],
+                    vec!["k".into(), "buzz-mesh-status".into()],
+                ],
+                true,
+            ),
+            (
+                "read-state look-alike without t tag",
+                buzz_core::kind::KIND_READ_STATE as u16,
+                vec![vec!["d".into(), read_state_d.clone()]],
+                false,
+            ),
+            (
+                "ordinary addressable",
+                buzz_core::kind::KIND_PROJECT as u16,
+                vec![vec!["d".into(), "retained-project".into()]],
+                false,
+            ),
+        ];
+
+        for (label, kind, tags, purged) in cases {
+            for mode in [Delete::Coordinate, Delete::Id] {
+                let keys = Keys::generate();
+                let d_tag = tags[0][1].clone();
+                let created_at = Timestamp::now().as_secs();
+                let event = EventBuilder::new(Kind::Custom(kind), label)
+                    .tags(
+                        tags.iter()
+                            .map(|tag| Tag::parse(tag.clone()).expect("tag"))
+                            .collect::<Vec<_>>(),
+                    )
+                    .custom_created_at(Timestamp::from(created_at))
+                    .sign_with_keys(&keys)
+                    .expect("sign event");
+                assert!(
+                    db.replace_parameterized_event(community, &event, &d_tag, None)
+                        .await
+                        .expect("store event")
+                        .1,
+                    "{label}/{mode:?}: event must be stored"
+                );
+                let id = event.id.as_bytes().to_vec();
+                let stored_at: DateTime<Utc> = sqlx::query_scalar(
+                    "SELECT created_at FROM events WHERE community_id=$1 AND id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("read stored created_at");
+                sqlx::query(
+                    "INSERT INTO event_mentions \
+                     (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+                     VALUES ($1, $2, $3, $4, NULL, $5)",
+                )
+                .bind(community.as_uuid())
+                .bind("c".repeat(64))
+                .bind(&id)
+                .bind(stored_at)
+                .bind(i32::from(kind))
+                .execute(&db.pool)
+                .await
+                .expect("index mention");
+
+                let deleted = match mode {
+                    Delete::Coordinate => event::soft_delete_by_coordinate(
+                        &db.pool,
+                        community,
+                        i32::from(kind),
+                        &keys.public_key().to_bytes(),
+                        &d_tag,
+                        (created_at + 1) as i64,
+                    )
+                    .await
+                    .expect("coordinate delete"),
+                    Delete::Id => event::soft_delete_event_and_update_thread(
+                        &db.pool, community, &id, None, None,
+                    )
+                    .await
+                    .expect("id delete"),
+                };
+                assert!(deleted, "{label}/{mode:?}: deletion must report success");
+
+                let (rows, live): (i64, i64) = sqlx::query_as(
+                    "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) \
+                     FROM events WHERE community_id=$1 AND id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count event rows");
+                let mentions: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count mentions");
+
+                if purged {
+                    assert_eq!(
+                        (rows, mentions),
+                        (0, 0),
+                        "{label}/{mode:?}: row and mentions must be physically removed"
+                    );
+                } else {
+                    assert_eq!(
+                        (rows, live, mentions),
+                        (1, 0, 1),
+                        "{label}/{mode:?}: row must remain soft-deleted"
+                    );
+                }
+
+                // A repeated deletion finds nothing live.
+                let again = match mode {
+                    Delete::Coordinate => event::soft_delete_by_coordinate(
+                        &db.pool,
+                        community,
+                        i32::from(kind),
+                        &keys.public_key().to_bytes(),
+                        &d_tag,
+                        (created_at + 1) as i64,
+                    )
+                    .await
+                    .expect("repeat coordinate delete"),
+                    Delete::Id => event::soft_delete_event_and_update_thread(
+                        &db.pool, community, &id, None, None,
+                    )
+                    .await
+                    .expect("repeat id delete"),
+                };
+                assert!(!again, "{label}/{mode:?}: repeated deletion is a no-op");
+
+                // The scoped hard-delete opt-in never leaks to the connection.
+                let leaked: Option<String> = sqlx::query_scalar(
+                    "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
+                )
+                .fetch_one(&db.pool)
+                .await
+                .expect("read GUC");
+                assert_ne!(leaked.as_deref(), Some("on"));
+            }
+        }
+    }
 }

@@ -1134,6 +1134,17 @@ pub async fn soft_delete_by_coordinate(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let purged = purge_retention_free_events(
+        &mut *tx,
+        community_id,
+        RetentionFreeTarget::Coordinate {
+            kind,
+            pubkey,
+            d_tag,
+            created_at_or_before: deletion_created_at,
+        },
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -1149,7 +1160,118 @@ pub async fn soft_delete_by_coordinate(
 
     tx.commit().await?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(purged > 0 || result.rows_affected() > 0)
+}
+
+/// SQL predicate over an `events` row for coordinates that carry no
+/// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
+/// deletion is physical, including the mention index, so soft-deleted payloads
+/// never accumulate. This is exactly the classification used by the migration
+/// 0011 / 0019 purge triggers this path replaces.
+macro_rules! retention_free_event_predicate {
+    () => {
+        "((kind = 30078 \
+           AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
+           AND (SELECT count(*) \
+                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
+                WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
+           AND EXISTS (SELECT 1 \
+                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
+                WHERE jsonb_typeof(tag) = 'array' AND jsonb_array_length(tag) >= 2 \
+                  AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
+           AND (SELECT count(*) \
+                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
+                WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1) \
+          OR (kind = 30003 \
+              AND d_tag LIKE 'buzz-mesh-member-status:%' \
+              AND tags @> '[[\"k\", \"buzz-mesh-status\"]]'::jsonb))"
+    };
+}
+
+/// Purge live retention-free rows matching `$target`, plus their mention rows,
+/// and return the number of events removed.
+macro_rules! purge_retention_free_sql {
+    ($target:literal) => {
+        concat!(
+            "WITH purged AS ( \
+                 DELETE FROM events \
+                 WHERE community_id = $1 AND ",
+            $target,
+            " AND deleted_at IS NULL AND ",
+            retention_free_event_predicate!(),
+            " RETURNING id \
+             ), purged_mentions AS ( \
+                 DELETE FROM event_mentions mention USING purged \
+                 WHERE mention.community_id = $1 AND mention.event_id = purged.id \
+             ) \
+             SELECT count(*) FROM purged"
+        )
+    };
+}
+
+/// Which live rows a deletion targets.
+enum RetentionFreeTarget<'a> {
+    Id(&'a [u8]),
+    Coordinate {
+        kind: i32,
+        pubkey: &'a [u8],
+        d_tag: &'a str,
+        created_at_or_before: DateTime<Utc>,
+    },
+}
+
+/// Physically delete live retention-free rows matched by `target`, plus their
+/// mention rows, in the caller's transaction. Runs before the generic soft
+/// delete so that statement never matches these rows. Returns the number of
+/// events removed.
+async fn purge_retention_free_events(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    target: RetentionFreeTarget<'_>,
+) -> Result<u64> {
+    // Migration 0011 fences NIP-RS hard deletes behind a transaction-local
+    // opt-in. Scope the opt-in to this statement and restore the caller's value.
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')")
+            .fetch_one(&mut *tx)
+            .await?;
+    sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+        .execute(&mut *tx)
+        .await?;
+
+    let purged: i64 = match target {
+        RetentionFreeTarget::Id(event_id) => {
+            sqlx::query_scalar(purge_retention_free_sql!("id = $2"))
+                .bind(community_id.as_uuid())
+                .bind(event_id)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+        RetentionFreeTarget::Coordinate {
+            kind,
+            pubkey,
+            d_tag,
+            created_at_or_before,
+        } => {
+            sqlx::query_scalar(purge_retention_free_sql!(
+                "kind = $2 AND pubkey = $3 AND d_tag = $4 AND created_at <= $5"
+            ))
+            .bind(community_id.as_uuid())
+            .bind(kind)
+            .bind(pubkey)
+            .bind(d_tag)
+            .bind(created_at_or_before)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
+
+    sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
+        .bind(previous.as_deref().unwrap_or_default())
+        .execute(&mut *tx)
+        .await?;
+
+    Ok(purged as u64)
 }
 
 /// Atomically soft-delete an event and decrement thread reply counters.
@@ -1236,6 +1358,9 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
         }
     }
 
+    let purged =
+        purge_retention_free_events(&mut *tx, community_id, RetentionFreeTarget::Id(event_id))
+            .await?;
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
@@ -1244,7 +1369,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     .execute(&mut *tx)
     .await?;
 
-    let deleted = result.rows_affected() > 0;
+    let deleted = purged > 0 || result.rows_affected() > 0;
 
     if deleted {
         if let Some(pid) = parent_event_id {
