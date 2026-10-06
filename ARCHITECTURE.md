@@ -335,6 +335,12 @@ recovers performs the ordinary admission checks. The worker shares graceful
 shutdown cancellation and has no migration or rollout flag; all relay pods
 must run this code for the bound to hold deployment-wide.
 
+Targets are ordered deterministically within each scan, so repeated deadline
+hits can leave the same tail targets unqueried and fail-close them after grace.
+This path does not rotate scan order or jitter authorization-driven closes; if
+writer saturation lasts beyond grace, many sockets on a pod can close together
+and create a reconnect herd.
+
 ### Step 5: Cleanup
 
 On disconnect (any cause):

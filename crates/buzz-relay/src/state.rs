@@ -51,6 +51,8 @@ pub(crate) enum CommunityDisconnectReason {
     AuthorizationDenied,
     /// The authenticated pubkey lost access to the community (e.g. a ban).
     AccessRevoked,
+    /// The relay could not re-establish the socket's access decision.
+    AuthorizationUnavailable,
 }
 
 impl CommunityDisconnectReason {
@@ -68,6 +70,12 @@ impl CommunityDisconnectReason {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("authorization denied"),
             })),
+            Self::AuthorizationUnavailable => {
+                WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: WsUtf8Bytes::from_static("authorization unavailable"),
+                }))
+            }
             Self::AccessRevoked => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("access revoked"),
@@ -6317,45 +6325,4 @@ pub(crate) struct LiveAuthorizationSession {
     pub membership_via_owner: bool,
     /// Most recent successful authoritative access check.
     pub last_checked_at: TokioInstant,
-}
-
-/// Why a community-bound socket is being asked to stop.
-///
-/// Only deletion is externally attributed today. Ordinary lifecycle exits keep
-/// using cancellation alone and therefore retain the existing bare-close
-/// behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommunityDisconnectReason {
-    CommunityDeleted,
-    /// NIP-FI: the connection's proven pubkey was added to the deny set.
-    AuthorizationDenied,
-    /// The authenticated pubkey lost access to the community (e.g. a ban).
-    AccessRevoked,
-    /// The relay could not re-establish the socket's access decision.
-    AuthorizationUnavailable,
-}
-
-impl CommunityDisconnectReason {
-    pub(crate) fn close_message(self) -> WsMessage {
-        match self {
-            Self::CommunityDeleted => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
-                code: axum::extract::ws::close_code::POLICY,
-                reason: WsUtf8Bytes::from_static("community deleted"),
-            })),
-            Self::AuthorizationDenied => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
-                code: axum::extract::ws::close_code::POLICY,
-                reason: WsUtf8Bytes::from_static("authorization denied"),
-            })),
-            Self::AccessRevoked => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
-                code: axum::extract::ws::close_code::POLICY,
-                reason: WsUtf8Bytes::from_static("access revoked"),
-            })),
-            Self::AuthorizationUnavailable => {
-                WsMessage::Close(Some(axum::extract::ws::CloseFrame {
-                    code: axum::extract::ws::close_code::POLICY,
-                    reason: WsUtf8Bytes::from_static("authorization unavailable"),
-                }))
-            }
-        }
-    }
 }
