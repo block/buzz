@@ -156,3 +156,18 @@ for variant in default wrong missing-annotation; do
   test ! -s "$out/gated.yaml"
   grep -q 'external policy' "$out/gate-error"
 done
+
+# Valid parent YAML aliases in unrelated resources must pass through unchanged.
+cat "$out/combined.yaml" >"$out/aliases.yaml"
+cat >>"$out/aliases.yaml" <<'YAML'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unrelated
+data:
+  first: &shared "value"
+  second: *shared
+YAML
+gate <"$out/aliases.yaml" >"$out/gated.yaml"
+cmp "$out/aliases.yaml" "$out/gated.yaml"

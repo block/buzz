@@ -5,7 +5,7 @@ input = STDIN.read
 resources = YAML.parse_stream(input).children.map do |doc|
   stream = Psych::Nodes::Stream.new
   stream.children << doc
-  YAML.safe_load(stream.to_yaml, permitted_classes: [], aliases: false)
+  YAML.safe_load(stream.to_yaml, permitted_classes: [], aliases: true)
 end.compact
 annotation = 'buzz.block.xyz/external-network-policy'
 resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
