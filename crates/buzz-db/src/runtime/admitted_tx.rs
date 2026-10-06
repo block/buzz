@@ -19,6 +19,43 @@ use crate::Result;
 /// but never exposes the inner transaction: [`AdmittedTx::commit`] and
 /// [`AdmittedTx::rollback`] are the only ways to end it. Dropping it without
 /// committing rolls back, as with [`sqlx::Transaction`].
+///
+/// These are live regressions for the guarantee. Event-write helpers accept an
+/// admitted transaction:
+///
+/// ```no_run
+/// async fn write(tx: &mut buzz_db::AdmittedTx, event: &nostr::Event) {
+///     let _ = buzz_db::event::insert_event_in_transaction(tx, event, None).await;
+/// }
+/// ```
+///
+/// but not a raw transaction, which carries no proof of admission:
+///
+/// ```compile_fail
+/// async fn write(tx: &mut sqlx::Transaction<'static, sqlx::Postgres>, event: &nostr::Event) {
+///     let _ = buzz_db::event::insert_event_in_transaction(tx, event, None).await;
+/// }
+/// ```
+///
+/// Code outside the crate cannot construct one, either through the
+/// constructor:
+///
+/// ```compile_fail
+/// fn forge(
+///     tx: sqlx::Transaction<'static, sqlx::Postgres>,
+///     community: buzz_core::CommunityId,
+/// ) -> buzz_db::AdmittedTx {
+///     buzz_db::AdmittedTx::admitted(tx, community)
+/// }
+/// ```
+///
+/// or through a conversion:
+///
+/// ```compile_fail
+/// fn forge(tx: sqlx::Transaction<'static, sqlx::Postgres>) -> buzz_db::AdmittedTx {
+///     tx.into()
+/// }
+/// ```
 #[must_use = "dropping an AdmittedTx rolls it back; call commit()"]
 pub struct AdmittedTx {
     tx: Transaction<'static, Postgres>,

@@ -402,6 +402,11 @@ test-unit:
         # contracts, and their fixtures. They live in an integration-test
         # binary, so `--lib` above does not run them.
         cargo nextest run -p buzz-db --test observability_source
+        # buzz-db `AdmittedTx` doctests. The `compile_fail` cases prove code
+        # outside the crate can neither construct an admitted transaction nor
+        # pass a raw `sqlx::Transaction` to an event-write helper; nextest
+        # does not run doctests, hence this separate step.
+        cargo test -p buzz-db --doc
         # Storage accounting crosses three crates whose focused regression
         # suites are otherwise absent from the infra-free unit lane.
         cargo nextest run -p buzz-media --lib \

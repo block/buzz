@@ -278,27 +278,21 @@ pub async fn insert_auto_membership_in_transaction(
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
-    community_id: CommunityId,
     channel_id: Uuid,
     relay_pubkey: Vec<u8>,
     tx: AdmittedTx,
 }
 
 impl LockedMemberSnapshot {
-    /// Return the newest relay-authored member snapshot timestamp using this
-    /// guard's existing connection.
-    pub async fn latest_member_event_timestamp(
-        &mut self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        relay_pubkey: &[u8],
-    ) -> Result<Option<u64>> {
+    /// Return the newest relay-authored member snapshot timestamp for the
+    /// locked coordinate, using this guard's existing connection.
+    pub async fn latest_member_event_timestamp(&mut self) -> Result<Option<u64>> {
         let value: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
             "SELECT created_at FROM events WHERE community_id = $1 AND kind = 39002 AND pubkey = $2 AND channel_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
         )
-        .bind(community_id.as_uuid())
-        .bind(relay_pubkey)
-        .bind(channel_id)
+        .bind(self.tx.community().as_uuid())
+        .bind(self.relay_pubkey.as_slice())
+        .bind(self.channel_id)
         .fetch_optional(&mut *self.tx)
         .await?;
         Ok(value.map(|timestamp| timestamp.timestamp() as u64))
@@ -309,14 +303,11 @@ impl LockedMemberSnapshot {
     /// without a nested pool checkout.
     pub async fn replace_member_event(
         &mut self,
-        community_id: CommunityId,
-        channel_id: Uuid,
         event: &nostr::Event,
     ) -> Result<(buzz_core::StoredEvent, bool)> {
-        if community_id != self.community_id
-            || channel_id != self.channel_id
-            || event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
-        {
+        let community_id = self.tx.community();
+        let channel_id = self.channel_id;
+        if event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice() {
             return Err(DbError::InvalidData(
                 "member snapshot replacement does not match its locked coordinate".into(),
             ));
@@ -446,7 +437,6 @@ pub async fn lock_member_snapshot(
         .collect::<Result<Vec<_>>>()?;
     Ok(LockedMemberSnapshot {
         members,
-        community_id,
         channel_id,
         relay_pubkey: relay_pubkey.to_vec(),
         tx,
@@ -2965,7 +2955,7 @@ mod postgres_tests {
             .sign_with_keys(&relay_keys)
             .expect("sign roster");
         let (_, inserted) = snapshot
-            .replace_member_event(community, channel.id, &event)
+            .replace_member_event(&event)
             .await
             .expect("replace roster on held connection");
         assert!(inserted);

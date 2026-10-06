@@ -553,8 +553,13 @@ impl Db {
 
     /// Replace a NIP-33 event inside a caller-owned transaction.
     ///
-    /// The caller owns commit or rollback. Requiring [`Transaction`] here and
+    /// The caller owns commit or rollback. Requiring [`AdmittedTx`] here and
     /// in the internal state machine makes the advisory-lock contract explicit.
+    ///
+    /// On a duplicate or an error the replacement rolls back to its own
+    /// savepoint and the caller's transaction stays usable. This future is not
+    /// cancel-safe: if it is dropped before completing, drop the transaction
+    /// too rather than continuing to write on it.
     pub async fn replace_parameterized_event_in_transaction(
         &self,
         tx: &mut AdmittedTx,
@@ -891,7 +896,7 @@ mod postgres_tests {
         );
         assert!(
             snapshot
-                .replace_member_event(community, channel, &fresh_b)
+                .replace_member_event(&fresh_b)
                 .await
                 .expect("new writer publishes B")
                 .1

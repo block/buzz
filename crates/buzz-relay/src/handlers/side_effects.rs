@@ -1127,20 +1127,18 @@ fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Resul
 }
 
 async fn store_group_members_event(
-    tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
 ) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
     let group_id = channel_id.to_string();
     let tags = group_members_tags(&group_id, &member_snapshot.members)?;
-    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let ts = member_snapshot
-        .latest_member_event_timestamp(tenant.community(), channel_id, &relay_pubkey)
+        .latest_member_event_timestamp()
         .await?
         .map(|timestamp| timestamp + 1)
         .unwrap_or(now)
@@ -1159,7 +1157,7 @@ async fn store_group_members_event(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|error| anyhow::anyhow!("failed to sign member snapshot: {error}"))?;
     let (stored, inserted) = member_snapshot
-        .replace_member_event(tenant.community(), channel_id, &event)
+        .replace_member_event(&event)
         .await?;
     Ok(inserted.then_some(stored))
 }
@@ -1300,7 +1298,7 @@ pub async fn emit_group_discovery_events(
         .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
         .await?;
     let stored_members =
-        store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
+        store_group_members_event(state, channel_id, &mut member_snapshot).await?;
     member_snapshot.release().await?;
     dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
@@ -3341,7 +3339,7 @@ pub async fn reconcile_large_channel_member_snapshots(
                 .await?;
             let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
             let stored_members =
-                store_group_members_event(&tenant, state, channel_id, &mut member_snapshot).await?;
+                store_group_members_event(state, channel_id, &mut member_snapshot).await?;
             member_snapshot.release().await?;
             dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
             Ok::<bool, anyhow::Error>(true)
