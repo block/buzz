@@ -1536,6 +1536,10 @@ pub struct DeletionTarget<'a> {
 /// concurrent tagged write from observing a head that is simultaneously being
 /// removed. The serialization invariant is owned entirely by this function;
 /// callers do not classify the target kind.
+///
+/// A channel-less kind-0 target likewise takes the pubkey's profile
+/// replacement lock before the UPDATE, so un-projecting the `users` row cannot
+/// interleave with a live profile replace or an in-flight backfill batch.
 pub async fn soft_delete_event_and_update_thread(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1605,6 +1609,24 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
                 .execute(tx.conn())
                 .await?;
         }
+    }
+
+    // A channel-less kind-0 is projected into `users` by the replace path and
+    // by `backfill_profiles_batch`, both under the pubkey's replacement lock.
+    // The un-projection below guards on `metadata_event_id = <deleted id>`,
+    // which is enough against a live replace (it writes a *new* id) but not
+    // against a batch that read this row as the head and will write the *same*
+    // id back after this delete commits. Taking the same lock serializes with
+    // both. Whether the row is the head cannot be known until the lock is
+    // held, so every channel-less kind-0 takes it; this is the first advisory
+    // lock in this function and no caller holds one on entry, so it cannot
+    // cycle with either writer.
+    if let Some((0, None, pubkey)) = &target {
+        let lock_key = event_replacement_lock_key(community_id, 0, pubkey, None);
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.conn())
+            .await?;
     }
 
     let purged = if target

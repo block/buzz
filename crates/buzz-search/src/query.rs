@@ -281,7 +281,8 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// SELECT ..., <profile name fields as tsvector> @@ $q AS name_match
 /// FROM (SELECT DISTINCT ON (pubkey) id, created_at
 ///       FROM events
-///       WHERE community_id = $ctx AND deleted_at IS NULL AND kind = 0 [AND authors]
+///       WHERE community_id = $ctx AND deleted_at IS NULL AND kind = 0
+///         AND channel_id IS NULL [AND authors]
 ///       ORDER BY pubkey, created_at DESC, id) AS heads
 ///      JOIN events USING (id, created_at)
 /// WHERE community_id = $ctx AND deleted_at IS NULL AND search_tsv @@ $q
@@ -389,9 +390,14 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         // never spools `content` or `search_tsv` (an inline avatar can make a
         // kind-0 row several KB) and the join leaves the planner free to drive
         // from the GIN probe when the text predicate is the more selective side.
+        //
+        // `channel_id IS NULL` is the same predicate the projection side uses
+        // to resolve a head (`current_profile_events_on`, the backfill, the
+        // precheck, and the replace path), so the row this search returns for
+        // a person is provably the row `users` was projected from.
         qb.push("(SELECT DISTINCT ON (pubkey) id, created_at FROM events WHERE community_id = ");
         qb.push_bind(*query.community.as_uuid());
-        qb.push(" AND deleted_at IS NULL AND kind = 0");
+        qb.push(" AND deleted_at IS NULL AND kind = 0 AND channel_id IS NULL");
         push_authors(&mut qb, query.authors.as_deref());
         qb.push(
             " ORDER BY pubkey, created_at DESC, id) AS heads \

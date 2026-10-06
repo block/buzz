@@ -50,7 +50,11 @@ cleared, so the pubkey leaves the `users`-backed search set and the precheck
 claimant. `name`, `display_name`, `avatar_url`, and `about` are kept as the
 last-known profile so readers that label a pubkey keep showing a name for the
 messages that remain. Deleting a kind-0 that is not the projected head changes
-nothing; the author's next kind-0 re-projects the row.
+nothing; the author's next kind-0 re-projects the row. The delete takes the
+same per-pubkey kind-0 replace lock the replace path and the backfill hold,
+so a head deleted while a backfill batch is in flight cannot be re-projected
+by that batch: the delete queues behind the batch and clears the pointer the
+batch wrote.
 
 A NIP-05 handle another row already holds is written under a savepoint and
 then resolved against the **holder's current kind-0 head**, not its row. A
@@ -71,7 +75,11 @@ With the setting on, a filter whose `kinds` is non-empty and all `0`:
 - runs `search_users` over `name`, `display_name`, and `nip05_handle` as a
   case-insensitive substring match, and over the hex pubkey as a prefix match
   only (a one- or two-character query drawn from `[0-9a-f]` would otherwise
-  substring-match a large share of every pubkey);
+  substring-match a large share of every pubkey). `about` is **not**
+  searched: a profile whose bio mentions the query is not a hit on this path
+  (it was on the FTS path). A multi-word query is one substring, so it is
+  order-sensitive: `chow wesley` does not match "Wesley Chow" (FTS matched
+  each lexeme independently and did);
 - ranks exact > prefix > contains (name/display_name before NIP-05 before
   pubkey within each tier), then by label, then by pubkey, so paging is total
   and stable;
@@ -88,7 +96,11 @@ With the setting on, a filter whose `kinds` is non-empty and all `0`:
   only) and returns the heads in `users` rank order. A hit with no live head
   is dropped rather than replaced by a stale row;
 - applies the normal NIP-01 post-filter and reader-visibility gates to the
-  hydrated events.
+  hydrated events. A `kinds:[0]` filter that also carries `#p` or `ids` can
+  therefore return a short page: hits the post-filter drops after `LIMIT` are
+  not refilled, unlike the FTS path, which keeps paging until `limit` events
+  pass the post-filter or the results run out. The known clients send only
+  `kinds`, `search`, `search_mode`, `limit`, and `page`.
 
 Three filter fields are **no-ops** on this path, by design:
 
@@ -120,8 +132,15 @@ ordinary row to the gauges and would count as one human until it is removed.
 The row source must be complete before the switch flips, or people with a
 kind-0 but no projected row vanish from search. The order is:
 
-1. **Migrate.** Apply migration `0083_users_name.sql` (`buzz-admin migrate`,
-   or `BUZZ_AUTO_MIGRATE=true` on the next relay start).
+1. **Migrate, before deploying the image — regardless of the setting.** Apply
+   migration `0083_users_name.sql` (`buzz-admin migrate`, or
+   `BUZZ_AUTO_MIGRATE=true` on the next relay start). Kind-0 ingest writes
+   `users.name` on every path, setting on or off, and the relay does not
+   refuse to start on a pending migration: with `BUZZ_AUTO_MIGRATE=false` an
+   image built from this change deployed ahead of 0083 boots normally and
+   then rejects every kind-0 publish with `column "name" does not exist`.
+   Deployments that apply schema out of band (see `docs/database.md`) must
+   have 0083 applied before the rollout reaches a relay pod.
 2. **Precheck.**
 
    ```bash

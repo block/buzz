@@ -47,6 +47,10 @@ pub struct SearchUsersParams<'a> {
     /// `display_name`, `nip05_handle`, and the hex pubkey.
     pub query: &'a str,
     /// Restrict results to these pubkeys (NIP-01 `authors`); `None` means all.
+    ///
+    /// `Some(&[])` returns no rows at this seam. The relay maps an empty
+    /// `authors` list to `None` before calling, so "empty means any" holds at
+    /// the REQ boundary (matching the FTS path) but not here.
     pub authors: Option<&'a [Vec<u8>]>,
     /// Maximum rows to return, clamped to `1..=500`.
     pub limit: u32,

@@ -914,6 +914,248 @@ mod postgres_tests {
         );
     }
 
+    /// Granted `pg_advisory_xact_lock(int8)` rows backend `pid` holds on
+    /// `key`. Postgres stores an int8 advisory key as `classid = key >> 32`,
+    /// `objid = key & 0xffffffff`, `objsubid = 1`.
+    async fn granted_replace_locks(pool: &PgPool, pid: i32, key: i64) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks \
+             WHERE locktype = 'advisory' AND pid = $1 AND granted \
+               AND classid = $2::oid AND objid = $3::oid AND objsubid = 1",
+        )
+        .bind(pid)
+        .bind(((key as u64) >> 32) as i64)
+        .bind(((key as u64) & 0xffff_ffff) as i64)
+        .fetch_one(pool)
+        .await
+        .expect("inspect pg_locks")
+    }
+
+    /// Run the `_in_tx` delete body on a transaction the test keeps open, so
+    /// the locks it holds can be read before they are released. Returns the
+    /// open transaction and its backend pid.
+    async fn delete_in_open_tx(
+        db: &Db,
+        community: CommunityId,
+        event_id: &[u8],
+    ) -> (crate::AdmittedTx, i32) {
+        let mut tx = crate::begin_community_event_write_transaction(
+            &db.pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin delete tx");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(tx.conn())
+            .await
+            .expect("backend pid");
+        let deleted =
+            crate::event::soft_delete_event_and_update_thread_in_tx(&mut tx, event_id, None, None)
+                .await
+                .expect("soft delete in tx");
+        assert!(deleted, "the row must transition to deleted in this call");
+        (tx, pid)
+    }
+
+    /// The delete hook's `metadata_event_id = <deleted id>` guard is enough
+    /// against a live replace, which writes a new id, but not against a
+    /// backfill batch that read this row as the head and will write the same
+    /// id back. So the hook takes the pubkey's kind-0 replacement lock before
+    /// the UPDATE — for every channel-less kind-0, head or stray, because
+    /// whether the row is the head cannot be known until the lock is held —
+    /// and a non-kind-0 deletion by the same author holds no exclusive
+    /// advisory lock (the community write fence holds a *shared* one on every
+    /// write). Read from `pg_locks` while each delete transaction is open,
+    /// and again after commit to pin the lock as transaction-scoped.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deleting_a_channel_less_kind0_holds_the_replace_lock_until_commit() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_bytes();
+        let key = event_replacement_lock_key(community, 0, &pubkey, None);
+
+        let head = kind0(&keys, r#"{"name":"wes"}"#, 1_700_000_010);
+        replace_profile(&db, community, &host, &head).await;
+        let stray = kind0(&keys, r#"{"name":"stray"}"#, 1_700_000_005);
+        db.insert_event(community, &stray, None)
+            .await
+            .expect("insert the stray live kind-0");
+        let note = EventBuilder::new(Kind::TextNote, "not a profile")
+            .custom_created_at(Timestamp::from(1_700_000_011))
+            .sign_with_keys(&keys)
+            .expect("sign note");
+        db.insert_event(community, &note, None)
+            .await
+            .expect("insert the note");
+
+        let (tx, pid) = delete_in_open_tx(&db, community, note.id.as_bytes()).await;
+        let exclusive_advisory: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks \
+             WHERE locktype = 'advisory' AND pid = $1 AND mode = 'ExclusiveLock'",
+        )
+        .bind(pid)
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect pg_locks");
+        assert_eq!(
+            exclusive_advisory, 0,
+            "a non-kind-0 deletion takes no exclusive advisory lock"
+        );
+        assert_eq!(
+            granted_replace_locks(&db.pool, pid, key).await,
+            0,
+            "a non-kind-0 deletion does not take the author's kind-0 replace lock"
+        );
+        tx.commit().await.expect("commit note delete");
+
+        let (tx, pid) = delete_in_open_tx(&db, community, stray.id.as_bytes()).await;
+        assert_eq!(
+            granted_replace_locks(&db.pool, pid, key).await,
+            1,
+            "a stray kind-0 takes the lock too: head-ness is only known once it is held"
+        );
+        tx.commit().await.expect("commit stray delete");
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey)
+                .await
+                .and_then(|row| row.5),
+            Some(head.id.as_bytes().to_vec()),
+            "the stray's deletion leaves the projection alone"
+        );
+
+        let (tx, pid) = delete_in_open_tx(&db, community, head.id.as_bytes()).await;
+        assert_eq!(
+            granted_replace_locks(&db.pool, pid, key).await,
+            1,
+            "deleting the head holds the pubkey's kind-0 replace lock until commit"
+        );
+        tx.commit().await.expect("commit head delete");
+        assert_eq!(
+            granted_replace_locks(&db.pool, pid, key).await,
+            0,
+            "the lock is transaction-scoped and gone once the delete commits"
+        );
+        assert_eq!(
+            users_row(&db.pool, community, &pubkey)
+                .await
+                .and_then(|row| row.5),
+            None,
+            "the head's deletion un-projects the row"
+        );
+    }
+
+    /// The race the lock closes: a backfill batch reads H1 as A's head, a
+    /// kind-5 on H1 soft-deletes it and clears A's row, and the batch then
+    /// writes `metadata_event_id = H1` back — a projected row pointing at a
+    /// deleted head, invisible to the precheck (A has no live head, so it is
+    /// not a publisher). The batch holds A's replacement lock from before its
+    /// head read until commit; the delete now takes the same lock, so it
+    /// queues behind the batch and its compare-and-clear sees the batch's
+    /// write. The batch is driven statement by statement on an open
+    /// transaction because `backfill_profiles_batch` cannot be paused between
+    /// its read and its write.
+    ///
+    /// Mutation oracle: without the lock in the delete hook the delete never
+    /// queues (it finishes before a waiter appears) and A's row ends with
+    /// `metadata_event_id = H1`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deleting_the_head_under_an_in_flight_backfill_batch_leaves_no_stale_projection() {
+        let db = setup_db().await;
+        let (community, host) = make_community(&db.pool).await;
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_bytes();
+        let key = event_replacement_lock_key(community, 0, &pubkey, None);
+
+        let head = kind0(
+            &keys,
+            &format!(r#"{{"name":"wes","nip05":"wes@{host}"}}"#),
+            1_700_000_010,
+        );
+        replace_profile(&db, community, &host, &head).await;
+
+        // The batch: lock, then read the head, in `backfill_profiles_batch` order.
+        let mut batch = db.pool.begin().await.expect("begin batch tx");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(key)
+            .execute(&mut *batch)
+            .await
+            .expect("batch takes the lock");
+        let heads = current_profile_events_on(&mut batch, community, &[pubkey.to_vec()])
+            .await
+            .expect("batch reads heads");
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].event.id, head.id, "the batch read H1 as the head");
+
+        // The kind-5 lands while the batch is between its read and its write.
+        let pool = db.pool.clone();
+        let head_id = head.id.as_bytes().to_vec();
+        let delete = tokio::spawn(async move {
+            crate::event::soft_delete_event_and_update_thread(
+                &pool, community, &head_id, None, None,
+            )
+            .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiters: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted \
+                   AND classid = $1::oid AND objid = $2::oid AND objsubid = 1",
+            )
+            .bind(((key as u64) >> 32) as i64)
+            .bind(((key as u64) & 0xffff_ffff) as i64)
+            .fetch_one(&db.pool)
+            .await
+            .expect("inspect pg_locks");
+            if waiters == 1 {
+                break;
+            }
+            assert!(
+                !delete.is_finished(),
+                "the delete finished without queueing behind the batch: the hook took no lock"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the delete to queue on the replace lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // The batch writes the head it read, as the real batch would, and commits.
+        let projection = ProfileProjection::from_kind0_event(&heads[0].event, &host);
+        upsert_profile_in_transaction(&mut batch, community, &pubkey, &projection)
+            .await
+            .expect("batch upsert");
+        batch.commit().await.expect("commit batch");
+
+        assert!(
+            delete.await.expect("join delete").expect("soft delete"),
+            "the head is deleted once the batch commits"
+        );
+        let row = users_row(&db.pool, community, &pubkey)
+            .await
+            .expect("users row");
+        assert_eq!(
+            row.5, None,
+            "the batch's write of H1 cannot outlive H1's deletion"
+        );
+        assert_eq!(row.4, None, "the handle is released with it");
+        let after = precheck_for(&db, community).await;
+        assert_eq!(
+            (
+                after.kind0_publishers,
+                after.users_rows,
+                after.unprojected_publishers
+            ),
+            (0, 1, 0),
+            "no live head, nothing unprojected: {after:?}"
+        );
+    }
+
     /// Heads written without a projection (as every kind-0 did before this
     /// seam) are picked up by the batched backfill, which pages by pubkey,
     /// uses the current head rather than a superseded row, and converges the
