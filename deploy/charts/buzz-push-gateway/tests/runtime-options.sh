@@ -19,6 +19,7 @@ raise 'grace period missing' unless pod['spec']['terminationGracePeriodSeconds']
 pod['spec']['terminationGracePeriodSeconds'] = 60
 raise 'runtime options changed unrelated resources or selectors' unless runtime == base
 expected = base.reject { |r| r['kind'] == 'NetworkPolicy' && r['metadata']['name'] == 'push-buzz-push-gateway' }
+external.find { |r| r['kind'] == 'Deployment' }['metadata'].delete('annotations')
 raise 'external policy mode changed migration isolation or other resources' unless external == expected
 RUBY
 reject() {
@@ -89,3 +90,40 @@ for key in 'bad key' '/name' 'prefix/' 'UPPER.example/name' 'a/b/c' "$long_label
   reject --set-json "podLabels={\"$key\":\"value\"}"
 done
 reject --set-json 'podLabels={"valid":"bad value"}'
+
+# Combined parent render gate: mutations must fail without emitting manifests.
+env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
+resources = YAML.load_stream(File.read("#{ARGV[0]}/external.yaml")).compact
+pod = resources.find { |r| r['kind'] == 'Deployment' }
+policy = {'apiVersion' => 'networking.k8s.io/v1', 'kind' => 'NetworkPolicy',
+          'metadata' => {'name' => 'platform-runtime'},
+          'spec' => {'podSelector' => {'matchLabels' => pod.dig('spec', 'selector', 'matchLabels').dup},
+                     'policyTypes' => %w[Ingress Egress], 'ingress' => [], 'egress' => []}}
+File.write("#{ARGV[0]}/combined.yaml", (resources + [policy]).map(&:to_yaml).join)
+variants = {
+  'misspelled' => ->(p) { p['metadata']['name'] = 'typo' },
+  'wrong-selector' => ->(p) { p['spec']['podSelector']['matchLabels']['app.kubernetes.io/instance'] = 'other' },
+  'empty-selector' => ->(p) { p['spec']['podSelector'] = {} },
+  'wrong-namespace' => ->(p) { p['metadata']['namespace'] = 'other' },
+  'ingress-only' => ->(p) { p['spec']['policyTypes'] = ['Ingress'] },
+  'wrong-expression' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'Exists'}] }
+}
+variants.each do |name, mutate|
+  changed = Marshal.load(Marshal.dump(policy))
+  mutate.call(changed)
+  File.write("#{ARGV[0]}/#{name}.yaml", (resources + [changed]).map(&:to_yaml).join)
+end
+RUBY
+gate() { env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby "$chart/tests/check-external-policy.rb"; }
+gate <"$out/default.yaml" >"$out/gated.yaml"
+cmp "$out/default.yaml" "$out/gated.yaml"
+gate <"$out/combined.yaml" >"$out/gated.yaml"
+cmp "$out/combined.yaml" "$out/gated.yaml"
+for mutation in external misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+  if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
+    echo "expected combined-render gate to reject $mutation" >&2
+    exit 1
+  fi
+  test ! -s "$out/gated.yaml"
+  grep -q 'external policy' "$out/gate-error"
+done
