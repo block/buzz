@@ -308,9 +308,10 @@ rolling.
 
 For local review, run `just admin-seed` before `just admin`. `just admin`
 defaults to `BUZZ_ADMIN_AUTH=disabled`, so the dashboard renders without a
-credential. In that mode it binds the relay to `127.0.0.1` on the port from
-`BUZZ_BIND_ADDR` (default 3000), so unauthenticated moderation reads stay
-local; `BUZZ_ADMIN_AUTH=nip98` keeps `BUZZ_BIND_ADDR` as configured. The
+credential. Unless the mode is exactly `nip98`, it binds the relay to
+`127.0.0.1` on the port from `BUZZ_BIND_ADDR` (default 3000), so
+unauthenticated moderation reads stay local even when the value is padded or
+misspelled; `BUZZ_ADMIN_AUTH=nip98` keeps `BUZZ_BIND_ADDR` as configured. The
 seed command also uploads real image and diagnostic fixtures to local MinIO.
 Feedback search and filters run over the bounded browser result
 set. The feedback **status** control (`new`/`reviewed`/`archived`) is

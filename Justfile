@@ -669,12 +669,13 @@ admin: bootstrap _ensure-migrations
     # assumed in dev. Disabled mode serves every moderation read (reports,
     # feedback, restrictions, community directory, member profiles, any stored
     # message by ID) to anyone who can reach the relay port and refuses writes
-    # and staffing, so it binds the relay to 127.0.0.1 (port from .env).
-    # Override per run with BUZZ_ADMIN_AUTH=nip98 (plus RELAY_OPERATOR_PUBKEYS
-    # or RELAY_OWNER_PUBKEY) to exercise the authenticated path; that keeps
-    # BUZZ_BIND_ADDR as configured.
+    # and staffing, so it binds the relay to 127.0.0.1 (port from .env)
+    # unless the mode is exactly nip98: a padded or misspelled value stays
+    # local. Override per run with BUZZ_ADMIN_AUTH=nip98 (plus
+    # RELAY_OPERATOR_PUBKEYS or RELAY_OWNER_PUBKEY) to exercise the
+    # authenticated path; that keeps BUZZ_BIND_ADDR as configured.
     export BUZZ_ADMIN_AUTH="${BUZZ_ADMIN_AUTH:-disabled}"
-    if [[ "$BUZZ_ADMIN_AUTH" == disabled ]]; then
+    if [[ "$BUZZ_ADMIN_AUTH" != nip98 ]]; then
         bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
         relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
         export BUZZ_BIND_ADDR="127.0.0.1:${relay_port}"
