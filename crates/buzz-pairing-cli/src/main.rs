@@ -611,7 +611,12 @@ fn read_line() -> Result<String, CliError> {
 /// Prompt for y/n and return true for 'y'/'Y'.
 fn read_yes_no() -> Result<bool, CliError> {
     let line = read_line()?;
-    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
+    Ok(parse_yes_no(&line))
+}
+
+/// Interpret a line of user input as an affirmative answer.
+fn parse_yes_no(line: &str) -> bool {
+    matches!(line.trim(), "y" | "Y" | "yes" | "Yes" | "YES")
 }
 
 /// Decode a 64-char hex string into a `[u8; 32]`.
@@ -620,4 +625,487 @@ fn hex_to_32(s: &str) -> Result<[u8; 32], CliError> {
     bytes
         .try_into()
         .map_err(|_| CliError::Other(format!("expected 32 bytes, got wrong length for '{s}'")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use buzz_core::pairing::types::AbortReason;
+    use futures_util::{stream, Sink};
+    use nostr::Kind;
+
+    type WsError = tokio_tungstenite::tungstenite::Error;
+
+    const TEST_RELAY: &str = "wss://relay.example.com";
+    const DEFAULT_RELAY: &str = "wss://relay.damus.io";
+
+    /// A signed, valid Nostr event unrelated to pairing.
+    fn sample_event() -> Event {
+        let keys = Keys::generate();
+        EventBuilder::text_note("test note")
+            .sign_with_keys(&keys)
+            .expect("signing failed")
+    }
+
+    /// Wrap a raw string as an incoming relay text frame.
+    fn text_frame(s: &str) -> Result<Message, WsError> {
+        Ok(Message::Text(s.to_string().into()))
+    }
+
+    /// In-memory [`Sink`] that records every outgoing frame.
+    #[derive(Default)]
+    struct CaptureSink {
+        sent: Vec<Message>,
+    }
+
+    impl Sink<Message> for CaptureSink {
+        type Error = WsError;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), WsError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), WsError> {
+            self.get_mut().sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), WsError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), WsError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Decode a captured text frame as a JSON array.
+    fn frame_as_json(msg: &Message) -> Vec<serde_json::Value> {
+        let Message::Text(text) = msg else {
+            panic!("expected a text frame, got {msg:?}");
+        };
+        let value: serde_json::Value = serde_json::from_str(text.as_str()).expect("frame is JSON");
+        value.as_array().expect("frame is a JSON array").clone()
+    }
+
+    // --- CLI argument parsing ---------------------------------------------
+
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn source_uses_default_relay_and_no_nsec() {
+        let cli = Cli::try_parse_from(["buzz-pair", "source"]).expect("parse");
+        match cli.command {
+            Cmd::Source { relay, nsec } => {
+                assert_eq!(relay, DEFAULT_RELAY);
+                assert!(nsec.is_none());
+            }
+            _ => panic!("expected source subcommand"),
+        }
+    }
+
+    #[test]
+    fn source_accepts_relay_and_nsec_flags() {
+        let cli = Cli::try_parse_from([
+            "buzz-pair",
+            "source",
+            "--relay",
+            TEST_RELAY,
+            "--nsec",
+            "nsec1example",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Source { relay, nsec } => {
+                assert_eq!(relay, TEST_RELAY);
+                assert_eq!(nsec.as_deref(), Some("nsec1example"));
+            }
+            _ => panic!("expected source subcommand"),
+        }
+    }
+
+    #[test]
+    fn target_defaults_to_qr_relay_and_hidden_secret() {
+        let cli = Cli::try_parse_from(["buzz-pair", "target"]).expect("parse");
+        match cli.command {
+            Cmd::Target { relay, show_secret } => {
+                assert!(relay.is_none());
+                assert!(!show_secret);
+            }
+            _ => panic!("expected target subcommand"),
+        }
+    }
+
+    #[test]
+    fn target_accepts_relay_override_and_show_secret() {
+        let cli = Cli::try_parse_from([
+            "buzz-pair",
+            "target",
+            "--relay",
+            TEST_RELAY,
+            "--show-secret",
+        ])
+        .expect("parse");
+        match cli.command {
+            Cmd::Target { relay, show_secret } => {
+                assert_eq!(relay.as_deref(), Some(TEST_RELAY));
+                assert!(show_secret);
+            }
+            _ => panic!("expected target subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_vectors_subcommand_parses() {
+        let cli = Cli::try_parse_from(["buzz-pair", "test-vectors"]).expect("parse");
+        assert!(matches!(cli.command, Cmd::TestVectors));
+    }
+
+    #[test]
+    fn missing_subcommand_is_rejected() {
+        assert!(Cli::try_parse_from(["buzz-pair"]).is_err());
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        assert!(Cli::try_parse_from(["buzz-pair", "source", "--bogus"]).is_err());
+    }
+
+    // --- parse_auth_challenge ---------------------------------------------
+
+    #[test]
+    fn auth_challenge_is_extracted() {
+        let challenge = parse_auth_challenge(r#"["AUTH","challenge-123"]"#);
+        assert_eq!(challenge.as_deref(), Some("challenge-123"));
+    }
+
+    #[test]
+    fn auth_challenge_ignores_other_message_types() {
+        assert!(parse_auth_challenge(r#"["NOTICE","restricted"]"#).is_none());
+        assert!(parse_auth_challenge(r#"["EOSE","pair"]"#).is_none());
+    }
+
+    #[test]
+    fn auth_challenge_ignores_malformed_json() {
+        assert!(parse_auth_challenge("not json at all").is_none());
+    }
+
+    #[test]
+    fn auth_challenge_requires_two_elements() {
+        assert!(parse_auth_challenge(r#"["AUTH"]"#).is_none());
+    }
+
+    #[test]
+    fn auth_challenge_requires_string_challenge() {
+        assert!(parse_auth_challenge(r#"["AUTH",42]"#).is_none());
+    }
+
+    #[test]
+    fn auth_challenge_requires_an_array() {
+        assert!(parse_auth_challenge(r#"{"AUTH":"challenge"}"#).is_none());
+    }
+
+    // --- parse_relay_event ------------------------------------------------
+
+    #[test]
+    fn relay_event_with_matching_sub_id_is_parsed() {
+        let event = sample_event();
+        let frame = serde_json::json!(["EVENT", "pair", event]).to_string();
+        let parsed = parse_relay_event(&frame, "pair").expect("event parses");
+        assert_eq!(parsed.id, event.id);
+    }
+
+    #[test]
+    fn relay_event_with_wrong_sub_id_is_ignored() {
+        let event = sample_event();
+        let frame = serde_json::json!(["EVENT", "other-sub", event]).to_string();
+        assert!(parse_relay_event(&frame, "pair").is_none());
+    }
+
+    #[test]
+    fn relay_non_event_messages_are_ignored() {
+        assert!(parse_relay_event(r#"["OK","abc",true,""]"#, "pair").is_none());
+        assert!(parse_relay_event(r#"["EOSE","pair"]"#, "pair").is_none());
+    }
+
+    #[test]
+    fn relay_event_requires_three_elements() {
+        assert!(parse_relay_event(r#"["EVENT","pair"]"#, "pair").is_none());
+    }
+
+    #[test]
+    fn relay_event_with_invalid_event_payload_is_ignored() {
+        assert!(parse_relay_event(r#"["EVENT","pair",{"not":"an event"}]"#, "pair").is_none());
+    }
+
+    #[test]
+    fn relay_event_requires_json_array() {
+        assert!(parse_relay_event("junk", "pair").is_none());
+        assert!(parse_relay_event(r#"{"EVENT":"pair"}"#, "pair").is_none());
+    }
+
+    // --- resolve_payload --------------------------------------------------
+
+    #[test]
+    fn resolve_payload_passes_through_valid_nsec() {
+        let keys = Keys::generate();
+        let nsec = keys.secret_key().to_bech32().expect("bech32");
+        let (payload, payload_type) = resolve_payload(Some(nsec.clone())).expect("valid nsec");
+        assert_eq!(*payload, nsec);
+        assert_eq!(payload_type, PayloadType::Nsec);
+    }
+
+    #[test]
+    fn resolve_payload_rejects_invalid_nsec() {
+        let err = resolve_payload(Some("definitely-not-a-key".into())).expect_err("invalid nsec");
+        assert!(matches!(err, CliError::InvalidNsec(_)));
+    }
+
+    #[test]
+    fn resolve_payload_generates_test_key_when_omitted() {
+        let (payload, payload_type) = resolve_payload(None).expect("generated key");
+        assert!(payload.starts_with("nsec1"), "expected bech32 nsec");
+        assert!(SecretKey::parse(&payload).is_ok(), "generated key parses");
+        assert_eq!(payload_type, PayloadType::Nsec);
+    }
+
+    // --- hex_to_32 --------------------------------------------------------
+
+    #[test]
+    fn hex_to_32_round_trips() {
+        let hex_str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+        let bytes = hex_to_32(hex_str).expect("valid hex");
+        assert_eq!(hex::encode(bytes), hex_str);
+    }
+
+    #[test]
+    fn hex_to_32_rejects_non_hex_input() {
+        let err = hex_to_32("zz").expect_err("invalid hex");
+        assert!(matches!(err, CliError::Other(_)));
+    }
+
+    #[test]
+    fn hex_to_32_rejects_wrong_length() {
+        // Valid hex, but only 16 bytes.
+        let err = hex_to_32("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6").expect_err("wrong length");
+        assert!(matches!(err, CliError::Other(_)));
+    }
+
+    // --- parse_yes_no -----------------------------------------------------
+
+    #[test]
+    fn yes_variants_are_affirmative() {
+        for input in ["y", "Y", "yes", "Yes", "YES", "  y  "] {
+            assert!(parse_yes_no(input), "expected {input:?} to be affirmative");
+        }
+    }
+
+    #[test]
+    fn everything_else_is_negative() {
+        for input in ["n", "N", "no", "", "yep", "true", "y e s"] {
+            assert!(!parse_yes_no(input), "expected {input:?} to be negative");
+        }
+    }
+
+    // --- cmd_test_vectors -------------------------------------------------
+
+    #[test]
+    fn test_vectors_derive_without_error() {
+        cmd_test_vectors().expect("spec test vectors derive cleanly");
+    }
+
+    // --- check_for_abort --------------------------------------------------
+
+    #[test]
+    fn non_abort_events_are_passed_through() {
+        let (mut session, _qr) = PairingSession::new_source(TEST_RELAY.to_string());
+        let event = sample_event();
+        assert!(check_for_abort(&mut session, &event).is_ok());
+    }
+
+    #[test]
+    fn peer_abort_is_surfaced_as_error() {
+        // Run the offline half of the handshake: source QR -> target offer.
+        let (mut source, qr) = PairingSession::new_source(TEST_RELAY.to_string());
+        let (mut target, offer) = PairingSession::new_target(&qr).expect("target session");
+        source.handle_offer(&offer).expect("offer accepted");
+
+        let abort_event = target
+            .abort(AbortReason::SasMismatch)
+            .expect("abort built")
+            .expect("abort event exists once peer is known");
+
+        let err = check_for_abort(&mut source, &abort_event).expect_err("abort is surfaced");
+        let msg = err.to_string();
+        assert!(msg.contains("peer aborted"), "unexpected message: {msg}");
+        assert!(msg.contains("SasMismatch"), "reason missing: {msg}");
+    }
+
+    // --- publish_event ----------------------------------------------------
+
+    #[tokio::test]
+    async fn publish_event_sends_event_frame() {
+        let event = sample_event();
+        let mut sink = CaptureSink::default();
+        publish_event(&mut sink, &event).await.expect("publish");
+
+        assert_eq!(sink.sent.len(), 1);
+        let frame = frame_as_json(&sink.sent[0]);
+        assert_eq!(frame[0], "EVENT");
+        let sent: Event = serde_json::from_value(frame[1].clone()).expect("event round-trips");
+        assert_eq!(sent.id, event.id);
+    }
+
+    // --- wait_for_event ---------------------------------------------------
+
+    #[tokio::test]
+    async fn wait_for_event_skips_non_matching_frames() {
+        let event = sample_event();
+        let other = sample_event();
+        let frames = vec![
+            text_frame("not json"),
+            text_frame(r#"["OK","abc",true,""]"#),
+            text_frame(r#"["EOSE","pair"]"#),
+            Ok(Message::Binary(vec![0x01, 0x02].into())),
+            text_frame(&serde_json::json!(["EVENT", "other-sub", other]).to_string()),
+            text_frame(&serde_json::json!(["EVENT", "pair", event]).to_string()),
+        ];
+        let mut read = stream::iter(frames);
+
+        let got = wait_for_event(&mut read, "pair", Duration::from_secs(5))
+            .await
+            .expect("event received");
+        assert_eq!(got.id, event.id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_event_times_out() {
+        let mut read = stream::pending::<Result<Message, WsError>>();
+        let err = wait_for_event(&mut read, "pair", Duration::from_millis(50))
+            .await
+            .expect_err("no event ever arrives");
+        assert!(matches!(err, CliError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_reports_closed_connection() {
+        let mut read = stream::iter(Vec::<Result<Message, WsError>>::new());
+        let err = wait_for_event(&mut read, "pair", Duration::from_secs(5))
+            .await
+            .expect_err("stream ended");
+        assert!(matches!(err, CliError::Other(_)));
+        assert!(err.to_string().contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_propagates_websocket_errors() {
+        let mut read = stream::iter(vec![Err::<Message, _>(WsError::ConnectionClosed)]);
+        let err = wait_for_event(&mut read, "pair", Duration::from_secs(5))
+            .await
+            .expect_err("websocket error");
+        assert!(matches!(err, CliError::WebSocket(_)));
+    }
+
+    // --- wait_for_eose ----------------------------------------------------
+
+    #[tokio::test]
+    async fn wait_for_eose_matches_subscription_id() {
+        let frames = vec![
+            text_frame("junk"),
+            text_frame(r#"["EOSE","other-sub"]"#),
+            text_frame(r#"["EOSE","pair"]"#),
+        ];
+        let mut read = stream::iter(frames);
+        wait_for_eose(&mut read, "pair", Duration::from_secs(5))
+            .await
+            .expect("EOSE received");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_eose_times_out() {
+        let mut read = stream::pending::<Result<Message, WsError>>();
+        let err = wait_for_eose(&mut read, "pair", Duration::from_millis(50))
+            .await
+            .expect_err("no EOSE ever arrives");
+        assert!(matches!(err, CliError::Timeout));
+    }
+
+    // --- handle_nip42_auth ------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn nip42_auth_is_skipped_when_relay_sends_no_challenge() {
+        let (session, _qr) = PairingSession::new_source(TEST_RELAY.to_string());
+        let mut read = stream::pending::<Result<Message, WsError>>();
+        let mut write = CaptureSink::default();
+
+        handle_nip42_auth(&mut read, &mut write, &session, TEST_RELAY)
+            .await
+            .expect("no auth required");
+        assert!(write.sent.is_empty(), "nothing should be sent");
+    }
+
+    #[tokio::test]
+    async fn nip42_auth_answers_challenge_with_session_key() {
+        let (session, _qr) = PairingSession::new_source(TEST_RELAY.to_string());
+        let frames = vec![
+            text_frame(r#"["NOTICE","auth required"]"#),
+            text_frame(r#"["AUTH","challenge-abc"]"#),
+            text_frame(r#"["OK","someid",true,""]"#),
+        ];
+        let mut read = stream::iter(frames);
+        let mut write = CaptureSink::default();
+
+        handle_nip42_auth(&mut read, &mut write, &session, TEST_RELAY)
+            .await
+            .expect("auth succeeds");
+
+        assert_eq!(write.sent.len(), 1);
+        let frame = frame_as_json(&write.sent[0]);
+        assert_eq!(frame[0], "AUTH");
+        let auth_event: Event = serde_json::from_value(frame[1].clone()).expect("auth event");
+        assert_eq!(auth_event.kind, Kind::Authentication);
+        assert_eq!(
+            auth_event.pubkey,
+            session.pubkey(),
+            "auth must use the session's ephemeral key"
+        );
+        auth_event.verify().expect("auth event is validly signed");
+        let tags_json = serde_json::to_string(&auth_event).expect("serialize");
+        assert!(tags_json.contains("challenge-abc"), "challenge tag missing");
+    }
+
+    #[tokio::test]
+    async fn nip42_auth_tolerates_missing_ok_response() {
+        let (session, _qr) = PairingSession::new_source(TEST_RELAY.to_string());
+        // Relay sends the challenge, then the stream ends before any OK.
+        let frames = vec![text_frame(r#"["AUTH","challenge-abc"]"#)];
+        let mut read = stream::iter(frames);
+        let mut write = CaptureSink::default();
+
+        handle_nip42_auth(&mut read, &mut write, &session, TEST_RELAY)
+            .await
+            .expect("missing OK is tolerated");
+        assert_eq!(write.sent.len(), 1, "auth response still sent");
+    }
+
+    #[tokio::test]
+    async fn nip42_auth_rejects_invalid_relay_url() {
+        let (session, _qr) = PairingSession::new_source(TEST_RELAY.to_string());
+        let frames = vec![text_frame(r#"["AUTH","challenge-abc"]"#)];
+        let mut read = stream::iter(frames);
+        let mut write = CaptureSink::default();
+
+        let err = handle_nip42_auth(&mut read, &mut write, &session, "not a url")
+            .await
+            .expect_err("invalid relay URL");
+        assert!(err.to_string().contains("invalid relay URL"));
+    }
 }
