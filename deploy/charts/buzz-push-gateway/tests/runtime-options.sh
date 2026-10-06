@@ -110,6 +110,8 @@ variants = {
   'unknown-operator' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'Unknown'}] },
   'empty-notin' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'absent', 'operator' => 'NotIn', 'values' => []}] },
   'valued-exists' => ->(p) { p['spec']['podSelector']['matchExpressions'] = [{'key' => 'app.kubernetes.io/name', 'operator' => 'Exists', 'values' => ['buzz-push-gateway']}] },
+  'argo-skip' => ->(p) { p['metadata']['annotations'] = {'argocd.argoproj.io/hook' => 'Skip'} },
+  'argo-presync' => ->(p) { p['metadata']['annotations'] = {'argocd.argoproj.io/hook' => 'PreSync', 'argocd.argoproj.io/hook-delete-policy' => 'HookSucceeded'} },
   'hook-policy' => ->(p) { p['metadata']['annotations'] = {'helm.sh/hook' => 'pre-install', 'helm.sh/hook-delete-policy' => 'hook-succeeded'} },
   'misspelled' => ->(p) { p['metadata']['name'] = 'typo' },
   'wrong-selector' => ->(p) { p['spec']['podSelector']['matchLabels']['app.kubernetes.io/instance'] = 'other' },
@@ -131,7 +133,7 @@ gate <"$out/combined.yaml" >"$out/gated.yaml"
 cmp "$out/combined.yaml" "$out/gated.yaml"
 gate <"$out/list.yaml" >"$out/gated.yaml"
 cmp "$out/list.yaml" "$out/gated.yaml"
-for mutation in invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
+for mutation in argo-skip argo-presync invalid-key invalid-value numeric-value unknown-operator empty-notin valued-exists duplicate-list external hook-policy misspelled wrong-selector empty-selector wrong-namespace ingress-only wrong-expression; do
   if gate <"$out/$mutation.yaml" >"$out/gated.yaml" 2>"$out/gate-error"; then
     echo "expected combined-render gate to reject $mutation" >&2
     exit 1

@@ -59,6 +59,7 @@ resources.select { |r| r['kind'] == 'Deployment' }.each do |deployment|
   end
   abort "external policy #{name}: expected exactly one replacement in #{namespace}" unless policies.length == 1
   abort "external policy #{name}: replacement must not be a Helm hook" if policies.first.dig('metadata', 'annotations', 'helm.sh/hook')
+  abort "external policy #{name}: replacement must not be an Argo CD hook" if policies.first.dig('metadata', 'annotations', 'argocd.argoproj.io/hook')
   spec = policies.first.fetch('spec')
   labels = deployment.dig('spec', 'template', 'metadata', 'labels')
   selector = spec.fetch('podSelector')
