@@ -687,8 +687,11 @@ export type AdminMemberDetailDto = {
   role: "owner" | "admin" | "member" | null;
   banned: boolean;
   mutedUntil: string | null;
-  /** Deployment-level relay staff (operator or moderator). */
-  isStaff: boolean;
+  /**
+   * Deployment-level relay staff (operator or moderator). `null` when admin
+   * auth is disabled, because the relay doesn't read the staff roster then.
+   */
+  isStaff: boolean | null;
 };
 
 /** GET /members/{pubkey} — one member's state in one community. */
