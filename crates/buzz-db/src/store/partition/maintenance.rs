@@ -576,6 +576,12 @@ async fn apply_change(
         transaction.rollback().await?;
         return Ok(LockedAttempt::Refused(reason));
     }
+    if let Some(catch_all) = &expected.catch_all {
+        if let Some(reason) = catch_all_foreign_key_refusal(&mut transaction, catch_all).await? {
+            transaction.rollback().await?;
+            return Ok(LockedAttempt::Refused(reason));
+        }
+    }
     // Parent first, in the order writers lock: an insert takes the parent and
     // then the foreign-key counterparts its constraint check reads. Waiting on
     // a counterpart while holding the parent could deadlock with such a writer.
@@ -604,7 +610,8 @@ async fn apply_change(
     // than queue the counterpart's own writers behind this transaction.
     // Dropping the catch-all removes only its inherited foreign key and check
     // triggers, which lock the catch-all itself, never the referenced table
-    // (lock probes on PostgreSQL 16 and 17), so no stronger mode is needed.
+    // (lock probes on PostgreSQL 16 and 17), so no stronger mode is needed. A
+    // catch-all with any other foreign key is refused before and after its lock.
     for counterpart in &parent.counterparts {
         lock(
             &mut transaction,
@@ -623,6 +630,12 @@ async fn apply_change(
             ),
         )
         .await?;
+        // Foreign-key DDL on or to the catch-all conflicts with this lock but
+        // not with the parent's, so only this check is authoritative.
+        if let Some(reason) = catch_all_foreign_key_refusal(&mut transaction, catch_all).await? {
+            transaction.rollback().await?;
+            return Ok(LockedAttempt::Refused(reason));
+        }
     }
 
     // Close the window between the serialized audit and the table locks.
@@ -873,6 +886,36 @@ where
 
 fn collision_message(name: &str) -> String {
     format!("canonical name {name} already exists without the expected attachment and bounds")
+}
+
+/// Refuse a catch-all with a foreign key of its own, or one that references it.
+///
+/// Such a key is invisible to the parent's counterpart set. Dropping the
+/// catch-all would silently drop it and lock its other table without `NOWAIT`
+/// while holding the parent.
+async fn catch_all_foreign_key_refusal(
+    connection: &mut PgConnection,
+    catch_all: &CatchAllReplacement,
+) -> Result<Option<String>> {
+    let names: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT pg_catalog.string_agg(foreign_key.conname::text, ', ' ORDER BY foreign_key.conname)
+        FROM pg_catalog.pg_constraint foreign_key
+        WHERE foreign_key.contype = 'f'
+          AND ((foreign_key.conrelid = $1::regclass AND foreign_key.conparentid = 0)
+               OR foreign_key.confrelid = $1::regclass)
+        "#,
+    )
+    .bind(qualified_relation_name(&catch_all.schema, &catch_all.name))
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(names.map(|names| {
+        format!(
+            "catch-all {} has foreign keys not inherited from the parent ({names}); \
+             the counterpart lock set is not proven",
+            catch_all.name
+        )
+    }))
 }
 
 /// Verify the changed catalog, audited inside the transaction, before commit.

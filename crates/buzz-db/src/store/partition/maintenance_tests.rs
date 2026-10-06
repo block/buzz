@@ -626,12 +626,17 @@ mod postgres_tests {
         assert!(queued, "maintenance never queued behind the writer");
 
         // Maintenance waits on the parent holding no counterpart lock, so the
-        // writer's key check proceeds instead of entering a lock cycle.
+        // writer's key check, and a write to the counterpart itself, proceed
+        // instead of entering a lock cycle in any counterpart lock mode.
         let started = Instant::now();
         sqlx::query("SELECT id FROM communities FOR KEY SHARE")
             .fetch_all(&mut *writer)
             .await
             .expect("foreign-key check behind queued maintenance");
+        sqlx::query("INSERT INTO communities(id) VALUES (gen_random_uuid())")
+            .execute(&mut *writer)
+            .await
+            .expect("counterpart write behind queued maintenance");
         assert!(
             started.elapsed() < std::time::Duration::from_millis(500),
             "{:?}",
@@ -710,24 +715,175 @@ mod postgres_tests {
         });
         wait_until_blocked_by(&admin, migration_pid, 2).await;
 
-        let started = Instant::now();
         migration.commit().await.expect("commit migration");
         let result = maintenance.await.expect("maintenance task");
-        let elapsed = started.elapsed();
 
-        // The parent-locked read finds the new counterpart and fails on it at
-        // once, instead of attaching against it under the parent lock until
-        // the lock timeout.
+        // The parent-locked read finds the new counterpart and its NOWAIT lock
+        // fails naming it, instead of attaching against it under the parent
+        // lock until a lock timeout that names no relation.
         assert!(
             matches!(result, Err(DbError::InvalidData(ref message))
-                if message.contains("events lock_timeout") && !message.contains("delivery_log")),
+                if message.contains("events lock_timeout")
+                    && message.contains("could not obtain lock on relation")
+                    && message.contains(r#".reviewers""#)
+                    && !message.contains("delivery_log")),
             "{result:?}"
         );
-        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
 
         release_writer.send(()).expect("release counterpart writer");
         writer.await.expect("counterpart writer task");
         assert_advanced(&maintain(&pool).await.expect("advance after release"));
+        drop_schema(&admin, &schema).await;
+    }
+
+    async fn backend_pid(connection: &mut PgConnection) -> i32 {
+        sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(connection)
+            .await
+            .expect("backend pid")
+    }
+
+    fn refused_events_only(result: &Result<PartitionAudit>, reason: &str) -> bool {
+        matches!(result, Err(DbError::InvalidData(message))
+            if message.contains("events operator_required")
+                && message.contains(reason)
+                && !message.contains("delivery_log"))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn foreign_key_referencing_the_parent_committed_while_waiting_is_refused() {
+        let (pool, admin, schema) = scratch_pool_with_max_connections(6).await;
+        seed_repaired_layout(&pool, true).await;
+        sqlx::query(
+            "CREATE TABLE event_refs \
+             (created_at TIMESTAMPTZ, alternate_at TIMESTAMPTZ, id BIGINT)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create referencing table");
+        // An in-flight migration makes events a referenced table, which the
+        // pre-lock read cannot see yet.
+        let mut migration = hold_lock(
+            &pool,
+            "ALTER TABLE event_refs ADD FOREIGN KEY (created_at, alternate_at, id) \
+             REFERENCES events (created_at, alternate_at, id)",
+        )
+        .await;
+        let migration_pid = backend_pid(&mut migration).await;
+        let maintenance = tokio::spawn({
+            let pool = pool.clone();
+            async move { maintain(&pool).await }
+        });
+        wait_until_blocked_by(&admin, migration_pid, 1).await;
+        migration.commit().await.expect("commit migration");
+
+        let result = maintenance.await.expect("maintenance task");
+        assert!(
+            refused_events_only(&result, "events is referenced by a foreign key"),
+            "{result:?}"
+        );
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn catch_all_foreign_keys_outside_the_parent_are_refused() {
+        let (pool, admin, schema) = scratch_pool().await;
+        seed_repaired_layout(&pool, true).await;
+        sqlx::query("CREATE TABLE reviewers (id UUID PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create counterpart");
+        let keys = |pool: &PgPool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pg_constraint WHERE contype = 'f' \
+                     AND (conrelid = 'events_p_future_next'::regclass AND conparentid = 0 \
+                          OR confrelid = 'events_p_future_next'::regclass)",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("count catch-all keys")
+            }
+        };
+        // Refused before any lock: with the parent held, a run that reached
+        // the parent lock would report lock_timeout instead.
+        let holder = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS SHARE MODE").await;
+        for (add, remove) in [
+            (
+                "ALTER TABLE ONLY events_p_future_next ADD CONSTRAINT catch_all_reviewer \
+                 FOREIGN KEY (community_id) REFERENCES reviewers(id)",
+                "ALTER TABLE events_p_future_next DROP CONSTRAINT catch_all_reviewer",
+            ),
+            (
+                "CREATE TABLE catch_all_refs (created_at TIMESTAMPTZ, alternate_at TIMESTAMPTZ, \
+                 id BIGINT, CONSTRAINT catch_all_reviewer FOREIGN KEY (created_at, alternate_at, id) \
+                 REFERENCES events_p_future_next (created_at, alternate_at, id))",
+                "DROP TABLE catch_all_refs",
+            ),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(add.to_string()))
+                .execute(&pool)
+                .await
+                .expect("add catch-all key");
+            let result = maintain(&pool).await;
+            assert!(
+                refused_events_only(&result, "catch_all_reviewer"),
+                "{add}: {result:?}"
+            );
+            // Refused, not dropped along with the catch-all.
+            assert_eq!(keys(&pool).await, 1, "{add}");
+            sqlx::query(sqlx::AssertSqlSafe(remove.to_string()))
+                .execute(&pool)
+                .await
+                .expect("remove catch-all key");
+        }
+        drop(holder);
+        assert_advanced(&maintain(&pool).await.expect("advance without the keys"));
+        drop_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn catch_all_foreign_key_committed_while_waiting_on_the_parent_is_refused() {
+        let (pool, admin, schema) = scratch_pool_with_max_connections(6).await;
+        seed_repaired_layout(&pool, true).await;
+        sqlx::query("CREATE TABLE reviewers (id UUID PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create counterpart");
+        // The catch-all's own key conflicts with no parent lock, so a reader
+        // holds the parent to keep maintenance waiting while it commits.
+        let mut reader = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS SHARE MODE").await;
+        let reader_pid = backend_pid(&mut reader).await;
+        let migration = hold_lock(
+            &pool,
+            "ALTER TABLE ONLY events_p_future_next ADD CONSTRAINT catch_all_reviewer \
+             FOREIGN KEY (community_id) REFERENCES reviewers(id)",
+        )
+        .await;
+        let maintenance = tokio::spawn({
+            let pool = pool.clone();
+            async move { maintain(&pool).await }
+        });
+        wait_until_blocked_by(&admin, reader_pid, 1).await;
+        migration.commit().await.expect("commit migration");
+        reader.commit().await.expect("release parent");
+
+        let result = maintenance.await.expect("maintenance task");
+        assert!(
+            refused_events_only(&result, "catch_all_reviewer"),
+            "{result:?}"
+        );
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'catch_all_reviewer'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count catch-all key");
+        assert_eq!(kept, 1);
         drop_schema(&admin, &schema).await;
     }
 
