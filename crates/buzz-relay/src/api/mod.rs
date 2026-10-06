@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod bridge;
+pub mod buzz_v1;
 pub mod events;
 pub mod gifs;
 pub mod git;

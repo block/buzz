@@ -3,6 +3,11 @@ kind: Deployment
 metadata:
   name: {{ include "push.name" . }}
   labels: {{- include "push.runtimeLabels" . | nindent 4 }}
+  {{- if not .Values.networkPolicy.enabled }}
+  annotations:
+    buzz.block.xyz/release-namespace: {{ .Release.Namespace | quote }}
+    buzz.block.xyz/external-network-policy: {{ .Values.networkPolicy.externalPolicyName | quote }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
@@ -11,12 +16,18 @@ spec:
   template:
     metadata:
       labels: {{- include "push.runtimeLabels" . | nindent 8 }}
+      {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.podAnnotations }}
       annotations: {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 60
+      {{- with .Values.serviceAccountName }}
+      serviceAccountName: {{ . | quote }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
