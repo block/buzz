@@ -1508,6 +1508,7 @@ mod tests {
         let _ = routed_db
             .query_events_routed("pool_operation_matrix_reader", &query)
             .await;
+        let _ = routed_db.usage_fleet_stock_snapshot().await;
         routed_db.refresh_pool_waiter_metrics();
 
         let snapshot = snapshotter.snapshot().into_vec();

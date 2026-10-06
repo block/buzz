@@ -775,6 +775,79 @@ impl Db {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::DbError;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    fn route_decisions(recorder: &DebuggingRecorder) -> Vec<(String, String, String, u64)> {
+        let mut decisions: Vec<_> = recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                if key.key().name() != "buzz_db_route_decision" {
+                    return None;
+                }
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|label| label.key() == name)
+                        .map(|label| label.value().to_owned())
+                        .unwrap_or_default()
+                };
+                let DebugValue::Counter(count) = value else {
+                    return None;
+                };
+                Some((label("path"), label("decision"), label("reason"), count))
+            })
+            .collect();
+        decisions.sort();
+        decisions
+    }
+
+    /// Every telemetry attempt on a proved reader lands in the route counter:
+    /// a completed query as `replica/<reason>`, a failed one as
+    /// `skipped/replica_error` with the error propagated (never a writer
+    /// fallback).
+    #[test]
+    fn finish_usage_read_records_every_attempt_in_route_decisions() {
+        let recorder = DebuggingRecorder::new();
+        let (ok, err) = metrics::with_local_recorder(&recorder, || {
+            (
+                Db::finish_usage_read("usage_fleet_stock", "fresh", Ok(7_u8)),
+                Db::finish_usage_read::<u8>(
+                    "usage_fleet_active_users",
+                    "fresh",
+                    Err(DbError::AuthEventRejected),
+                ),
+            )
+        });
+
+        assert!(matches!(ok, Ok(Some(7))));
+        assert!(matches!(err, Err(DbError::AuthEventRejected)));
+        assert_eq!(
+            route_decisions(&recorder),
+            vec![
+                (
+                    "usage_fleet_active_users".to_owned(),
+                    "skipped".to_owned(),
+                    "replica_error".to_owned(),
+                    1
+                ),
+                (
+                    "usage_fleet_stock".to_owned(),
+                    "replica".to_owned(),
+                    "fresh".to_owned(),
+                    1
+                ),
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use buzz_core::CommunityId;
