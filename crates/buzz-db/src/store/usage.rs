@@ -640,12 +640,14 @@ impl Db {
         let Some((mut tx, reason)) = self.route_usage_read(path).await else {
             return Ok(None);
         };
-        sqlx::query("SET LOCAL statement_timeout = '5s'")
-            .execute(&mut *tx)
-            .await?;
-        let snapshot = fleet_stock_snapshot_on(&mut *tx).await?;
-        Self::record_route(path, "replica", reason);
-        Ok(Some(snapshot))
+        let collected = async {
+            sqlx::query("SET LOCAL statement_timeout = '5s'")
+                .execute(&mut *tx)
+                .await?;
+            fleet_stock_snapshot_on(&mut *tx).await
+        }
+        .await;
+        Self::finish_usage_read(path, reason, collected)
     }
 
     /// Collect all fleet active-user windows from a proved read-replica snapshot.
@@ -661,12 +663,34 @@ impl Db {
         let Some((mut tx, reason)) = self.route_usage_read(path).await else {
             return Ok(None);
         };
-        sqlx::query("SET LOCAL statement_timeout = '15s'")
-            .execute(&mut *tx)
-            .await?;
-        let snapshot = fleet_active_users_on(&mut *tx, observed_at).await?;
-        Self::record_route(path, "replica", reason);
-        Ok(Some(snapshot))
+        let collected = async {
+            sqlx::query("SET LOCAL statement_timeout = '15s'")
+                .execute(&mut *tx)
+                .await?;
+            fleet_active_users_on(&mut *tx, observed_at).await
+        }
+        .await;
+        Self::finish_usage_read(path, reason, collected)
+    }
+
+    /// Record the route outcome of a proved-reader telemetry query. A query
+    /// error is a skipped attempt (`replica_error`), never a writer fallback,
+    /// so every attempt appears in `buzz_db_route_decision`.
+    fn finish_usage_read<T>(
+        path: &'static str,
+        reason: &'static str,
+        collected: Result<T>,
+    ) -> Result<Option<T>> {
+        match collected {
+            Ok(snapshot) => {
+                Self::record_route(path, "replica", reason);
+                Ok(Some(snapshot))
+            }
+            Err(error) => {
+                Self::record_route(path, "skipped", "replica_error");
+                Err(error)
+            }
+        }
     }
 
     /// Return total number of communities on this relay.

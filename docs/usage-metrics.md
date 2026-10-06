@@ -48,6 +48,12 @@ gauges. In fleet-only mode the relay does not attribute storage to communities,
 so it emits neither `buzz_community_storage_*` series nor
 `buzz_storage_unmapped_community_bytes`.
 
+Every fleet telemetry query attempt is recorded in
+`buzz_db_route_decision{path=~"usage_fleet_.*"}`: `replica/fresh` when it ran on
+a proved reader, `skipped/<reason>` when no fresh proved reader was available,
+and `skipped/replica_error` when the reader query itself failed. None of these
+paths fall back to the writer.
+
 ## Rollout and rollback
 
 1. Deploy with per-community mode unset or `off` and the telemetry replica
@@ -63,7 +69,8 @@ the associated memory and monitoring-cardinality growth, so it is not the
 steady-state configuration. In this mode every leader tick collects all
 families, so a successful collection reports both availability gauges as `1`
 and a failed one demotes the leader and reports `0`; dashboards gated on
-availability keep working through a rollback. It emits the exact
+availability or `buzz_usage_snapshot_age_seconds` keep working through a
+rollback. It emits the exact
 `buzz_communities_total` instead of `buzz_communities_estimated`.
 
 ## Leader election

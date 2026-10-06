@@ -1005,19 +1005,18 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn = match observability::acquire_reader_with_legacy_metrics(read_pool, operation)
-            .await
-        {
-            Ok(conn) => conn,
-            Err(sqlx::Error::PoolTimedOut) => {
-                tracing::warn!("reader pool acquire timed out; routing to writer");
-                return Err("reader_acquire_timeout");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "reader connection acquire failed; routing to writer");
-                return Err("reader_validation_error");
-            }
-        };
+        let conn =
+            match observability::acquire_reader_with_legacy_metrics(read_pool, operation).await {
+                Ok(conn) => conn,
+                Err(sqlx::Error::PoolTimedOut) => {
+                    tracing::warn!("reader pool acquire timed out");
+                    return Err("reader_acquire_timeout");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "reader connection acquire failed");
+                    return Err("reader_validation_error");
+                }
+            };
         let mut conn = conn;
         let aurora = self.reader_aurora_capability_on(&mut conn).await;
         let mut tx = match sqlx::Transaction::begin(
@@ -1053,11 +1052,11 @@ impl Db {
             // between samples entirely, so absence of elevated active is
             // NOT evidence of a cold connect.
             Err(sqlx::Error::PoolTimedOut) => {
-                tracing::warn!("reader pool acquire timed out; routing to writer");
+                tracing::warn!("reader pool acquire timed out");
                 return Err("reader_acquire_timeout");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "reader transaction begin failed; routing to writer");
+                tracing::warn!(error = %e, "reader transaction begin failed");
                 return Err("reader_validation_error");
             }
         };
@@ -1065,7 +1064,7 @@ impl Db {
             Ok(Some(observation)) => observation,
             Ok(None) => return Err("reader_validation_error"),
             Err(e) => {
-                tracing::warn!(error = %e, "heartbeat observation failed; routing to writer");
+                tracing::warn!(error = %e, "heartbeat observation failed");
                 return Err("reader_validation_error");
             }
         };
