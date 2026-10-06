@@ -2165,17 +2165,19 @@ mod postgres_tests {
             }
         }
 
-        // A read-state-shaped row whose `d_tag` column was never backfilled:
-        // the purge predicate is NULL, which the triggers treat as false. The
-        // id path must still soft-delete it (the `COALESCE` in the generic
-        // soft delete), not silently skip it. Coordinate deletes key on
-        // `d_tag`, so only the id path can reach this row.
+        // A mesh-status-shaped row whose `d_tag` column was never backfilled:
+        // `kind = 30003 AND NULL LIKE … AND tags @> …` makes the purge
+        // predicate NULL (a read-state row cannot: its tag/column EXISTS is
+        // false), which the triggers treat as false. The id path must still
+        // soft-delete it (the `COALESCE` in the generic soft delete), not
+        // silently skip it. Coordinate deletes key on `d_tag`, so only the id
+        // path can reach this row.
         let null_d_tag_row = || async {
             let (_, id, _) = store(
-                "nip-rs with NULL d_tag column",
-                nip_rs,
-                read_state_d.clone(),
-                vec![tag(&["d", &read_state_d]), t_read_state.clone()],
+                "mesh-status with NULL d_tag column",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), k_mesh.clone()],
             )
             .await;
             sqlx::query("UPDATE events SET d_tag = NULL WHERE community_id=$1 AND id=$2")
