@@ -8069,10 +8069,7 @@ mod postgres_tests {
         let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
         let probe_url = format!("{base_prefix}/{probe_db}");
 
-        let schema_sql = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql"),
-        )
-        .expect("read schema/schema.sql");
+        let schema_sql = crate::test_support::desired_state_schema_sql();
         let bootstrap = PgPool::connect(&probe_url)
             .await
             .expect("connect probe database");

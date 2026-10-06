@@ -3576,10 +3576,12 @@ mod postgres_tests {
             .connect(&scratch_url)
             .await
             .expect("connect desired-schema scratch db");
-        sqlx::raw_sql(include_str!("../../../../schema/schema.sql"))
-            .execute(&pool)
-            .await
-            .expect("apply desired-state schema");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            crate::test_support::desired_state_schema_sql(),
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply desired-state schema");
 
         let db = Db::from_pool(pool.clone());
         let community_uuid = Uuid::new_v4();
