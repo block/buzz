@@ -4,6 +4,7 @@
 //! [`CommunityId`](buzz_core::CommunityId). Keep ordinary moderation reads in
 //! [`crate::moderation`] tenant-fenced.
 
+use buzz_core::kind::{AUTHOR_ONLY_KINDS, RESULT_GATED_KINDS};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -437,15 +438,15 @@ pub struct AdminCommunity {
 }
 
 /// List active communities whose host starts with `prefix` (case-insensitive,
-/// matched literally), ordered by `(lower(host), id)` and resumed after
-/// `after`. Uses the tenant binder's liveness rule, so every row can be bound.
+/// matched literally), ordered by `lower(host)` and resumed after the
+/// lowercased host `after`. `lower(host)` is unique, so it alone is a total
+/// order. Uses the tenant binder's liveness rule, so every row can be bound.
 pub async fn list_communities(
     pool: &PgPool,
     prefix: &str,
-    after: Option<(&str, Uuid)>,
+    after: Option<&str>,
     limit: i64,
 ) -> Result<Vec<AdminCommunity>> {
-    let (after_host, after_id) = after.unzip();
     let rows = sqlx::query(
         r#"
         SELECT id, host, icon
@@ -454,14 +455,13 @@ pub async fn list_communities(
           AND deleted_at IS NULL
           AND deletion_state = 'active'
           AND lower(host) LIKE lower($1) || '%' ESCAPE '\'
-          AND ($2::text IS NULL OR (lower(host), id) > ($2, $3::uuid))
-        ORDER BY lower(host), id
-        LIMIT $4
+          AND lower(host) > COALESCE($2, '')
+        ORDER BY lower(host)
+        LIMIT $3
         "#,
     )
     .bind(crate::user::escape_like(prefix))
-    .bind(after_host)
-    .bind(after_id)
+    .bind(after)
     .bind(bounded_limit(limit))
     .fetch_all(pool)
     .await?;
@@ -497,6 +497,10 @@ pub struct AdminEventPreview {
 }
 
 /// Fetch event `id` from `community` only (same lookup as the report detail).
+///
+/// Author-only and result-gated kinds are never returned: the relay must not
+/// reveal that such an event exists to anyone but its author or `#p` reader,
+/// so a matching row is reported as absent.
 pub async fn get_event_preview(
     pool: &PgPool,
     community_id: Uuid,
@@ -506,13 +510,20 @@ pub async fn get_event_preview(
         r#"
         SELECT id, pubkey, kind, content, created_at, deleted_at, channel_id
         FROM events
-        WHERE community_id = $1 AND id = $2
+        WHERE community_id = $1 AND id = $2 AND kind <> ALL($3)
         ORDER BY created_at DESC
         LIMIT 1
         "#,
     )
     .bind(community_id)
     .bind(id)
+    .bind(
+        AUTHOR_ONLY_KINDS
+            .iter()
+            .chain(RESULT_GATED_KINDS)
+            .map(|&kind| kind as i32)
+            .collect::<Vec<_>>(),
+    )
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
@@ -581,7 +592,7 @@ impl Db {
     pub async fn admin_list_communities(
         &self,
         prefix: &str,
-        after: Option<(&str, Uuid)>,
+        after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AdminCommunity>> {
         list_communities(&self.pool, prefix, after, limit).await

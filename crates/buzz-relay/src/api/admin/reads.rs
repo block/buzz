@@ -17,9 +17,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use buzz_db::admin_moderation::{AdminCommunity, AdminEventPreview};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use super::auth::{authorize_read, lookup_admin_principal};
+use super::auth::{authorize_read, lookup_admin_principal, AdminAccess};
 use super::error::ApiError;
 use super::{community_for_host, decode_hex_pubkey, limit, CommunityQuery};
 use crate::state::AppState;
@@ -41,25 +40,24 @@ pub(super) struct CommunitiesPage {
     next_cursor: Option<String>,
 }
 
+/// The cursor is the last row's `lower(host)`, which is unique, so it alone
+/// resumes the directory order.
 fn encode_community_cursor(community: &AdminCommunity) -> String {
-    let payload = format!("{}_{}", community.id, community.host.to_ascii_lowercase());
-    URL_SAFE_NO_PAD.encode(payload)
+    URL_SAFE_NO_PAD.encode(community.host.to_lowercase())
 }
 
-fn decode_community_cursor(token: &str) -> Result<(String, Uuid), ApiError> {
-    let invalid = || ApiError::bad_request("invalid_cursor", "cursor is invalid");
-    let bytes = URL_SAFE_NO_PAD.decode(token).map_err(|_| invalid())?;
-    let payload = String::from_utf8(bytes).map_err(|_| invalid())?;
-    let (id, host) = payload.split_once('_').ok_or_else(invalid)?;
-    let id = Uuid::parse_str(id).map_err(|_| invalid())?;
-    if host.is_empty() {
-        return Err(invalid());
-    }
-    Ok((host.to_owned(), id))
+fn decode_community_cursor(token: &str) -> Result<String, ApiError> {
+    URL_SAFE_NO_PAD
+        .decode(token)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| ApiError::bad_request("invalid_cursor", "cursor is invalid"))
 }
 
 /// `GET /communities?q=&cursor=&limit=` — active communities whose host starts
-/// with `q`, paged by `(lower(host), id)`. `limit` is 1–100, default 50.
+/// with `q` (at most 255 characters, the host length), paged by `lower(host)`.
+/// `limit` is 1–100, default 50.
 pub(super) async fn communities(
     State(state): AppStateRef,
     method: Method,
@@ -75,13 +73,15 @@ pub(super) async fn communities(
         .map(decode_community_cursor)
         .transpose()?;
     let prefix = query.q.as_deref().unwrap_or("").trim();
+    if prefix.chars().count() > 255 {
+        return Err(ApiError::bad_request(
+            "invalid_query",
+            "q must be at most 255 characters",
+        ));
+    }
     let items = state
         .db
-        .admin_list_communities(
-            prefix,
-            after.as_ref().map(|(h, id)| (h.as_str(), *id)),
-            limit,
-        )
+        .admin_list_communities(prefix, after.as_deref(), limit)
         .await?;
     let next_cursor = (items.len() as i64 == limit)
         .then(|| items.last().map(encode_community_cursor))
@@ -163,7 +163,9 @@ pub(super) struct MemberLookup {
     role: Option<String>,
     banned: bool,
     muted_until: Option<DateTime<Utc>>,
-    is_staff: bool,
+    /// Whether the pubkey is deployment staff; `null` in `disabled` mode,
+    /// where no caller can act on the answer and the roster is not read.
+    is_staff: Option<bool>,
 }
 
 /// Whether `pubkey` is deployment staff, using the direct-action staff guard's
@@ -174,7 +176,8 @@ async fn is_staff(state: &AppState, pubkey: &[u8]) -> Result<bool, ApiError> {
 }
 
 /// `GET /members/{pubkey}?communityHost=` — profile, community role, current
-/// restriction and staff status for one pubkey in one community.
+/// restriction and, for a signed caller, staff status for one pubkey in one
+/// community.
 pub(super) async fn lookup_member(
     State(state): AppStateRef,
     method: Method,
@@ -183,7 +186,7 @@ pub(super) async fn lookup_member(
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<Json<MemberLookup>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    let access = authorize_read(&state, &headers, &method, &uri).await?;
     let pubkey = decode_hex_pubkey(&pubkey_hex)?;
     let pubkey_hex = hex::encode(&pubkey);
     let community = community_for_host(&state, &query.community_host).await?;
@@ -193,6 +196,10 @@ pub(super) async fn lookup_member(
         .db
         .moderation_restriction_state(community, &pubkey)
         .await?;
+    let is_staff = match access {
+        AdminAccess::Staff(_) => Some(is_staff(&state, &pubkey).await?),
+        AdminAccess::NetworkTrusted => None,
+    };
     Ok(Json(MemberLookup {
         profile: profile.map(|p| MemberProfile {
             display_name: p.display_name,
@@ -203,13 +210,24 @@ pub(super) async fn lookup_member(
         role: role.map(|member| member.role),
         banned: restriction.banned,
         muted_until: restriction.muted_until,
-        is_staff: is_staff(&state, &pubkey).await?,
+        is_staff,
         pubkey: pubkey_hex,
     }))
 }
 
+/// The one answer for an event the preview will not show: a malformed id, an
+/// id stored only in another community, or an author-only or result-gated
+/// event are all indistinguishable from an absent one.
+fn event_not_found() -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "event_not_found",
+        message: "event was not found in this community".to_owned(),
+    }
+}
+
 /// `GET /events/{id}?communityHost=` — one event inside one community, for the
-/// delete preview. An id stored only in another community is `event_not_found`.
+/// delete preview. Anything else is [`event_not_found`].
 pub(super) async fn event_preview(
     State(state): AppStateRef,
     method: Method,
@@ -219,18 +237,17 @@ pub(super) async fn event_preview(
     Query(query): Query<CommunityQuery>,
 ) -> Result<Json<AdminEventPreview>, ApiError> {
     authorize_read(&state, &headers, &method, &uri).await?;
-    let id = decode_hex_pubkey(&id_hex)?;
+    let id = hex::decode(&id_hex)
+        .ok()
+        .filter(|id| id.len() == 32)
+        .ok_or_else(event_not_found)?;
     let community = community_for_host(&state, &query.community_host).await?;
     state
         .db
         .admin_get_event_preview(*community.as_uuid(), &id)
         .await?
         .map(Json)
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "event_not_found",
-            message: "event was not found in this community".to_owned(),
-        })
+        .ok_or_else(event_not_found)
 }
 
 #[cfg(test)]

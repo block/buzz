@@ -1,5 +1,5 @@
 //! Tests for the community reads, the HEAD binding of every admin read, and
-//! the view/act/staff classification of every admin route. The unsigned, HEAD
+//! the view/act/operator classification of every admin route. The unsigned, HEAD
 //! and validation checks reject or answer before any database access; the rest
 //! are `#[ignore]`d and run in the PostgreSQL lane.
 
@@ -25,7 +25,7 @@ use crate::test_support::database_url;
 
 const PK: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-fn new_routes(host: &str) -> Vec<String> {
+fn community_read_routes(host: &str) -> Vec<String> {
     vec![
         "/communities".to_string(),
         format!("/members/search?communityHost={host}&q=a"),
@@ -86,9 +86,9 @@ async fn get(state: &Arc<AppState>, keys: &nostr::Keys, uri: &str) -> (StatusCod
 }
 
 #[tokio::test]
-async fn new_reads_reject_unsigned_requests() {
+async fn community_reads_reject_unsigned_requests() {
     let state = nip98_state(vec![test_operator_keys().public_key().to_hex()]).await;
-    for uri in new_routes("a.example") {
+    for uri in community_read_routes("a.example") {
         let request = Request::builder()
             .uri(&uri)
             .header(header::HOST, "admin.example")
@@ -105,7 +105,7 @@ async fn new_reads_reject_unsigned_requests() {
 /// The report, feedback, staffing and restriction GET routes, the status a
 /// HEAD-signed HEAD gets past auth, and whether producing that status needs
 /// the database.
-fn other_reads() -> Vec<(String, StatusCode, bool)> {
+fn moderation_reads() -> Vec<(String, StatusCode, bool)> {
     let id = Uuid::new_v4();
     vec![
         ("/probe".to_owned(), StatusCode::OK, false),
@@ -136,10 +136,10 @@ fn other_reads() -> Vec<(String, StatusCode, bool)> {
 /// one of these reads, and a HEAD-signed HEAD passes auth wherever the answer needs no
 /// database (the rest are covered by the Postgres lane below).
 #[tokio::test]
-async fn other_reads_authorize_head_with_the_real_method() {
+async fn moderation_reads_authorize_head_with_the_real_method() {
     let keys = test_operator_keys();
     let state = nip98_state(vec![keys.public_key().to_hex()]).await;
-    for (uri, want, needs_db) in other_reads() {
+    for (uri, want, needs_db) in moderation_reads() {
         let head = |signed: &str| signed_as(&keys, "HEAD", signed, &uri, &uri);
         assert_eq!(
             send(&state, head("GET")).await.0,
@@ -153,12 +153,12 @@ async fn other_reads_authorize_head_with_the_real_method() {
 }
 
 /// The credential covers the full target: a GET-signed HEAD, or a query
-/// changed after signing, is refused on every new route.
+/// changed after signing, is refused on every community read.
 #[tokio::test]
-async fn new_reads_reject_method_and_query_tampering() {
+async fn community_reads_reject_method_and_query_tampering() {
     let keys = test_operator_keys();
     let state = nip98_state(vec![keys.public_key().to_hex()]).await;
-    let mut routes = new_routes("a.example");
+    let mut routes = community_read_routes("a.example");
     routes[0] = "/communities?q=a.example".to_owned();
     for uri in routes {
         let head = signed_as(&keys, "HEAD", "GET", &uri, &uri);
@@ -212,6 +212,35 @@ async fn member_search_rejects_empty_and_overlong_queries() {
     }
 }
 
+/// `q` longer than a host can be is refused before any database access.
+#[tokio::test]
+async fn community_directory_rejects_a_query_longer_than_a_host() {
+    let keys = test_operator_keys();
+    let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+    let uri = format!("/communities?q={}", "a".repeat(256));
+    let (status, body) = get(&state, &keys, &uri).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_query"))
+    );
+}
+
+/// A malformed event id gets the same answer as an absent event.
+#[tokio::test]
+async fn event_preview_answers_a_malformed_id_as_not_found() {
+    let keys = test_operator_keys();
+    let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+    for id in ["zz".repeat(32), "ab".repeat(31), "ab".repeat(33)] {
+        let uri = format!("/events/{id}?communityHost=a.example");
+        let (status, body) = get(&state, &keys, &uri).await;
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("event_not_found")),
+            "{uri}"
+        );
+    }
+}
+
 async fn community(pool: &sqlx::PgPool, host: &str) -> CommunityId {
     buzz_db::Db::from_pool(pool.clone())
         .ensure_configured_community(host)
@@ -232,15 +261,27 @@ async fn seed_profile(pool: &sqlx::PgPool, c: CommunityId, pubkey: &[u8], name: 
     .expect("seed profile");
 }
 
-/// A raw event row: the same id may be stored in two communities with
+/// A raw kind-1 event row: the same id may be stored in two communities with
 /// different content, which is exactly what isolation must not leak.
 async fn seed_event(pool: &sqlx::PgPool, c: CommunityId, id: &[u8], content: &str, deleted: bool) {
+    seed_event_of_kind(pool, c, id, 1, content, deleted).await;
+}
+
+async fn seed_event_of_kind(
+    pool: &sqlx::PgPool,
+    c: CommunityId,
+    id: &[u8],
+    kind: u32,
+    content: &str,
+    deleted: bool,
+) {
     sqlx::query(
         "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, deleted_at) \
-         VALUES ($1, $2, $2, now(), 1, '[]', $3, $2, CASE WHEN $4 THEN now() END)",
+         VALUES ($1, $2, $2, now(), $3, '[]', $4, $2, CASE WHEN $5 THEN now() END)",
     )
     .bind(c.as_uuid())
     .bind(id)
+    .bind(kind as i32)
     .bind(content)
     .bind(deleted)
     .execute(pool)
@@ -262,7 +303,7 @@ fn unique_host(label: &str) -> String {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn new_reads_serve_operators_and_moderators_and_refuse_non_staff() {
+async fn community_reads_serve_operators_and_moderators_and_refuse_non_staff() {
     let (pool, state) = fixture().await;
     let host = unique_host("reads-auth");
     community(&pool, &host).await;
@@ -282,7 +323,7 @@ async fn new_reads_serve_operators_and_moderators_and_refuse_non_staff() {
         StatusCode::OK,
         StatusCode::NOT_FOUND,
     ];
-    for (uri, want) in new_routes(&host).iter().zip(expected) {
+    for (uri, want) in community_read_routes(&host).iter().zip(expected) {
         for keys in [test_operator_keys(), moderator.clone()] {
             assert_eq!(get(&state, &keys, uri).await.0, want, "{uri}");
             let head = signed_as(&keys, "HEAD", "HEAD", uri, uri);
@@ -356,6 +397,17 @@ async fn community_reads_never_return_another_communitys_data() {
     assert_eq!(
         (member["role"].clone(), member["banned"].clone()),
         (Value::Null, false.into())
+    );
+    let (_, member) = get(
+        &state,
+        &keys,
+        &format!("/members/{}?communityHost={host_b}", hex::encode(shared)),
+    )
+    .await;
+    assert_eq!(
+        (member["role"].clone(), member["banned"].clone()),
+        ("admin".into(), true.into()),
+        "{member}"
     );
 
     let (status, stranger) = get(
@@ -466,11 +518,23 @@ async fn community_directory_pages_live_hosts_by_literal_prefix() {
     let (_, under) = get(&state, &keys, &format!("/communities?q={p}_")).await;
     assert_eq!(hosts(&under), [format!("{p}_u.example")]);
 
-    let (status, bad) = get(&state, &keys, "/communities?cursor=not-a-cursor").await;
-    assert_eq!(
-        (status, bad["error"]["code"].as_str()),
-        (StatusCode::BAD_REQUEST, Some("invalid_cursor"))
-    );
+    let (status, longest) = get(
+        &state,
+        &keys,
+        &format!("/communities?q={}", "a".repeat(255)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{longest}");
+
+    // Not base64, base64 of nothing, and base64 of invalid UTF-8.
+    for cursor in ["not-a-cursor!", "", "_w"] {
+        let (status, bad) = get(&state, &keys, &format!("/communities?cursor={cursor}")).await;
+        assert_eq!(
+            (status, bad["error"]["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_cursor")),
+            "cursor={cursor:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -511,6 +575,44 @@ async fn member_lookup_reports_staff_and_active_restrictions() {
     .await;
     assert_eq!(member["isStaff"], true);
     assert_eq!(member["pubkey"], staff);
+}
+
+/// A Moderator gets the staff answer too (the desktop preflights direct
+/// actions with it); disabled mode has no signed caller and gets `null`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn member_lookup_reports_staff_only_to_a_signed_caller() {
+    let (pool, state) = fixture().await;
+    let host = unique_host("lookup-staff");
+    community(&pool, &host).await;
+    let moderator = nostr::Keys::generate();
+    buzz_db::Db::from_pool(pool.clone())
+        .upsert_relay_operator(
+            &moderator.public_key().to_bytes(),
+            "moderator",
+            &[1u8; 32],
+            true,
+        )
+        .await
+        .expect("seed moderator");
+    let operator = test_operator_keys().public_key().to_hex();
+    let lookup = |pubkey: &str| format!("/members/{pubkey}?communityHost={host}");
+
+    for (pubkey, want) in [(operator.as_str(), true), (PK, false)] {
+        let (status, member) = get(&state, &moderator, &lookup(pubkey)).await;
+        assert_eq!(status, StatusCode::OK, "{member}");
+        assert_eq!(member["isStaff"], want, "{pubkey}");
+    }
+
+    let open = disabled_mode_state().await;
+    let request = Request::builder()
+        .uri(lookup(&operator))
+        .header(header::HOST, "admin.example")
+        .body(Body::empty())
+        .unwrap();
+    let (status, member) = send(&open, request).await;
+    assert_eq!(status, StatusCode::OK, "{member}");
+    assert!(member["isStaff"].is_null(), "{member}");
 }
 
 /// Only the staff-roster read fails: each connection shadows
@@ -574,13 +676,13 @@ async fn member_search_returns_up_to_the_limit() {
 }
 
 /// The database-backed half of
-/// `other_reads_authorize_head_with_the_real_method`.
+/// `moderation_reads_authorize_head_with_the_real_method`.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn other_reads_serve_a_head_signed_head() {
+async fn moderation_reads_serve_a_head_signed_head() {
     let (_, state) = fixture().await;
     let keys = test_operator_keys();
-    for (uri, want, _) in other_reads().into_iter().filter(|r| r.2) {
+    for (uri, want, _) in moderation_reads().into_iter().filter(|r| r.2) {
         let head = signed_as(&keys, "HEAD", "HEAD", &uri, &uri);
         assert_eq!(send(&state, head).await.0, want, "HEAD {uri}");
     }
@@ -617,6 +719,79 @@ async fn event_preview_reports_the_stored_event_and_its_deletion() {
     assert!(
         event["deletedAt"].is_string() && event["channelId"].is_null(),
         "{event}"
+    );
+}
+
+/// An author-only or result-gated event is answered as absent, even to staff.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn event_preview_hides_author_only_and_result_gated_kinds() {
+    use buzz_core::kind::{AUTHOR_ONLY_KINDS, RESULT_GATED_KINDS};
+    let (pool, state) = fixture().await;
+    let keys = test_operator_keys();
+    let host = unique_host("preview-hidden");
+    let c = community(&pool, &host).await;
+    for (i, &kind) in AUTHOR_ONLY_KINDS
+        .iter()
+        .chain(RESULT_GATED_KINDS)
+        .enumerate()
+    {
+        let id = [0x80 + i as u8; 32];
+        seed_event_of_kind(&pool, c, &id, kind, "hidden", false).await;
+        let uri = format!("/events/{}?communityHost={host}", hex::encode(id));
+        let (status, body) = get(&state, &keys, &uri).await;
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("event_not_found")),
+            "kind {kind}: {body}"
+        );
+    }
+}
+
+/// Every query struct refuses an unknown field, on reads and on a write; the
+/// refused write leaves the ban in place.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn admin_queries_reject_unknown_fields() {
+    let (pool, state) = fixture().await;
+    let keys = test_operator_keys();
+    let host = unique_host("unknown-field");
+    let c = community(&pool, &host).await;
+    let target = [0x91u8; 32];
+    let db = buzz_db::Db::from_pool(pool.clone());
+    db.ban_community_member(c, &target, &keys.public_key().to_bytes(), None, None)
+        .await
+        .expect("seed ban");
+
+    for uri in [
+        "/communities?bogus=1".to_owned(),
+        format!("/members/search?communityHost={host}&q=a&bogus=1"),
+        format!("/members/{PK}?communityHost={host}&bogus=1"),
+    ] {
+        assert_eq!(
+            get(&state, &keys, &uri).await.0,
+            StatusCode::BAD_REQUEST,
+            "{uri}"
+        );
+    }
+
+    let uri = format!(
+        "/members/{}/ban?communityHost={host}&bogus=1",
+        hex::encode(target)
+    );
+    let unban = signed_as(&keys, "DELETE", "DELETE", &uri, &uri);
+    assert_eq!(
+        send(&state, unban).await.0,
+        StatusCode::BAD_REQUEST,
+        "{uri}"
+    );
+    let restriction = db
+        .moderation_restriction_state(c, &target)
+        .await
+        .expect("read ban");
+    assert!(
+        restriction.banned,
+        "the refused unban must not lift the ban"
     );
 }
 
@@ -688,13 +863,14 @@ enum Check {
     /// A signed staff member; refused in disabled mode.
     Act,
     /// A signed Operator; refused in disabled mode.
-    Staff,
+    Operator,
 }
 
 /// Every route the admin API mounts, with its check. A new route must be
-/// added here, which forces a deliberate choice of policy.
+/// added here with a deliberate policy: `every_route_is_listed` fails while
+/// the number of `.route(` registrations in `router()` differs from this list.
 fn every_route() -> Vec<(&'static str, String, Check)> {
-    use Check::{Act, Staff, View};
+    use Check::{Act, Operator, View};
     let id = Uuid::nil();
     let host = "communityHost=a.example";
     vec![
@@ -708,9 +884,9 @@ fn every_route() -> Vec<(&'static str, String, Check)> {
         ("GET", format!("/feedback/{id}"), View),
         ("PATCH", format!("/feedback/{id}"), Act),
         ("GET", format!("/feedback/{id}/attachments/{PK}"), View),
-        ("GET", "/operators".into(), Staff),
-        ("PUT", format!("/operators/{PK}"), Staff),
-        ("DELETE", format!("/operators/{PK}"), Staff),
+        ("GET", "/operators".into(), Operator),
+        ("PUT", format!("/operators/{PK}"), Operator),
+        ("DELETE", format!("/operators/{PK}"), Operator),
         ("GET", "/communities".into(), View),
         ("GET", format!("/members/search?{host}&q=a"), View),
         ("GET", format!("/members/{PK}?{host}"), View),
@@ -724,6 +900,17 @@ fn every_route() -> Vec<(&'static str, String, Check)> {
     ]
 }
 
+/// Counts registrations, not paths: it catches an added or removed `.route(`
+/// call, not a changed path within one.
+#[test]
+fn every_route_is_listed() {
+    let source = include_str!("mod.rs");
+    let start = source.find("pub fn router(").expect("router() in mod.rs");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("end of router()")];
+    assert_eq!(body.matches(".route(").count(), every_route().len());
+}
+
 fn unsigned_request(method: &str, uri: &str) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -735,13 +922,13 @@ fn unsigned_request(method: &str, uri: &str) -> Request<Body> {
 }
 
 /// nip98 demands a credential on every route; disabled mode serves every view
-/// route and refuses every act and staff route.
+/// route and refuses every act and operator route.
 ///
 /// The route list is written by hand: a new route must be added here on
 /// purpose. View rows only prove no credential is asked for (they accept 404
 /// or 500); `community_reads_serve_disabled_mode_within_the_selected_community`
 /// is what proves the reads return data. Unsigned and disabled-mode requests
-/// cannot tell `.staff()` from `.act()`; `moderator_cannot_access_staffing_endpoints`
+/// cannot tell `.operator()` from `.act()`; `moderator_cannot_access_staffing_endpoints`
 /// covers that boundary.
 #[tokio::test]
 #[ignore = "requires Postgres"]
