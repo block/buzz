@@ -1,7 +1,7 @@
 //! Per-peer NetEQ-style jitter buffer for huddle remote audio.
 //!
 //! Wraps the [`neteq`] crate's `NetEq` state machine and registers a thin
-//! `AudioDecoder` impl over our existing `opus = "0.3"` dependency. Default
+//! `AudioDecoder` impl over our `opus` dependency. Default
 //! features on `neteq` are disabled so we don't pull in axum/cpal/clap; this
 //! module owns the Opus side of the trait instead.
 //!

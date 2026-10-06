@@ -26,6 +26,12 @@ WebPKI roots select `default-features = false, features = ["webpki-roots"]`;
 hosts can also pass their configured TLS connector. Signing and trust policy
 remain host-owned.
 
+Opus 0.4 uses the maintained `opusic-sys` backend. NetEQ is pinned to 0.8.3:
+its published source does not use its declared `ringbuf` dependency, which has
+advisory RUSTSEC-2026-0293. The root security policy documents that unreachable
+path and forbids other consumers of vulnerable ringbuf versions. Re-audit or
+remove that exception when updating NetEQ; 0.9.1 still declares the old ringbuf.
+
 Run `cargo test -p buzz-audio-client` and
 `cargo clippy -p buzz-audio-client --all-targets -- -D warnings` from the root
 with Hermit active. Tests use real loopback WebSockets and Opus audio, without a
