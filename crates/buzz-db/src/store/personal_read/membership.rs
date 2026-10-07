@@ -121,3 +121,31 @@ pub(crate) async fn record_message(
     .await?;
     Ok(())
 }
+
+/// Note that an eligible timeline message (top-level, or a broadcast reply)
+/// arrived in `channel`. Run it as the ingest transaction's last statement:
+/// concurrent posts to one channel queue on this row lock until commit.
+/// `GREATEST` makes their order irrelevant. Key-share locks from inserts that
+/// reference the channel do not conflict with this non-key update.
+pub(crate) async fn record_timeline_arrival(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    event: &Event,
+    channel: Uuid,
+    received_at: DateTime<Utc>,
+) -> Result<()> {
+    if !ELIGIBLE_KINDS.contains(&i32::from(event.kind.as_u16())) {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE channels SET last_timeline_received_at =
+            GREATEST(last_timeline_received_at, $3)
+         WHERE community_id=$1 AND id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(channel)
+    .bind(received_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}

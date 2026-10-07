@@ -215,8 +215,11 @@ device-local.
 
 - 20 sidebar rows, 100 intents, 20 contexts / 100 selectors per request.
 - 64 KiB write body; 16 KiB context URL; 1 MiB serialized API response.
-- `unread` is an existence probe that stops at the first message past the
-  position, so a caught-up reader examines almost nothing. Counting is forward
+- A channel whose last timeline arrival (`channels.last_timeline_received_at`)
+  is at or before the position is read with one comparison, without walking
+  past replies. Otherwise `unread` is an existence probe that stops at the
+  first message past the position, which also rules out a deleted latest
+  message. Counting is forward
   from the position: work grows with what is unread, not with history.
 - Mention counts walk only your mentions in that scope past the position
   (`idx_event_mentions_scope_received`).
@@ -228,15 +231,19 @@ device-local.
   containment, not a production capacity claim.
 
 Apply migration 0056 (or the equivalent desired schema). It creates two
-private tables, adds `thread_metadata.last_reply_received_at` and
+private tables, adds `thread_metadata.last_reply_received_at`,
+`channels.last_timeline_received_at` and
 `event_mentions.received_at`/`root_id` (NULL for rows from before it, which no
 position can reach), and one index on `event_mentions`. Ingest writes the
 author's own position and follow rows in the same transaction as the message.
 
 During a rolling deploy, relay processes still on the old code write
 `event_mentions` rows without `received_at`/`root_id` and do not mark posting
-read. Those mentions never count, and an author's own message from such a
-process can show unread to them until they next read the scope.
+read. Those mentions never count, an author's own message from such a
+process can show unread to them until they next read the scope, and a
+channel or thread whose only new messages came through such a process shows
+read until its next message through new code (the arrival columns are not
+updated).
 
 Use existing HTTP route/status/latency metrics for `/buzz/v1/me/sidebar` and
 `/buzz/v1/me/read-state`, plus database pool/statement metrics. No payload,

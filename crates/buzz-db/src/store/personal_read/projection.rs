@@ -84,8 +84,11 @@ impl Db {
         // cover them all, so a follow that survived leaving does not bring
         // back replies from the absence.
         //
-        // - unread: the first timeline message past the position
-        //   (idx_events_community_channel_created);
+        // - unread: nothing when the channel's last timeline arrival is at
+        //   or before the position (one comparison, so a caught-up reader
+        //   never walks replies); otherwise the first timeline message past
+        //   it (idx_events_community_channel_created), which rules out a
+        //   deleted latest message;
         // - mentions: the actor's mentions in that scope that arrived past
         //   the position (idx_event_mentions_scope_received);
         // - read_through_id: the newest timeline message, by author time, that
@@ -100,6 +103,7 @@ impl Db {
             r#"WITH roster AS MATERIALIZED (
                 SELECT c.id, c.name, c.channel_type::text AS channel_type,
                     c.archived_at IS NOT NULL AS archived, cm.hidden_at IS NOT NULL AS hidden,
+                    c.last_timeline_received_at,
                     GREATEST(cf.through_timestamp, cm.joined_at, s.started) AS position,
                     GREATEST(cf.threads_through_timestamp, cm.joined_at, s.started) AS threads_floor
                 FROM channel_members cm JOIN channels c
@@ -114,7 +118,7 @@ impl Db {
                 ORDER BY c.id LIMIT $5
              )
              SELECT r.id, r.name, r.channel_type, r.archived, r.hidden,
-                EXISTS (SELECT 1 FROM events e {EVENT_THREAD_ROW}
+                COALESCE(r.last_timeline_received_at > r.position, false) AND EXISTS (SELECT 1 FROM events e {EVENT_THREAD_ROW}
                     WHERE e.community_id=$1 AND e.channel_id=r.id
                         AND {UNREAD_EVENT} AND {ON_TIMELINE}) AS unread,
                 (SELECT count(*) FROM event_mentions m JOIN events e ON e.community_id=$1

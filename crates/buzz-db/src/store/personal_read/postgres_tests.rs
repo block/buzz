@@ -641,6 +641,74 @@ async fn posting_marks_read_and_read_through_skips_deleted_and_auxiliary() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn channel_unread_follows_timeline_arrivals_only() {
+    let (db, pool, community, channel, actor, root) = fixture().await;
+    let base = now();
+    let other = Keys::generate();
+    let last = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT last_timeline_received_at FROM channels WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        apply(&db, community, &actor, mark(channel, None, &root)).await,
+        IntentOutcome::Applied
+    );
+    let caught_up = last(pool.clone()).await;
+    assert!(caught_up.is_some(), "the fixture's message set it");
+    assert!(!sidebar(&db, community, &actor).await.unread);
+
+    // A thread reply is not on the timeline: the channel stays read.
+    reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &other,
+        base + 1,
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(last(pool.clone()).await, caught_up);
+    assert!(!sidebar(&db, community, &actor).await.unread);
+
+    // A reaction (not an eligible kind) doesn't move it; a broadcast reply,
+    // which shows on the timeline, does.
+    post_kind(&db, community, channel, &other, 7, base + 2, vec![]).await;
+    assert_eq!(last(pool.clone()).await, caught_up);
+    let broadcast = reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &other,
+        base + 3,
+        vec![],
+        true,
+    )
+    .await;
+    assert!(last(pool.clone()).await > caught_up);
+    assert!(sidebar(&db, community, &actor).await.unread);
+
+    // Deleting the only unread timeline message leaves the channel read: the
+    // probe confirms what the arrival time suggests.
+    sqlx::query("UPDATE events SET deleted_at=clock_timestamp() WHERE community_id=$1 AND id=$2")
+        .bind(community.as_uuid())
+        .bind(broadcast.id.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!sidebar(&db, community, &actor).await.unread);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn top_level_message_with_depth_zero_metadata_marks_read_and_follows() {
     // Workflow messages store a depth-0 metadata row with no parent.
     let (db, _, community, channel, actor, _) = fixture().await;

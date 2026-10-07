@@ -12,7 +12,7 @@ mod model;
 mod projection;
 mod writes;
 
-pub(crate) use membership::{record_message, Place};
+pub(crate) use membership::{record_message, record_timeline_arrival, Place};
 pub use model::*;
 
 #[cfg(test)]

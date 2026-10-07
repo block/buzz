@@ -41,6 +41,14 @@ CREATE TABLE personal_read_frontiers (
 -- with nothing new since the reader's position without reading replies.
 ALTER TABLE thread_metadata ADD COLUMN last_reply_received_at TIMESTAMPTZ;
 
+-- Arrival time of a channel's latest eligible timeline message (top-level or
+-- broadcast reply): the sidebar answers "anything new?" for a caught-up
+-- reader with one comparison instead of walking past replies. Unindexed so
+-- updates stay HOT. NULL for channels with no timeline message since this
+-- migration, which no position can be behind: every position is floored at
+-- a started_at set after it.
+ALTER TABLE channels ADD COLUMN last_timeline_received_at TIMESTAMPTZ;
+
 -- Arrival time and read scope of each mention, so the sidebar counts a
 -- reader's unread mentions in one channel timeline or thread from its
 -- position. root_id is the thread a reply belongs to, NULL when the mention

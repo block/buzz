@@ -456,6 +456,16 @@ pub async fn insert_event_in_transaction(
             .await?;
         }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
+        if let Some(channel) = channel_id {
+            crate::personal_read::record_timeline_arrival(
+                tx,
+                community_id,
+                event,
+                channel,
+                result.0.received_at,
+            )
+            .await?;
+        }
     }
     Ok(result)
 }
@@ -1899,6 +1909,24 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             .await?;
         }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
+        // Last, so the channel row lock is held only until commit.
+        let timeline = match &thread_meta {
+            None => channel_id,
+            Some(meta) if meta.parent_event_id.is_none() || (meta.depth == 1 && meta.broadcast) => {
+                Some(meta.channel_id)
+            }
+            Some(_) => None,
+        };
+        if let Some(channel) = timeline {
+            crate::personal_read::record_timeline_arrival(
+                tx,
+                community_id,
+                event,
+                channel,
+                received_at,
+            )
+            .await?;
+        }
     }
 
     Ok((
