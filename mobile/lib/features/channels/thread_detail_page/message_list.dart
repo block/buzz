@@ -147,12 +147,6 @@ class _ThreadMessageList extends HookWidget {
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);
-    final headDrag = useRef<Drag?>(null);
-    useEffect(
-      () =>
-          () => headDrag.value?.cancel(),
-      const [],
-    );
     const headIndex = 0;
     final tailAnchorIndex = replies.length + 1;
 
@@ -316,46 +310,28 @@ class _ThreadMessageList extends HookWidget {
                   child: CompositedTransformFollower(
                     link: visible ? headLink : loadingHeadLink,
                     showWhenUnlinked: false,
-                    child: Semantics(
-                      sortKey: const OrdinalSortKey(-1),
-                      child: GestureDetector(
-                        onVerticalDragStart: !visible
-                            ? null
-                            : (details) {
-                                headDrag.value = headScrollPosition.value?.drag(
-                                  details,
-                                  () => headDrag.value = null,
-                                );
-                              },
-                        onVerticalDragUpdate: !visible
-                            ? null
-                            : (details) => headDrag.value?.update(details),
-                        onVerticalDragEnd: !visible
-                            ? null
-                            : (details) => headDrag.value?.end(details),
-                        onVerticalDragCancel: !visible
-                            ? null
-                            : () => headDrag.value?.cancel(),
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxHeight: visible
-                                ? double.infinity
-                                : math.max(
-                                    0,
-                                    constraints.maxHeight -
-                                        frostedAppBarHeight(context) -
-                                        Grid.xs -
-                                        bottomInset,
-                                  ),
-                          ),
-                          child: SingleChildScrollView(
-                            key: const ValueKey('thread-initial-head'),
-                            primary: false,
-                            physics: visible
-                                ? const NeverScrollableScrollPhysics()
-                                : null,
-                            child: _buildHead(context),
-                          ),
+                    child: _ThreadHeadScrollInput(
+                      enabled: visible,
+                      scrollPosition: () => headScrollPosition.value,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: visible
+                              ? double.infinity
+                              : math.max(
+                                  0,
+                                  constraints.maxHeight -
+                                      frostedAppBarHeight(context) -
+                                      Grid.xs -
+                                      bottomInset,
+                                ),
+                        ),
+                        child: SingleChildScrollView(
+                          key: const ValueKey('thread-initial-head'),
+                          primary: false,
+                          physics: visible
+                              ? const NeverScrollableScrollPhysics()
+                              : null,
+                          child: _buildHead(context),
                         ),
                       ),
                     ),

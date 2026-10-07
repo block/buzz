@@ -105,6 +105,36 @@ void _loadingReviewTests() {
             isTrue,
             reason: 'Dragging the persistent head scrolls the reply list.',
           );
+          list.itemScrollController!.jumpTo(index: 0);
+          await tester.pumpAndSettle();
+          final beforeWheel = tester.getTopLeft(find.text('Reply 0')).dy;
+          await tester.sendEventToBinding(
+            PointerScrollEvent(
+              position: tester.getCenter(
+                find.text('Original message').hitTestable(),
+              ),
+              scrollDelta: const Offset(0, 50),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            tester.getTopLeft(find.text('Reply 0')).dy,
+            lessThan(beforeWheel),
+          );
+          list.itemScrollController!.jumpTo(index: 0);
+          await tester.pumpAndSettle();
+          final semantics = tester.ensureSemantics();
+          await tester.pump();
+          final headNode = tester.getSemantics(
+            find.byKey(const ValueKey('thread-head-scroll-semantics')),
+          );
+          headNode.owner!.performAction(
+            headNode.id,
+            SemanticsAction.scrollDown,
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Original message').hitTestable(), findsNothing);
+          semantics.dispose();
         }
       },
     );

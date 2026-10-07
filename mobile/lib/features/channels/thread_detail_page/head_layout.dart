@@ -38,3 +38,85 @@ class _ThreadHeadLayout extends HookWidget {
     );
   }
 }
+
+/// Gives the persistent head the same scroll input as its linked lazy list.
+class _ThreadHeadScrollInput extends HookWidget {
+  final bool enabled;
+  final ScrollPosition? Function() scrollPosition;
+  final Widget child;
+
+  const _ThreadHeadScrollInput({
+    required this.enabled,
+    required this.scrollPosition,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final drag = useRef<Drag?>(null);
+    useEffect(
+      () =>
+          () => drag.value?.cancel(),
+      [enabled],
+    );
+    final position = scrollPosition();
+    useListenable(position);
+    void scrollPage(double direction) {
+      final current = scrollPosition();
+      if (current != null) {
+        current.moveTo(
+          current.pixels + direction * current.viewportDimension * 0.8,
+        );
+      }
+    }
+
+    return Semantics(
+      key: const ValueKey('thread-head-scroll-semantics'),
+      sortKey: const OrdinalSortKey(-1),
+      onScrollUp:
+          enabled &&
+              position != null &&
+              position.pixels > position.minScrollExtent
+          ? () => scrollPage(-1)
+          : null,
+      onScrollDown:
+          enabled &&
+              position != null &&
+              position.pixels < position.maxScrollExtent
+          ? () => scrollPage(1)
+          : null,
+      child: Listener(
+        onPointerSignal: !enabled
+            ? null
+            : (event) {
+                if (event is PointerScrollEvent) {
+                  GestureBinding.instance.pointerSignalResolver.register(
+                    event,
+                    (_) {
+                      scrollPosition()?.pointerScroll(event.scrollDelta.dy);
+                    },
+                  );
+                }
+              },
+        child: GestureDetector(
+          onVerticalDragStart: !enabled
+              ? null
+              : (details) {
+                  drag.value = scrollPosition()?.drag(
+                    details,
+                    () => drag.value = null,
+                  );
+                },
+          onVerticalDragUpdate: !enabled
+              ? null
+              : (details) => drag.value?.update(details),
+          onVerticalDragEnd: !enabled
+              ? null
+              : (details) => drag.value?.end(details),
+          onVerticalDragCancel: !enabled ? null : () => drag.value?.cancel(),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
