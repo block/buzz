@@ -2431,7 +2431,7 @@ mod tests {
     fn advertised_max_limit() -> i64 {
         crate::nip11::RelayInfo::build(
             None,
-            None,
+            crate::nip11::RelayWorkspaceProfile::default(),
             crate::nip11::RelayCapabilityFlags::default(),
             crate::config::DEFAULT_MAX_FRAME_BYTES,
             None,

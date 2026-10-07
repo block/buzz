@@ -360,6 +360,66 @@ impl Db {
         Ok(())
     }
 
+    /// Returns whether this community projects thread replies into channels.
+    #[datastore_span(
+        name = "get_community_thread_replies_in_channel",
+        system = "postgresql"
+    )]
+    pub async fn get_community_thread_replies_in_channel(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        let row = sqlx::query(
+            r#"
+            SELECT thread_replies_in_channel
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<bool, _>("thread_replies_in_channel"))
+            .transpose()?
+            .unwrap_or(false))
+    }
+
+    /// Sets whether this community projects thread replies into channels.
+    #[datastore_span(
+        name = "set_community_thread_replies_in_channel",
+        system = "postgresql"
+    )]
+    pub async fn set_community_thread_replies_in_channel(
+        &self,
+        community_id: CommunityId,
+        enabled: bool,
+    ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET thread_replies_in_channel = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(enabled)
+        .execute(&mut *connection)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations

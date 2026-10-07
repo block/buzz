@@ -31,6 +31,9 @@ pub struct RelayInfo {
     /// admins/owners via the kind:9033 command. Omitted when no icon is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Buzz extension: whether thread replies are projected into channel feeds.
+    #[serde(default)]
+    pub thread_replies_in_channel: bool,
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
@@ -197,6 +200,15 @@ pub(crate) struct RelayCapabilityFlags {
     pub advertise_fi: bool,
 }
 
+/// Host-scoped workspace profile fields consumed by [`RelayInfo::build`].
+#[derive(Default, Clone, Copy)]
+pub(crate) struct RelayWorkspaceProfile<'a> {
+    /// Workspace icon URL advertised in the standard NIP-11 `icon` field.
+    pub icon: Option<&'a str>,
+    /// Whether thread replies are projected into channel feeds.
+    pub thread_replies_in_channel: bool,
+}
+
 impl RelayInfo {
     /// Builds the relay's NIP-11 information document.
     ///
@@ -207,9 +219,9 @@ impl RelayInfo {
     /// unconditionally) requires clients to verify those events against
     /// `self`. Pass `Some` whenever the relay has a stable signing key.
     ///
-    /// `icon` is the community's workspace icon (see
-    /// [`workspace_icon_for_host`]) — a host-scoped scalar, pre-fetched by
-    /// the caller so `build` itself stays static-input.
+    /// `profile` is the community's workspace profile (see
+    /// [`workspace_profile_for_host`]) — host-scoped scalars,
+    /// pre-fetched by the caller so `build` itself stays static-input.
     ///
     /// `advertise_nip43` controls whether NIP-43 (relay membership) is added
     /// to `supported_nips`. Set `true` only when the relay actually emits and
@@ -227,13 +239,17 @@ impl RelayInfo {
     /// provider credential.
     pub(crate) fn build(
         relay_self: Option<&str>,
-        icon: Option<&str>,
+        profile: RelayWorkspaceProfile<'_>,
         flags: RelayCapabilityFlags,
         max_message_length: usize,
         pairing_relay_url: Option<&str>,
         admin_api: Option<&str>,
         gif_provider: Option<&str>,
     ) -> Self {
+        let RelayWorkspaceProfile {
+            icon,
+            thread_replies_in_channel,
+        } = profile;
         let RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
@@ -276,6 +292,7 @@ impl RelayInfo {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            thread_replies_in_channel,
             read_state_snapshot: None,
             buzz_v1: None,
             artifacts: serde_json::json!({
@@ -368,16 +385,19 @@ fn push_descriptor(
 /// Centralised so the content-negotiated root handler and the dedicated
 /// `/info` endpoint can't drift apart. Every input to `RelayInfo::build`
 /// stays a pre-derived scalar: [`nip11_facts`] (config + keypair) plus the
-/// host-scoped workspace icon. Optional provider capabilities are passed as
+/// host-scoped workspace profile. Optional provider capabilities are passed as
 /// config-derived scalar identifiers; no provider credential enters NIP-11.
 pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
     let (relay_self, advertise_nip43) = nip11_facts(state);
-    let icon = workspace_icon_for_host(state, raw_host).await;
+    let profile = workspace_profile_for_host(state, raw_host).await;
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
     let advertise_fi = state.config.nip_fi.mode.evaluates();
     let mut info = RelayInfo::build(
         relay_self.as_deref(),
-        icon.as_deref(),
+        RelayWorkspaceProfile {
+            icon: profile.icon.as_deref(),
+            thread_replies_in_channel: profile.thread_replies_in_channel,
+        },
         RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
@@ -435,25 +455,45 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     info
 }
 
-/// Fetches the workspace icon for the community bound to `raw_host`, as the
-/// host-scoped scalar consumed by [`RelayInfo::build`].
+#[derive(Debug, Default)]
+struct WorkspaceProfile {
+    icon: Option<String>,
+    thread_replies_in_channel: bool,
+}
+
+/// Fetches the workspace profile for the community bound to `raw_host`, as the
+/// host-scoped scalars consumed by [`RelayInfo::build`].
 ///
 /// The icon is per-community state (`communities.icon`, set by relay
 /// admins/owners via the kind:9033 command) served in the standard NIP-11
-/// `icon` field. The lookup is scoped through
+/// `icon` field. `thread_replies_in_channel` is a Buzz extension on the same
+/// profile command. The lookup is scoped through
 /// [`crate::tenant::bind_community`] — never an unscoped query. Fails open to
-/// `None` (no `icon` field): NIP-11 is intentionally served to unmapped hosts
-/// too, and an icon lookup failure must not break that.
-async fn workspace_icon_for_host(state: &crate::state::AppState, raw_host: &str) -> Option<String> {
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
-        .await
-        .ok()?;
-    state
+/// the default empty profile: NIP-11 is intentionally served to unmapped hosts
+/// too, and a profile lookup failure must not break that.
+async fn workspace_profile_for_host(
+    state: &crate::state::AppState,
+    raw_host: &str,
+) -> WorkspaceProfile {
+    let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await else {
+        return WorkspaceProfile::default();
+    };
+    let icon = state
         .db
         .get_community_icon(tenant.community())
         .await
         .ok()
-        .flatten()
+        .flatten();
+    let thread_replies_in_channel = state
+        .db
+        .get_community_thread_replies_in_channel(tenant.community())
+        .await
+        .unwrap_or(false);
+
+    WorkspaceProfile {
+        icon,
+        thread_replies_in_channel,
+    }
 }
 
 /// Derives the two NIP-11 facts that depend on runtime config:
@@ -495,8 +535,8 @@ fn admin_api_advertisement(admin: Option<&crate::config::AdminConfig>) -> Option
 /// an enumeration oracle for *other* communities. `build` takes only static
 /// and scalar inputs — the per-deployment facts arrive pre-derived through
 /// [`nip11_facts`] (config + relay keypair), and the one host-scoped fact
-/// (the workspace `icon`) arrives as a scalar from
-/// [`workspace_icon_for_host`], whose DB lookup is scoped through
+/// (the workspace profile) arrives as scalars from
+/// [`workspace_profile_for_host`], whose DB lookup is scoped through
 /// [`crate::tenant::bind_community`] and can therefore only ever surface the
 /// requesting host's own community state.
 ///
@@ -510,7 +550,7 @@ fn admin_api_advertisement(admin: Option<&crate::config::AdminConfig>) -> Option
 #[allow(clippy::type_complexity)]
 const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
     Option<&str>,
-    Option<&str>,
+    RelayWorkspaceProfile<'_>,
     RelayCapabilityFlags,
     usize,
     Option<&str>,
@@ -591,11 +631,21 @@ mod tests {
         );
     }
 
+    fn workspace_profile(
+        icon: Option<&str>,
+        thread_replies_in_channel: bool,
+    ) -> RelayWorkspaceProfile<'_> {
+        RelayWorkspaceProfile {
+            icon,
+            thread_replies_in_channel,
+        }
+    }
+
     #[test]
     fn build_advertises_buzz_repository_url() {
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -609,7 +659,7 @@ mod tests {
     fn configured_pairing_relay_is_advertised_and_unset_value_is_omitted() {
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             Some("wss://pairing.buzz.xyz"),
@@ -625,7 +675,7 @@ mod tests {
 
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -640,7 +690,7 @@ mod tests {
     fn gif_descriptor_and_extension_are_config_gated_and_credential_free() {
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -660,7 +710,7 @@ mod tests {
 
         let unconfigured = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -681,7 +731,7 @@ mod tests {
     fn icon_is_mirrored_and_empty_or_absent_is_omitted() {
         let info = RelayInfo::build(
             None,
-            Some("data:image/webp;base64,UklGRg=="),
+            workspace_profile(Some("data:image/webp;base64,UklGRg=="), false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -701,7 +751,7 @@ mod tests {
         for icon in [None, Some("")] {
             let info = RelayInfo::build(
                 None,
-                icon,
+                workspace_profile(icon, false),
                 RelayCapabilityFlags::default(),
                 DEFAULT_MAX_FRAME_BYTES,
                 None,
@@ -718,6 +768,26 @@ mod tests {
     }
 
     #[test]
+    fn thread_replies_in_channel_is_advertised() {
+        let info = RelayInfo::build(
+            None,
+            workspace_profile(None, true),
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        assert!(info.thread_replies_in_channel);
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(
+            json.get("thread_replies_in_channel")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn auth_required_is_advertised_true() {
         // REQ, EVENT, and COUNT all unconditionally require
         // `AuthState::Authenticated` (see `crates/buzz-relay/src/handlers/`),
@@ -729,7 +799,7 @@ mod tests {
     fn max_message_length_uses_configured_frame_limit() {
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             262_144,
             None,
@@ -768,7 +838,7 @@ mod tests {
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -789,7 +859,7 @@ mod tests {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
         let info = RelayInfo::build(
             Some(pk),
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -806,7 +876,7 @@ mod tests {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
         let info = RelayInfo::build(
             Some(pk),
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
@@ -828,7 +898,7 @@ mod tests {
     fn build_nip43_without_self_panics_in_debug() {
         let _ = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
@@ -856,7 +926,7 @@ mod tests {
 
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -881,7 +951,7 @@ mod tests {
 
         let info = RelayInfo::build(
             None,
-            None,
+            workspace_profile(None, false),
             RelayCapabilityFlags::default(),
             DEFAULT_MAX_FRAME_BYTES,
             None,
