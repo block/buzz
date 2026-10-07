@@ -60,5 +60,10 @@ ALTER TABLE event_mentions ADD COLUMN received_at TIMESTAMPTZ, ADD COLUMN root_i
 CREATE INDEX idx_event_mentions_scope_received
     ON event_mentions (community_id, pubkey_hex, channel_id, root_id, received_at);
 
+-- idx_thread_metadata_window (0049) leads with the same columns. With both,
+-- the planner can take this narrower index for a thread's latest reply and
+-- then sort every reply in the thread instead of reading the first row.
+DROP INDEX IF EXISTS idx_thread_metadata_root;
+
 SELECT attach_community_write_fence('personal_read_accounts');
 SELECT attach_community_write_fence('personal_read_frontiers');

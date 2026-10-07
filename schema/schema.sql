@@ -576,7 +576,6 @@ CREATE TABLE thread_metadata (
 );
 
 CREATE INDEX idx_thread_metadata_parent ON thread_metadata (community_id, parent_event_id);
-CREATE INDEX idx_thread_metadata_root ON thread_metadata (community_id, root_event_id);
 CREATE INDEX idx_thread_metadata_window
     ON thread_metadata (community_id, root_event_id, event_created_at DESC, event_id ASC);
 CREATE INDEX idx_thread_metadata_channel_depth
