@@ -9,6 +9,11 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  private func descendants(of view: UIView) -> [UIView] {
+    view.subviews.flatMap { [$0] + descendants(of: $0) }
+  }
+
+  @MainActor
   func testNativeRemovalConfirmationUsesDestructiveAlertAndCancelsOnce() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
@@ -129,9 +134,9 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(fitted.width, 180)
     title.frame = CGRect(origin: .zero, size: fitted)
     title.layoutIfNeeded()
-    for label in title.contentView.subviews.compactMap({ $0 as? UILabel }) {
+    for label in descendants(of: title.contentView).compactMap({ $0 as? UILabel }) {
       XCTAssertEqual(label.lineBreakMode, .byTruncatingTail)
-      XCTAssertTrue(title.bounds.contains(label.frame))
+      XCTAssertTrue(title.bounds.contains(label.convert(label.bounds, to: title)))
     }
   }
 
@@ -157,10 +162,18 @@ class RunnerTests: XCTestCase {
     parent.view.layoutIfNeeded()
     bar.view().layoutIfNeeded()
     let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
-    let label = try XCTUnwrap(title.contentView.subviews.compactMap { $0 as? UILabel }.first)
+    let label = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.first)
     XCTAssertEqual(navigation.traitCollection.preferredContentSizeCategory, .extraExtraExtraLarge)
     XCTAssertEqual(label.font.pointSize, 20, accuracy: 0.01)
     XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
+
+    parent.setOverrideTraitCollection(UITraitCollection(preferredContentSizeCategory: .large),
+      forChild: navigation)
+    parent.view.layoutIfNeeded()
+    bar.view().layoutIfNeeded()
+    XCTAssertEqual(label.font.pointSize, 17, accuracy: 0.01)
+    XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
+    XCTAssertLessThanOrEqual(title.bounds.width, title.intrinsicContentSize.width + 1)
 
     arguments["title"] = String(repeating: "Long channel name ", count: 12)
     messenger.configure(arguments)
@@ -193,11 +206,47 @@ class RunnerTests: XCTestCase {
     title.setSubtitlePresence(.gray)
     title.frame = CGRect(x: 0, y: 0, width: 180, height: 44)
     title.layoutIfNeeded()
-    let dot = try XCTUnwrap(title.contentView.subviews.first { $0.accessibilityIdentifier == "dm-navigation-status-dot" })
-    let label = try XCTUnwrap(title.contentView.subviews.compactMap { $0 as? UILabel }.first { $0.text == "Offline" })
+    let dot = try XCTUnwrap(descendants(of: title.contentView).first { $0.accessibilityIdentifier == "dm-navigation-status-dot" })
+    let label = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.first { $0.text == "Offline" })
     XCTAssertEqual(label.frame.minX - dot.frame.maxX, 6, accuracy: 0.1)
-    XCTAssertEqual(label.frame.midY, dot.frame.midY, accuracy: 0.1)
-    XCTAssertEqual((dot.frame.minX + label.frame.maxX) / 2, title.bounds.midX, accuracy: 0.1)
+    // Auto Layout aligns centers to the display pixel grid.
+    XCTAssertEqual(label.frame.midY, dot.frame.midY, accuracy: 1 / title.traitCollection.displayScale)
+    XCTAssertEqual((dot.convert(dot.bounds, to: title).minX + label.convert(label.bounds, to: title).maxX) / 2, title.bounds.midX, accuracy: 0.1)
+  }
+
+  @MainActor
+  func testTitleStacksMirrorAvatarAndPresenceInRTL() throws {
+    let parent = UIViewController()
+    let window = UIWindow(windowScene: try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first))
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let factory = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent)
+    let bar = factory.create(withFrame: CGRect(x: 0, y: 0, width: 393, height: 160),
+      viewIdentifier: 999994, arguments: ["title": "Alice", "subtitle": "Online",
+        "titleAvatar": ["avatarInitial": "A"], "titlePresenceColor": 0xFF00FF00])
+    parent.view.addSubview(bar.view())
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    parent.setOverrideTraitCollection(UITraitCollection(layoutDirection: .rightToLeft), forChild: navigation)
+    parent.view.layoutIfNeeded()
+    bar.view().layoutIfNeeded()
+    let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
+    XCTAssertEqual(title.effectiveUserInterfaceLayoutDirection, .rightToLeft)
+    title.layoutIfNeeded()
+    let avatar = try XCTUnwrap(descendants(of: title.contentView).first {
+      $0.accessibilityIdentifier == "dm-navigation-avatar"
+    })
+    let badge = try XCTUnwrap(descendants(of: title.contentView).first {
+      $0.accessibilityIdentifier == "dm-navigation-presence"
+    })
+    let label = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.first)
+    let avatarFrame = avatar.convert(avatar.bounds, to: title)
+    let labelFrame = label.convert(label.bounds, to: title)
+    let badgeFrame = badge.convert(badge.bounds, to: title)
+    XCTAssertGreaterThanOrEqual(avatarFrame.minX - labelFrame.maxX, 8 - 0.5)
+    XCTAssertEqual(badgeFrame.minX, avatarFrame.minX, accuracy: 0.5)
+    XCTAssertEqual(avatarFrame.size, CGSize(width: 32, height: 32))
   }
 
   @MainActor
@@ -244,8 +293,8 @@ class RunnerTests: XCTestCase {
       title.layoutIfNeeded()
       XCTAssertEqual(title.traitCollection.preferredContentSizeCategory, .accessibilityExtraExtraExtraLarge)
       XCTAssertTrue(title.accessibilityLabel?.contains(subtitle) == true)
-      for label in title.contentView.subviews.compactMap({ $0 as? UILabel }) where !label.isHidden {
-        XCTAssertTrue(title.bounds.contains(label.frame))
+      for label in descendants(of: title.contentView).compactMap({ $0 as? UILabel }) where !label.isHidden {
+        XCTAssertTrue(title.bounds.contains(label.convert(label.bounds, to: title)))
         XCTAssertGreaterThanOrEqual(label.bounds.height, label.intrinsicContentSize.height)
         let frame = label.convert(label.bounds, to: navigation.navigationBar)
         XCTAssertGreaterThanOrEqual(frame.minY, 0)
@@ -298,13 +347,13 @@ class RunnerTests: XCTestCase {
         for direction in [UISemanticContentAttribute.forceLeftToRight, .forceRightToLeft] {
           title.semanticContentAttribute = direction
           title.layoutIfNeeded()
-          let status = try XCTUnwrap(title.contentView.subviews.compactMap { $0 as? UILabel }.first { $0.text == subtitle })
+          let status = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.first { $0.text == subtitle })
           XCTAssertFalse(status.isHidden)
           XCTAssertGreaterThan(status.bounds.width, 0)
-          XCTAssertTrue(title.bounds.contains(status.frame))
+          XCTAssertTrue(title.bounds.contains(status.convert(status.bounds, to: title)))
           XCTAssertTrue(title.isAccessibilityElement)
           XCTAssertTrue(title.accessibilityLabel?.contains(explanation) == true)
-          XCTAssertFalse(title.contentView.subviews.contains { $0 is UIButton }, "Retention stays text-only")
+          XCTAssertFalse(descendants(of: title.contentView).contains { $0 is UIButton }, "Retention stays text-only")
         }
         XCTAssertTrue(title.accessibilityActivate())
         XCTAssertEqual(messenger.actions.last, "title")
@@ -314,7 +363,7 @@ class RunnerTests: XCTestCase {
       messenger.configure(args)
       let permanent = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
       XCTAssertFalse(permanent.accessibilityLabel?.contains("Ephemeral") == true)
-      XCTAssertFalse(permanent.contentView.subviews.compactMap { $0 as? UILabel }.contains { $0.text?.contains("Temporary") == true })
+      XCTAssertFalse(descendants(of: permanent.contentView).compactMap { $0 as? UILabel }.contains { $0.text?.contains("Temporary") == true })
       _ = bar // Keep the platform view alive throughout reconfiguration.
     }
   }
@@ -323,6 +372,11 @@ class RunnerTests: XCTestCase {
   func testNativeDmTitlePreservesAvatarPresenceAndAccessibility() throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
+    let window = UIWindow(windowScene: try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first))
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
     let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
     let bar = factory.create(
       withFrame: CGRect(x: 0, y: 0, width: 390, height: 120), viewIdentifier: 999996,
@@ -334,21 +388,22 @@ class RunnerTests: XCTestCase {
     parent.view.addSubview(bar.view())
     let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
     let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
-    title.frame.size = title.intrinsicContentSize
+    parent.view.layoutIfNeeded()
+    bar.view().layoutIfNeeded()
     title.layoutIfNeeded()
     XCTAssertEqual(title.accessibilityLabel, "Alice, Online")
     XCTAssertEqual(title.accessibilityTraits, .header)
     XCTAssertFalse(title.accessibilityActivate())
-    let avatar = try XCTUnwrap(title.contentView.subviews.first { $0.accessibilityIdentifier == "dm-navigation-avatar" } as? UIImageView)
+    let avatar = try XCTUnwrap(descendants(of: title.contentView).first { $0.accessibilityIdentifier == "dm-navigation-avatar" } as? UIImageView)
     XCTAssertNotNil(avatar.image)
     XCTAssertEqual(avatar.frame.size, CGSize(width: 32, height: 32))
-    let presence = try XCTUnwrap(title.contentView.subviews.first { $0.accessibilityIdentifier == "dm-navigation-presence" })
+    let presence = try XCTUnwrap(descendants(of: title.contentView).first { $0.accessibilityIdentifier == "dm-navigation-presence" })
     XCTAssertEqual(presence.backgroundColor, UIColor.green)
-    let labels = title.contentView.subviews.compactMap { $0 as? UILabel }
+    let labels = descendants(of: title.contentView).compactMap { $0 as? UILabel }
     XCTAssertEqual(labels.map(\.text), ["Alice", "Online"])
     for label in labels {
-      XCTAssertTrue(title.bounds.contains(label.frame))
-      XCTAssertFalse(label.frame.intersects(avatar.frame))
+      XCTAssertTrue(title.bounds.contains(label.convert(label.bounds, to: title)))
+      XCTAssertFalse(label.convert(label.bounds, to: title).intersects(avatar.convert(avatar.bounds, to: title)))
     }
   }
 
@@ -375,10 +430,10 @@ class RunnerTests: XCTestCase {
     title.layoutIfNeeded()
     // The title owns one native glass capsule and remains a single action.
     XCTAssertEqual(title.accessibilityTraits, .button)
-    let labels = title.contentView.subviews.compactMap { $0 as? UILabel }
+    let labels = descendants(of: title.contentView).compactMap { $0 as? UILabel }
     XCTAssertEqual(labels.map(\.text), ["general", "36 members"])
     for label in labels {
-      XCTAssertTrue(title.bounds.contains(label.frame))
+      XCTAssertTrue(title.bounds.contains(label.convert(label.bounds, to: title)))
       XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
       XCTAssertGreaterThanOrEqual(label.bounds.height, label.intrinsicContentSize.height)
     }
@@ -407,7 +462,7 @@ class RunnerTests: XCTestCase {
       title.frame.size = title.intrinsicContentSize
       title.layoutIfNeeded()
       XCTAssertEqual(title.layer.cornerRadius, title.bounds.height / 2)
-      XCTAssertEqual(title.contentView.subviews.compactMap { $0 as? UILabel }.count, 2)
+      XCTAssertEqual(descendants(of: title.contentView).compactMap { $0 as? UILabel }.count, 2)
       XCTAssertTrue(title.accessibilityActivate())
       XCTAssertEqual(messenger.actions.last, "title")
       for offset in [0.0, 6.0, 52.0, 0.0, -20.0] {
