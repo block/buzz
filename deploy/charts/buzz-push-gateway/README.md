@@ -45,3 +45,10 @@ both ingress and egress isolation. It emits no manifests on failure and preserve
 successful output byte-for-byte. Parent CI must run this same gate on its complete
 render; a subchart-only render intentionally fails in external-policy mode.
 The deployment owner must separately validate the allowed traffic and rolling drain.
+
+## Deployment annotations
+
+Use `deploymentAnnotations` for Deployment metadata such as
+`secret.reloader.stakater.com/reload`. These do not apply to runtime Pods or
+migration Jobs. Values must be strings; `buzz.block.xyz/release-namespace` and
+`buzz.block.xyz/external-network-policy` are reserved for chart policy ownership.

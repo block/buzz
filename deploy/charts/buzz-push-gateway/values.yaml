@@ -37,6 +37,9 @@ appAttestRoot:
   secretKey: app-attest-root.pem
 service:
   port: 8080
+# Optional Deployment metadata, independent of runtime and migration Pods.
+# The chart owns buzz.block.xyz/release-namespace and external-network-policy.
+deploymentAnnotations: {}
 podAnnotations: {}
 httpRoute:
   # Disabled by default so a generic install cannot claim an unattached route.

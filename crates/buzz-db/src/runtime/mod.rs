@@ -1340,12 +1340,29 @@ impl Db {
         event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result =
             event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;
-        tx.commit().await?;
         if result.1 {
-            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            // Index mentions in the event's own transaction so a concurrent
+            // deletion cannot strand an orphan row. A savepoint keeps the
+            // existing best-effort contract: an indexing failure never rejects
+            // an otherwise valid event.
+            sqlx::query("SAVEPOINT serving_write_mentions")
+                .execute(&mut *tx)
+                .await?;
+            match insert_mentions_in_transaction(&mut tx, event, channel_id).await {
+                Ok(()) => {
+                    sqlx::query("RELEASE SAVEPOINT serving_write_mentions")
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                Err(e) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT serving_write_mentions")
+                        .execute(&mut *tx)
+                        .await?;
+                    tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+                }
             }
         }
+        tx.commit().await?;
         Ok(result)
     }
 

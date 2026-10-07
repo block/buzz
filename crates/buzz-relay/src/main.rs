@@ -20,6 +20,7 @@ use buzz_relay::config::{Config, MAX_DRAIN_JITTER_MS};
 use buzz_relay::lifecycle::{BootTracker, LifecycleReason, StartupPhase};
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
+use buzz_relay::startup_steps::{StartupStep, StepTimer};
 use buzz_relay::state::AppState;
 use buzz_relay::storage_sweep;
 use buzz_relay::telemetry;
@@ -305,10 +306,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ..DbConfig::default()
     }
     .with_session_timeouts_from_env();
+    let step = StepTimer::start(StartupStep::DbConnect);
     let db = Db::new(&db_config).await.map_err(|e| {
         error!("Failed to connect to Postgres: {e}");
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
+    step.finish();
     if db.has_read_pool() {
         info!("Postgres connected (writer + lazy read replica pool)");
         // Reader-down at boot must not crash or block the relay; this warn-only
@@ -322,21 +325,25 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
     if auto_migrate {
+        let step = StepTimer::start(StartupStep::DbMigrate);
         db.migrate().await.map_err(|e| {
             error!("Failed to run database migrations: {e}");
             anyhow::anyhow!("Database migration failed: {e}")
         })?;
+        step.finish();
         info!("Database migrations complete");
     } else {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
+    let mut step = StepTimer::start(StartupStep::PartitionEnsure);
     let startup_partition_audit = match db
         .ensure_future_partitions(3, config.partition_manager_create_enabled)
         .await
     {
         Ok(audit) => Some(audit),
         Err(error) => {
+            step.degrade();
             error!(%error, "Failed to ensure partitions");
             match db.audit_partitions(3).await {
                 Ok(audit) => Some(audit),
@@ -347,12 +354,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             }
         }
     };
+    step.finish();
 
+    let step = StepTimer::start(StartupStep::DeletionFenceVerify);
     db.validate_deletion_serving_catalog().await.map_err(|e| {
         error!("Community deletion serving-fence validation failed: {e}");
         anyhow::anyhow!("Community deletion serving fence is unsafe: {e}")
     })?;
     info!("Community deletion serving fences verified");
+    step.finish();
 
     // Freshness fence probe: cursor pages route to the replica only for
     // history the probe has verified as fully replayed. Deliberately AFTER
@@ -363,16 +373,19 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // fence over an unenforced floor. Verification failure is loud but
     // non-fatal: the fence stays closed and every cursor page routes to the
     // writer.
+    let mut step = StepTimer::start(StartupStep::ReplicaFenceProbe);
     match db.spawn_fence_probe().await {
         Ok(true) => info!("Replica fence probe started (floor guard verified)"),
         Ok(false) => {}
         Err(e) => {
+            step.degrade();
             error!(
                 "Replica fence disabled — floor guard verification failed: {e}. \
                  All cursor reads stay on the writer."
             );
         }
     }
+    step.finish();
 
     // NIP-43: if membership enforcement is on, a valid owner pubkey is required.
     // config.rs already strips invalid values with a warning; catch the resulting
@@ -409,6 +422,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // startup. An empty authority (unparseable `relay_url`)
     // is a misconfiguration — fail fast when membership is enforced rather than
     // seeding an empty-host community that no request can ever resolve to.
+    let mut step = StepTimer::start(StartupStep::MembershipBootstrap);
     let deployment_community = {
         let host = buzz_relay::tenant::relay_url_authority(&config.relay_url);
         if host.is_empty() {
@@ -418,6 +432,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     config.relay_url
                 ));
             }
+            step.degrade();
             error!(
                 relay_url = %config.relay_url,
                 "Could not derive a community host from relay_url; skipping membership backfill/bootstrap (non-fatal, membership not required)"
@@ -436,6 +451,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                             "Failed to ensure deployment community (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
                         ));
                     }
+                    step.degrade();
                     error!("Failed to ensure deployment community (non-fatal, membership not required): {e}");
                     None
                 }
@@ -460,6 +476,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                         "Failed to backfill pubkey_allowlist (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
                     ));
                 } else {
+                    step.degrade();
                     error!("Failed to backfill pubkey_allowlist (non-fatal): {e}");
                 }
             }
@@ -483,6 +500,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                         "Failed to bootstrap relay owner (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
                     ));
                 } else {
+                    step.degrade();
                     error!(
                         "Failed to bootstrap relay owner (non-fatal, membership not required): {e}"
                     );
@@ -490,19 +508,27 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             }
         }
     }
+    step.finish();
 
     // NIP-33: backfill d_tag for any existing parameterized replaceable events
     // that predate the column addition. Idempotent — no-ops when fully populated.
+    let mut step = StepTimer::start(StartupStep::DTagBackfill);
     match db.backfill_d_tags().await {
         Ok(0) => {}
         Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
-        Err(e) => error!("Failed to backfill d_tags: {e}"),
+        Err(e) => {
+            step.degrade();
+            error!("Failed to backfill d_tags: {e}");
+        }
     }
+    step.finish();
 
     let (audit, audit_metrics_pool) = if config.audit_enabled {
+        let step = StepTimer::start(StartupStep::AuditConnect);
         let audit_pool = connect_audit_pool(&db_config)
             .await
             .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
+        step.finish();
         info!("Audit service ready");
         let metrics_pool = audit_pool.clone();
         (Some(AuditService::new(audit_pool)), Some(metrics_pool))
@@ -511,6 +537,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         (None, None)
     };
 
+    let step = StepTimer::start(StartupStep::RedisConnect);
     let redis_pool = {
         let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
         cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
@@ -530,6 +557,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
     );
     info!("Redis pub/sub connected");
+    step.finish();
 
     // Spawn Redis pub/sub subscriber for multi-node fan-out.
     // Events published by other relay instances are received here and
@@ -575,10 +603,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
+    let step = StepTimer::start(StartupStep::SearchConnect);
     let search_pool = sqlx::postgres::PgPoolOptions::new()
         .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    step.finish();
     let search_metrics_pool = search_pool.clone();
     let search = SearchService::new(search_pool);
     info!(
@@ -679,7 +709,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             "NIP-FI: warming JWKS snapshots"
         );
         let issuer_ids: Vec<String> = jwks_configs.iter().map(|c| c.issuer.clone()).collect();
+        let mut step = StepTimer::start(StartupStep::NipFiJwksWarm);
         let warmed = warm_nip_fi_jwks_snapshots(&jwks_source, &issuer_ids).await;
+        if warmed.iter().any(|ok| !ok) {
+            // FI ingress fails closed until the refresh loop lands a snapshot.
+            step.degrade();
+        }
+        step.finish();
         let issuers = jwks_configs
             .iter()
             .zip(warmed)
@@ -709,6 +745,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // relay behaves byte-identically to a build without the mesh. When
     // enabled, a misconfigured mesh is fatal here (bind/Redis failure): an
     // operator who asked for the mesh gets it or gets told why not.
+    let step = StepTimer::start(StartupStep::MeshBoot);
     if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
         &state.config,
         state.redis_pool.clone(),
@@ -732,6 +769,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         }
         info!(runtime_id = %runtime_id, "Inter-relay mesh started");
     }
+    step.finish();
 
     // Git-on-object-storage: admit the configured S3/MinIO backend against the
     // linearizable conditional-write axiom (A3) before serving git traffic.
@@ -758,11 +796,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             race_rounds,
             "running git object-store conformance probe (A3 gate)"
         );
+        let step = StepTimer::start(StartupStep::GitConformanceProbe);
         let report = state
             .git_store
             .run_conformance_probe(cfg)
             .await
             .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
+        step.finish();
         tracing::info!(
             race_width = report.race_width,
             race_rounds = report.race_rounds,
@@ -771,6 +811,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         );
     }
 
+    let step = StepTimer::start(StartupStep::ChannelRosterFence);
     match state.db.verify_channel_roster_fence().await {
         Ok(()) => {
             info!("Channel roster fence verified");
@@ -782,36 +823,62 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             ));
         }
     }
+    step.finish();
 
     // Repair legacy NIP-29 channel rosters that were persisted while the
     // canonical member query still truncated at 1,000 rows. Validation above
     // makes migration 0032 a code/schema compatibility gate before the new
     // replacement protocol or listener can serve traffic.
+    let mut step = StepTimer::start(StartupStep::LargeRosterReconcile);
     match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
     {
-        Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),
-        Ok(_) => {}
+        Ok(summary) => {
+            if summary.failed > 0 {
+                step.degrade();
+            }
+            if summary.repaired > 0 || summary.failed > 0 {
+                info!(
+                    count = summary.repaired,
+                    failed = summary.failed,
+                    "large channel member snapshots reconciled on startup"
+                );
+            }
+        }
         Err(error) => {
+            step.degrade();
             tracing::warn!(%error, "large channel member snapshot startup reconciliation failed")
         }
     }
+    step.finish();
 
     // NIP-43: reconcile the event-backed roster for every provisioned
     // community before opening the listener. `relay_members` is canonical;
     // this repairs pre-snapshot communities and any publication that failed
     // after a membership transaction committed.
     if config.require_relay_membership {
+        let mut step = StepTimer::start(StartupStep::Nip43Reconcile);
         match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
             &state,
             buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Bootstrap,
         )
         .await
         {
-            Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
+            Ok(summary) => {
+                if summary.failed > 0 {
+                    step.degrade();
+                }
+                info!(
+                    count = summary.repaired,
+                    failed = summary.failed,
+                    "NIP-43 membership snapshots reconciled on startup"
+                );
+            }
             Err(error) => {
+                step.degrade();
                 tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
             }
         }
+        step.finish();
 
         let reconcile_state = Arc::clone(&state);
         let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
@@ -830,8 +897,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 )
                 .await
                 {
-                    Ok(count) if count > 0 => {
-                        info!(count, "NIP-43 membership snapshots repaired")
+                    Ok(summary) if summary.repaired > 0 => {
+                        info!(count = summary.repaired, "NIP-43 membership snapshots repaired")
                     }
                     Ok(_) => {}
                     Err(error) => tracing::warn!(
@@ -1824,9 +1891,11 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
+    let step = StepTimer::start(StartupStep::HealthBind);
     let health_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.health_port))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
+    step.finish();
     info!(port = config.health_port, "Health probe listener started");
     tokio::spawn(async move {
         axum::serve(health_listener, health_router).await.ok();
@@ -1899,10 +1968,12 @@ async fn serve(
         hard_shutdown_abort
     });
 
+    let step = StepTimer::start(StartupStep::ListenerBind);
     let tcp_listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
     info!(addr = %config.bind_addr, "buzz-relay TCP listening");
+    step.finish();
 
     #[cfg(unix)]
     if let Some(ref uds_path) = config.uds_path {
