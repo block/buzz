@@ -7363,6 +7363,28 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK, "ban must be accepted");
+        let resolved: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        let mut keys_seen: Vec<&str> = resolved
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys_seen.sort_unstable();
+        assert_eq!(
+            keys_seen,
+            ["activeAction", "status"],
+            "resolve returns only status/action"
+        );
+        assert!(
+            !resolved.to_string().contains(&hex::encode(&author)),
+            "resolve response must not reveal the hidden target's author"
+        );
 
         let banned: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM community_bans b JOIN moderation_reports r \
