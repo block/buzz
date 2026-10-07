@@ -73,6 +73,7 @@ A relay that supports this NIP:
   - an event dated at or before the newest delete, with `OK false` and the message `invalid: agent-attention address deleted at <t>`, where `<t>` is the delete's `created_at`;
   - an event that is older than the newest accepted version, or has the same `created_at` and a higher ID, with `invalid: agent-attention address has a newer version`.
   An exact resend of the current version is accepted as a duplicate.
+- MUST store an accepted delete and apply it (remove the versions it covers and record its time) as one atomic step. If it cannot apply the delete, it MUST reject the `kind:5` and MUST NOT store or deliver it.
 - MUST reject a `kind:5` that targets `kind:30173` unless it is signed by the agent, has exactly one `a` tag and has a `["k", "30173"]` tag. It MUST reject an `e`-tag deletion of a `kind:30173` event.
 - MUST send `CLOSED` with an `error:` prefix, instead of `EOSE`, when it cannot read stored events for a subscription with a filter that can match `kind:30173`. An empty result followed by `EOSE` therefore means there are no objects.
 

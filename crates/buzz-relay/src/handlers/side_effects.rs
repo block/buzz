@@ -2289,6 +2289,54 @@ pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
             })
 }
 
+/// The `(agent pubkey, d tag)` of a NIP-AT delete when `kind:30173` is
+/// enabled: a `kind:5` with no `e` tag whose first `a` tag names the kind.
+/// Matches the authorization and dispatch rule that only the first `a` tag
+/// is processed.
+pub(crate) fn agent_attention_deletion_target(
+    event: &Event,
+    enabled: bool,
+) -> Option<(Vec<u8>, String)> {
+    if !enabled || event.kind != Kind::EventDeletion || has_e_tag(event) {
+        return None;
+    }
+    let coordinate = event
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "a")
+        .and_then(|tag| tag.content())?;
+    let mut parts = coordinate.splitn(3, ':');
+    let kind = parts.next()?.parse::<u32>().ok()?;
+    if kind != buzz_core::kind::KIND_AGENT_ATTENTION {
+        return None;
+    }
+    let pubkey = hex::decode(parts.next()?).ok()?;
+    let d_tag = parts.next()?.to_string();
+    Some((pubkey, d_tag))
+}
+
+/// Persist an already-authorized NIP-AT delete and apply it atomically. A
+/// failure rolls back the stored delete too, so the relay never reports or
+/// fans out a delete that did not take effect.
+pub(crate) async fn persist_agent_attention_deletion(
+    tenant: &TenantContext,
+    event: &Event,
+    pubkey: &[u8],
+    d_tag: &str,
+    state: &Arc<AppState>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+    Ok(state
+        .db
+        .insert_watermarked_deletion(
+            tenant.community(),
+            event,
+            buzz_core::kind::KIND_AGENT_ATTENTION as i32,
+            pubkey,
+            d_tag,
+        )
+        .await?)
+}
+
 /// Persist an already-authorized workflow deletion and its domain changes atomically.
 pub(crate) async fn persist_workflow_deletion(
     tenant: &TenantContext,
@@ -2370,36 +2418,27 @@ async fn handle_a_tag_deletion(
             // deletion's own created_at, so a stale/replayed tombstone can never
             // erase a newer replacement head. NIP-AT also keeps the delete in
             // effect: the relay then refuses versions dated at or before it.
-            let deleted = if k == buzz_core::kind::KIND_AGENT_ATTENTION
-                && state.config.agent_attention_enabled
-            {
-                state
-                    .db
-                    .delete_watermarked_coordinate(
-                        tenant.community(),
-                        kind_i32,
-                        &pubkey_bytes,
-                        d_tag,
-                        event.created_at.as_secs() as i64,
-                    )
-                    .await
-            } else {
-                state
-                    .db
-                    .soft_delete_by_coordinate(
-                        tenant.community(),
-                        kind_i32,
-                        &pubkey_bytes,
-                        d_tag,
-                        event.created_at.as_secs() as i64,
-                    )
-                    .await
+            if k == buzz_core::kind::KIND_AGENT_ATTENTION && state.config.agent_attention_enabled {
+                // NIP-AT deletion belongs to the atomic persistence path in ingest.
+                return Err(anyhow::anyhow!(
+                    "agent-attention deletion requires atomic persistence"
+                ));
             }
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
+            let deleted = state
+                .db
+                .soft_delete_by_coordinate(
+                    tenant.community(),
+                    kind_i32,
+                    &pubkey_bytes,
+                    d_tag,
+                    event.created_at.as_secs() as i64,
                 )
-            })?;
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
+                    )
+                })?;
             if deleted {
                 tracing::info!(
                     kind = k,
@@ -3964,6 +4003,30 @@ mod tests {
 
         let two_a = attention_delete(&agent, &[a.clone(), a.clone(), k.clone()]);
         assert!(validate_agent_attention_deletion(&two_a, &agent_bytes).is_err());
+    }
+
+    #[test]
+    fn attention_deletion_target_routes_only_enabled_a_tag_deletes() {
+        let agent = nostr::Keys::generate();
+        let kind = buzz_core::kind::KIND_AGENT_ATTENTION;
+        let d_tag = "d".repeat(64);
+        let coord = format!("{kind}:{}:{d_tag}", agent.public_key());
+        let a = vec!["a".to_string(), coord];
+        let k = vec!["k".to_string(), kind.to_string()];
+        let event = attention_delete(&agent, &[a.clone(), k.clone()]);
+
+        assert_eq!(
+            agent_attention_deletion_target(&event, true),
+            Some((agent.public_key().to_bytes().to_vec(), d_tag))
+        );
+        assert_eq!(agent_attention_deletion_target(&event, false), None);
+        let other_kind = attention_delete(
+            &agent,
+            &[vec!["a".into(), format!("30023:{}:x", agent.public_key())]],
+        );
+        assert_eq!(agent_attention_deletion_target(&other_kind, true), None);
+        let with_e = attention_delete(&agent, &[vec!["e".into(), "0".repeat(64)], a, k]);
+        assert_eq!(agent_attention_deletion_target(&with_e, true), None);
     }
 
     #[test]

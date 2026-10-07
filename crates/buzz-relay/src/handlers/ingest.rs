@@ -3425,7 +3425,22 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
-    let (stored_event, was_inserted) = if workflow_deletion {
+    let attention_deletion = crate::handlers::side_effects::agent_attention_deletion_target(
+        &event,
+        state.config.agent_attention_enabled,
+    );
+    let (stored_event, was_inserted) = if let Some((pubkey, d_tag)) = &attention_deletion {
+        // NIP-AT: the stored delete, its effect and the coordinate watermark
+        // commit together. Failure rejects the event, so the writer never
+        // sees OK for a delete that did not take effect.
+        crate::handlers::side_effects::persist_agent_attention_deletion(
+            tenant, &event, pubkey, d_tag, state,
+        )
+        .await
+        .map_err(|e| {
+            IngestError::Internal(format!("error: agent-attention deletion failed: {e}"))
+        })?
+    } else if workflow_deletion {
         // A single commit owns public acceptance, domain mutation, and dispatch.
         // Failure rolls everything back; identical concurrent requests cannot
         // divide insertion and repair ownership between two relay workers.
@@ -3541,7 +3556,10 @@ async fn ingest_event_inner(
         });
     }
 
-    if !workflow_deletion && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    if !workflow_deletion
+        && attention_deletion.is_none()
+        && crate::handlers::side_effects::is_side_effect_kind(kind_u32)
+    {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await

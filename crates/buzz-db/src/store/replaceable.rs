@@ -387,71 +387,104 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
+/// NIP-AT delete inside `tx`: soft-delete the coordinate's versions dated at
+/// or before the delete and raise the coordinate's watermark to the delete's
+/// time, under the coordinate's replacement lock. Later writes dated at or
+/// before the delete are then rejected with
+/// [`ParameterizedReplaceStatus::DeletedAt`]. Returns whether a live row was
+/// deleted.
+async fn delete_watermarked_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+    deletion_created_at_secs: i64,
+) -> Result<bool> {
+    let deleted_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let lock_key = event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
+    observability::observe_advisory_lock(
+        LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut **tx),
+    )
+    .await?;
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+         AND deleted_at IS NULL AND created_at <= $5",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .bind(deleted_at)
+    .execute(&mut **tx)
+    .await?;
+    // A delete at or after the current watermark's second replaces it; an
+    // older (late) delete leaves a newer accepted version's mark alone.
+    sqlx::query(
+        "INSERT INTO parameterized_event_watermarks \
+             (community_id, kind, pubkey, d_tag, created_at, event_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+             created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id \
+         WHERE EXCLUDED.created_at >= parameterized_event_watermarks.created_at",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .bind(deleted_at)
+    .bind(DELETE_WATERMARK_ID.as_slice())
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 impl Db {
-    /// NIP-AT delete: soft-delete the coordinate's versions dated at or before
-    /// the delete and raise the coordinate's watermark to the delete's time, in
-    /// one transaction under the coordinate's replacement lock. Later writes
-    /// dated at or before the delete are then rejected with
-    /// [`ParameterizedReplaceStatus::DeletedAt`]. Returns whether a live row
-    /// was deleted.
-    #[datastore_span(name = "delete_watermarked_coordinate", system = "postgresql")]
-    pub async fn delete_watermarked_coordinate(
+    /// Store an authorized NIP-AT `kind:5` delete and apply it in one
+    /// transaction: the delete request, its mention rows, the soft-delete of
+    /// the coordinate's versions and the coordinate watermark commit together
+    /// or not at all. A failure therefore cannot leave a stored (and fanned
+    /// out) delete whose effect never happened.
+    ///
+    /// The returned boolean grants dispatch ownership: true when this call
+    /// inserted the delete or deleted a live version. Authorization of the
+    /// coordinate is the caller's responsibility.
+    #[datastore_span(name = "insert_watermarked_deletion", system = "postgresql")]
+    pub async fn insert_watermarked_deletion(
         &self,
         community_id: CommunityId,
+        event: &nostr::Event,
         kind: i32,
         pubkey: &[u8],
         d_tag: &str,
-        deletion_created_at_secs: i64,
-    ) -> Result<bool> {
-        let deleted_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
-            .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    ) -> Result<(StoredEvent, bool)> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
             observability::WriterOperation::EventWrite,
         )
         .await?;
-        let lock_key =
-            event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
-        observability::observe_advisory_lock(
-            LockType::Replacement,
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .execute(&mut *tx),
+        let (stored, inserted) =
+            crate::event::insert_event_in_transaction(&mut tx, community_id, event, None).await?;
+        if inserted {
+            crate::insert_mentions_in_transaction(&mut tx, community_id, event, None).await?;
+        }
+        let deleted = delete_watermarked_in_transaction(
+            &mut tx,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+            event.created_at.as_secs() as i64,
         )
-        .await?;
-        let result = sqlx::query(
-            "UPDATE events SET deleted_at = NOW() \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
-             AND deleted_at IS NULL AND created_at <= $5",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind)
-        .bind(pubkey)
-        .bind(d_tag)
-        .bind(deleted_at)
-        .execute(&mut *tx)
-        .await?;
-        // A delete at or after the current watermark's second replaces it; an
-        // older (late) delete leaves a newer accepted version's mark alone.
-        sqlx::query(
-            "INSERT INTO parameterized_event_watermarks \
-                 (community_id, kind, pubkey, d_tag, created_at, event_id) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
-                 created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id \
-             WHERE EXCLUDED.created_at >= parameterized_event_watermarks.created_at",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind)
-        .bind(pubkey)
-        .bind(d_tag)
-        .bind(deleted_at)
-        .bind(DELETE_WATERMARK_ID.as_slice())
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(result.rows_affected() > 0)
+        Ok((stored, inserted || deleted))
     }
 
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
@@ -811,6 +844,131 @@ mod postgres_tests {
         )
         .await
         .expect("create channel");
+    }
+
+    fn attention_fixture(
+        keys: &nostr::Keys,
+        d_tag: &str,
+        created_at: u64,
+    ) -> (nostr::Event, nostr::Event) {
+        use nostr::{EventBuilder, Kind, Tag, Timestamp};
+        let kind = buzz_core::kind::KIND_AGENT_ATTENTION;
+        let version = EventBuilder::new(Kind::Custom(kind as u16), "ciphertext")
+            .tags([Tag::parse(["d", d_tag]).expect("d tag")])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign version");
+        let coordinate = format!("{kind}:{}:{d_tag}", keys.public_key().to_hex());
+        let delete = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([
+                Tag::parse(["a", coordinate.as_str()]).expect("a tag"),
+                Tag::parse(["k", kind.to_string().as_str()]).expect("k tag"),
+            ])
+            .custom_created_at(Timestamp::from(created_at + 1))
+            .sign_with_keys(keys)
+            .expect("sign delete");
+        (version, delete)
+    }
+
+    async fn attention_rows(
+        pool: &PgPool,
+        community: CommunityId,
+        ids: &[&nostr::Event],
+    ) -> Vec<bool> {
+        let mut live = Vec::new();
+        for event in ids {
+            let row: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+                "SELECT deleted_at FROM events WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .fetch_optional(pool)
+            .await
+            .expect("load event row");
+            live.push(matches!(row, Some(None)));
+        }
+        live
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn attention_deletion_stores_applies_and_watermarks_atomically() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "attention_delete").await;
+        let db = Db::from_pool(pool.clone());
+        let community = CommunityId::from_uuid(make_community(&pool).await);
+        let keys = nostr::Keys::generate();
+        let d_tag = "a".repeat(64);
+        let kind = buzz_core::kind::KIND_AGENT_ATTENTION as i32;
+        let now = nostr::Timestamp::now().as_secs();
+        let (version, delete) = attention_fixture(&keys, &d_tag, now);
+        let pubkey = keys.public_key().to_bytes();
+        db.replace_parameterized_event_with_status(community, &version, &d_tag, None)
+            .await
+            .expect("store version");
+
+        // A failure after the delete row is written must roll back all of it.
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_attention_delete() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected deletion failure'; END $$; \
+             CREATE TRIGGER reject_attention_delete BEFORE INSERT ON parameterized_event_watermarks \
+             FOR EACH ROW EXECUTE FUNCTION reject_attention_delete();",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure trigger");
+        let failed = db
+            .insert_watermarked_deletion(community, &delete, kind, &pubkey, &d_tag)
+            .await;
+        sqlx::raw_sql(
+            "DROP TRIGGER reject_attention_delete ON parameterized_event_watermarks; \
+             DROP FUNCTION reject_attention_delete();",
+        )
+        .execute(&pool)
+        .await
+        .expect("remove failure trigger");
+        assert!(failed.is_err(), "the injected failure must surface");
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(delete.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count delete rows");
+        assert_eq!(rows, 0, "a failed delete must not be stored");
+        assert_eq!(
+            attention_rows(&pool, community, &[&version]).await,
+            vec![true],
+            "a failed delete must not remove the version"
+        );
+
+        // The retry commits all three effects together.
+        let (_, dispatch) = db
+            .insert_watermarked_deletion(community, &delete, kind, &pubkey, &d_tag)
+            .await
+            .expect("retry delete");
+        assert!(dispatch, "the first successful delete owns dispatch");
+        assert_eq!(
+            attention_rows(&pool, community, &[&delete, &version]).await,
+            vec![true, false]
+        );
+        let replay = db
+            .replace_parameterized_event_with_status(community, &version, &d_tag, None)
+            .await
+            .expect("replay older version");
+        assert_eq!(
+            replay.status,
+            ParameterizedReplaceStatus::DeletedAt(delete.created_at.as_secs() as i64)
+        );
+        let (_, dispatch) = db
+            .insert_watermarked_deletion(community, &delete, kind, &pubkey, &d_tag)
+            .await
+            .expect("duplicate delete");
+        assert!(!dispatch, "an exact resend is a duplicate");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
