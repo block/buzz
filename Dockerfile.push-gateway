@@ -13,7 +13,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 ARG BUZZ_PUSH_CARGO_FEATURES=""
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates \
+    && apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --features "$BUZZ_PUSH_CARGO_FEATURES"
