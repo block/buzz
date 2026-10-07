@@ -52,7 +52,7 @@ export function useAsyncLoad<T>(
         if (!active) return;
         setState({
           status: "error",
-          message: e instanceof Error ? e.message : String(e),
+          message: adminErrorMessage(e),
           error: e,
         });
       },
@@ -68,7 +68,7 @@ export function useAsyncLoad<T>(
 // ── Admin error message parsing ───────────────────────────────────────────
 
 /**
- * Extract a human-readable message from an admin mutation error.
+ * Extract a human-readable message from an admin read or mutation error.
  *
  * Native admin commands reject with `admin API error: {json}` where the JSON
  * is the relay's error envelope (`{"error":{"code","message","requestId"}}`).

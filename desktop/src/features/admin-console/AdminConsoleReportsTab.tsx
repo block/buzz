@@ -39,6 +39,7 @@ import {
   CommunityGroupedList,
   formatTimestamp,
   useAsyncLoad,
+  adminErrorCode,
   adminErrorMessage,
   preserveRequestIdOnError,
 } from "./AdminConsolePanelHelpers";
@@ -431,6 +432,9 @@ function ResolveReportForm({
         frozenRef.current = null;
       }
       toast.error(adminErrorMessage(e));
+      // The relay persists the failed action before answering
+      // `enforcement_failed`; reload so the detail shows it and its recovery.
+      if (adminErrorCode(e) === "enforcement_failed") onResolved();
     } finally {
       setIsSubmitting(false);
     }
