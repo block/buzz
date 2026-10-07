@@ -1537,9 +1537,9 @@ mod postgres_tests {
                 .join("\n")
         }
 
-        // Table DDL must live in its table file, where SchemaBot reads it. A
-        // merge conflict resolved by pasting DDL into the manifest, or a table
-        // declared in a sibling directory, would still build and pass CI.
+        // Table and index DDL must live in its table file, where SchemaBot
+        // reads it. A merge conflict resolved by pasting DDL into the manifest,
+        // or DDL in a sibling directory, would still build and pass CI.
         for line in strip_comments(&manifest).lines().map(str::trim) {
             assert!(
                 line.is_empty()
@@ -1549,13 +1549,23 @@ mod postgres_tests {
                  put table DDL in tables/public/<table>.sql: {line:.80}"
             );
         }
-        for file in included.iter().filter(|f| !f.starts_with("tables/public/")) {
+        let non_table_files = std::iter::once("schema.sql").chain(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|f| !f.starts_with("tables/public/")),
+        );
+        for file in non_table_files {
             let text = std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
             for statement in strip_comments(&text).to_ascii_uppercase().split(';') {
                 let tokens: Vec<_> = statement.split_whitespace().collect();
                 assert!(
-                    !tokens.windows(2).any(|pair| pair == ["ALTER", "TABLE"]),
-                    "{file} may not ALTER TABLE; change the table file in tables/public/ instead"
+                    !tokens.windows(2).any(|pair| matches!(
+                        pair,
+                        ["CREATE" | "UNIQUE", "INDEX"] | ["DROP" | "ALTER", "TABLE" | "INDEX"]
+                    )),
+                    "{file} may not create, alter or drop tables or indexes; \
+                     change tables/public/<table>.sql instead"
                 );
                 let creates_table = tokens.iter().enumerate().any(|(i, token)| {
                     *token == "CREATE"

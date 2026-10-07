@@ -21,9 +21,9 @@
 -- Adding a table: add `tables/public/<table>.sql` and include it below after
 -- the tables it references; put its partitions, triggers, and seed rows in the
 -- matching subdirectories and include those too. This file holds only `\i`
--- lines and `CREATE EXTENSION`. Outside `tables/public/`, no file may
--- `ALTER TABLE` or `CREATE TABLE`, except `PARTITION OF` in `partitions/`.
--- The layout test enforces both.
+-- lines and `CREATE EXTENSION`. Outside `tables/public/`, no file may create,
+-- alter or drop a table or index, except `CREATE TABLE ... PARTITION OF` in
+-- `partitions/`. The layout test enforces both.
 
 -- Buzz initial Postgres schema — multi-tenant.
 --
