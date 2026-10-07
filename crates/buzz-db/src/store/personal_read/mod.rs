@@ -11,7 +11,7 @@ mod model;
 mod projection;
 mod writes;
 
-pub(crate) use membership::record_reply;
+pub(crate) use membership::{commit, record_reply, reserve};
 pub use model::*;
 
 #[cfg(test)]
@@ -25,3 +25,6 @@ mod threads_postgres_tests;
 
 #[cfg(test)]
 mod arrival_postgres_tests;
+
+#[cfg(test)]
+mod bench_postgres_tests;

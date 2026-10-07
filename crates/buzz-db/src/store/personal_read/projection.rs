@@ -71,89 +71,78 @@ impl Db {
             .await?;
         writes::deadlines(&mut tx).await?;
         sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
-        // Every position is floored at the account's start (infinity before
-        // the actor's first intent, so nothing counts). A channel's is its
-        // frontier, never earlier than joining: a new member starts caught
-        // up. A thread row exists only for the actor's threads (see
-        // `membership`), and a whole-channel cut covers them all. Each count
-        // ranges over author time from the position less the arrival skew
-        // (served by idx_events_community_channel_created or
-        // idx_thread_metadata_window), filters on arrival, and stops at the
-        // cap: rows the filters reject are read but bound nothing. The latest message is the last arrival among
-        // the newest messages and everything counted, so marking through it
-        // reads every counted message whatever its author time.
+        // Unread is subtraction: the channel's counter less the actor's
+        // position (starting and joining write one, so a started member
+        // without a row has read nothing), and each of the actor's threads' reply count less its
+        // position. Nothing counts before the account starts. Attention needs
+        // the messages themselves, so it walks forward from the position
+        // through the numbered messages after it, only when something is
+        // unread, and stops at the cap. A whole-channel mark through the
+        // counter's latest message reads every counted message.
         let sql = format!(
             r#"WITH roster AS MATERIALIZED (
                 SELECT c.id, c.name, c.channel_type::text AS channel_type,
                     c.archived_at IS NOT NULL AS archived, cm.hidden_at IS NOT NULL AS hidden,
-                    GREATEST(cf.through_timestamp, cm.joined_at, s.started) AS position,
-                    GREATEST(cf.threads_through_timestamp, s.started) AS threads_floor
+                    s.started IS NOT NULL AS started,
+                    COALESCE(k.timeline_seq, 0) AS timeline_seq,
+                    COALESCE(cf.through_seq, 0) AS through_seq,
+                    COALESCE(cf.through_channel_seq, 0) AS through_channel_seq,
+                    COALESCE(cf.through_timestamp, '-infinity') AS position,
+                    encode(k.latest_id, 'hex') AS latest_id
                 FROM channel_members cm JOIN channels c
                     ON c.community_id=cm.community_id AND c.id=cm.channel_id
-                CROSS JOIN (SELECT COALESCE((SELECT started_at FROM personal_read_accounts
-                    WHERE community_id=$1 AND actor=$2), 'infinity') AS started) s
+                CROSS JOIN (SELECT (SELECT started_at FROM personal_read_accounts
+                    WHERE community_id=$1 AND actor=$2) AS started) s
+                LEFT JOIN personal_read_counters k ON k.community_id=cm.community_id
+                    AND k.channel_id=c.id
                 LEFT JOIN personal_read_frontiers cf ON cf.community_id=cm.community_id
                     AND cf.actor=cm.pubkey AND cf.channel_id=c.id AND cf.root_id=''::bytea
                 WHERE cm.community_id=$1 AND cm.pubkey=$2 AND cm.removed_at IS NULL
                     AND c.deleted_at IS NULL AND ($3::uuid IS NULL OR c.id>$3)
                     AND ($4::uuid[] IS NULL OR c.id=ANY($4))
                 ORDER BY c.id LIMIT $5
+             ), counted AS (
+                SELECT r.*, CASE WHEN r.started
+                    THEN GREATEST(r.timeline_seq - r.through_seq, 0) ELSE 0 END AS unread
+                FROM roster r
              )
              SELECT r.id, r.name, r.channel_type, r.archived, r.hidden,
-                (SELECT v.id FROM (VALUES (latest.arrival, latest.id),
-                        (timeline.arrival, timeline.id), (threads.arrival, threads.id)) v(arrival, id)
-                    WHERE v.id IS NOT NULL ORDER BY v.arrival DESC, v.id LIMIT 1) AS latest_message_id,
-                latest.at AS latest_message_at,
-                COALESCE(timeline.unread, 0) AS unread, COALESCE(timeline.attention, 0) AS attention,
+                r.latest_id AS latest_message_id, latest.at AS latest_message_at,
+                LEAST(r.unread, $9)::int AS unread,
+                CASE WHEN r.channel_type='dm' THEN LEAST(r.unread, $9)::int
+                    ELSE COALESCE(attention.n, 0) END AS attention,
                 COALESCE(threads.items, '[]') AS threads
-             FROM roster r
+             FROM counted r
              LEFT JOIN LATERAL (
-                SELECT (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS id,
-                    max(received_at) AS arrival, max(extract(epoch FROM created_at)::bigint) AS at
-                FROM (SELECT id,created_at,received_at FROM events
+                SELECT max(extract(epoch FROM created_at)::bigint) AS at
+                FROM (SELECT created_at FROM events
                     WHERE community_id=$1 AND channel_id=r.id AND kind=ANY($6) AND deleted_at IS NULL
                     ORDER BY created_at DESC LIMIT $7) newest
              ) latest ON true
              LEFT JOIN LATERAL (
-                SELECT count(*)::int AS unread, count(*) FILTER (WHERE directed)::int AS attention,
-                    (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS id,
-                    max(received_at) AS arrival
-                FROM (
-                    SELECT e.id, e.received_at, r.channel_type='dm' OR {DIRECTED_TAGS} AS directed
-                    FROM events e
+                SELECT count(*)::int AS n FROM (
+                    SELECT 1 FROM events e
                     LEFT JOIN thread_metadata tm ON tm.community_id=$1
                         AND tm.event_created_at=e.created_at AND tm.event_id=e.id
-                    WHERE e.community_id=$1 AND e.channel_id=r.id
-                        AND e.created_at >= r.position-$8 AND e.received_at > r.position
-                        AND e.kind=ANY($6) AND e.pubkey<>$2 AND e.deleted_at IS NULL AND {ON_TIMELINE}
+                    WHERE r.unread > 0 AND r.channel_type<>'dm'
+                        AND e.community_id=$1 AND e.channel_id=r.id
+                        AND e.created_at >= r.position-$8 AND e.channel_seq > r.through_channel_seq
+                        AND e.kind=ANY($6) AND e.pubkey<>$2 AND {ON_TIMELINE} AND {DIRECTED_TAGS}
                     ORDER BY e.created_at LIMIT $9
-                ) counted
-             ) timeline ON true
+                ) directed
+             ) attention ON true
              LEFT JOIN LATERAL (
                 SELECT jsonb_agg(jsonb_build_object('root_id',encode(tf.root_id,'hex'),
-                        'unread',n.unread,'latest_reply_id',n.id,'latest_reply_at',n.at)) AS items,
-                    (array_agg(n.id ORDER BY n.arrival DESC,n.id))[1] AS id, max(n.arrival) AS arrival
+                        'unread',LEAST(root.reply_seq - tf.through_seq, $9),
+                        'latest_reply_id',encode(root.reply_last_id,'hex'),
+                        'latest_reply_at',extract(epoch FROM last.event_created_at)::bigint)) AS items
                 FROM personal_read_frontiers tf
-                CROSS JOIN LATERAL (SELECT GREATEST(tf.through_timestamp, r.threads_floor) AS position) p
-                CROSS JOIN LATERAL (
-                    SELECT count(*)::int AS unread,
-                        (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS id,
-                        max(extract(epoch FROM created_at)::bigint) AS at,
-                        max(received_at) AS arrival
-                    FROM (
-                        SELECT e.id, e.created_at, e.received_at
-                        FROM thread_metadata tm JOIN events e ON e.community_id=$1
-                            AND e.created_at=tm.event_created_at AND e.id=tm.event_id
-                        WHERE tm.community_id=$1 AND tm.root_event_id=tf.root_id
-                            AND tm.channel_id=r.id AND tm.event_id<>tf.root_id
-                            AND tm.event_created_at >= p.position-$8
-                            AND e.received_at > p.position AND e.kind=ANY($6) AND e.pubkey<>$2
-                            AND e.deleted_at IS NULL AND NOT (tm.depth=1 AND tm.broadcast)
-                        ORDER BY tm.event_created_at LIMIT $9
-                    ) counted
-                ) n
-                WHERE tf.community_id=$1 AND tf.actor=$2 AND tf.channel_id=r.id
-                    AND tf.root_id<>''::bytea AND n.unread > 0
+                JOIN thread_metadata root ON root.community_id=$1 AND root.event_id=tf.root_id
+                    AND root.depth=0
+                CROSS JOIN LATERAL (SELECT event_created_at FROM thread_metadata
+                    WHERE community_id=$1 AND event_id=root.reply_last_id LIMIT 1) last
+                WHERE r.started AND tf.community_id=$1 AND tf.actor=$2 AND tf.channel_id=r.id
+                    AND tf.root_id<>''::bytea AND root.reply_seq > tf.through_seq
              ) threads ON true
              ORDER BY r.id"#
         )

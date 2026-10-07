@@ -477,10 +477,14 @@ async fn insert_event_on(
     let received_at = Utc::now();
     let d_tag = extract_d_tag(event);
     let not_before = extract_not_before(event);
+    // No thread metadata: on the timeline.
+    let numbers =
+        crate::personal_read::reserve(&mut *connection, community_id, event, channel_id, true)
+            .await?;
     let result = sqlx::query(
         r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before, channel_seq, timeline_seq)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT DO NOTHING
         "#,
     )
@@ -496,10 +500,16 @@ async fn insert_event_on(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
-    .execute(connection)
+    .bind(numbers.map(|n| n.channel))
+    .bind(numbers.map(|n| n.timeline))
+    .execute(&mut *connection)
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
+    if let (true, Some(n), Some(channel)) = (was_inserted, numbers, channel_id) {
+        crate::personal_read::commit(connection, community_id, event, channel, n, received_at)
+            .await?;
+    }
 
     Ok((
         StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
@@ -1580,10 +1590,17 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let d_tag = extract_d_tag(event);
     let not_before = extract_not_before(event);
 
+    let on_timeline = thread_meta
+        .as_ref()
+        .is_none_or(|m| m.parent_event_id.is_none() || (m.depth == 1 && m.broadcast));
+    let numbers =
+        crate::personal_read::reserve(&mut **tx, community_id, event, channel_id, on_timeline)
+            .await?;
+
     let result = sqlx::query(
         r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before, channel_seq, timeline_seq)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT DO NOTHING
         "#,
     )
@@ -1599,12 +1616,18 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
+    .bind(numbers.map(|n| n.channel))
+    .bind(numbers.map(|n| n.timeline))
     .execute(&mut **tx)
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
 
     if was_inserted {
+        if let (Some(n), Some(channel)) = (numbers, channel_id) {
+            crate::personal_read::commit(&mut **tx, community_id, event, channel, n, received_at)
+                .await?;
+        }
         if let Some(ref meta) = thread_meta {
             let broadcast_val: bool = meta.broadcast;
 
@@ -1696,29 +1719,45 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     .execute(&mut **tx)
                     .await?;
 
+                    // An eligible reply takes the thread's next number unless it
+                    // counts on the timeline instead (broadcast depth-1).
+                    let counted = numbers.filter(|_| !(meta.depth == 1 && meta.broadcast));
+                    let mut thread_seq = None;
                     if let Some(root_id) = meta.root_event_id {
-                        sqlx::query(
+                        thread_seq = sqlx::query_scalar::<_, i64>(
                             r#"
                             UPDATE thread_metadata
-                            SET descendant_count = descendant_count + 1
+                            SET descendant_count = descendant_count + 1,
+                                reply_seq = reply_seq + $3::int,
+                                reply_channel_seq = CASE WHEN $3 = 1 THEN $4 ELSE reply_channel_seq END,
+                                reply_last_id = CASE WHEN $3 = 1 THEN $5 ELSE reply_last_id END
                             WHERE community_id = $1 AND event_id = $2
+                            RETURNING reply_seq
                             "#,
                         )
                         .bind(community_id.as_uuid())
                         .bind(root_id)
-                        .execute(&mut **tx)
+                        .bind(i32::from(counted.is_some()))
+                        .bind(counted.map(|n| n.channel))
+                        .bind(meta.event_id)
+                        .fetch_optional(&mut **tx)
                         .await?;
                     }
                     let root = meta.root_event_id.unwrap_or(pid);
-                    crate::personal_read::record_reply(
-                        tx,
-                        community_id,
-                        event,
-                        meta.channel_id,
-                        root,
-                        received_at,
-                    )
-                    .await?;
+                    if let (Some(n), Some(seq)) = (numbers, thread_seq) {
+                        crate::personal_read::record_reply(
+                            tx,
+                            community_id,
+                            event,
+                            meta.channel_id,
+                            root,
+                            n,
+                            seq,
+                            counted.is_some(),
+                            received_at,
+                        )
+                        .await?;
+                    }
                 }
             }
         }

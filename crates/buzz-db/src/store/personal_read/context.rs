@@ -2,7 +2,6 @@
 use super::{classification, model::*, writes};
 use crate::{observability, Db, DbError, Result};
 use buzz_core::CommunityId;
-use chrono::{DateTime, Utc};
 use sqlx::{Acquire, Row};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -47,17 +46,15 @@ impl Db {
                 contexts.push(ContextState::Unavailable);
                 continue;
             };
-            // The positions the sidebar counts against, both floored at the
-            // account's start and absent before it: the channel's, never
-            // before joining and absent for a non-member; and the thread's,
-            // which exists only for the actor's threads and includes any
-            // whole-channel cut.
+            // The channel-wide cuts the sidebar subtracts against, absent
+            // before the account starts: the channel's for a member, and the
+            // thread's, which exists only for the actor's threads. A cut in
+            // channel numbering orders every message in either context.
             let positions = sqlx::query(
                 "SELECT CASE WHEN m.joined_at IS NOT NULL AND s.started IS NOT NULL
-                        THEN GREATEST(cf.through_timestamp, m.joined_at, s.started) END AS channel,
+                        THEN COALESCE(cf.through_channel_seq, 0) END AS channel,
                     CASE WHEN tf.root_id IS NOT NULL AND s.started IS NOT NULL
-                        THEN GREATEST(tf.through_timestamp, cf.threads_through_timestamp, s.started)
-                        END AS thread
+                        THEN tf.through_channel_seq END AS thread
                  FROM (SELECT (SELECT started_at FROM personal_read_accounts
                     WHERE community_id=$1 AND actor=$2) AS started) s
                  LEFT JOIN channel_members m ON m.community_id=$1 AND m.channel_id=$3
@@ -73,15 +70,15 @@ impl Db {
             .bind(&root)
             .fetch_one(&mut *tx)
             .await?;
-            let channel_position: Option<DateTime<Utc>> = positions.try_get("channel")?;
-            let thread_position: Option<DateTime<Utc>> = positions.try_get("thread")?;
+            let channel_position: Option<i64> = positions.try_get("channel")?;
+            let thread_position: Option<i64> = positions.try_get("thread")?;
             let ids: Vec<Vec<u8>> = query
                 .message_ids
                 .iter()
                 .filter_map(|id| writes::event_id(id))
                 .collect();
             let rows = sqlx::query(
-                "SELECT encode(e.id,'hex') AS id,e.kind,e.received_at,
+                "SELECT encode(e.id,'hex') AS id,e.kind,e.channel_seq,
                     e.deleted_at IS NOT NULL AS deleted,e.pubkey=$3 AS own,e.tags,
                     tm.root_event_id,tm.depth,tm.broadcast,c.channel_type::text AS channel_type
                  FROM events e JOIN channels c ON c.community_id=e.community_id AND c.id=e.channel_id
@@ -133,7 +130,8 @@ impl Db {
                             } else {
                                 thread_position
                             };
-                            let received: DateTime<Utc> = row.try_get("received_at")?;
+                            // Unnumbered messages predate numbering: read.
+                            let seq: Option<i64> = row.try_get("channel_seq")?;
                             let tags: Vec<Vec<String>> =
                                 serde_json::from_value(row.try_get("tags")?).unwrap_or_default();
                             let reason = classification::reason(
@@ -143,7 +141,7 @@ impl Db {
                             );
                             match position {
                                 None => MessageReadState::NotCounted,
-                                Some(p) if received <= p => MessageReadState::Read,
+                                Some(p) if seq.is_none_or(|n| n <= p) => MessageReadState::Read,
                                 Some(_) if on_timeline => MessageReadState::Unread { reason },
                                 Some(_) => MessageReadState::Unread {
                                     reason: match reason {
