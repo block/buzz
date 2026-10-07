@@ -79,11 +79,12 @@ thread with an unread reply:
 - `read_through_id`: the last message in that scope, in display order, at or
   before your read position, or null when there is none. Draw the "new"
   divider below it and open the view there.
-- `latest_id` (threads only): the last unread reply to arrive. Fetch it by ID
-  for a preview; marking the thread through it reads every listed reply.
+- `latest_id` (threads only): the last reply in display order. Fetch it by ID
+  for a preview; marking the thread through it reads every reply above it,
+  late arrivals included.
 
-`threads` lists every followed thread with an unread reply, newest reply
-(author time) first, then by `root_id`. There is no cap. A badge or a threads
+`threads` lists every followed thread with an unread reply, by `latest_id`
+(newest author time first), then by `root_id`. There is no cap. A badge or a threads
 page is computed on the client from these rows. Clients receive message IDs
 only; positions and timestamps stay relay-internal. No message bytes are
 included.
@@ -107,14 +108,15 @@ The relay updates read state when it stores an eligible message:
   any member replies, or with a `follow` intent. A new follow starts just
   before the message that caused it, so that message is unread.
 - **Unfollow is sticky.** `unfollow` keeps the row with `following=false`, so
-  later replies and mentions do not follow you again. Your own reply, or
-  `follow`, does. Whether a new mention should re-follow is an open product
-  question; today it does not.
+  later replies do not follow you again. Your own reply, `follow`, or a new
+  mention does. A mention catches the thread up to just before itself: the
+  replies from while you were unfollowed stay read, and the mention shows.
 
 An account starts caught up at its first read intent (`started_at`): every
 position is floored there, so history from before then never counts, and
 nothing counts before the first intent. Joining a channel starts that channel
-caught up.
+caught up, its followed threads included: a follow that survived leaving does
+not bring back replies from your absence.
 
 ## Explicit contexts
 
@@ -230,6 +232,11 @@ private tables, adds `thread_metadata.last_reply_received_at` and
 `event_mentions.received_at`/`root_id` (NULL for rows from before it, which no
 position can reach), and one index on `event_mentions`. Ingest writes the
 author's own position and follow rows in the same transaction as the message.
+
+During a rolling deploy, relay processes still on the old code write
+`event_mentions` rows without `received_at`/`root_id` and do not mark posting
+read. Those mentions never count, and an author's own message from such a
+process can show unread to them until they next read the scope.
 
 Use existing HTTP route/status/latency metrics for `/buzz/v1/me/sidebar` and
 `/buzz/v1/me/read-state`, plus database pool/statement metrics. No payload,

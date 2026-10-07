@@ -1880,7 +1880,14 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             }
         }
 
-        if let (None, Some(channel)) = (&thread_meta, channel_id) {
+        // A top-level message, whether or not it arrives with a depth-0
+        // metadata row (workflow messages do); replies are recorded above.
+        let top_level = match &thread_meta {
+            None => channel_id,
+            Some(meta) if meta.parent_event_id.is_none() => Some(meta.channel_id),
+            Some(_) => None,
+        };
+        if let Some(channel) = top_level {
             crate::personal_read::record_message(
                 tx,
                 community_id,

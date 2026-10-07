@@ -80,7 +80,9 @@ impl Db {
         // the actor's first intent, so nothing counts). A channel's is its
         // frontier, never earlier than joining: a new member starts caught
         // up. A thread's is its row, which exists only for threads the actor
-        // follows (see `membership`), and a whole-channel cut covers them all.
+        // follows (see `membership`), and a whole-channel cut and joining
+        // cover them all, so a follow that survived leaving does not bring
+        // back replies from the absence.
         //
         // - unread: the first timeline message past the position
         //   (idx_events_community_channel_created);
@@ -90,13 +92,16 @@ impl Db {
         //   arrived at or before the position. Anything that arrived by then
         //   was authored no later than the position plus the skew;
         // - threads: followed roots whose last reply arrived after the
-        //   thread position, then their unread replies and mentions.
+        //   thread position and that have an unread reply (an existence
+        //   probe), then their mentions; `latest_id` is the last reply in
+        //   display order (idx_thread_metadata_window), so no part of a
+        //   thread row grows with its unread count.
         let sql = format!(
             r#"WITH roster AS MATERIALIZED (
                 SELECT c.id, c.name, c.channel_type::text AS channel_type,
                     c.archived_at IS NOT NULL AS archived, cm.hidden_at IS NOT NULL AS hidden,
                     GREATEST(cf.through_timestamp, cm.joined_at, s.started) AS position,
-                    GREATEST(cf.threads_through_timestamp, s.started) AS threads_floor
+                    GREATEST(cf.threads_through_timestamp, cm.joined_at, s.started) AS threads_floor
                 FROM channel_members cm JOIN channels c
                     ON c.community_id=cm.community_id AND c.id=cm.channel_id
                 CROSS JOIN (SELECT COALESCE((SELECT started_at FROM personal_read_accounts
@@ -133,15 +138,13 @@ impl Db {
                     AND root.depth=0 AND root.event_id=tf.root_id
                 CROSS JOIN LATERAL (SELECT GREATEST(tf.through_timestamp, r.threads_floor) AS position) p
                 CROSS JOIN LATERAL (
-                    SELECT (array_agg(encode(e.id,'hex') ORDER BY e.received_at DESC,e.id))[1] AS id,
-                        max(e.created_at) AS at
+                    SELECT encode(tm.event_id,'hex') AS id, tm.event_created_at AS at
                     FROM thread_metadata tm JOIN events e ON e.community_id=$1
                         AND e.created_at=tm.event_created_at AND e.id=tm.event_id
                     WHERE tm.community_id=$1 AND tm.root_event_id=tf.root_id
                         AND tm.channel_id=r.id AND tm.event_id<>tf.root_id
-                        AND tm.event_created_at >= p.position-$7
-                        AND e.received_at > p.position AND e.kind=ANY($6)
-                        AND e.deleted_at IS NULL AND NOT (tm.depth=1 AND tm.broadcast)
+                        AND e.kind=ANY($6) AND e.deleted_at IS NULL
+                    ORDER BY tm.event_created_at DESC, tm.event_id LIMIT 1
                 ) n
                 CROSS JOIN LATERAL (
                     SELECT count(*) AS mentions
@@ -163,7 +166,15 @@ impl Db {
                 ) rt ON true
                 WHERE tf.community_id=$1 AND tf.actor=$2 AND tf.channel_id=r.id
                     AND tf.root_id<>''::bytea AND tf.following
-                    AND root.last_reply_received_at > p.position AND n.id IS NOT NULL
+                    AND root.last_reply_received_at > p.position
+                    AND EXISTS (SELECT 1 FROM thread_metadata tm JOIN events e
+                        ON e.community_id=$1 AND e.created_at=tm.event_created_at
+                            AND e.id=tm.event_id
+                        WHERE tm.community_id=$1 AND tm.root_event_id=tf.root_id
+                            AND tm.channel_id=r.id AND tm.event_id<>tf.root_id
+                            AND tm.event_created_at >= p.position-$7
+                            AND e.received_at > p.position AND e.kind=ANY($6)
+                            AND e.deleted_at IS NULL AND NOT (tm.depth=1 AND tm.broadcast))
              ) threads ON true
              ORDER BY r.id"#
         );

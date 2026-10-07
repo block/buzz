@@ -51,12 +51,14 @@ impl Db {
             // account's start and absent before it: the channel's, never
             // before joining and absent for a non-member; and the thread's,
             // which exists only for threads the actor follows and includes any
-            // whole-channel cut.
+            // whole-channel cut and, for a member, joining: a follow that
+            // survived leaving does not bring back replies from the absence.
             let positions = sqlx::query(
                 "SELECT CASE WHEN m.joined_at IS NOT NULL AND s.started IS NOT NULL
                         THEN GREATEST(cf.through_timestamp, m.joined_at, s.started) END AS channel,
                     CASE WHEN tf.root_id IS NOT NULL AND s.started IS NOT NULL
-                        THEN GREATEST(tf.through_timestamp, cf.threads_through_timestamp, s.started)
+                        THEN GREATEST(tf.through_timestamp, cf.threads_through_timestamp,
+                            m.joined_at, s.started)
                         END AS thread
                  FROM (SELECT (SELECT started_at FROM personal_read_accounts
                     WHERE community_id=$1 AND actor=$2) AS started) s

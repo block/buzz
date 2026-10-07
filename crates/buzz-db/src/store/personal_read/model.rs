@@ -107,8 +107,8 @@ pub struct ThreadReadSummary {
     /// The last reply, in display order, at or before the actor's thread
     /// position. None when the actor has read no reply.
     pub read_through_id: Option<String>,
-    /// Last unread reply to arrive: marking through it reads the thread, and
-    /// clients fetch it by ID for a preview.
+    /// The last reply in display order: marking through it reads the thread,
+    /// and clients fetch it by ID for a preview.
     pub latest_id: String,
 }
 

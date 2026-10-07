@@ -28,8 +28,11 @@ pub(crate) enum Place<'a> {
 /// - a reply also makes the root's author, and in a DM (at most nine
 ///   members) every member, follow the thread.
 ///
-/// Nobody but the author is re-followed: an unfollowed row stays unfollowed,
-/// even for a new mention (whether a mention should re-follow is open).
+/// A new mention re-follows an unfollowed thread, catching up to just before
+/// the mention: chatter from while unfollowed stays muted, but the mention
+/// shows. A mentioned member already following keeps their position. Anyone
+/// else the reply makes follow keeps an existing row as it is, so an
+/// unfollow sticks for ordinary replies.
 ///
 /// Everyone but the author starts just before the message, so it is unread.
 pub(crate) async fn record_message(
@@ -53,8 +56,8 @@ pub(crate) async fn record_message(
         Place::Reply { root, broadcast } => (root, true, broadcast),
     };
     // Rank 0 is the replying author, who follows (again) and has read; 1 a
-    // mentioned member and 2 anyone else the reply makes follow, whose
-    // existing rows are left alone. Every insert's fence and foreign-key
+    // mentioned member, who follows again if they had unfollowed; 2 anyone
+    // else the reply makes follow, whose existing rows are left alone. Every insert's fence and foreign-key
     // checks run at the end of the statement, after the account rows exist.
     sqlx::query(
         "WITH joined AS (
@@ -92,10 +95,18 @@ pub(crate) async fn record_message(
             ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
             SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp,
                 excluded.through_timestamp), following=true
+         ), mentioned AS (
+            INSERT INTO personal_read_frontiers
+                (community_id, actor, channel_id, root_id, through_timestamp)
+            SELECT $1, actor, $2, $3, through FROM members WHERE rank=1
+            ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
+            SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp,
+                excluded.through_timestamp), following=true
+            WHERE NOT personal_read_frontiers.following
          )
          INSERT INTO personal_read_frontiers
             (community_id, actor, channel_id, root_id, through_timestamp)
-         SELECT $1, actor, $2, $3, through FROM members WHERE rank>0
+         SELECT $1, actor, $2, $3, through FROM members WHERE rank=2
          ON CONFLICT DO NOTHING",
     )
     .bind(community.as_uuid())

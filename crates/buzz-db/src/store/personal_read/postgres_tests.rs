@@ -353,10 +353,34 @@ async fn rejoining_starts_caught_up_again() {
     .execute(&pool)
     .await
     .unwrap();
+    // The member follows a thread; the follow survives leaving.
+    let root = post(&db, community, channel, &member, now(), vec![]).await;
+    reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &member,
+        now(),
+        vec![],
+        false,
+    )
+    .await;
     db.remove_member(community, channel, &pk, &pk)
         .await
         .unwrap();
     let away = post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
+    let away_reply = reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &Keys::generate(),
+        now(),
+        mention(&member),
+        false,
+    )
+    .await;
     // Re-adding an active member (a role change) must not move the position.
     let owner_pk = owner.public_key().to_bytes();
     db.add_member(
@@ -374,8 +398,21 @@ async fn rejoining_starts_caught_up_again() {
         .unwrap();
     let row = sidebar(&db, community, &member).await;
     assert!(!row.unread, "messages from while away are read");
+    assert!(row.threads.is_empty(), "so are replies in followed threads");
     assert_eq!(
         status(&db, community, &member, channel, None, &[&away]).await,
+        ["read"]
+    );
+    assert_eq!(
+        status(
+            &db,
+            community,
+            &member,
+            channel,
+            Some(&root),
+            &[&away_reply]
+        )
+        .await,
         ["read"]
     );
     post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
@@ -600,6 +637,75 @@ async fn posting_marks_read_and_read_through_skips_deleted_and_auxiliary() {
         .find(|c| c.channel_id != channel)
         .unwrap();
     assert!(!empty.unread && empty.mentions == 0 && empty.read_through_id.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn top_level_message_with_depth_zero_metadata_marks_read_and_follows() {
+    // Workflow messages store a depth-0 metadata row with no parent.
+    let (db, _, community, channel, actor, _) = fixture().await;
+    let base = now();
+    let author = Keys::generate();
+    db.add_member(
+        community,
+        channel,
+        &author.public_key().to_bytes(),
+        MemberRole::Member,
+        None,
+    )
+    .await
+    .unwrap();
+    let insert = |who: Keys, at: u64, tags: Vec<Tag>| {
+        let db = db.clone();
+        async move {
+            let event = EventBuilder::new(Kind::Custom(9), format!("workflow at {at}"))
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&who)
+                .unwrap();
+            db.insert_event_with_thread_metadata(
+                community,
+                &event,
+                Some(channel),
+                Some(crate::event::ThreadMetadataParams {
+                    event_id: event.id.as_bytes(),
+                    event_created_at: chrono::DateTime::from_timestamp(at as i64, 0).unwrap(),
+                    channel_id: channel,
+                    parent_event_id: None,
+                    parent_event_created_at: None,
+                    root_event_id: None,
+                    root_event_created_at: None,
+                    depth: 0,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .unwrap();
+            event
+        }
+    };
+    let own = insert(actor.clone(), base + 1, vec![]).await;
+    let row = sidebar(&db, community, &actor).await;
+    assert!(!row.unread, "posting read through it");
+    assert_eq!(row.read_through_id, Some(own.id.to_hex()));
+
+    let root = insert(author.clone(), base + 2, mention(&actor)).await;
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!((row.unread, row.mentions), (true, 1));
+    reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &author,
+        base + 3,
+        vec![],
+        false,
+    )
+    .await;
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(row.threads.len(), 1, "the mention followed its thread");
+    assert_eq!(row.threads[0].root_id, root.id.to_hex());
 }
 
 #[tokio::test]

@@ -279,7 +279,7 @@ async fn mark_thread_read_with_the_newest_displayed_reply_clears_a_late_reply() 
         now - 40,
     )
     .await;
-    let late = reply(
+    let _late = reply(
         &db,
         &pool,
         community,
@@ -303,8 +303,8 @@ async fn mark_thread_read_with_the_newest_displayed_reply_clears_a_late_reply() 
     assert_eq!((row.unread, row.threads.len()), (false, 1));
     assert_eq!(
         row.threads[0].latest_id,
-        late.id.to_hex(),
-        "the last arrival"
+        newest.id.to_hex(),
+        "the last in display order, not the last arrival"
     );
     assert_eq!(row.threads[0].mentions, 2);
 

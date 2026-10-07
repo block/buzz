@@ -466,8 +466,10 @@ async fn thread_summaries_order_newest_first_and_list_every_unread_thread() {
             roots[5].id.to_hex()
         ]
     );
-    // Ordered by its newest reply's author time, anchored at its last arrival.
-    assert_eq!(row.threads[2].latest_id, last.unwrap().id.to_hex());
+    // Ordered by, and anchored at, its last reply in display order, not the
+    // last to arrive.
+    assert_eq!(row.threads[2].latest_id, anchors[2].id.to_hex());
+    assert_ne!(row.threads[2].latest_id, last.unwrap().id.to_hex());
 
     // Reading a listed thread through its anchor removes only it.
     let first = &row.threads[0];
@@ -651,33 +653,53 @@ async fn follow_starts_caught_up_and_unfollow_is_sticky() {
     assert_eq!(row.threads.len(), 1);
     assert_eq!(row.threads[0].latest_id, next.id.to_hex());
 
-    // Unfollow keeps the row; later replies, mentions included, don't
-    // re-follow (whether a new mention should is an open product question).
+    // Unfollow keeps the row; later replies don't re-follow.
     assert_eq!(
         apply(&db, community, &actor, follow(channel, &root, false)).await,
         IntentOutcome::Applied
     );
     assert!(sidebar(&db, community, &actor).await.threads.is_empty());
-    say(base + 2, vec![]).await;
-    say(base + 3, mention(&actor)).await;
+    let chatter = say(base + 2, vec![]).await;
     assert_eq!(following(&pool, community, &actor).await, [false]);
     assert!(sidebar(&db, community, &actor).await.threads.is_empty());
 
-    // The actor's own reply re-follows, read through it.
+    // A new mention re-follows, catching up to just before it: the chatter
+    // from while unfollowed stays read, the mention shows.
+    let mentioned = say(base + 3, mention(&actor)).await;
+    assert_eq!(following(&pool, community, &actor).await, [true]);
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(row.threads.len(), 1);
+    assert_eq!(
+        (
+            row.threads[0].mentions,
+            row.threads[0].latest_id.clone(),
+            row.threads[0].read_through_id.clone()
+        ),
+        (1, mentioned.id.to_hex(), Some(chatter.id.to_hex()))
+    );
+    // A mention while following leaves the position alone.
+    let again = say(base + 4, mention(&actor)).await;
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(
+        (row.threads[0].mentions, row.threads[0].latest_id.clone()),
+        (2, again.id.to_hex())
+    );
+
+    // The actor's own reply reads the thread through it.
     let own = reply(
         &db,
         community,
         channel,
         &root,
         &actor,
-        base + 4,
+        base + 5,
         vec![],
         false,
     )
     .await;
     assert_eq!(following(&pool, community, &actor).await, [true]);
     assert!(sidebar(&db, community, &actor).await.threads.is_empty());
-    say(base + 5, vec![]).await;
+    say(base + 6, vec![]).await;
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(row.threads.len(), 1);
     assert_eq!(
@@ -686,7 +708,7 @@ async fn follow_starts_caught_up_and_unfollow_is_sticky() {
             row.threads[0].read_through_id.clone()
         ),
         (0, Some(own.id.to_hex())),
-        "the earlier mention was read when the actor replied"
+        "the earlier mentions were read when the actor replied"
     );
 
     // Following again catches up; a target without a root is invalid.
