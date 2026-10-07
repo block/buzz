@@ -25,6 +25,48 @@ and runtime evidence answer different questions.
 
 ---
 
+## Before opening a PR
+
+Open work in progress as a draft PR. Mark it ready for review only when this
+checklist holds for the current change. Scale it to what changed:
+documentation-only changes need content, link, and diff checks plus human
+confirmation, not app runs.
+
+1. **Agent review ran** under [Reviewing](#reviewing), and its recommended
+   blockers were fixed or explicitly declined by the human author. Optional
+   suggestions do not gate readiness.
+2. **An agent exercised the changed behavior.** Client changes: the affected flow
+   in the app, using the native app or a device when the behavior needs it
+   (browser or headless Playwright counts only for what it can exercise). Relay
+   changes: a local relay, exercising the changed events or endpoints. CLI or
+   tooling changes: the affected command or workflow. The human may skip this
+   step, for example for a small change or while iterating.
+3. **A human then tested it themselves**: in the app, against the local relay
+   (through the app or `curl`), or by running the changed command. Agent testing
+   does not substitute. Agents give the human exact steps and what working looks
+   like, then wait for explicit confirmation. Never mark this step done yourself.
+4. **Add `buzz-review-completed` to the PR description** once steps 1–3 hold. It
+   attests the checklist, and automated reviewers may skip review because of it.
+   If later edits change behavior, remove it and return the PR to draft until the
+   affected steps are redone.
+
+## Reviewing
+
+- Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
+  issue. Review the change against what it is trying to do.
+- Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers here find most often.
+- Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
+  below 9 names the concrete defect and the fix.
+- Recommend blocking only for concrete correctness, security, or agreed-contract
+  defects with a realistic failure scenario: state the defect, how it fails, and
+  the fix. Label everything else (nits, wording, speculative hardening,
+  out-of-scope improvements) as optional.
+- Put all findings in the first review. Later reviews check prior blockers and
+  defects the fixes introduced; reopen other areas only on new evidence of a
+  material defect.
+- Agents post reviews as comments, never Request Changes. Humans decide which
+  findings must be fixed.
+
 ## Ecosystem
 
 Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
@@ -112,6 +154,10 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 Run `just ci` before every PR — it runs repository-wide formatting, lint,
 and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
 builds. Clippy passing does not mean fmt passes; run both.
+For changes limited to Flutter/Dart code in the mobile app, run
+`just mobile-install mobile-check mobile-test` instead of `just ci`.
+Native code and build-configuration changes also require the corresponding
+platform checks.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
@@ -148,6 +194,91 @@ Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
 - New public API must have doc comments
+
+---
+
+## Review-Proven Rules
+
+These rules distill the recurring findings from the last 25 PRs' review
+threads — 53% of substantive review findings were repeats of the clusters
+below, and reviewed PRs averaged ~5 review rounds. A second, independent
+mining pass over 71 agent-review rooms (303 findings, Aug 18–29) confirmed
+the same clusters and measured how often authors actually fix each class
+once flagged: test-seam binding and unbounded-resource findings were fixed
+**100%** of the time, swallowed-error findings **90%**, stale-state races
+**70%** — these are not style opinions, they are defects authors agree
+with on sight. Authors apply them **before writing code**, and reviewers check
+against them; each cites the PRs where reviewers litigated it.
+
+1. **Every caught failure must leave a durable retry record or propagate.**
+   Never catch-log-and-return-success (opt-out revocation permanently
+   abandoned, PR #6269), never convert a terminal failure into an
+   authoritative success/empty result (cold-history `error` → `success`
+   with `[]`, PR #7013), and never delete the durable journal an operation
+   depends on before its retry has actually succeeded (PR #6269). If a
+   partial failure can orphan committed state (installations, endpoints),
+   schedule its cleanup/renewal durably (PRs #6269, #6996, #7013).
+
+2. **Fence async results by generation; clear derived metadata on every
+   removal path.** A completing in-flight probe or fetch must verify it is
+   still the newest before writing its result (stale login-shell probe
+   recached a false-negative PATH, PR #6904). Provenance/ownership metadata
+   attached to synthetic state must be updated or cleared on *all* paths
+   that remove or refresh that state — typed deletion, toolbar removal,
+   profile/name refresh; enumerate the paths and test each (PR #6956 burned
+   4 rounds on this one class). Backfill and live subscriptions must
+   overlap — a gap between a finite history REQ and the live subscription
+   silently drops events (PR #3995); a retired chunk must not keep a stale
+   scope fence (PR #6996). (PRs #3995, #6904, #6956, #6996)
+
+3. **Regression tests must bind the production seam and be falsifiable.**
+   See "Review-Proven Test Standards" in [TESTING.md](TESTING.md) for the
+   full rule — in short: a guard whose removal doesn't fail any test
+   protects nothing; bind regression tests to the production code path,
+   not test-only helpers. (PRs #6807, #6980, #6996, #7013)
+
+4. **Bound every resource, loop, and process tree.** Cap captured
+   output (unbounded discovery temp files exhausted disk and overran the
+   deadline, PR #6904). Containment failures are errors, not warnings — a
+   tolerated Job Object creation failure or a `setsid` escape leaks whole
+   process trees (PR #6904). Retry/re-subscribe loops need backoff and a
+   terminal state: a persistent failure must not self-amplify into an
+   unbounded refresh loop (PR #6996), and check zero-delay edge cases
+   (`remainingMs()==0` selected the wrong fallback window, PR #6996).
+   (PRs #6904, #6996)
+
+5. **One user action = one atomic persist.** Implementing a single user
+   commit as N independent durable writes leaves torn state on partial
+   failure (theme "Set" as three independent notifier persists, PR #6944;
+   relay-commit vs. local-save recovery gap, PR #6269). Persist one
+   snapshot, or order the writes so every prefix is consistent and the
+   remainder is durably retried per rule 1. (PRs #6269, #6944)
+
+6. **A guard that hides the only recovery affordance is a functional
+   failure.** Before adding a visibility predicate or state fence, ask:
+   if the state it assumes goes wrong, does the user still have a way
+   back? A fence that permanently suppresses "jump to latest" after a
+   bounded correction fails strands the user silently — two reviewers
+   flagged this independently (PR #6807).
+
+7. **Audit assistive semantics on every new visual component.** The
+   agent-review lanes flagged accessibility defects on 44 findings across
+   the Aug 18–29 window — the second-largest cluster — and authors fixed
+   the concrete ones (duplicate VoiceOver stops on native controls,
+   actionable labels owned by two widgets at once, PR #6680; missing or
+   decorative-leaking semantics on new UI, PRs #6611, #6702, #6885, #6905,
+   #6908). New UI ships with: one owner per actionable label, no duplicate
+   screen-reader stops, and explicit semantics for every interactive
+   element. (PRs #6611, #6680, #6702, #6885, #6905, #6908, #6980)
+
+8. **Every input modality is a first-class seam.** Keyboard, pointer, and
+   hotkey paths must not silently diverge: `Shift+Space` treated as plain
+   `Space` because the guard omitted `shiftKey` (PR #6862), keyboard
+   ownership not released on blur, modifier keys dropped on the non-mouse
+   path (PRs #5958, #6793, #6860, #6908, #7006). When adding an input
+   handler, enumerate the modalities that can reach it and test the
+   non-primary ones — that's where the defects were. (PRs #5958, #5972,
+   #6793, #6860, #6862, #6908, #7006)
 
 ---
 
@@ -226,7 +357,9 @@ channel and derives its containing root. An optional `thread` parameter is
 accepted only when it matches that derived root. The explicit
 `--channel <uuid> --event <hex>` form remains available.
 
-All reads return sig-stripped JSON arrays; all writes return
+All event reads return normalized JSON arrays. Normal output preserves the seven
+canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
+`created_at`, `tags`, `sig`); all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
@@ -467,6 +600,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
+7. **`pgschema` omits seed DML and some storage parameters** — Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 
@@ -586,11 +720,13 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
   over raw `Theme.of(context)` calls.
 - **Keep widgets small and composable.** One public widget per file; push
   private sub-widgets (`_Foo`) into sibling `part` files under a
-  `<page>/` folder rather than growing the page file. Hard ceiling:
-  **1000 lines/file**, enforced across Desktop, Web, and Mobile by the
+  `<page>/` folder rather than growing the page file. Mobile's hard ceiling is
+  **1200 lines/file**, enforced with the other surface-specific limits by the
   repository-level `just file-size-check` gate (`just check`, CI, and every
-  pre-push). If the guard trips, **split the file — never bump the limit or add
-  an override to slip under it.**
+  pre-push). If an individual file trips the guard, **split the file — never
+  bump a surface limit or add an override merely to admit that file.**
+  Deliberate repository-wide policy revisions must update the enforced rules,
+  tests, and guidance together.
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.
@@ -601,7 +737,7 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 cd mobile
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test
+flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
@@ -643,3 +779,16 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+### Mention editor contract
+
+Autocomplete inserts a literal full label and a separator, including multi-word
+names. Only autocomplete settlement may move the caret past that separator;
+internal label spaces and deliberate ArrowLeft/click movement must be respected.
+See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.
+
+Selected mention labels bind exact keys, including same-name teammates and
+persistent automatic addresses. Use the returned label from registration for
+insert/restore/remove. Ambiguous manually typed names must fail visibly without
+clearing the draft in chat, edit, and standalone forum consumers; never fan out
+silently to all identities sharing a name. See `docs/mention-editor.md`.

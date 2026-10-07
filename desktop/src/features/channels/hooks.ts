@@ -11,7 +11,6 @@ import {
   archiveChannel,
   createChannel,
   deleteChannel,
-  getCanvas,
   getChannelDetails,
   getChannelMembers,
   getChannels,
@@ -19,9 +18,7 @@ import {
   joinChannel,
   leaveChannel,
   openDm,
-  invokeTauri,
   removeChannelMember,
-  setCanvas,
   setChannelPurpose,
   setChannelTopic,
   unarchiveChannel,
@@ -36,9 +33,10 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
-import type {
-  GetChannelsPayload,
-  OpenDmInput,
+import {
+  syncAgentsToActiveHuddle,
+  type GetChannelsPayload,
+  type OpenDmInput,
 } from "@/shared/api/tauriChannels";
 import { mergeConcurrentChannelRecency } from "@/features/channels/lib/channelRecencyMerge";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -53,6 +51,7 @@ import {
   CHANNEL_MEMBERS_STALE_TIME_MS,
   channelMembersQueryKey,
 } from "@/features/channels/rosterFreshness";
+import { dmVisibilityQueryKeyFor } from "@/features/channels/useHiddenDmIds";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -530,6 +529,12 @@ export function useCreateChannelMutation() {
 
 export function useOpenDmMutation() {
   const queryClient = useQueryClient();
+  const { activeCommunity } = useCommunities();
+  const identityQuery = useIdentityQuery();
+  const dmVisibilityKey = dmVisibilityQueryKeyFor(
+    activeCommunity?.relayUrl,
+    identityQuery.data?.pubkey,
+  );
 
   return useMutation({
     mutationFn: (input: OpenDmInput) => openDm(input),
@@ -537,6 +542,11 @@ export function useOpenDmMutation() {
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
         upsertCachedChannel(current, openedChannel),
       );
+      queryClient.setQueryData<Set<string>>(dmVisibilityKey, (current) => {
+        const next = new Set(current);
+        next.delete(openedChannel.id);
+        return next;
+      });
     },
     onSettled: () => {
       // The relay-returned DM is already in the cache. Mark the list stale so
@@ -546,6 +556,7 @@ export function useOpenDmMutation() {
         queryKey: channelsQueryKey,
         refetchType: "none",
       });
+      void queryClient.invalidateQueries({ queryKey: dmVisibilityKey });
     },
   });
 }
@@ -575,6 +586,12 @@ export function useUpsertCachedChannel() {
 
 export function useHideDmMutation() {
   const queryClient = useQueryClient();
+  const { activeCommunity } = useCommunities();
+  const identityQuery = useIdentityQuery();
+  const dmVisibilityKey = dmVisibilityQueryKeyFor(
+    activeCommunity?.relayUrl,
+    identityQuery.data?.pubkey,
+  );
 
   return useMutation({
     mutationFn: (channelId: string) => hideDm(channelId),
@@ -591,8 +608,16 @@ export function useHideDmMutation() {
         queryClient.setQueryData(channelsQueryKey, context.previous);
       }
     },
+    onSuccess: (_data, channelId) => {
+      queryClient.setQueryData<Set<string>>(dmVisibilityKey, (current) =>
+        new Set(current).add(channelId),
+      );
+    },
     onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: dmVisibilityKey }),
+      ]);
     },
   });
 }
@@ -820,12 +845,11 @@ export function useAddChannelMembersMutation(channelId: string | null) {
         variables.role === "bot" &&
         result.added.length > 0
       ) {
-        void invokeTauri("sync_agents_to_active_huddle", {
-          channelId: effectiveChannelId,
-          agentPubkeys: result.added,
-        }).catch((error) => {
-          console.warn("Could not sync added agents into Huddle:", error);
-        });
+        void syncAgentsToActiveHuddle(effectiveChannelId, result.added).catch(
+          (error) => {
+            console.warn("Could not sync added agents into Huddle:", error);
+          },
+        );
       }
     },
     onSettled: async (_data, _err, variables) => {
@@ -936,35 +960,11 @@ export function useSelectedChannel(
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
-export function useCanvasQuery(channelId: string | null, enabled = true) {
-  return useQuery({
-    queryKey: ["channel-canvas", channelId],
-    queryFn: () => {
-      if (!channelId) {
-        return Promise.reject(new Error("No channel selected"));
-      }
-      return getCanvas(channelId);
-    },
-    enabled: enabled && channelId !== null,
-  });
-}
-
-export function useSetCanvasMutation(channelId: string | null) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (content: string) => {
-      if (!channelId) {
-        return Promise.reject(new Error("No channel selected"));
-      }
-      return setCanvas({ channelId, content });
-    },
-    onSuccess: () => {
-      if (channelId) {
-        void queryClient.invalidateQueries({
-          queryKey: ["channel-canvas", channelId],
-        });
-      }
-    },
-  });
-}
+// Canvas query/mutation hooks live in their own module to keep this file under
+// the desktop file-size ratchet; re-exported here so existing import paths
+// (`@/features/channels/hooks`) keep working.
+export {
+  useCanvasHistoryQuery,
+  useCanvasQuery,
+  useSetCanvasMutation,
+} from "@/features/channels/canvasHooks";

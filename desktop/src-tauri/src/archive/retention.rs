@@ -10,7 +10,7 @@
 //! Phase-2 prune scan, the get/set accessors for the observer window, and the
 //! PRAGMA-based size readout. The prune worker itself lands in Phase 2.
 //!
-//! Kept in a sibling file (not `store.rs`) to respect the 1000-line gate, per
+//! Kept in a sibling file (not `store.rs`) to respect the 1500-line gate, per
 //! the existing `metric_store.rs` / `pipeline.rs` / `store_migrations.rs`
 //! precedent.
 

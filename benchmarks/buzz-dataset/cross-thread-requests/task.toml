@@ -7,6 +7,7 @@ authors = [{ name = "Buzz" }]
 keywords = ["buzz-native", "threading", "batching", "concurrency"]
 
 [metadata]
+evaluation_layer = "workflow"
 difficulty = "hard"
 category = "collaboration"
 tags = ["threading", "batching", "concurrency", "routing"]

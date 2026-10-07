@@ -27,6 +27,7 @@ import {
   ProjectEntityFacepile,
   ProjectEntityListRow,
 } from "./ProjectEntityListRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 import { useProjectConversationPanel } from "./ProjectConversationPanelContext";
 
 // Relay search caps a page at 500. Use the full page and surface a lower-bound
@@ -400,13 +401,12 @@ export function DiscussionChannelsPanel({
   }
   if (channels.length === 0) {
     return (
-      <p
-        className="px-4 py-6 text-sm text-muted-foreground"
-        data-testid="project-discussion-channels-panel"
-      >
-        No channels reference this repository yet. Paste its link (or a review
-        or task link) in a channel and it will show up here.
-      </p>
+      <ProjectPanelState
+        className="px-4"
+        description="Paste this repository, review, or task link in a channel and it will appear here."
+        testId="project-discussion-channels-panel"
+        title="No linked channels yet"
+      />
     );
   }
 

@@ -6,10 +6,6 @@ import { installMockBridge } from "../helpers/bridge";
 const SAMPLE_NSEC =
   "nsec1u70xptkumvfc4k4hu0rc4fnzcexvw63zvq2ng9vmqujsaayhparqu8eju9";
 
-// --buzz-onboarding-backup-ink (#717106), the olive key ink shared with the
-// backup step.
-const BACKUP_INK = "rgb(113, 113, 6)";
-
 test("key import masks the key with a reveal toggle", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await installMockBridge(page, undefined, {
@@ -23,12 +19,15 @@ test("key import masks the key with a reveal toggle", async ({ page }) => {
   await expect(input).toBeVisible();
   await waitForAnimations(page);
 
-  // Masked by default; no toggle until there is input; key text uses the
-  // shared backup ink.
+  // Masked by default; no toggle until there is input. The refreshed card
+  // keeps key text on the standard foreground token.
   const toggle = page.getByTestId("nostr-import-reveal-toggle");
   await expect(input).toHaveAttribute("type", "password");
   await expect(toggle).toHaveCSS("opacity", "0");
-  await expect(input).toHaveCSS("color", BACKUP_INK);
+  await expect(input).toHaveAttribute(
+    "class",
+    /text-\[oklch\(0\.22213_0_0\)\]/,
+  );
 
   // The toggle is absolutely positioned: its appearance must not resize the
   // input or shift the centered text.

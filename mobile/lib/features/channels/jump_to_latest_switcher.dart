@@ -2,6 +2,17 @@ import 'package:flutter/material.dart';
 
 import 'jump_to_latest_button.dart';
 
+/// Whether channel Latest should remain hidden at the effective timeline tail.
+///
+/// Composer and keyboard layout updates can briefly make item-position
+/// measurements stale. Preserve an active tail-follow intent through those
+/// frames unless the user explicitly detached from the tail.
+bool shouldHideChannelJumpToLatest({
+  required bool isAtLatest,
+  required bool followsLatest,
+  required bool userHasDetached,
+}) => isAtLatest || (followsLatest && !userHasDetached);
+
 /// Shared channel/thread visibility transition for [JumpToLatestButton].
 class JumpToLatestSwitcher extends StatelessWidget {
   final String id;
@@ -18,6 +29,19 @@ class JumpToLatestSwitcher extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final child = visible
+        ? JumpToLatestButton(
+            key: ValueKey('$id-jump-to-latest'),
+            id: id,
+            onPressed: onPressed,
+          )
+        : SizedBox.shrink(key: ValueKey('$id-jump-to-latest-hidden'));
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return KeyedSubtree(
+        key: ValueKey('$id-jump-to-latest-switcher'),
+        child: child,
+      );
+    }
     return AnimatedSwitcher(
       key: ValueKey('$id-jump-to-latest-switcher'),
       duration: reduceMotion
@@ -36,13 +60,7 @@ class JumpToLatestSwitcher extends StatelessWidget {
           child: child,
         ),
       ),
-      child: visible
-          ? JumpToLatestButton(
-              key: ValueKey('$id-jump-to-latest'),
-              id: id,
-              onPressed: onPressed,
-            )
-          : SizedBox.shrink(key: ValueKey('$id-jump-to-latest-hidden')),
+      child: child,
     );
   }
 }

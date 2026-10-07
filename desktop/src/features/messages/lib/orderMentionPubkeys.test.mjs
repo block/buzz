@@ -25,3 +25,14 @@ test("dedupes aliases at their earliest authored position", () => {
 
   assert.deepEqual(ordered, [AGENT_A, AGENT_B]);
 });
+
+test("case variants cannot overwrite a competing identity before occurrence selection", () => {
+  assert.deepEqual(
+    orderMentionPubkeysByText(
+      "@Scout hello",
+      { Scout: AGENT_A, scout: AGENT_B },
+      () => true,
+    ),
+    [],
+  );
+});

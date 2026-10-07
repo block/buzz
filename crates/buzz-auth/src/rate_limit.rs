@@ -60,6 +60,8 @@ pub enum LimitType {
     Messages,
     /// HTTP REST API calls.
     ApiCalls,
+    /// Relay-proxied GIF metadata searches.
+    GifSearches,
     /// All WebSocket events (broader than `Messages`).
     WsEvents,
     /// Concurrent WebSocket connections from a single IP address.
@@ -72,6 +74,7 @@ impl LimitType {
         match self {
             Self::Messages => "msg",
             Self::ApiCalls => "api",
+            Self::GifSearches => "gif",
             Self::WsEvents => "ws",
             Self::IpConnections => "conn",
         }
@@ -87,6 +90,10 @@ pub struct RateLimitConfig {
     /// Maximum messages per minute for human users. Default: 60.
     #[serde(default = "default_human_msg")]
     pub human_messages_per_min: u64,
+    /// Maximum relay-proxied GIF searches per minute for each pubkey.
+    /// Default: 30.
+    #[serde(default = "default_gif_searches")]
+    pub gif_searches_per_min: u64,
     /// Maximum HTTP API calls per minute for human users. Default: 300.
     #[serde(default = "default_human_api")]
     pub human_api_calls_per_min: u64,
@@ -109,6 +116,9 @@ pub struct RateLimitConfig {
 
 fn default_human_msg() -> u64 {
     60
+}
+fn default_gif_searches() -> u64 {
+    30
 }
 fn default_human_api() -> u64 {
     300
@@ -133,6 +143,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             human_messages_per_min: default_human_msg(),
+            gif_searches_per_min: default_gif_searches(),
             human_api_calls_per_min: default_human_api(),
             human_ws_events_per_sec: default_human_ws(),
             agent_standard_messages_per_min: default_agent_std_msg(),
@@ -270,6 +281,17 @@ mod tests {
             "key {key} should start with {expected_prefix}"
         );
         assert!(key.ends_with(":msg"));
+    }
+
+    #[test]
+    fn gif_searches_have_an_independent_quota_key() {
+        let ctx = fixture_ctx("relay-a.example");
+        let keys = Keys::generate();
+        let gif_key = rate_limit_key(&ctx, &keys.public_key(), &LimitType::GifSearches);
+        let api_key = rate_limit_key(&ctx, &keys.public_key(), &LimitType::ApiCalls);
+
+        assert!(gif_key.ends_with(":gif"));
+        assert_ne!(gif_key, api_key);
     }
 
     #[test]

@@ -75,6 +75,23 @@ const drainMicrotasks = async () => {
   }
 };
 
+test("ambiguous sibling sessions reject the pick even after another channel switched", async () => {
+  const h = harness([CH_A, CH_B]);
+  h.push(frame("switched"));
+  h.push(frame("ambiguous_target", { channelId: CH_B }));
+  assert.equal(await h.outcome, "ambiguous");
+  assert.equal(h.cancelTimeoutCalls, 1);
+  assert.equal(h.unsubscribeCalls, 1);
+});
+
+test("stale or foreign ambiguity does not reject a live model pick", async () => {
+  const h = harness([CH_A]);
+  h.push(frame("ambiguous_target", { requestId: "old-pick" }));
+  h.push(frame("ambiguous_target", { channelId: CH_B }));
+  h.push(frame("switched"));
+  assert.equal(await h.outcome, "ok");
+});
+
 test("awaitLiveSwitchOutcome fast sent on one channel does not mask a later unsupported on another", async () => {
   const h = harness([CH_A, CH_B]);
   // Channel A acks fast as `sent`; a first-ack-resolves impl would settle "ok"

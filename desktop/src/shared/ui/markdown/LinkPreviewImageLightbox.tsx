@@ -10,6 +10,7 @@ import {
   type ImageLightboxCornerRadii,
   imageLightboxBoxFromRect,
   imageLightboxCornerRadiiFromElement,
+  imageLightboxSourceScopeForTrigger,
   visibleImageGalleryForTrigger,
 } from "./imageLightbox";
 
@@ -18,16 +19,12 @@ type ImageZoomOverlayProps = {
   galleryIndex?: number;
   galleryItems?: ImageGalleryItem[];
   onClose: () => void;
-  onCopy: (src: string | undefined) => void;
-  onDownload: (src: string | undefined) => void;
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
   sourceCornerRadii: ImageLightboxCornerRadii;
   sourceScope?: Element | null;
   src: string | undefined;
 };
-
-const ignoreUnavailableImageAction = () => undefined;
 
 export function createLinkPreviewImageLightbox(
   ImageZoomOverlay: ComponentType<ImageZoomOverlayProps>,
@@ -52,7 +49,7 @@ export function createLinkPreviewImageLightbox(
 
       const sourceBox = imageLightboxBoxFromRect(rect);
       const sourceCornerRadii = imageLightboxCornerRadiiFromElement(image);
-      const sourceScope = trigger.closest("[data-link-preview-list]");
+      const sourceScope = imageLightboxSourceScopeForTrigger(trigger);
       const dim =
         image.naturalWidth > 0 && image.naturalHeight > 0
           ? `${image.naturalWidth}x${image.naturalHeight}`
@@ -62,6 +59,7 @@ export function createLinkPreviewImageLightbox(
         {
           alt,
           dim,
+          trigger,
           resolvedSrc: src,
           src: undefined,
           thumbnailBox: sourceBox,
@@ -103,8 +101,6 @@ export function createLinkPreviewImageLightbox(
             galleryIndex={lightboxState.galleryIndex}
             galleryItems={lightboxState.galleryItems}
             onClose={() => setLightboxState(null)}
-            onCopy={ignoreUnavailableImageAction}
-            onDownload={ignoreUnavailableImageAction}
             resolvedSrc={src}
             sourceBox={lightboxState.sourceBox}
             sourceCornerRadii={lightboxState.sourceCornerRadii}

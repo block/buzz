@@ -26,8 +26,6 @@ test("a persona target with a live sibling resolves to the live instance", () =>
     directManagedAgent: undefined,
     isArchived: (pubkey) => pubkey === ARCHIVED_PK,
     personaInstances: [archived, live],
-    preferDirectManagedAgent: false,
-    preserveRequestedInstance: false,
     pubkey: undefined,
   });
 
@@ -42,8 +40,6 @@ test("a persona target with all instances archived resolves to undefined", () =>
     directManagedAgent: undefined,
     isArchived: () => true,
     personaInstances: [first, second],
-    preferDirectManagedAgent: false,
-    preserveRequestedInstance: false,
     pubkey: undefined,
   });
 
@@ -58,8 +54,6 @@ test("an explicit archived pubkey stays exact even when a live sibling exists", 
     directManagedAgent: archivedDirect,
     isArchived: (pubkey) => pubkey === ARCHIVED_PK,
     personaInstances: [archivedDirect, live],
-    preferDirectManagedAgent: false,
-    preserveRequestedInstance: false,
     pubkey: ARCHIVED_PK,
   });
 
@@ -75,15 +69,13 @@ test("an explicit archived pubkey with no managed record resolves to undefined s
     directManagedAgent: undefined,
     isArchived: (pubkey) => pubkey === HISTORICAL_PK,
     personaInstances: [],
-    preferDirectManagedAgent: false,
-    preserveRequestedInstance: false,
     pubkey: HISTORICAL_PK,
   });
 
   assert.equal(resolved, undefined);
 });
 
-test("a preserved requested instance pins the exact record over canonicalization", () => {
+test("an explicit stopped instance pins the exact record over canonicalization", () => {
   const requested = agent({ pubkey: HISTORICAL_PK, status: "stopped" });
   const live = agent({ pubkey: LIVE_PK, status: "running" });
 
@@ -91,16 +83,14 @@ test("a preserved requested instance pins the exact record over canonicalization
     directManagedAgent: requested,
     isArchived: NONE_ARCHIVED,
     personaInstances: [requested, live],
-    preferDirectManagedAgent: false,
-    preserveRequestedInstance: true,
     pubkey: HISTORICAL_PK,
   });
 
   assert.equal(resolved, requested);
 });
 
-test("a non-archived historical pubkey canonicalizes to the live persona instance", () => {
-  // Rule 5: #5788 canonicalization is retained for non-archived navigation.
+test("a non-archived historical pubkey stays exact, like archived and active keys", () => {
+  // History is authored by a key, not its current persona representative.
   const requested = agent({ pubkey: HISTORICAL_PK, status: "stopped" });
   const live = agent({ pubkey: LIVE_PK, status: "running" });
 
@@ -108,15 +98,13 @@ test("a non-archived historical pubkey canonicalizes to the live persona instanc
     directManagedAgent: requested,
     isArchived: NONE_ARCHIVED,
     personaInstances: [requested, live],
-    preferDirectManagedAgent: false,
-    preserveRequestedInstance: false,
     pubkey: HISTORICAL_PK,
   });
 
-  assert.equal(resolved, live);
+  assert.equal(resolved, requested);
 });
 
-test("preferDirectManagedAgent keeps a directly opened active instance exact", () => {
+test("explicit navigation keeps a directly opened active instance exact", () => {
   // The panel's own default: an access edit must target the clicked instance,
   // not an alphabetically-earlier active sibling.
   const sibling = agent({ name: "Alpha", pubkey: LIVE_PK, status: "running" });
@@ -130,17 +118,14 @@ test("preferDirectManagedAgent keeps a directly opened active instance exact", (
     directManagedAgent: clicked,
     isArchived: NONE_ARCHIVED,
     personaInstances: [sibling, clicked],
-    preferDirectManagedAgent: true,
-    preserveRequestedInstance: false,
     pubkey: HISTORICAL_PK,
   });
 
   assert.equal(resolved, clicked);
 });
 
-test("an explicit archived pubkey stays exact even with preferDirectManagedAgent", () => {
-  // Rule 2 wins over the direct-preference redirect: a deliberately opened
-  // archived instance must not be redirected away from its unarchive control.
+test("an explicit archived pubkey stays exact with a running sibling", () => {
+  // Archive state does not change what identity an explicit target names.
   const archivedDirect = agent({ pubkey: ARCHIVED_PK, status: "stopped" });
   const live = agent({ pubkey: LIVE_PK, status: "running" });
 
@@ -148,10 +133,22 @@ test("an explicit archived pubkey stays exact even with preferDirectManagedAgent
     directManagedAgent: archivedDirect,
     isArchived: (pubkey) => pubkey === ARCHIVED_PK,
     personaInstances: [archivedDirect, live],
-    preferDirectManagedAgent: true,
-    preserveRequestedInstance: false,
     pubkey: ARCHIVED_PK,
   });
 
   assert.equal(resolved, archivedDirect);
 });
+
+for (const instances of [[], [agent({ status: "running" })]]) {
+  test(`relay-only A never resolves to local sibling B (${instances.length} siblings)`, () => {
+    assert.equal(
+      resolveCanonicalManagedAgent({
+        directManagedAgent: undefined,
+        isArchived: NONE_ARCHIVED,
+        personaInstances: instances,
+        pubkey: HISTORICAL_PK,
+      }),
+      undefined,
+    );
+  });
+}

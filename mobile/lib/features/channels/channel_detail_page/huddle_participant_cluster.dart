@@ -38,8 +38,10 @@ class _HuddleParticipantCluster extends HookWidget {
     required this.pubkeys,
     required this.profiles,
     required this.fallbackLabels,
+    required this.contextualLabels,
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
+    required this.workingAgentPubkeys,
     required this.movementDuration,
     required this.entryDuration,
     required this.exitDuration,
@@ -50,8 +52,12 @@ class _HuddleParticipantCluster extends HookWidget {
   final List<String> pubkeys;
   final Map<String, UserProfile> profiles;
   final Map<String, String> fallbackLabels;
+
+  /// Huddle-scoped identity labels, keyed by lowercase pubkey.
+  final Map<String, String> contextualLabels;
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
+  final Set<String> workingAgentPubkeys;
   final Duration movementDuration;
   final Duration entryDuration;
   final Duration exitDuration;
@@ -137,8 +143,10 @@ class _HuddleParticipantCluster extends HookWidget {
                 pubkey: pubkey,
                 profile: profiles[pubkey],
                 fallbackLabel: fallbackLabels[pubkey],
+                contextualLabel: contextualLabels[pubkey],
                 active: activeSpeakerPubkeys.contains(pubkey),
                 speakerLevel: speakerLevels[pubkey] ?? 0,
+                preparingResponse: workingAgentPubkeys.contains(pubkey),
                 slot: lastSlots[pubkey]!,
                 present: visiblePubkeySet.contains(pubkey),
                 movementDuration: movementDuration,
@@ -171,8 +179,10 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
     required this.pubkey,
     required this.profile,
     required this.fallbackLabel,
+    required this.contextualLabel,
     required this.active,
     required this.speakerLevel,
+    required this.preparingResponse,
     required this.slot,
     required this.present,
     required this.movementDuration,
@@ -184,8 +194,10 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
   final String pubkey;
   final UserProfile? profile;
   final String? fallbackLabel;
+  final String? contextualLabel;
   final bool active;
   final double speakerLevel;
+  final bool preparingResponse;
   final _HuddleClusterSlot slot;
   final bool present;
   final Duration movementDuration;
@@ -235,8 +247,10 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
             pubkey: pubkey,
             profile: profile,
             fallbackLabel: fallbackLabel,
+            contextualLabel: contextualLabel,
             active: active,
             speakerLevel: speakerLevel,
+            preparingResponse: preparingResponse,
             frameSize: frameSize,
             onTap: onTap,
           ),

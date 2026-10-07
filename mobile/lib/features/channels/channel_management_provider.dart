@@ -7,8 +7,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/utils/string_utils.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
@@ -34,15 +36,22 @@ class AddMembersException implements Exception {
   const AddMembersException(this.failures);
 
   String get message => failures.entries
-      .map(
-        (entry) =>
-            '${entry.key.length > 8 ? '${entry.key.substring(0, 8)}…' : entry.key}: ${entry.value}',
-      )
+      .map((entry) => '${shortPubkey(entry.key)}: ${entry.value}')
       .join('; ');
 
   @override
   String toString() => 'AddMembersException($message)';
 }
+
+/// The keys in a DM. Current membership is authoritative. The channel
+/// metadata's `p` tags can lag membership changes, so they count only when
+/// the membership snapshot is unavailable or empty.
+Iterable<String> dmParticipantPubkeys(
+  Channel channel,
+  List<ChannelMember>? members,
+) => members != null && members.isNotEmpty
+    ? members.map((member) => member.pubkey)
+    : channel.participantPubkeys;
 
 @immutable
 class ChannelMember {
@@ -70,7 +79,7 @@ class ChannelMember {
     if (displayName case final name? when name.trim().isNotEmpty) {
       return name.trim();
     }
-    return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 }
 
@@ -155,12 +164,14 @@ class DirectoryUser {
   final String? displayName;
   final String? avatarUrl;
   final String? nip05Handle;
+  final bool isAgent;
 
   const DirectoryUser({
     required this.pubkey,
     this.displayName,
     this.avatarUrl,
     this.nip05Handle,
+    this.isAgent = false,
   });
 
   String get label {
@@ -172,7 +183,7 @@ class DirectoryUser {
     if (nip05 != null && nip05.isNotEmpty) {
       return nip05;
     }
-    return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 
   String get secondaryLabel {
@@ -180,11 +191,22 @@ class DirectoryUser {
     if (nip05 != null && nip05.isNotEmpty && nip05 != label) {
       return nip05;
     }
-    return pubkey.length > 16 ? '${pubkey.substring(0, 16)}…' : pubkey;
+    // The primary label is already the compact key when no name or NIP-05
+    // exists; a second key-shaped line would only duplicate it.
+    final display = displayName?.trim();
+    return display != null && display.isNotEmpty ? shortPubkey(pubkey) : '';
   }
 
-  /// First visible character used when no avatar image is available.
-  String get initial => label.isNotEmpty ? label[0].toUpperCase() : '?';
+  /// Avatar initial — name-derived when available, otherwise keyed to the
+  /// hex public key so unnamed identities keep distinct initials (a compact
+  /// npub would render `N` for everyone).
+  String get initial {
+    final display = displayName?.trim();
+    if (display != null && display.isNotEmpty) return display[0].toUpperCase();
+    final nip05 = nip05Handle?.trim();
+    if (nip05 != null && nip05.isNotEmpty) return nip05[0].toUpperCase();
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
+  }
 }
 
 /// Whether the mobile DM directory should show local preview identities.
@@ -313,6 +335,7 @@ List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
           displayName: profile.displayName,
           avatarUrl: profile.avatarUrl,
           nip05Handle: profile.nip05,
+          isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
         ),
   ]..sort((a, b) {
     final labelComparison = a.label.toLowerCase().compareTo(
@@ -381,6 +404,16 @@ final relayDirectoryUsersProvider =
                   displayName: profile.displayName,
                   avatarUrl: profile.avatarUrl,
                   nip05Handle: profile.nip05,
+                  isAgent:
+                      verifiedOaOwnerPubkey(
+                        profileEvents
+                            .firstWhere(
+                              (event) => event.pubkey.toLowerCase() == pubkey,
+                            )
+                            .tags,
+                        pubkey,
+                      ) !=
+                      null,
                 )
               else
                 DirectoryUser(pubkey: pubkey),
@@ -488,7 +521,11 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 /// Channel members from kind:39002 NIP-29 members event.
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {
-      ref.watch(channelMembershipUpdateProvider(channelId));
+      ref.watch(
+        channelMembershipUpdateProvider(
+          channelId,
+        ).select((update) => update.version),
+      );
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
@@ -558,6 +595,24 @@ final channelMembersProvider = FutureProvider.autoDispose
       );
       return members;
     });
+
+/// The latest roster for [channelId] in the current relay, account, and
+/// channel scope, or null if none has loaded in that scope yet.
+///
+/// While [channelMembersProvider] reloads (for example after a kind:39002
+/// update), this keeps the roster from the last completed load in the same
+/// scope instead of dropping it. Another relay or account never sees it.
+List<ChannelMember>? watchLatestChannelMembers(Ref ref, String channelId) {
+  final loaded = ref.watch(channelMembersProvider(channelId)).asData?.value;
+  if (loaded != null) return loaded;
+  return ref
+      .read(_channelMembersSnapshotCacheProvider)
+      .read(
+        relayBaseUrl: ref.watch(relayConfigProvider).baseUrl,
+        pubkey: ref.watch(myPubkeyProvider)?.toLowerCase(),
+        channelId: channelId,
+      );
+}
 
 /// Channel canvas (kind:40100 for the channel).
 final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((

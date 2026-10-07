@@ -18,6 +18,7 @@ export function WorkflowsRouteScreen({
   onEditorPaneChange,
 }: WorkflowsRouteScreenProps) {
   const {
+    closeWorkflowDetail,
     goDuplicateWorkflow,
     goEditWorkflow,
     goNewWorkflow,
@@ -26,11 +27,11 @@ export function WorkflowsRouteScreen({
   } = useAppNavigation();
   const closeEditor = React.useCallback(() => {
     if (editor?.hasOrigin) {
-      window.history.back();
+      closeWorkflowDetail();
       return;
     }
     void goWorkflows({ replace: true });
-  }, [editor?.hasOrigin, goWorkflows]);
+  }, [closeWorkflowDetail, editor?.hasOrigin, goWorkflows]);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   const memberChannels = channels.filter((channel) => channel.isMember);

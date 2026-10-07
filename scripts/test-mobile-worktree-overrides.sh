@@ -64,7 +64,7 @@ out="$("$wt/scripts/mobile-worktree-overrides.sh")"
 ios="$wt/mobile/ios/Flutter/WorktreeOverrides.xcconfig"
 android="$wt/mobile/android/worktree.properties"
 [[ -f "$ios" && -f "$android" ]] || fail "worktree must write both override files"
-grep -q '^BUNDLE_IDENTIFIER = com\.buzz\.buzzMobile\.feature-work-1$' "$ios" \
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile\.feature-work-1$' "$ios" \
   && pass "iOS bundle identifier keys to the sanitized worktree directory name" \
   || fail "iOS bundle identifier must key to the worktree dir, got: $(cat "$ios")"
 grep -q '^APP_DISPLAY_NAME = Buzz (Fix_Thing-2)$' "$ios" \
@@ -86,7 +86,7 @@ printf '%s' "$out" | grep -q 'Worktree Feature_Work-1' \
 # ── Branch switch in the same worktree: identity stable, label follows ───────
 git -C "$wt" checkout -q -b "another/branch-name"
 "$wt/scripts/mobile-worktree-overrides.sh" > /dev/null
-grep -q '^BUNDLE_IDENTIFIER = com\.buzz\.buzzMobile\.feature-work-1$' "$ios" \
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile\.feature-work-1$' "$ios" \
   && grep -q '^applicationIdSuffix=\.feature_work_1$' "$android" \
   && pass "branch switch keeps the install identity stable (per worktree)" \
   || fail "install identity must not change on branch switch"
@@ -156,6 +156,9 @@ gradle="$repo_root/mobile/android/app/build.gradle.kts"
 manifest="$repo_root/mobile/android/app/src/main/AndroidManifest.xml"
 plist="$repo_root/mobile/ios/Runner/Info.plist"
 
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.dogfood\.mobile$' "$debug_xcconfig" \
+  && pass "Debug.xcconfig defaults to the dogfood bundle identifier" \
+  || fail "Debug.xcconfig must default to xyz.block.buzz.dogfood.mobile"
 grep -q 'WorktreeOverrides.xcconfig' "$debug_xcconfig" \
   && pass "Debug.xcconfig includes WorktreeOverrides" \
   || fail "Debug.xcconfig must include WorktreeOverrides.xcconfig"
@@ -166,15 +169,20 @@ if [[ -n "$worktree_line" && -n "$app_line" && "$worktree_line" -lt "$app_line" 
 else
   fail "Debug.xcconfig must include AppOverrides.xcconfig after WorktreeOverrides.xcconfig"
 fi
+grep -q '^ios_prefix="xyz.block.buzz.dogfood.mobile\."$' "$clean_script" \
+  && pass "cleanup targets the iOS dogfood worktree prefix" \
+  || fail "cleanup must share the iOS dogfood prefix used by worktree overrides"
+
 grep -q 'WorktreeOverrides' "$release_xcconfig" \
   && fail "Release.xcconfig must not include WorktreeOverrides.xcconfig" \
   || pass "Release.xcconfig does not include WorktreeOverrides"
-grep -q '^BUNDLE_IDENTIFIER = com\.buzz\.buzzMobile$' "$release_xcconfig" \
+grep -q '^BUNDLE_IDENTIFIER = xyz\.block\.buzz\.mobile$' "$release_xcconfig" \
   && pass "Release.xcconfig keeps the production bundle identifier" \
-  || fail "Release.xcconfig must keep BUNDLE_IDENTIFIER = com.buzz.buzzMobile"
+  || fail "Release.xcconfig must keep BUNDLE_IDENTIFIER = xyz.block.buzz.mobile"
 grep -q '^APP_DISPLAY_NAME = Buzz$' "$release_xcconfig" \
   && pass "Release.xcconfig keeps the production display name" \
   || fail "Release.xcconfig must keep APP_DISPLAY_NAME = Buzz"
+
 grep -q '<string>$(APP_DISPLAY_NAME)</string>' "$plist" \
   && pass "Info.plist display name resolves from build settings" \
   || fail "Info.plist CFBundleDisplayName must be \$(APP_DISPLAY_NAME)"

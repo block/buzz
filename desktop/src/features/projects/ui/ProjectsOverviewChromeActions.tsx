@@ -1,7 +1,8 @@
-import { Info, MessageCircle } from "lucide-react";
+import { MessageCircle } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 
 export function ProjectsOverviewChromeActions({
   chatOpen,
@@ -49,12 +50,10 @@ export function ProjectsOverviewChromeActions({
         type="button"
         variant="ghost"
       >
-        <Info
-          className={cn(
-            "h-4 w-4 transition-opacity duration-200 ease-linear",
-            contextOpen ? "opacity-100" : "opacity-60",
-          )}
-          data-testid="projects-overview-context-icon"
+        <DrawerPanelIcon
+          className="-scale-x-100"
+          side={contextOpen ? "left" : "right"}
+          testId="projects-overview-context-icon"
         />
       </Button>
     </>

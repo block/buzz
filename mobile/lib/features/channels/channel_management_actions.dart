@@ -34,15 +34,16 @@ class ChannelActions {
        _isCommunityValid = isCommunityValid;
 
   Future<Channel> createChannel({
+    String? channelId,
     required String name,
     required String channelType,
     required String visibility,
     String? description,
     int? ttlSeconds,
   }) async {
-    final channelId = _newUuidV4();
+    final resolvedChannelId = channelId ?? _newUuidV4();
     final tags = buildCreateChannelTags(
-      channelId: channelId,
+      channelId: resolvedChannelId,
       name: name,
       channelType: channelType,
       visibility: visibility,
@@ -52,7 +53,7 @@ class ChannelActions {
     _ensureCommunityValid();
     await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
     _ensureCommunityValid();
-    return _refreshChannelsAndRead(channelId);
+    return _refreshChannelsAndRead(resolvedChannelId);
   }
 
   /// Open (or create) a DM channel with the given pubkeys.

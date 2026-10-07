@@ -62,6 +62,13 @@ export type ProjectsWorkItemsResult<TProject extends ProjectReference> = {
   };
 };
 
+/** Includes every repository-bearing read model, including repository-only ones. */
+export function projectsWithWorkItemRepositories<
+  TProject extends ProjectReference,
+>(projects: readonly TProject[]): TProject[] {
+  return projects.filter((project) => project.repositories.length > 0);
+}
+
 function groupByRepoAddress(events: RelayEvent[]): Map<string, RelayEvent[]> {
   const grouped = new Map<string, RelayEvent[]>();
   for (const event of events) {

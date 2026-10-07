@@ -1,4 +1,5 @@
 import { classifyRelayClosed } from "@/shared/api/relayClosedPolicy";
+import { isQueryDeadlineError } from "@/shared/lib/relayError";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -25,6 +26,16 @@ const RETRY_MAX_DELAY_MS = 30_000;
 
 type LiveSubscription = Extract<RelaySubscription, { mode: "live" }>;
 
+type ClosedRepairOptions = {
+  /** Paged channel repair; without it a CLOSED retry resends the cursor filter only. */
+  requestRepair?: (
+    request: ChannelReconnectRepairRequest,
+  ) => Promise<RelayEvent[]>;
+  /** Connection generation the CLOSED frame arrived on. */
+  generation?: number;
+  isActive?: () => boolean;
+};
+
 export function clearClosedRetry(subscription: LiveSubscription) {
   if (subscription.closedRetryTimeout === undefined) return;
   window.clearTimeout(subscription.closedRetryTimeout);
@@ -36,6 +47,7 @@ export function handleRelayClosed({
   subId,
   message,
   sendReq,
+  closeSubscription,
   requestRepair,
   generation = 0,
   isActive = () => true,
@@ -44,25 +56,72 @@ export function handleRelayClosed({
   subId: string;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
-  /** Paged channel repair; without it a CLOSED retry resends the cursor filter only. */
-  requestRepair?: (
-    request: ChannelReconnectRepairRequest,
-  ) => Promise<RelayEvent[]>;
-  /** Connection generation the CLOSED frame arrived on. */
-  generation?: number;
-  isActive?: () => boolean;
-}) {
+  closeSubscription?: (subId: string) => Promise<void>;
+} & ClosedRepairOptions) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode !== "live") {
-    // Classify before rejecting so a `rate-limited:` history CLOSED arms the
-    // gate for concurrent ops. A history sub can't be retried (the caller holds
-    // the promise), so we still reject immediately after arming.
+    // Classify before acting so a `rate-limited:` CLOSED arms the gate for
+    // concurrent ops regardless of whether this specific sub can be retried.
     const closedClass = classifyRelayClosed(message);
     if (closedClass === "rate-limited") {
       const hintSeconds = parseRateLimitHint(message);
       activateRateLimit(hintSeconds);
+
+      // History subs hold a promise the caller is awaiting. Rather than
+      // rejecting immediately, defer and re-issue the REQ after the
+      // rate-limit window so the caller transparently receives their result.
+      // Bounded to 3 attempts — if the relay keeps refusing, fall through
+      // to the permanent reject so the caller's promise resolves with an error
+      // rather than waiting forever.
+      if (subscription.mode === "history") {
+        const attempt = subscription.closedRetryAttempt ?? 0;
+        if (attempt < 3) {
+          subscription.closedRetryAttempt = attempt + 1;
+          // The same cancellable timeout owns admission waiting and, only once
+          // dispatched, the response budget. A later hint can extend the gate.
+          window.clearTimeout(subscription.timeout);
+          const newSubId = `history-${crypto.randomUUID()}`;
+          subscriptions.delete(subId);
+          subscriptions.set(newSubId, subscription);
+          const isOwned = () => subscriptions.get(newSubId) === subscription;
+          const retryWhenAdmitted = () => {
+            if (!isOwned()) return;
+            const remainingMs = rateLimitRemainingMs();
+            if (remainingMs > 0) {
+              subscription.timeout = window.setTimeout(
+                retryWhenAdmitted,
+                remainingMs,
+              );
+              return;
+            }
+            // Arm before transport: EOSE/CLOSED may arrive before send settles.
+            subscription.timeout = window.setTimeout(() => {
+              if (!isOwned()) return;
+              subscriptions.delete(newSubId);
+              closeSubscription?.(newSubId)?.catch(() => {});
+              subscription.reject(
+                new Error("Relay closed the history subscription."),
+              );
+            }, subscription.timeoutMs);
+            void sendReq(newSubId, subscription.filter).catch(() => {
+              if (!isOwned()) return;
+              window.clearTimeout(subscription.timeout);
+              subscriptions.delete(newSubId);
+              subscription.reject(
+                new Error(message || "Relay closed the history subscription."),
+              );
+            });
+          };
+          subscription.timeout = window.setTimeout(
+            retryWhenAdmitted,
+            rateLimitRemainingMs(),
+          );
+          return;
+        }
+      }
     }
+
     window.clearTimeout(subscription.timeout);
     subscriptions.delete(subId);
     subscription.reject(
@@ -97,23 +156,24 @@ function recoverLiveSubscriptionFromClosed({
   subscription: LiveSubscription;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
-  /** Paged channel repair; without it a CLOSED retry resends the cursor filter only. */
-  requestRepair?: (
-    request: ChannelReconnectRepairRequest,
-  ) => Promise<RelayEvent[]>;
-  /** Connection generation the CLOSED frame arrived on. */
-  generation?: number;
-  isActive?: () => boolean;
-}) {
+} & ClosedRepairOptions) {
   subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
-  const closedClass = classifyRelayClosed(message);
+  // A deadline on a live sub is treated as retryable: resubscribe with the
+  // same filter under the 1-30s backoff, which can keep retrying at the cap.
+  // `since` is deliberately not advanced to now; that could skip events
+  // missed while the sub was closed.
+  const closedClass = isQueryDeadlineError(message)
+    ? "retryable"
+    : classifyRelayClosed(message);
 
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
     // doesn't silently loop.
     subscriptions.delete(subId);
+    clearClosedRetry(subscription);
+    subscription.onRemoved?.();
     return;
   }
 
@@ -140,11 +200,22 @@ function recoverLiveSubscriptionFromClosed({
   }
 
   subscription.closedRetryAttempt = attempt + 1;
-  subscription.closedRetryTimeout = window.setTimeout(() => {
+  const retryWhenAdmitted = () => {
     subscription.closedRetryTimeout = undefined;
     if (subscriptions.get(subId) !== subscription) return;
-    // The original filter has no reader-clock `since` and replays only its
-    // newest `limit` rows, so resume from the accepted-event cursor instead.
+    // A later quota hint can extend the shared gate after this retry was
+    // scheduled. Keep the existing cancellable timer owner while waiting;
+    // postponement is not another failed attempt and must not grow backoff.
+    const remainingMs = rateLimitRemainingMs();
+    if (remainingMs > 0) {
+      subscription.closedRetryTimeout = window.setTimeout(
+        retryWhenAdmitted,
+        remainingMs,
+      );
+      return;
+    }
+    // The live channel filter has no reader-clock `since` and replays only
+    // its newest `limit` rows, so resume from the accepted-event cursor.
     const channelId = subscription.filter["#h"]?.[0];
     const shouldPageReplay =
       channelId !== undefined &&
@@ -192,7 +263,11 @@ function recoverLiveSubscriptionFromClosed({
         isActive,
       });
     });
-  }, delayMs);
+  };
+  subscription.closedRetryTimeout = window.setTimeout(
+    retryWhenAdmitted,
+    delayMs,
+  );
 }
 
 export function prepareSubscriptionEvent(

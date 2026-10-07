@@ -2,8 +2,6 @@ import {
   Check,
   ChevronRight,
   Copy,
-  FileText,
-  Hash,
   Info,
   MessageSquare,
   Pencil,
@@ -12,17 +10,12 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
+import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { PanelSectionGroup } from "@/shared/ui/PanelSectionGroup";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-
-function getChannelIcon(channelType: Channel["channelType"]): LucideIcon {
-  if (channelType === "forum") return FileText;
-  if (channelType === "dm") return MessageSquare;
-  return Hash;
-}
 
 export function ChannelHero({
   channel,
@@ -31,7 +24,6 @@ export function ChannelHero({
   channel: Channel;
   onEdit?: () => void;
 }) {
-  const Icon = getChannelIcon(channel.channelType);
   const channelDescription = channel.description.trim();
   const description =
     channelDescription || (onEdit ? "Add a description" : null);
@@ -42,7 +34,11 @@ export function ChannelHero({
       data-testid="channel-management-hero"
     >
       <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-primary-foreground">
-        <Icon className="h-8 w-8" />
+        {channel.channelType === "dm" ? (
+          <MessageSquare className="h-8 w-8" />
+        ) : (
+          <ChannelGlyph channel={channel} className="h-8 w-8" />
+        )}
       </div>
       {channel.channelType !== "dm" && onEdit ? (
         <button
@@ -68,7 +64,7 @@ export function ChannelHero({
             </span>
           </span>
           <span
-            className="mt-1 line-clamp-2 max-w-full text-sm leading-5 text-muted-foreground/70"
+            className="mt-1 line-clamp-6 max-w-full whitespace-pre-line text-sm leading-5 text-muted-foreground/70"
             data-testid="channel-management-description"
           >
             {description}
@@ -84,7 +80,7 @@ export function ChannelHero({
           </h3>
           {description ? (
             <p
-              className="mt-1 line-clamp-2 max-w-full text-sm leading-5 text-muted-foreground/70"
+              className="mt-1 line-clamp-6 max-w-full whitespace-pre-line text-sm leading-5 text-muted-foreground/70"
               data-testid="channel-management-description"
             >
               {description}

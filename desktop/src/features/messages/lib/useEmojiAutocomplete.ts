@@ -238,8 +238,11 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
         return { handled: true };
       }
 
+      // Forward Tab selects; Shift+Tab deliberately does not. The reverse
+      // move stays the browser's, so this overlay can't swallow a keyboard
+      // user's way back out (see useMentions for the same split).
       if (
-        event.key === "Tab" ||
+        (event.key === "Tab" && !event.shiftKey) ||
         (event.key === "Enter" &&
           !event.ctrlKey &&
           !event.metaKey &&

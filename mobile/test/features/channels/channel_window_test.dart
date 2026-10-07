@@ -63,6 +63,27 @@ void main() {
   });
 
   group('ChannelWindowStore', () {
+    test('flattens equal-second rows in desktop channel order', () {
+      final store = replaceNewestChannelWindow(
+        const ChannelWindowStore.empty(),
+        _page(
+          rows: [_row('a', createdAt: 10), _row('m', createdAt: 10)],
+          hasMore: false,
+        ),
+      );
+      final withLive = mergeLiveChannelWindowEvent(
+        store,
+        _row('z', createdAt: 10),
+        isTimelineRow: true,
+      );
+
+      expect(flattenChannelWindowEvents(withLive).map((event) => event.id), [
+        'z',
+        'm',
+        'a',
+      ]);
+    });
+
     test('rejects cursor interval and row order violations', () {
       expect(
         () => appendOlderChannelWindow(
@@ -121,25 +142,42 @@ void main() {
       expect(refreshed.pages.single.rows.single.event.id, 'b');
     });
 
-    test('drops live rows at or older than oldest loaded boundary', () {
-      final store = replaceNewestChannelWindow(
-        const ChannelWindowStore.empty(),
-        _page(rows: [_row('a', createdAt: 10), _row('m', createdAt: 9)]),
-      );
-      final ignored = mergeLiveChannelWindowEvent(
-        store,
-        _row('z', createdAt: 8),
-        isTimelineRow: true,
-      );
-      expect(identical(ignored, store), isTrue);
+    test(
+      'keeps the loaded boundary closed but accepts exhausted live rows',
+      () {
+        final store = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(
+            rows: [_row('a', createdAt: 10), _row('m', createdAt: 9)],
+            hasMore: true,
+          ),
+        );
+        final ignored = mergeLiveChannelWindowEvent(
+          store,
+          _row('z', createdAt: 8),
+          isTimelineRow: true,
+        );
+        expect(identical(ignored, store), isTrue);
 
-      final merged = mergeLiveChannelWindowEvent(
-        store,
-        _row('live', createdAt: 11),
-        isTimelineRow: true,
-      );
-      expect(merged.liveOverlay.map((event) => event.id), ['live']);
-    });
+        final merged = mergeLiveChannelWindowEvent(
+          store,
+          _row('live', createdAt: 11),
+          isTimelineRow: true,
+        );
+        expect(merged.liveOverlay.map((event) => event.id), ['live']);
+
+        final exhausted = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(rows: [_row('a', createdAt: 10)], hasMore: false),
+        );
+        final sameSecond = mergeLiveChannelWindowEvent(
+          exhausted,
+          _row('z', createdAt: 10),
+          isTimelineRow: true,
+        );
+        expect(sameSecond.liveOverlay.map((event) => event.id), ['z']);
+      },
+    );
   });
 
   group('live thread summaries', () {

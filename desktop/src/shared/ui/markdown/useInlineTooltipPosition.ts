@@ -13,6 +13,7 @@ export function useInlineTooltipPosition() {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const fragmentCenterXRef = React.useRef<number | null>(null);
   const placementObserverRef = React.useRef<MutationObserver | null>(null);
+  const placementFrameRef = React.useRef<number | null>(null);
   const placedRef = React.useRef(false);
 
   const positionContent = React.useCallback(() => {
@@ -32,14 +33,18 @@ export function useInlineTooltipPosition() {
     );
     const correction = desiredLeft - rect.left;
     if (Math.abs(correction) < 0.5) return;
-    const currentOffset = Number.parseFloat(wrapper.style.marginLeft) || 0;
-    wrapper.style.marginLeft = `${currentOffset + correction}px`;
+    const currentOffset = Number.parseFloat(content.style.translate) || 0;
+    content.style.translate = `${currentOffset + correction}px`;
   }, []);
 
   const setContentRef = React.useCallback(
     (content: HTMLDivElement | null) => {
       placementObserverRef.current?.disconnect();
       placementObserverRef.current = null;
+      if (placementFrameRef.current !== null) {
+        cancelAnimationFrame(placementFrameRef.current);
+        placementFrameRef.current = null;
+      }
       contentRef.current = content;
       placedRef.current = false;
       const wrapper = content?.parentElement;
@@ -48,27 +53,43 @@ export function useInlineTooltipPosition() {
       let transform = wrapper.style.transform;
       const handlePlacement = () => {
         const nextTransform = wrapper.style.transform;
-        if (nextTransform === transform) return;
-        transform = nextTransform;
+        if (nextTransform !== transform) transform = nextTransform;
         placedRef.current = true;
         positionContent();
+        if (placementFrameRef.current !== null) {
+          cancelAnimationFrame(placementFrameRef.current);
+        }
+        placementFrameRef.current = requestAnimationFrame(() => {
+          placementFrameRef.current = null;
+          positionContent();
+        });
       };
-      const observer = new MutationObserver(handlePlacement);
+      const observer = new MutationObserver(() => {
+        if (wrapper.style.transform !== transform) handlePlacement();
+      });
       observer.observe(wrapper, {
         attributeFilter: ["style"],
         attributes: true,
       });
       placementObserverRef.current = observer;
-      requestAnimationFrame(() => {
+      placementFrameRef.current = requestAnimationFrame(() => {
+        placementFrameRef.current = null;
         if (contentRef.current !== content) return;
-        placedRef.current = true;
-        positionContent();
+        handlePlacement();
       });
     },
     [positionContent],
   );
 
-  React.useEffect(() => () => placementObserverRef.current?.disconnect(), []);
+  React.useEffect(
+    () => () => {
+      placementObserverRef.current?.disconnect();
+      if (placementFrameRef.current !== null) {
+        cancelAnimationFrame(placementFrameRef.current);
+      }
+    },
+    [],
+  );
 
   const onPointerMove = React.useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
@@ -77,7 +98,7 @@ export function useInlineTooltipPosition() {
       );
       if (rects.length <= 1) {
         fragmentCenterXRef.current = null;
-        contentRef.current?.parentElement?.style.removeProperty("margin-left");
+        contentRef.current?.style.removeProperty("translate");
         return;
       }
       const fragment = rects.reduce<DOMRect | null>((nearest, rect) => {
@@ -90,6 +111,14 @@ export function useInlineTooltipPosition() {
       if (!fragment) return;
       fragmentCenterXRef.current = fragment.left + fragment.width / 2;
       positionContent();
+      if (placementFrameRef.current !== null) {
+        cancelAnimationFrame(placementFrameRef.current);
+      }
+      placementFrameRef.current = requestAnimationFrame(() => {
+        placementFrameRef.current = null;
+        placedRef.current = true;
+        positionContent();
+      });
     },
     [positionContent],
   );

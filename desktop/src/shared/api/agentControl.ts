@@ -1,15 +1,16 @@
 import { sendAgentObserverControl } from "@/shared/api/observerRelay";
-import type { CancelManagedAgentTurnResult } from "@/shared/api/types";
 
+/** Send a stop request; the harness acknowledges it via control_result. */
 export async function cancelManagedAgentTurn(
   pubkey: string,
   channelId: string,
-): Promise<CancelManagedAgentTurnResult> {
+  requestId: string,
+): Promise<void> {
   await sendAgentObserverControl(pubkey, {
     type: "cancel_turn",
     channelId,
+    requestId,
   });
-  return { status: "sent" };
 }
 
 /**

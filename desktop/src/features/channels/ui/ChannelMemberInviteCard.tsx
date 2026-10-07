@@ -2,7 +2,7 @@ import { Search, UserPlus, X } from "lucide-react";
 import * as React from "react";
 
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
@@ -19,7 +19,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -206,6 +206,7 @@ export function ChannelMemberInviteCard({
                   <UserAvatar
                     avatarUrl={invitee.avatarUrl ?? null}
                     displayName={formatSearchUserName(invitee)}
+                    shape={invitee.isAgent ? "squircle" : "circle"}
                     size="xs"
                   />
                   <span className="font-medium">
@@ -269,11 +270,11 @@ export function ChannelMemberInviteCard({
                       <div className="flex min-w-0 items-center gap-2">
                         <UserAvatar
                           avatarUrl={null}
-                          displayName={truncatePubkey(directInvitee.pubkey)}
+                          displayName={truncateNpub(directInvitee.pubkey)}
                           size="xs"
                         />
                         <p className="truncate text-sm font-medium leading-5">
-                          {truncatePubkey(directInvitee.pubkey)}
+                          {truncateNpub(directInvitee.pubkey)}
                         </p>
                         <span className="shrink-0 text-xs text-muted-foreground">
                           by public key
@@ -297,6 +298,7 @@ export function ChannelMemberInviteCard({
                         <UserAvatar
                           avatarUrl={result.avatarUrl}
                           displayName={formatSearchUserName(result)}
+                          shape={result.isAgent ? "squircle" : "circle"}
                           size="xs"
                         />
                         <p className="truncate text-sm font-medium leading-5">
@@ -368,7 +370,7 @@ export function ChannelMemberInviteCard({
         <div className="space-y-1 text-sm text-destructive">
           {submissionErrors.map((error) => (
             <p key={`${error.pubkey}-${error.error}`}>
-              {truncatePubkey(error.pubkey)}: {error.error}
+              {truncateNpub(error.pubkey)}: {error.error}
             </p>
           ))}
         </div>

@@ -5,7 +5,6 @@ import {
 } from "@/features/channels/useLiveChannelUpdates";
 import {
   countUnreadAppBadgeObservedEvents,
-  countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
   hasUnreadTopLevelObservedEvent,
@@ -426,13 +425,14 @@ export function useUnreadChannels(
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
       const channel = channelsRef.current.find((ch) => ch.id === channelId);
-      const isHighPriority =
-        channel?.channelType === "dm" ||
-        (normalizedPubkey !== null &&
-          isHighPriorityEventForUser(event, normalizedPubkey));
       const isThreadedReply =
         getThreadReference(event.tags).parentId !== null &&
         !isBroadcastReply(event.tags);
+      const isHighPriority =
+        channel?.channelType === "dm" ||
+        isThreadedReply ||
+        (normalizedPubkey !== null &&
+          isHighPriorityEventForUser(event, normalizedPubkey));
       const didRecordUnreadEvent = recordUnreadEvent(
         channelId,
         makeObservedUnreadEvent({
@@ -571,10 +571,14 @@ export function useUnreadChannels(
 
   const muteThread = React.useCallback(
     (rootId: string) => {
+      const didAdd = !mutedRootIdsRef.current.has(rootId);
       mutedRootIdsRef.current.add(rootId);
       observedPersistence.updateMembership("muted_root", rootId, true);
       if (normalizedPubkey !== null) {
         mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      if (didAdd) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
@@ -583,10 +587,13 @@ export function useUnreadChannels(
 
   const unmuteThread = React.useCallback(
     (rootId: string) => {
-      mutedRootIdsRef.current.delete(rootId);
+      const didDelete = mutedRootIdsRef.current.delete(rootId);
       observedPersistence.updateMembership("muted_root", rootId, false);
       if (normalizedPubkey !== null) {
         mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      if (didDelete) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
@@ -784,13 +791,8 @@ export function useUnreadChannels(
     relayClient,
   ]);
 
-  // Unread = inactive channels, plus any channel manually marked unread this
-  // session. A manually marked active channel must remain visible as unread
-  // until the user explicitly marks it read again.
-  // High-priority unread = DMs or channels with a mention/broadcast newer
-  // than the read marker. Forced-unread channels are dot tier only (not
-  // high-priority). Both sets share identical deps and always invalidate
-  // together, so they are computed in a single memo.
+  // Derive unread and high-priority projections together so they invalidate
+  // from the same read-state snapshot.
   const rawUnread =
     // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and latestVersion are intentional invalidation signals
     React.useMemo(() => {
@@ -841,7 +843,7 @@ export function useUnreadChannels(
           if (!isForcedUnread) continue;
           unread.add(channel.id);
           topLevelUnread.add(channel.id);
-          counts.set(channel.id, 1);
+          if (channel.channelType === "dm") counts.set(channel.id, 1);
           unreadChannelNotificationCount += 1;
           continue;
         }
@@ -857,33 +859,25 @@ export function useUnreadChannels(
         ) {
           topLevelUnread.add(channel.id);
         }
-        const badgeCount =
-          nativeProjection?.badgeCount ??
-          countUnreadBadgeObservedEvents(
-            observedEvents,
-            readAtForObservedEvent,
-          );
-        counts.set(channel.id, badgeCount);
-        unreadChannelNotificationCount +=
+        const appBadgeCount =
           nativeProjection?.appBadgeCount ??
           countUnreadAppBadgeObservedEvents(
             observedEvents,
             readAtForObservedEvent,
           );
+        const highPriorityCount =
+          nativeProjection?.highPriorityCount ??
+          countUnreadHighPriorityObservedEvents(
+            observedEvents,
+            readAtForObservedEvent,
+          );
+        counts.set(channel.id, unreadCount);
+        unreadChannelNotificationCount += appBadgeCount;
 
-        // DM channels: any unread DM is high-priority.
-        if (channel.channelType === "dm") {
-          highPriority.add(channel.id);
-        } else if (
-          nativeProjection?.highPriorityUnread ||
-          (!nativeProjection &&
-            countUnreadHighPriorityObservedEvents(
-              observedEvents,
-              readAtForObservedEvent,
-            ) > 0)
-        ) {
-          // Non-DM: high-priority only if at least one mention/broadcast
-          // remains unread in its own channel/thread context.
+        // DM channels: any unread DM is high-priority. Non-DM: high-priority
+        // only if at least one mention, broadcast, or relevant thread reply
+        // remains unread in its own channel/thread context.
+        if (channel.channelType === "dm" || highPriorityCount > 0) {
           highPriority.add(channel.id);
         }
       }
@@ -962,6 +956,11 @@ export function useUnreadChannels(
     () => new Set(mentionedRootIdsRef.current) as ReadonlySet<string>,
     [membershipVersion],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const mutedRootIds = React.useMemo(
+    () => new Set(mutedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
 
   return {
     unreadChannelIds,
@@ -990,7 +989,7 @@ export function useUnreadChannels(
       currentActivityScope,
       threadActivityRef.current,
     ),
-    mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
+    mutedRootIds,
     muteThread,
     unmuteThread,
   };

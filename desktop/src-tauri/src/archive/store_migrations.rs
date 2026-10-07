@@ -4,7 +4,7 @@
 //! `archive_migrations`, so a migration that already ran is a no-op.
 //!
 //! Kept in a sibling file (not `store.rs`) to keep that file under the
-//! 1000-line gate, per the existing `metric_store.rs` / `pipeline.rs`
+//! 1500-line gate, per the existing `metric_store.rs` / `pipeline.rs`
 //! precedent.
 
 use rusqlite::{params, Connection};

@@ -8,8 +8,9 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+mod launch;
+
 use futures_util::StreamExt;
-use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
@@ -18,9 +19,15 @@ use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
 };
 
+#[path = "acp_frame_writer.rs"]
+mod frame_writer;
+
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+
+/// Package and binary name used by Buzz's Pi ACP fork.
+pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -141,8 +148,8 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
-    /// Write end of the agent's stdin pipe.
-    stdin: ChildStdin,
+    /// Sole stdin writer; None after an interrupted/failed frame closes it.
+    stdin: Option<ChildStdin>,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
@@ -214,6 +221,10 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Ask Claude Code for summarized thinking on `session/new`. Opus omits
+    /// readable thinking unless asked; set only when the CLI the adapter runs
+    /// is new enough to accept `--thinking-display`.
+    claude_thinking_summaries: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -457,11 +468,34 @@ impl AcpClient {
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
+        Self::spawn_with_env(command, args, extra_env, has_generated_codex_config, &[]).await
+    }
+
+    /// Spawn with authoritative launch environment overrides. Unlike persona
+    /// defaults, these values take precedence over the inherited environment.
+    pub(crate) async fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+        launch_env: &[(String, String)],
+    ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
+        // A launch prefix may change the CLI or environment the adapter sees,
+        // so the version check below could inspect the wrong binary.
+        let launch_prefixed = std::env::var_os(launch::PREFIX_ENV).is_some();
+        let mut cmd = launch::command(command, args)?;
+        if crate::config::normalize_agent_command_identity(command) == BUZZ_PI_ACP_NAME {
+            if !args.iter().any(|arg| arg == "--") {
+                cmd.arg("--");
+            }
+            // Desktop launches buzz-acp in the Buzz nest; adapters inherit that
+            // workspace. Keep managed skills tied to launch CWD across sessions.
+            cmd.arg("--skill")
+                .arg(std::env::current_dir()?.join(".agents/skills"));
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Inherit stderr so agent logs are visible in the harness terminal.
             .stderr(Stdio::inherit())
@@ -516,6 +550,32 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // The harness composes the entire Git config block once. It must replace
+        // inherited counts/PATH rather than mixing two independently indexed blocks.
+        for (name, value) in extra_env
+            .iter()
+            .filter(|(name, _)| crate::git::is_managed_env(name))
+        {
+            cmd.env(name, value);
+        }
+        // Git applies this older injection channel after GIT_CONFIG_COUNT.
+        // Keeping it would let an ambient user.name or signing setting win
+        // over the harness-owned agent identity in native shells.
+        cmd.env_remove("GIT_CONFIG_PARAMETERS");
+        cmd.env_remove("NOSTR_PRIVATE_KEY");
+        if extra_env.iter().any(|(name, _)| name == "GIT_CONFIG_COUNT") {
+            // Native shells inherit these overrides, while buzz-agent clears
+            // them for MCP. Let both paths use the harness's agent identity.
+            for name in [
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ] {
+                cmd.env_remove(name);
+            }
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -534,7 +594,17 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
-        let mut child = cmd.spawn()?;
+        cmd.envs(launch_env.iter().cloned());
+        cmd.env_remove(launch::PREFIX_ENV);
+        let claude_thinking_summaries = standard_adapter == Some(StandardAdapterKind::Claude)
+            && !launch_prefixed
+            && claude_cli_accepts_thinking_display(&cmd).await;
+        let mut child = cmd.spawn().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to spawn {:?}: {error}", cmd.as_std().get_program()),
+            )
+        })?;
 
         let stdin = child
             .stdin
@@ -547,7 +617,7 @@ impl AcpClient {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
@@ -563,6 +633,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            claude_thinking_summaries,
         })
     }
 
@@ -637,14 +708,17 @@ impl AcpClient {
     ///
     /// - `None` — no system-prompt field in the request (legacy framing).
     /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
-    ///   (ACP protocol v2, buzz-agent, goose unused).
+    ///   (ACP protocol v2, buzz-agent; goose unused).
+    /// - `Some(SystemPromptTransport::PiMeta(text))` — `_meta.systemPrompt`
+    ///   as a replacement string for the Buzz pi-acp fork.
     /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
     ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
     ///
-    /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
-    /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one. When both `ClaudeMeta` and `session_title` are
-    /// present the two `_meta` members are merged into a single object.
+    /// `session_title` rides in `_meta.sessionTitle` when `Some`, and a Claude
+    /// CLI that supports it gets `_meta.claudeCode.options.extraArgs` asking
+    /// for summarized thinking. These and the metadata prompt transports merge
+    /// into a single object; with none of them, `_meta` is omitted entirely,
+    /// since adapters may distinguish an absent member from a null one.
     ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
@@ -663,6 +737,9 @@ impl AcpClient {
             Some(SystemPromptTransport::Field(sp)) => {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
             }
+            Some(SystemPromptTransport::PiMeta(sp)) => {
+                params["_meta"]["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
             Some(SystemPromptTransport::ClaudeMeta(sp)) => {
                 // Merge into _meta so sessionTitle (set below) is not clobbered.
                 params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
@@ -670,8 +747,13 @@ impl AcpClient {
             None => {}
         }
         if let Some(title) = session_title {
-            // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
+            // Merge — _meta may already carry a system prompt from an adapter extension.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
+        }
+        if self.claude_thinking_summaries {
+            // Merge — claude-agent-acp spreads these into the CLI's argv.
+            params["_meta"]["claudeCode"]["options"]["extraArgs"]["thinking-display"] =
+                serde_json::Value::String("summarized".to_owned());
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -1068,12 +1150,10 @@ impl AcpClient {
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let line = serde_json::to_string(value)?;
-        tokio::time::timeout(WRITE_TIMEOUT, async {
-            self.stdin.write_all(line.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
-            self.stdin.flush().await?;
-            Ok::<(), std::io::Error>(())
-        })
+        tokio::time::timeout(
+            WRITE_TIMEOUT,
+            frame_writer::write_frame(&mut self.stdin, line.as_bytes()),
+        )
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
@@ -2131,9 +2211,9 @@ pub struct SessionNewResponse {
 
 /// How to deliver a system prompt on `session/new`.
 ///
-/// The two variants match the two mechanisms supported by current adapters:
-///
 /// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`PiMeta`** — `_meta.systemPrompt: text`, used by the Buzz pi-acp fork
+///   to replace Pi's native system prompt.
 /// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
 ///   `claude-agent-acp` to append to the adapter's own native system prompt
 ///   while keeping its tool-use preset intact.
@@ -2141,6 +2221,8 @@ pub struct SessionNewResponse {
 pub enum SystemPromptTransport<'a> {
     /// Deliver as a bare top-level `systemPrompt` field.
     Field(&'a str),
+    /// Deliver as `_meta.systemPrompt: text`.
+    PiMeta(&'a str),
     /// Deliver as `_meta.systemPrompt: {"append": text}`.
     ClaudeMeta(&'a str),
 }
@@ -2161,8 +2243,8 @@ pub enum ModelSwitchMethod {
 /// Extract `configOptions` entries with `category == "model"` from a `session/new` result.
 ///
 /// Returns the raw JSON array entries. Each entry has `configId` (spelled `id`
-/// by some adapters, e.g. claude-agent-acp), `displayName`,
-/// `options: [{ value, displayName }]`, etc.
+/// by some adapters, e.g. claude-agent-acp), `name`,
+/// `options: [{ value, name }]`, etc.
 pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
     result["configOptions"]
         .as_array()
@@ -2333,6 +2415,99 @@ fn kill_process_group(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn kill_process_group(_pid: u32) -> bool {
     false
+}
+
+/// First Claude Code release with `--thinking-display`. Older CLIs exit on
+/// unknown flags, so sending it to them would fail every `session/new`.
+const CLAUDE_THINKING_DISPLAY_MIN_VERSION: (u64, u64, u64) = (2, 1, 94);
+
+/// Parse `claude --version` output such as `2.1.284 (Claude Code)`. The
+/// first word must be exactly three dot-separated digit runs.
+fn parse_claude_version(output: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = output.split_whitespace().next()?.split('.');
+    let mut next = || {
+        let part = parts.next()?;
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())?
+    };
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
+}
+
+/// Whether the CLI claude-agent-acp will run accepts `--thinking-display`.
+///
+/// The adapter runs `CLAUDE_CODE_EXECUTABLE` when set and its bundled CLI
+/// otherwise; the bundled one cannot be inspected from here, so an unset
+/// variable, a hung or failing binary, or unparseable output all answer
+/// `false` and leave the session exactly as before.
+async fn claude_cli_accepts_thinking_display(cmd: &tokio::process::Command) -> bool {
+    const KEY: &str = "CLAUDE_CODE_EXECUTABLE";
+    let executable = cmd
+        .as_std()
+        .get_envs()
+        .find(|(key, _)| *key == KEY)
+        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_else(|| std::env::var_os(KEY))
+        .filter(|path| !path.is_empty());
+    let Some(executable) = executable else {
+        tracing::debug!(target: "acp::spawn", "{KEY} unset; not requesting thinking summaries");
+        return false;
+    };
+    let mut version_cmd = tokio::process::Command::new(&executable);
+    version_cmd.arg("--version");
+    configure_version_probe(&mut version_cmd);
+    let version = match version_cmd.spawn() {
+        Ok(child) => claude_version_within(child, std::time::Duration::from_secs(5)).await,
+        Err(_) => None,
+    };
+    let accepts = version.is_some_and(|v| v >= CLAUDE_THINKING_DISPLAY_MIN_VERSION);
+    tracing::debug!(
+        target: "acp::spawn",
+        "{executable:?} --version = {version:?}; thinking summaries requested: {accepts}"
+    );
+    accepts
+}
+
+/// Pipe stdout only, and put the probe in its own process group (like the
+/// adapter) so a timeout also kills a launcher's children.
+fn configure_version_probe(cmd: &mut tokio::process::Command) {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    configure_no_window(cmd);
+}
+
+/// Read at most a version line from `child` and require a clean exit within
+/// `limit`. On timeout the whole process group is killed.
+async fn claude_version_within(
+    mut child: tokio::process::Child,
+    limit: std::time::Duration,
+) -> Option<(u64, u64, u64)> {
+    use tokio::io::AsyncReadExt;
+    const MAX_VERSION_BYTES: u64 = 256;
+    let pid = child.id();
+    let probe = async {
+        let mut stdout = Vec::new();
+        let pipe = child.stdout.take()?;
+        pipe.take(MAX_VERSION_BYTES)
+            .read_to_end(&mut stdout)
+            .await
+            .ok()?;
+        child.wait().await.ok()?.success().then_some(stdout)
+    };
+    match tokio::time::timeout(limit, probe).await {
+        Ok(stdout) => parse_claude_version(&String::from_utf8_lossy(&stdout?)),
+        Err(_) => {
+            if !pid.is_some_and(kill_process_group) {
+                let _ = child.start_kill();
+            }
+            None
+        }
+    }
 }
 
 /// Suppress the console window that Windows otherwise allocates for every
@@ -2715,17 +2890,17 @@ mod tests {
                 {
                     "configId": "model",
                     "category": "model",
-                    "displayName": "Model",
+                    "name": "Model",
                     "options": [
-                        { "value": "claude-sonnet-4-20250514", "displayName": "Claude Sonnet 4" },
-                        { "value": "claude-opus-4-20250514", "displayName": "Claude Opus 4" }
+                        { "value": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4" },
+                        { "value": "claude-opus-4-20250514", "name": "Claude Opus 4" }
                     ]
                 },
                 {
                     "configId": "theme",
                     "category": "appearance",
-                    "displayName": "Theme",
-                    "options": [{ "value": "dark", "displayName": "Dark" }]
+                    "name": "Theme",
+                    "options": [{ "value": "dark", "name": "Dark" }]
                 }
             ]
         });
@@ -2828,7 +3003,7 @@ mod tests {
                 "configId": "model",
                 "category": "model",
                 "options": [
-                    { "value": "claude-sonnet-4-20250514", "displayName": "Sonnet 4" }
+                    { "value": "claude-sonnet-4-20250514", "name": "Sonnet 4" }
                 ]
             }],
             "models": {
@@ -3629,125 +3804,140 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_version_gate_admits_only_cli_with_thinking_display() {
+        let accepts = |out: &str| {
+            parse_claude_version(out).is_some_and(|v| v >= CLAUDE_THINKING_DISPLAY_MIN_VERSION)
+        };
+        assert!(!accepts("2.1.92 (Claude Code)"), "below the minimum");
+        assert!(!accepts("1.0.100 (Claude Code)"), "older major");
+        assert!(accepts("2.1.94 (Claude Code)"), "exactly the minimum");
+        assert!(accepts("2.1.284 (Claude Code)"), "newer");
+        assert!(accepts("3.0.0"), "newer major");
+        assert!(!accepts(""), "empty output");
+        assert!(!accepts("error: unknown"), "unparseable output");
+        assert!(!accepts("2.1.284.garbage"), "trailing junk");
+        assert!(!accepts("2.1.+284"), "sign in a component");
+    }
+
+    #[tokio::test]
+    async fn claude_thinking_display_check_fails_closed_without_readable_cli() {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.env("CLAUDE_CODE_EXECUTABLE", "/nonexistent/claude");
+        assert!(!claude_cli_accepts_thinking_display(&cmd).await);
+        cmd.env("CLAUDE_CODE_EXECUTABLE", "");
+        assert!(!claude_cli_accepts_thinking_display(&cmd).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_version_timeout_kills_launcher_children() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-hang-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let pidfile = dir.join("child.pid");
+        // A launcher that starts a child holding stdout open, then hangs.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 300 & echo $! > {}; wait", pidfile.display()));
+        configure_version_probe(&mut cmd);
+        let child = cmd.spawn().expect("spawn launcher");
+        let version = claude_version_within(child, std::time::Duration::from_millis(500)).await;
+        assert_eq!(version, None);
+        let grandchild = std::fs::read_to_string(&pidfile).expect("pidfile");
+        let grandchild = nix::unistd::Pid::from_raw(grandchild.trim().parse().expect("pid"));
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = nix::sys::signal::kill(grandchild, None).is_ok();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        std::fs::remove_dir_all(&dir).expect("remove dir");
+        assert!(!alive, "the launcher's child must not outlive the timeout");
+    }
+
+    /// Spawn a fake `claude-agent-acp` whose `CLAUDE_CODE_EXECUTABLE` is a
+    /// fake CLI running `cli_body`, then return the `_meta` its `session/new`
+    /// actually received.
+    #[cfg(unix)]
+    async fn claude_session_meta_with_cli(cli_body: &str) -> serde_json::Value {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-claude-cli-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create fake dir");
+        let write = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake");
+            path
+        };
+        let cli = write("claude", cli_body);
+        let adapter = write(
+            "claude-agent-acp",
+            r#"read -r _init
+echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r REQ
+echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+sleep 1"#,
+        );
+        let mut client = AcpClient::spawn_with_env(
+            adapter.to_str().expect("utf8 path"),
+            &[],
+            &[],
+            false,
+            &[(
+                "CLAUDE_CODE_EXECUTABLE".into(),
+                cli.to_str().expect("utf8 path").into(),
+            )],
+        )
+        .await
+        .expect("spawn fake claude adapter");
+        client.initialize().await.expect("initialize");
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("be brief")),
+                Some("Fizz"),
+            )
+            .await
+            .expect("session_new_full");
+        client.shutdown().await;
+        std::fs::remove_dir_all(&dir).expect("remove fake dir");
+        resp.raw["_receivedRequest"]["params"]["_meta"].clone()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_spawn_requests_thinking_summaries_only_from_supporting_cli() {
+        let meta = claude_session_meta_with_cli("echo '2.1.284 (Claude Code)'").await;
+        assert_eq!(
+            meta["claudeCode"]["options"]["extraArgs"],
+            serde_json::json!({ "thinking-display": "summarized" })
+        );
+        assert_eq!(
+            meta["systemPrompt"],
+            serde_json::json!({ "append": "be brief" })
+        );
+        assert_eq!(meta["sessionTitle"], "Fizz");
+
+        for (case, cli) in [
+            ("old CLI", "echo '2.1.93 (Claude Code)'"),
+            ("failing CLI", "echo '2.1.284 (Claude Code)'; exit 1"),
+            ("unclean version", "echo '2.1.284.garbage'"),
+        ] {
+            let meta = claude_session_meta_with_cli(cli).await;
+            assert!(meta.get("claudeCode").is_none(), "{case}: {meta}");
+            assert_eq!(meta["sessionTitle"], "Fizz", "{case}");
+        }
+    }
+
     // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
 
-    #[tokio::test]
-    async fn session_new_full_sends_claude_meta_system_prompt_when_claude_meta_transport() {
-        // When ClaudeMeta transport is requested, the prompt must appear as
-        // _meta.systemPrompt: {"append": text} — never as a bare systemPrompt field.
-        let script = r#"
-            read -t 2 _init
-            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
-            read -t 2 REQ
-            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_claude","_receivedRequest":'"$REQ"'}}'
-            sleep 1
-        "#;
-        let mut client = spawn_script(script).await;
-        client
-            .initialize()
-            .await
-            .expect("initialize should succeed");
-
-        let resp = client
-            .session_new_full(
-                "/tmp",
-                vec![],
-                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
-                None,
-            )
-            .await
-            .expect("session_new_full should succeed");
-
-        let received = &resp.raw["_receivedRequest"];
-        assert!(
-            received["params"].get("systemPrompt").is_none(),
-            "bare systemPrompt must not be present for ClaudeMeta transport"
-        );
-        assert_eq!(
-            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
-            Some("Be concise"),
-            "_meta.systemPrompt.append must carry the prompt text"
-        );
-    }
-
-    #[tokio::test]
-    async fn session_new_full_merges_claude_meta_and_session_title_into_single_meta_object() {
-        // Both ClaudeMeta prompt and session_title must coexist under _meta —
-        // the prompt must not clobber sessionTitle or vice versa.
-        let script = r#"
-            read -t 2 _init
-            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
-            read -t 2 REQ
-            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_merged","_receivedRequest":'"$REQ"'}}'
-            sleep 1
-        "#;
-        let mut client = spawn_script(script).await;
-        client
-            .initialize()
-            .await
-            .expect("initialize should succeed");
-
-        let resp = client
-            .session_new_full(
-                "/tmp",
-                vec![],
-                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
-                Some("Fizz · #buzz-dev"),
-            )
-            .await
-            .expect("session_new_full should succeed");
-
-        let received = &resp.raw["_receivedRequest"];
-        assert_eq!(
-            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
-            Some("Be concise"),
-            "_meta.systemPrompt.append must be present"
-        );
-        assert_eq!(
-            received["params"]["_meta"]["sessionTitle"].as_str(),
-            Some("Fizz · #buzz-dev"),
-            "_meta.sessionTitle must be present alongside systemPrompt"
-        );
-    }
-
-    // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
-
-    /// Helper: spawn an inert `cat` subprocess so we have a real AcpClient
-    /// to drive `handle_session_update` against. `cat` never writes back,
-    /// which is fine — these tests don't read from the agent, they just
-    /// feed JSON into the parser.
-    async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
-            .await
-            .expect("spawn cat as inert client")
-    }
-
-    /// Build a `session/update` JSON-RPC notification carrying a
-    /// `session_info_update` with the given `_meta.goose.activeRunId` value.
-    /// Pass `None` to omit the `activeRunId` field entirely.
-    ///
-    /// `_meta` is nested inside the `update` object (per the ACP
-    /// `SessionInfoUpdate` schema), matching what goose and buzz-agent
-    /// emit on the wire.
-    fn session_info_update_msg(active_run_id: Option<serde_json::Value>) -> serde_json::Value {
-        let mut goose = serde_json::Map::new();
-        if let Some(v) = active_run_id {
-            goose.insert("activeRunId".to_string(), v);
-        }
-        let mut meta = serde_json::Map::new();
-        meta.insert("goose".to_string(), serde_json::Value::Object(goose));
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {
-                "sessionId": "test-session",
-                "update": {
-                    "sessionUpdate": "session_info_update",
-                    "_meta": serde_json::Value::Object(meta),
-                },
-            }
-        })
-    }
+    include!("acp/system_prompt_tests.rs");
 
     #[tokio::test]
     async fn active_run_id_sets_on_string() {

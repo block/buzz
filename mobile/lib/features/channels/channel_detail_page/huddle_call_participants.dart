@@ -6,10 +6,12 @@ class _HuddleCallParticipants extends StatelessWidget {
     required this.error,
     required this.profiles,
     required this.fallbackLabels,
+    required this.contextualLabels,
     required this.remotePubkeys,
     required this.localPubkey,
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
+    required this.workingAgentPubkeys,
     required this.retryTooltip,
     required this.retryIcon,
     required this.onRetry,
@@ -21,10 +23,14 @@ class _HuddleCallParticipants extends StatelessWidget {
   final String? error;
   final Map<String, UserProfile> profiles;
   final Map<String, String> fallbackLabels;
+
+  /// Huddle-scoped identity labels, keyed by lowercase pubkey.
+  final Map<String, String> contextualLabels;
   final List<String> remotePubkeys;
   final String? localPubkey;
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
+  final Set<String> workingAgentPubkeys;
   final String retryTooltip;
   final IconData retryIcon;
   final VoidCallback onRetry;
@@ -126,6 +132,7 @@ class _HuddleCallParticipants extends StatelessWidget {
               speakerLevel: localPubkey == null
                   ? 0
                   : speakerLevels[localPubkey] ?? 0,
+              preparingResponse: false,
               isSelf: true,
               onTap: null,
             ),
@@ -143,8 +150,10 @@ class _HuddleCallParticipants extends StatelessWidget {
                 pubkeys: remotePubkeys,
                 profiles: profiles,
                 fallbackLabels: fallbackLabels,
+                contextualLabels: contextualLabels,
                 activeSpeakerPubkeys: activeSpeakerPubkeys,
                 speakerLevels: speakerLevels,
+                workingAgentPubkeys: workingAgentPubkeys,
                 movementDuration: movementDuration,
                 entryDuration: entryDuration,
                 exitDuration: exitDuration,

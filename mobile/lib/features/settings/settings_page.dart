@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -10,8 +11,11 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
-import '../../shared/community/community_membership_provider.dart';
+import '../../shared/success_haptic.dart';
+import '../../shared/push/push_bridge.dart';
+import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -19,31 +23,44 @@ import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/modal_presentation.dart';
-import 'accent_picker_page.dart';
-import 'theme_picker_page.dart';
+import '../../shared/widgets/immediate_page_route.dart';
 
-part 'settings_page/appearance_section.dart';
-part 'settings_page/community_section.dart';
+part 'settings_page/profile_section.dart';
+part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/notifications_section.dart';
+
+Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
 
 class SettingsPage extends HookConsumerWidget {
   /// Creates the settings page.
   const SettingsPage({
     super.key,
     required this.profileHeader,
-    required this.invitePageBuilder,
     required this.identityRecoveryPageBuilder,
+    this.profileEditPageBuilder = _emptyProfileEditPage,
+    this.onSetStatus,
+    this.onEditDisplayName,
+    this.onEditProfileDescription,
   });
 
   /// Header widget displayed at the top of settings.
   final Widget profileHeader;
 
-  /// Builds the community-invite page pushed from the invite settings row.
-  final WidgetBuilder invitePageBuilder;
-
   /// Builds the identity-recovery page pushed from the recovery settings row.
   final WidgetBuilder identityRecoveryPageBuilder;
+
+  /// Builds the current-user profile editor opened from the Photo row.
+  final WidgetBuilder profileEditPageBuilder;
+
+  /// Opens the current-user status editor.
+  final void Function(BuildContext context)? onSetStatus;
+
+  /// Opens the display-name editor from the settings section.
+  final Future<void> Function(BuildContext context)? onEditDisplayName;
+
+  /// Opens the profile-description editor from the settings section.
+  final Future<void> Function(BuildContext context)? onEditProfileDescription;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -55,8 +72,14 @@ class SettingsPage extends HookConsumerWidget {
     );
 
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
+      useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
+        nativeTitle: 'Settings',
+        nativeLeading: IosNavigationAction(
+          label: 'Close settings',
+          symbol: 'xmark',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
         showBottomDivider: false,
@@ -94,17 +117,24 @@ class SettingsPage extends HookConsumerWidget {
               padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
               children: [
                 profileHeader,
-                _CommunitySection(invitePageBuilder: invitePageBuilder),
-                const _AppearanceSection(),
+                _StatusSection(onSetStatus: onSetStatus),
+                _ProfileSection(
+                  profileEditPageBuilder: profileEditPageBuilder,
+                  onEditDisplayName: onEditDisplayName,
+                  onEditProfileDescription: onEditProfileDescription,
+                ),
+                const _NotificationsSection(),
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,
                 ),
-                const _RemoveCommunitySection(),
               ],
             ),
           ),
           if (packageInfo.hasData)
-            _VersionFooter(version: packageInfo.data!.version),
+            _VersionFooter(
+              version: packageInfo.data!.version,
+              buildNumber: packageInfo.data!.buildNumber,
+            ),
         ],
       ),
     );
@@ -112,9 +142,10 @@ class SettingsPage extends HookConsumerWidget {
 }
 
 class _VersionFooter extends StatelessWidget {
-  const _VersionFooter({required this.version});
+  const _VersionFooter({required this.version, required this.buildNumber});
 
   final String version;
+  final String buildNumber;
 
   @override
   Widget build(BuildContext context) {
@@ -124,7 +155,7 @@ class _VersionFooter extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: Grid.xs, top: Grid.xxs),
         child: Center(
           child: Text(
-            'v$version',
+            buildNumber.isEmpty ? 'v$version' : 'v$version ($buildNumber)',
             style: context.textTheme.bodySmall?.copyWith(
               color: context.colors.onSurfaceVariant.withValues(alpha: 0.6),
             ),

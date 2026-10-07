@@ -80,8 +80,15 @@ class Channel {
 
   bool get isStream => channelType == 'stream';
   bool get isForum => channelType == 'forum';
+
+  /// Streams, forums and DMs can @mention people outside them. An outside
+  /// person who is not added becomes a reference, which does not notify them.
+  /// Streams and forums ask on send. Nobody can be added to a DM, so a DM
+  /// does not ask.
+  bool get mentionsOutsidePeople => isStream || isForum || isDm;
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
+  bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
 
   /// Whether [selfRole] may add *another* identity here, mirroring the relay's
   /// kind:9000 authority (`validate_admin_event` + `add_member`): DMs never,

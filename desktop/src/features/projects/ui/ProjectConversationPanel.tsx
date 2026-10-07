@@ -279,7 +279,11 @@ export function ProjectConversationPanel({
         scrollTargetId={scrollTargetId}
         threadHead={panelData.threadHead}
         threadReplies={panelData.visibleReplies}
-        threadRepliesPending={false}
+        threadRepliesPending={threadRepliesQuery.isPending}
+        threadRepliesError={threadRepliesQuery.isError}
+        onRetryThreadReplies={() => {
+          void threadRepliesQuery.refetch();
+        }}
         threadTypingPubkeys={[]}
         widthPx={widthPx}
       />,

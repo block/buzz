@@ -9,6 +9,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
@@ -31,8 +32,12 @@ class CommunityInvitePage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final roleAsync = ref.watch(currentCommunityRoleProvider);
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
-      appBar: const FrostedAppBar(title: Text('Invite to community')),
+      useUtilitySurfaceTheme: true,
+      appBar: const FrostedAppBar(
+        centerTitle: true,
+        nativeLargeTitle: true,
+        title: Text('Invite to community'),
+      ),
       body: roleAsync.when(
         loading: () => const Center(
           child: BuzzLoadingIndicator(
@@ -61,7 +66,7 @@ class _CommunityInviteBody extends StatelessWidget {
     return ListView(
       padding: EdgeInsets.fromLTRB(
         0,
-        frostedAppBarHeight(context) + Grid.xs,
+        frostedAppBarHeight(context, nativeLargeTitle: true) + Grid.xs,
         0,
         Grid.lg,
       ),

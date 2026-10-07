@@ -285,7 +285,7 @@ async function quickReactionStorageContains(
   }, emoji);
 }
 
-test("message quick reaction tray stays neutral after selecting a tray emoji", async ({
+test("message quick reaction stays neutral after selecting a shortcut", async ({
   page,
 }) => {
   await openGeneral(page);
@@ -307,6 +307,29 @@ test("message quick reaction tray stays neutral after selecting a tray emoji", a
   await expect(messageReactionTrigger(row)).not.toHaveClass(
     SELECTED_ACTION_CLASS,
   );
+});
+
+test("message reaction action stays neutral after selecting from the picker", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+
+  const reactionTrigger = messageReactionTrigger(row);
+  await expect(reactionTrigger).toBeVisible();
+  await reactionTrigger.click();
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker).toBeVisible();
+  await picker.locator("input[type='search']").fill("thumbs up");
+  await picker.getByRole("button", { name: "👍" }).first().click();
+
+  await expect(row.getByLabel("Toggle 👍 reaction")).toBeVisible();
+  await row.hover();
+  await expect(reactionTrigger).not.toHaveAttribute("aria-pressed", "true");
+  await expect(reactionTrigger).not.toHaveClass(SELECTED_ACTION_CLASS);
 });
 
 test("emoji picker keeps Frequently used live within the app session", async ({

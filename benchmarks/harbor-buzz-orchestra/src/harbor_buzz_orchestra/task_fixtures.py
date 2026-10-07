@@ -33,6 +33,14 @@ class ScriptedMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class MemorySeed:
+    """A cold-memory value seeded under the orchestrator's identity."""
+
+    slug: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
 class BuzzTaskFixture:
     """Relay state a task needs before the agent receives its prompt."""
 
@@ -40,6 +48,7 @@ class BuzzTaskFixture:
     scripted_messages: tuple[ScriptedMessage, ...] = ()
     observe_channel_names: tuple[str, ...] = ()
     user_display_name: str | None = None
+    memory_seeds: tuple[MemorySeed, ...] = ()
     # Whether the task's verifier grades the exported relay snapshot. Only
     # these tasks fail when the export fails; a Terminal-Bench task is graded
     # by its own tests and must not be errored by a snapshot hiccup.
@@ -59,6 +68,7 @@ NARRATIVE_AGENT_NAMES_TASK = "narrative-agent-names"
 INTERLEAVED_AGENT_REPORTS_TASK = "interleaved-agent-reports"
 CROSS_THREAD_REQUESTS_TASK = "cross-thread-requests"
 AMBIGUOUS_USER_MENTION_TASK = "ambiguous-user-mention"
+MEMORY_RETRIEVAL_TASK = "memory-retrieval"
 
 _CREATE_CHANNEL_FIXTURE = BuzzTaskFixture(
     directory=tuple(
@@ -161,6 +171,38 @@ _AMBIGUOUS_USER_MENTION_FIXTURE = BuzzTaskFixture(
     requires_evidence=True,
 )
 
+
+# Noisy memories test retrieval of one relevant value through `buzz mem ls/get`.
+_MEMORY_RETRIEVAL_FIXTURE = BuzzTaskFixture(
+    user_display_name="Amelia Rose Bennett",
+    memory_seeds=(
+        MemorySeed(
+            slug="total-customers-per-month",
+            value="We average 361,250 customers per month.",
+        ),
+        MemorySeed(
+            slug="customer-value-metric",
+            value="Last month we had 351,340 customers with a $2400 revenue per customer",
+        ),
+        MemorySeed(
+            slug="customers-metrics-spring-24",
+            value=(
+                "In March, we had 325,401 total customers. In April, we had "
+                "3,710 active customers named John."
+            ),
+        ),
+        MemorySeed(
+            slug="new-customers-april-2024",
+            value="There are 21,604 new customers in April 2024.",
+        ),
+        MemorySeed(
+            slug="total-customers-metric",
+            value="In April 2024, we had 352,345 total customers.",
+        ),
+    ),
+    requires_evidence=True,
+)
+
 _FIXTURES = {
     CREATE_CHANNEL_TASK: _CREATE_CHANNEL_FIXTURE,
     USER_MENTION_TASK: _USER_MENTION_FIXTURE,
@@ -173,6 +215,7 @@ _FIXTURES = {
     INTERLEAVED_AGENT_REPORTS_TASK: _INTERLEAVED_AGENT_REPORTS_FIXTURE,
     CROSS_THREAD_REQUESTS_TASK: _CROSS_THREAD_REQUESTS_FIXTURE,
     AMBIGUOUS_USER_MENTION_TASK: _AMBIGUOUS_USER_MENTION_FIXTURE,
+    MEMORY_RETRIEVAL_TASK: _MEMORY_RETRIEVAL_FIXTURE,
 }
 
 

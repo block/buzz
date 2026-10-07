@@ -1,10 +1,14 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
 
 import type { TimelineMessage } from "@/features/messages/types";
+import { isVoiceNoteAttachment } from "@/features/messages/lib/audioAttachment";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { isVideoMedia } from "@/shared/ui/markdown/mediaEntry";
-import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
+import {
+  parseImetaTags,
+  type ParsedImetaEntry,
+} from "@/shared/ui/markdown/parseImeta";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 
 type SendVideoReviewComment = (
@@ -31,6 +35,13 @@ type MarkdownAstNode = {
   type: string;
   url?: string;
 };
+
+function isReviewVideo(
+  url: string,
+  entry: ParsedImetaEntry | undefined,
+): boolean {
+  return isVideoMedia(url, entry?.m) && !isVoiceNoteAttachment(entry);
+}
 
 function markdownImageUrls(body: string): string[] {
   if (!body.includes("![")) return [];
@@ -73,7 +84,7 @@ export function hasRenderedVideoAttachment(
 ): boolean {
   const imetaByUrl = parseImetaTags(message.tags ?? []);
   return markdownImageUrls(message.body).some((src) =>
-    isVideoMedia(src, imetaByUrl.get(src)?.m),
+    isReviewVideo(src, imetaByUrl.get(src)),
   );
 }
 
@@ -82,13 +93,13 @@ export function hasVideoAttachment(
 ): boolean {
   const imetaByUrl = parseImetaTags(message.tags ?? []);
   if (
-    [...imetaByUrl.values()].some((entry) => isVideoMedia(entry.url, entry.m))
+    [...imetaByUrl.values()].some((entry) => isReviewVideo(entry.url, entry))
   ) {
     return true;
   }
 
   for (const src of markdownImageUrls(message.body)) {
-    if (isVideoMedia(src, imetaByUrl.get(src)?.m)) return true;
+    if (isReviewVideo(src, imetaByUrl.get(src))) return true;
   }
 
   return false;

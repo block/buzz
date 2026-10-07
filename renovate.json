@@ -24,6 +24,12 @@
       "separateMultipleMinor": false
     },
     {
+      "description": "rust-cache v2.9.2 cleanup can preserve sherpa's prebuilt directory after removing its static archive, poisoning warm Unit Tests caches. Keep v2.9.1 until the action or sherpa validates the archive before reuse.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["Swatinem/rust-cache"],
+      "allowedVersions": "<=2.9.1"
+    },
+    {
       "description": "evalexpr v13 relicensed from MIT to AGPL-3.0 — pin below v13 until migrated to an MIT alternative.",
       "matchPackageNames": ["evalexpr"],
       "allowedVersions": "<13"

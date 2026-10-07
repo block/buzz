@@ -167,6 +167,8 @@ fn stale_inbound_head(
         instructions: None,
         persona_ids: bare_persona_ids.iter().map(|s| s.to_string()).collect(),
         is_builtin: false,
+        shared: false,
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,

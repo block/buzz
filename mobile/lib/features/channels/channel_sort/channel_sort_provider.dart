@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -26,11 +27,13 @@ class ChannelSortState {
 
 class ChannelSortNotifier extends Notifier<ChannelSortState> {
   ChannelSortManager? _manager;
+  bool _isInitialized = false;
 
   @override
   ChannelSortState build() {
     _manager?.dispose();
     _manager = null;
+    _isInitialized = false;
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
@@ -77,6 +80,11 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
     );
     _manager = manager;
 
+    // Resume re-read catches an EVENT a healthy socket never delivered.
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    });
+
     ref.onDispose(() {
       manager.dispose();
       if (_manager == manager) {
@@ -87,6 +95,7 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
     Future.microtask(() async {
       await manager.initialize();
       if (_manager != manager) return;
+      _isInitialized = true;
       _emitManagerState(manager);
     });
 
@@ -103,7 +112,7 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
   void _emitManagerState(ChannelSortManager manager) {
     if (_manager != manager) return;
     state = ChannelSortState(
-      isReady: true,
+      isReady: _isInitialized,
       store: manager.store,
       version: state.version + 1,
     );

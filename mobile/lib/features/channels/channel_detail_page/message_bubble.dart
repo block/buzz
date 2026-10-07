@@ -3,6 +3,7 @@ part of '../channel_detail_page.dart';
 class _MessageBubble extends HookConsumerWidget {
   final TimelineMessage message;
   final bool showAuthor;
+  final bool hasReplies;
   final Map<String, String> channelNames;
   final String currentChannelId;
   final String? currentPubkey;
@@ -15,6 +16,7 @@ class _MessageBubble extends HookConsumerWidget {
   const _MessageBubble({
     required this.message,
     required this.showAuthor,
+    required this.hasReplies,
     required this.channelNames,
     required this.currentChannelId,
     required this.currentPubkey,
@@ -28,12 +30,28 @@ class _MessageBubble extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final hasLocalReplies = ref.watch(
+      threadLocalRepliesProvider(
+        ThreadRepliesArgs(
+          channelId: currentChannelId,
+          rootId: message.rootId ?? message.id,
+        ),
+      ).select(
+        (replies) => replies.any((reply) {
+          final thread = reply.threadReference;
+          return thread.parentId == message.id || thread.rootId == message.id;
+        }),
+      ),
+    );
     // Watch only this user's profile to avoid rebuilding on unrelated cache changes.
     final pk = message.pubkey.toLowerCase();
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(message.pubkey);
+    final displayName = watchChannelIdentityLabel(ref, currentChannelId, pk);
+    final isAgent =
+        ref.watch(agentMentionPubkeysProvider(currentChannelId)).contains(pk) ||
+        profile?.ownerPubkey != null;
     final canManageMessage =
         currentPubkey?.toLowerCase() == pk ||
         (profile?.ownerPubkey != null &&
@@ -76,6 +94,11 @@ class _MessageBubble extends HookConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      currentChannelId,
+      normalizedMentionPubkeys,
+    );
 
     void openMessageActions(MessageLongPressDetails details) {
       showMessageActions(
@@ -112,9 +135,9 @@ class _MessageBubble extends HookConsumerWidget {
           borderRadius: BorderRadius.circular(Radii.md),
           highlightColor: context.colors.primary.withValues(alpha: 0.1),
           snapshotKey: messageSnapshotKey,
-          // Tap opens the thread; long-press still opens the action sheet.
+          // Tap opens existing threads; long-press can start a new one.
           // MessageContent handles mention, channel-link, and media taps.
-          onTap: allMessages == null
+          onTap: (!hasReplies && !hasLocalReplies) || allMessages == null
               ? null
               : () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -143,11 +166,17 @@ class _MessageBubble extends HookConsumerWidget {
                     children: [
                       if (showAuthor)
                         GestureDetector(
-                          onTap: () =>
-                              showUserProfileSheet(context, message.pubkey),
+                          onTap: () => showUserProfileSheet(
+                            context,
+                            message.pubkey,
+                            names: channelIdentityNamesProvider(
+                              currentChannelId,
+                            ),
+                          ),
                           child: _UserAvatar(
                             profile: profile,
                             pubkey: message.pubkey,
+                            isAgent: isAgent,
                           ),
                         )
                       else
@@ -184,6 +213,10 @@ class _MessageBubble extends HookConsumerWidget {
                                               showUserProfileSheet(
                                                 context,
                                                 message.pubkey,
+                                                names:
+                                                    channelIdentityNamesProvider(
+                                                      currentChannelId,
+                                                    ),
                                               ),
                                           displayNameKey: ValueKey(
                                             'message-author-${message.id}',
@@ -215,6 +248,7 @@ class _MessageBubble extends HookConsumerWidget {
                               MessageContent(
                                 content: message.content,
                                 mentionNames: resolvedMentionNames,
+                                mentionLabels: mentionLabels,
                                 agentMentionPubkeys: agentMentionPubkeys,
                                 channelNames: channelNames,
                                 tags: message.tags,
@@ -264,8 +298,13 @@ class _MessageBubble extends HookConsumerWidget {
                                     currentChannelId: currentChannelId,
                                   );
                                 },
-                                onMentionTap: (pubkey) =>
-                                    showUserProfileSheet(context, pubkey),
+                                onMentionTap: (pubkey) => showUserProfileSheet(
+                                  context,
+                                  pubkey,
+                                  names: channelIdentityNamesProvider(
+                                    currentChannelId,
+                                  ),
+                                ),
                               ),
                             ],
                           ),
@@ -281,6 +320,7 @@ class _MessageBubble extends HookConsumerWidget {
                     ),
                     child: ReactionRow(
                       messageId: message.id,
+                      channelId: currentChannelId,
                       reactions: message.reactions,
                       onToggle: (emoji) => toggleReaction(ref, message, emoji),
                       showAddButton: isMember && !isArchived,
@@ -318,11 +358,13 @@ Widget _messageTimestamp(BuildContext context, int createdAt, {Key? key}) {
 class _UserAvatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
+  final bool isAgent;
   final double size;
 
   const _UserAvatar({
     required this.profile,
     required this.pubkey,
+    required this.isAgent,
     this.size = messageAvatarSize,
   });
 
@@ -347,6 +389,7 @@ class _UserAvatar extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                 ),
       ),
+      isAgent: isAgent,
     );
   }
 }

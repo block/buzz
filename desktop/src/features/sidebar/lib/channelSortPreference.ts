@@ -24,11 +24,6 @@ export type ChannelSortStore = {
 
 export const DEFAULT_SORT_MODE: ChannelSortMode = "alpha";
 
-export const DEFAULT_STORE: ChannelSortStore = Object.freeze({
-  version: 1,
-  groups: {},
-});
-
 export function sectionSortGroupKey(sectionId: string): ChannelSortGroupKey {
   return `section:${sectionId}`;
 }
@@ -47,43 +42,7 @@ export function storageKey(pubkey: string, relayUrl?: string): string {
   return `${STORAGE_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalized)}`;
 }
 
-/**
- * Drops per-section sort modes whose custom section no longer exists so
- * deleted sections don't leave stale `section:<id>` keys in localStorage
- * forever. Fixed group keys (starred/channels/forums/dms) are always kept.
- * Returns the same store reference when nothing needs stripping.
- */
-export function stripOrphanedSectionModes(
-  store: ChannelSortStore,
-  liveSectionIds: Iterable<string>,
-): ChannelSortStore {
-  const liveKeys = new Set<string>(
-    [...liveSectionIds].map((id) => sectionSortGroupKey(id)),
-  );
-  const kept = Object.entries(store.groups).filter(
-    ([key]) => !key.startsWith("section:") || liveKeys.has(key),
-  );
-  if (kept.length === Object.keys(store.groups).length) return store;
-  return { ...store, groups: Object.fromEntries(kept) };
-}
-
-export function boundChannelSortStore(
-  store: ChannelSortStore,
-): ChannelSortStore {
-  const entries = Object.entries(store.groups);
-  if (entries.length <= MAX_CHANNEL_SORT_GROUPS) return store;
-  const isFixedGroup = (key: string) =>
-    key === "starred" ||
-    key === "channels" ||
-    key === "forums" ||
-    key === "dms";
-  const fixed = entries.filter(([key]) => isFixedGroup(key));
-  const custom = entries
-    .filter(([key]) => !isFixedGroup(key))
-    .slice(-(MAX_CHANNEL_SORT_GROUPS - fixed.length));
-  return { ...store, groups: Object.fromEntries([...fixed, ...custom]) };
-}
-
+/** Parses the legacy `groups` field; unknown keys are kept, unknown modes dropped. */
 export function parseChannelSortPayload(
   json: unknown,
 ): ChannelSortStore | null {
@@ -101,43 +60,7 @@ export function parseChannelSortPayload(
           ),
         )
       : {};
-  return boundChannelSortStore({ version: 1, groups });
-}
-
-export function readChannelSortStore(
-  pubkey: string,
-  relayUrl?: string,
-): ChannelSortStore {
-  try {
-    const raw = window.localStorage.getItem(storageKey(pubkey, relayUrl));
-    if (!raw) return DEFAULT_STORE;
-    return parseChannelSortPayload(JSON.parse(raw)) ?? DEFAULT_STORE;
-  } catch {
-    return DEFAULT_STORE;
-  }
-}
-
-export function writeChannelSortStore(
-  pubkey: string,
-  store: ChannelSortStore,
-  relayUrl?: string,
-): boolean {
-  try {
-    window.localStorage.setItem(
-      storageKey(pubkey, relayUrl),
-      JSON.stringify(boundChannelSortStore(store)),
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function sortModeForGroup(
-  store: ChannelSortStore,
-  group: ChannelSortGroupKey,
-): ChannelSortMode {
-  return store.groups[group] ?? DEFAULT_SORT_MODE;
+  return { version: 1, groups };
 }
 
 function channelRecencyMs(channel: Channel): number | null {

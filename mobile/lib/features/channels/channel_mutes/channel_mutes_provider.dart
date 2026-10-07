@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -23,11 +24,13 @@ class ChannelMutesState {
 
 class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
   ChannelMutesManager? _manager;
+  bool _isInitialized = false;
 
   @override
   ChannelMutesState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
+    _isInitialized = false;
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
@@ -69,6 +72,11 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     );
     _manager = manager;
 
+    // Resume re-read catches an EVENT a healthy socket never delivered.
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    });
+
     ref.onDispose(() {
       manager.dispose();
       if (_manager == manager) {
@@ -79,6 +87,7 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     Future.microtask(() async {
       await manager.initialize();
       if (_manager != manager) return;
+      _isInitialized = true;
       _emitManagerState(manager);
     });
 
@@ -92,7 +101,7 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
   void _emitManagerState(ChannelMutesManager manager) {
     if (_manager != manager) return;
     state = ChannelMutesState(
-      isReady: true,
+      isReady: _isInitialized,
       store: manager.store,
       version: state.version + 1,
     );

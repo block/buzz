@@ -38,6 +38,7 @@ function AgentRow({
         className="h-9 w-9 shrink-0 text-xs"
         iconClassName="h-5 w-5"
         label={persona.displayName}
+        shape="squircle"
       />
       <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
         {persona.displayName}

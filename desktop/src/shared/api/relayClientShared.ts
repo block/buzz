@@ -29,6 +29,15 @@ export function isRelayConnectionDegraded(state: ConnectionState): boolean {
   );
 }
 
+/**
+ * Aggregate cap on explicit `#h` channel values the relay accepts across one
+ * REQ's filters before rejecting it as `restricted: too many explicit
+ * channels`. Mirrors `MAX_EXPLICIT_CHANNEL_VALUES` in
+ * `crates/buzz-relay/src/handlers/req.rs`. A subscription over more hidden DMs
+ * than this must be split into multiple REQs, each within the cap.
+ */
+export const MAX_EXPLICIT_CHANNEL_VALUES = 128;
+
 export type RelaySubscriptionFilter = {
   ids?: string[];
   kinds: number[];
@@ -36,14 +45,19 @@ export type RelaySubscriptionFilter = {
   authors?: string[];
   since?: number;
   until?: number;
+  /** Relay extension: composite pagination tiebreak paired with `until`. */
+  before_id?: string;
 } & Partial<Record<`#${string}`, string[]>>;
 
 type HistorySubscription = {
   mode: "history";
+  filter: RelaySubscriptionFilter;
   events: RelayEvent[];
   resolve: (events: RelayEvent[]) => void;
   reject: (error: Error) => void;
   timeout: number;
+  timeoutMs: number;
+  closedRetryAttempt?: number;
 };
 
 type FirstEventSubscription = {
@@ -59,10 +73,14 @@ export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
+  /** Client-side admission only; interactive consumers still obey cooldown/pacing. */
+  priority?: "interactive";
   onEvent: (event: RelayEvent) => void;
   /** Called once after each batch of dispatched events (buffered or repaired). */
   onFlush?: () => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
+  /** Release readiness/cancellation listeners when this entry is retired. */
+  onRemoved?: () => void;
   lastSeenCreatedAt?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.

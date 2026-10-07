@@ -1050,6 +1050,28 @@ void main() {
       expect(entries.single.summary!.replyCount, 5);
     });
 
+    test('relay direct replies are a lower bound for a broadcast row', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a'),
+        _replyMsg(
+          id: 'broadcast',
+          parentId: 'a',
+          extraTags: const [
+            ['broadcast', '1'],
+          ],
+        ),
+      ]);
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          'broadcast': relaySummary(replyCount: 1, descendantCount: 0),
+        },
+      );
+      final summary = entries.last.summary!;
+      expect(summary.replyCount, 1);
+      expect(summary.isLowerBound, isTrue);
+    });
+
     test('a nested reply badges the reply it answers', () {
       final messages = formatTimeline([
         _textMsg(id: 'a', createdAt: 1000),

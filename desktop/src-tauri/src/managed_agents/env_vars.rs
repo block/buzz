@@ -180,7 +180,10 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
 /// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
 /// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
 /// - `BUZZ_AGENT_THINKING_SUMMARY` — non-secret enum (auto/concise/detailed)
-/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL`, `DATABRICKS_MODEL_FILTER` — Block non-secret defaults
+/// - `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, `OPENAI_COMPAT_API` — OpenAI-compatible
+///   endpoint, model id, and API flavor (`auto|chat|responses`); the key itself
+///   (`OPENAI_COMPAT_API_KEY`) is not listed and stays masked
 pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
     const SAFE_KEYS: &[&str] = &[
         "BUZZ_AGENT_PROVIDER",
@@ -189,6 +192,10 @@ pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
         "BUZZ_AGENT_THINKING_SUMMARY",
         "DATABRICKS_HOST",
         "DATABRICKS_MODEL",
+        "DATABRICKS_MODEL_FILTER",
+        "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_COMPAT_MODEL",
+        "OPENAI_COMPAT_API",
     ];
     let upper = key.to_ascii_uppercase();
     SAFE_KEYS.iter().any(|safe| upper == *safe)

@@ -2,6 +2,7 @@
 members = [
     "crates/buzz-relay",
     "crates/buzz-core",
+    "crates/ifc-core",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
     "crates/buzz-db",
@@ -16,6 +17,7 @@ members = [
     "crates/buzz-ws-client",
     "crates/buzz-admin",
     "crates/buzz-deletion",
+    "crates/buzz-feature-flags",
     "crates/buzz-workflow",
     "crates/buzz-media",
     "crates/buzz-cli",
@@ -26,6 +28,7 @@ members = [
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
     "crates/buzz-relay-mesh",
+    "crates/buzz-mesh-smoke",
     "crates/buzz-dev-mcp",
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",
@@ -77,7 +80,7 @@ postcard    = { version = "1", default-features = false, features = ["use-std"] 
 
 # Inter-relay mesh transport (buzz-relay-mesh)
 iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring"] }
-serde_json  = "1"
+serde_json  = { version = "1", features = ["raw_value"] }
 serde_yaml  = "0.9"
 evalexpr    = "11"
 cron        = "0.16"
@@ -100,8 +103,11 @@ anyhow    = "1"
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
 
+# JWT / JWS verification (NIP-FI federated identity assertions)
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+
 # HTTP client (webhook delivery)
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
 
 # Cryptography
 sha2      = "0.11"
@@ -137,6 +143,7 @@ buzz-core = { path = "crates/buzz-core" }
 buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-deletion = { path = "crates/buzz-deletion" }
+buzz-feature-flags = { path = "crates/buzz-feature-flags" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }
@@ -183,3 +190,8 @@ strip = true
 # allowlist for the auth token). Revert to crates.io once #449 lands upstream.
 [patch.crates-io]
 aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }
+# MeshLLM 0.76 uses rusqlite 0.40 / libsqlite3-sys 0.38. SQLx 0.9.0's
+# optional SQLite driver still caps libsqlite3-sys below 0.38, which Cargo
+# resolves even though Buzz only enables PostgreSQL. Pin the merged upstream
+# compatibility fix until it is released: https://github.com/transact-rs/sqlx/pull/4402
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "94aafe3a68884d923b0798a767c8d7f6cfda89d2" }

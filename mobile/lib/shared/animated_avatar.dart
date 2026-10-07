@@ -18,6 +18,11 @@ class AnimatedAvatarDescriptor {
   final String animationUrl;
 }
 
+/// Builds the desktop-compatible animated-avatar URL from a static poster and
+/// an animated image.
+String buildAnimatedAvatarUrl(String posterUrl, String animationUrl) =>
+    '$posterUrl$_animatedAvatarSeparator${Uri.encodeComponent(animationUrl)}';
+
 /// Parses the Buzz animated-avatar fragment scheme from [url].
 ///
 /// Returns `null` when the poster or animation URL is missing, malformed, or

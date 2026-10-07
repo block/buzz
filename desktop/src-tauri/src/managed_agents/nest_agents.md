@@ -44,15 +44,24 @@ created: 2026-01-15
 - **`.scratch/` is disposable** — don't rely on it across sessions
 - **Stay on task** — only stage files relevant to your current work
 
-## Git Commit Identity
+## Git Commit Attribution
 
-The human operator signs off for accountability.
+Git authorship, co-authorship, DCO sign-off, and cryptographic signing are separate claims. Follow repository-local rules and the authorizing human's explicit directions; do not infer attribution from repository ownership or from who requested, approved, or reviewed the work.
 
-- **Human sign-off (required):** every commit MUST include a `Signed-off-by` trailer for the human operator who is responsible for the agent's work. Add via `git commit --trailer "Signed-off-by: Human Name <human@email>"`. One blank line must separate trailers from the commit body.
-- **Human credit (`Co-authored-by`):** every commit MUST also include a `Co-authored-by` trailer for the same human operator, with identical name and email to the `Signed-off-by` line. GitHub parses `Co-authored-by` for contribution-graph credit; `Signed-off-by` alone does not grant it. Add via `git commit --trailer "Co-authored-by: Human Name <human@email>"`. Place `Co-authored-by` before `Signed-off-by` in the trailer block.
-- **Discovering the human's identity:** read `git config user.name` and `git config user.email` from the working repository. These reflect the human operator's configured identity for that repo (which may differ from their global config). Use these exact values for both trailers. Do NOT hardcode, guess, or prompt for the email — the repo config is the source of truth. If `git config user.email` returns empty, STOP and ask the human operator for their name and email before committing.
-- **Signing:** if the agent has a registered signing key, sign commits. If not, commits will land unverified — this is acceptable until agent SSH keys are provisioned. Do NOT use the human's signing key.
-- **Verify before pushing:** `git log -1` should show the human's `Signed-off-by` trailer.
+- **Author:** use the person or agent required by the applicable policy. If no policy specifies an author, use the identity that actually authored the change.
+- **Co-authors:** add `Co-authored-by` only for other people or agents who materially authored the change. Request, approval, review, or accountability alone is not co-authorship.
+- **DCO:** add `Signed-off-by` only when repository policy requires that identity's DCO certification. A sign-off is not an approval marker.
+- **Identity:** resolve required identities from trusted local configuration or explicit verified direction; never hard-code or guess them. A managed runtime may make effective `git config user.*` values identify the agent. Stop and ask if a required identity cannot be established.
+- **Signing:** use only the signing key configured for the committing identity. Never use another person's signing key.
+- **Verify before pushing:** inspect every outgoing commit against the actual upstream or base and confirm its attribution matches the applicable policy.
+
+A repository may require an accountable human as author and the implementing agent as co-author. An agent-owned repository may use the agent as author and require no human trailer. In both cases, repository-local policy controls.
+
+### Managed runtime default
+
+When Buzz runs you through its stock `buzz-acp` harness, by default (`BUZZ_GIT_IDENTITY` unset or `agent`) its `GIT_CONFIG_*` environment variables set your agent nostr identity and signing as the default for commits you create: `user.email` is `<pubkey>@<relay-host>`, `user.name` is your display name (or npub), and commits are signed with your agent key (NIP-GS). These outrank repo and global `user.*` config, but not repo `author.*`/`committer.*` config, and amend or cherry-pick keep the original author. Treat this as your identity under the rules above, and do not override it with `user.*` config, `-c user.*`, `--author` or another signing key. If a repository's policy requires a different author, tell the operator instead.
+
+The operator can opt out per-agent with `BUZZ_GIT_IDENTITY=user`. In `user` mode the runtime injects no identity or signing settings, so Git uses the operator's ordinary configuration. It also drops inherited `GIT_CONFIG_*` identity, signing, `author.*`, `committer.*` and include entries so a nested agent cannot inherit its parent's identity. Relay git authentication works in both modes. A custom agent harness gets only relay git authentication and controls its own commit attribution.
 
 <!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->
 ## Active Agents

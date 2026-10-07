@@ -12,6 +12,7 @@ class AppListCard extends StatelessWidget {
     this.label,
     this.dividerIndent,
     this.verticalPadding = Grid.xxs,
+    this.horizontalPadding = Grid.gutter,
     required this.children,
   });
 
@@ -28,6 +29,9 @@ class AppListCard extends StatelessWidget {
   /// Adjacent cards contribute this padding from both sides. For example,
   /// passing [Grid.twelve] creates a 24dp rhythm between grouped surfaces.
   final double verticalPadding;
+
+  /// Outer horizontal inset; use zero inside an already padded sheet.
+  final double horizontalPadding;
 
   final List<Widget> children;
 
@@ -61,12 +65,13 @@ class AppListCard extends StatelessWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
+        horizontalPadding,
         verticalPadding,
-        Grid.gutter,
+        horizontalPadding,
         verticalPadding,
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (label != null)
@@ -87,12 +92,15 @@ class AppListCard extends StatelessWidget {
             // does. The dividers carry the group structure, so the fill only has
             // to separate the card from the page.
             color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.card),
+            borderRadius: BorderRadius.circular(Radii.container),
             // Keeps row ripples inside the rounded corners.
             clipBehavior: Clip.antiAlias,
             child: AppListInset(
               horizontal: _inset,
-              child: Column(children: separated),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: separated,
+              ),
             ),
           ),
         ],

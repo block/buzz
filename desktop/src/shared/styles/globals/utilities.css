@@ -1,3 +1,9 @@
+@utility rounded-squircle {
+  border-radius: 0;
+  -webkit-clip-path: url("#rounded-squircle-clip");
+  clip-path: url("#rounded-squircle-clip");
+}
+
 @layer utilities {
   /*
    * Skips rendering (layout, paint) for offscreen rows while keeping them in
@@ -35,6 +41,15 @@
   .content-visibility-auto-row {
     content-visibility: auto;
     contain-intrinsic-size: auto 2rem;
+  }
+
+  /*
+   * Member cards rendered eagerly can skip offscreen layout and paint.
+   * Virtualized member rows must not use this utility.
+   */
+  .content-visibility-auto-member-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 3.75rem;
   }
 
   .buzz-huddle-tooltip {

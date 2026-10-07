@@ -480,9 +480,9 @@ test("selected review chrome and diff query stay aligned across fetch phases", a
       selectedPullRequest: result.current.selectedPullRequest,
       selectedPullRequestId: REVIEW_A_ID,
     });
-    assert.equal(
+    assert.match(
       screen.getByTestId("project-pull-requests-empty").textContent,
-      "No reviews yet.",
+      /^No reviews yet/,
     );
     assert.equal(screen.queryByTestId("project-pull-request-detail"), null);
   } finally {

@@ -1,5 +1,4 @@
 use super::*;
-
 #[test]
 fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
     use crate::managed_agents::RespondTo;
@@ -428,28 +427,20 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
     )
     .expect("sample managed agent record");
 
-    let persona = crate::managed_agents::AgentDefinition {
-        id: "persona-1".to_string(),
-        display_name: "Persona".to_string(),
-        avatar_url: None,
-        system_prompt: "You are a persona.".to_string(),
-        runtime: Some("goose".to_string()),
-        model: Some("persona-model".to_string()),
-        provider: Some("anthropic".to_string()),
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        env_vars: BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "".to_string(),
-        updated_at: "".to_string(),
-    };
+    let persona: crate::managed_agents::AgentDefinition = serde_json::from_str(
+        r#"{
+            "id": "persona-1",
+            "display_name": "Persona",
+            "system_prompt": "You are a persona.",
+            "runtime": "goose",
+            "model": "persona-model",
+            "provider": "anthropic",
+            "is_active": true,
+            "created_at": "",
+            "updated_at": ""
+        }"#,
+    )
+    .expect("sample persona");
 
     // agent_model_discovery_config is the single helper get_agent_models
     // consumes — the stale record bytes must lose to the persona's current
@@ -476,11 +467,46 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
 
 // ---------------------------------------------------------------------------
 // Databricks provider detection
-// ---------------------------------------------------------------------------
-//
+
+#[test]
+fn merged_filter_value_overrides_inherited_process_value_even_when_blank() {
+    let env = BTreeMap::from([("DATABRICKS_MODEL_FILTER".to_string(), "   ".to_string())]);
+    assert_eq!(
+        env_value_or_process_if_absent(&env, "DATABRICKS_MODEL_FILTER"),
+        Some(String::new())
+    );
+}
+
+#[test]
+fn absent_filter_value_uses_process_value_when_available() {
+    const TEST_FILTER_ENV: &str = "BUZZ_TEST_DATABRICKS_MODEL_FILTER";
+    let original = std::env::var(TEST_FILTER_ENV).ok();
+    std::env::set_var(TEST_FILTER_ENV, "process-*");
+    let value = env_value_or_process_if_absent(&BTreeMap::new(), TEST_FILTER_ENV);
+    match original {
+        Some(value) => std::env::set_var(TEST_FILTER_ENV, value),
+        None => std::env::remove_var(TEST_FILTER_ENV),
+    }
+    assert_eq!(value.as_deref(), Some("process-*"));
+}
+
+#[test]
+fn databricks_filtered_empty_response_is_authoritative() {
+    let filter = buzz_agent_pkg::config::DatabricksModelFilter::parse(Some("allowed-*")).unwrap();
+    let response = databricks_models_response(
+        "databricks_v2",
+        Vec::new(),
+        Some("configured".into()),
+        filter.as_ref(),
+    )
+    .expect("active filter permits an empty authoritative catalog");
+    assert!(response.models.is_empty());
+    assert!(!response.supports_switching);
+    assert_eq!(response.selected_model.as_deref(), Some("configured"));
+}
+
 // Parse/filter/pagination tests live in crates/buzz-agent/src/catalog.rs
 // (they moved there with the Option C refactor).
-
 // ---------------------------------------------------------------------------
 // Dead-knob guards: mcp_command and turn_timeout_seconds
 // ---------------------------------------------------------------------------
@@ -961,4 +987,50 @@ fn databricks_static_token_error_redacts_echoed_token() {
         error.contains("update it in agent settings"),
         "error lost its remediation: {error}"
     );
+}
+
+/// Trimmed from a real `claude-agent-acp` 0.36.1 `session/new` response: the
+/// adapter labels options with `name`, not `displayName`.
+fn claude_code_models_raw() -> serde_json::Value {
+    serde_json::json!({
+        "agent": { "name": "claude-agent-acp", "version": "0.36.1" },
+        "stable": { "configOptions": [{
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "opus[1m]",
+            "options": [
+                { "value": "default", "name": "Default (recommended)",
+                  "description": "Use the default model (currently claude-opus-5-5[1m])" },
+                { "value": "opus[1m]", "name": "Opus",
+                  "description": "Opus with 1M context · Best for everyday, complex tasks" },
+                { "value": "haiku", "name": "Haiku",
+                  "description": "Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok" }
+            ]
+        }]}
+    })
+}
+
+#[test]
+fn claude_code_models_keep_adapter_name_description_and_current_value() {
+    let response = normalize_agent_models(&claude_code_models_raw(), None);
+
+    let haiku = response.models.iter().find(|m| m.id == "haiku").unwrap();
+    assert_eq!(haiku.name.as_deref(), Some("Haiku"));
+    assert_eq!(
+        haiku.description.as_deref(),
+        Some("Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok")
+    );
+    assert_eq!(response.agent_default_model.as_deref(), Some("opus[1m]"));
+}
+
+#[test]
+fn stable_current_value_outranks_unstable_current_model_id() {
+    let mut raw = claude_code_models_raw();
+    raw["unstable"] = serde_json::json!({ "currentModelId": "haiku", "availableModels": [] });
+
+    let response = normalize_agent_models(&raw, None);
+
+    assert_eq!(response.agent_default_model.as_deref(), Some("opus[1m]"));
 }

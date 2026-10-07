@@ -89,7 +89,7 @@ export function getWorkflowTriggerEmoji(
   return nonEmptyString(emojiCondition?.value);
 }
 
-function getWorkflowTriggerConfig(
+export function getWorkflowTriggerConfig(
   definition: Record<string, unknown>,
 ): TriggerConfig | null {
   const trigger = asRecord(definition.trigger);

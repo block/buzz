@@ -112,6 +112,7 @@ export async function buildInstanceInputForDefinition(
   runtime: AcpRuntime,
   upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
+  effortLevel?: string | null,
 ): Promise<CreateManagedAgentInput> {
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
@@ -141,7 +142,7 @@ export async function buildInstanceInputForDefinition(
 
   return {
     ...base,
-    acpCommand: "buzz-acp",
+    acpCommand: persona.acpCommand || "buzz-acp",
     agentCommand: runtime.command,
     // Do NOT seed agentArgs from runtime.defaultArgs: record.agent_args must
     // remain empty so spawn resolves args live from the definition on every
@@ -157,5 +158,6 @@ export async function buildInstanceInputForDefinition(
     spawnAfterCreate: true,
     startOnAppLaunch: true,
     backend: { type: "local" },
+    ...(effortLevel && { effortLevel }),
   };
 }

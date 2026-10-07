@@ -1,5 +1,7 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
+import { startBootWarm } from "@/features/agents/acpRuntimesQuery";
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { useForegroundQueryRefresh } from "@/features/workflows/hooks";
 import { relayClient } from "@/shared/api/relayClient";
@@ -23,6 +25,22 @@ export function useAppShellLifecycleEffects({
   useRelayResumeTriggers();
   useForegroundQueryRefresh();
 
+  // Warm the ACP runtime catalog once at app launch. The shared runtime-catalog
+  // cache is in-memory only, so it starts cold every boot; the cheap discovery
+  // path reports every harness as "(not installed)" until a forced pass warms
+  // it. The create/edit picker and Agents > Agent defaults surfaces read that
+  // cheap path, so without this warm they render all-missing (and block agent
+  // save) until the user visits Settings > Agents — the accidental workaround.
+  // `startBootWarm` drives the module-level boot-warm gate (once per launch, so
+  // this remounting effect never re-fires the probe) which makes those cheap
+  // surfaces show loading/retryable-error instead of blessing the cold catalog,
+  // and swallows the probe's own errors so a failure leaves the last good
+  // catalog in place without an unhandled rejection.
+  const queryClient = useQueryClient();
+  React.useEffect(() => {
+    void startBootWarm(queryClient);
+  }, [queryClient]);
+
   // Prevent webview file:/// navigation on file drop outside the composer.
   // Scoped to file drags only (text drag-and-drop into inputs still works).
   // Composer's onDrop fires first (React synthetic before window bubble).
@@ -42,33 +60,13 @@ export function useAppShellLifecycleEffects({
 
   React.useEffect(() => {
     let isCancelled = false;
-
-    const startPreconnect = () => {
-      if (isCancelled) {
-        return;
+    void relayClient.preconnect().catch((error) => {
+      if (!isCancelled) {
+        console.error("Failed to preconnect to relay", error);
       }
-
-      void relayClient.preconnect().catch((error) => {
-        if (!isCancelled) {
-          console.error("Failed to preconnect to relay", error);
-        }
-      });
-    };
-
-    if ("requestIdleCallback" in window) {
-      const idleId = window.requestIdleCallback(startPreconnect, {
-        timeout: 1_500,
-      });
-      return () => {
-        isCancelled = true;
-        window.cancelIdleCallback(idleId);
-      };
-    }
-
-    const timeoutId = globalThis.setTimeout(startPreconnect, 250);
+    });
     return () => {
       isCancelled = true;
-      globalThis.clearTimeout(timeoutId);
     };
   }, []);
 

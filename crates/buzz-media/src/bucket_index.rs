@@ -193,7 +193,7 @@ fn parse_auxiliary_key(key: &str) -> Option<(Uuid, String, String)> {
 }
 
 /// Per-community logical storage: bytes and object count of bound shas.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommunityStorage {
     pub bytes: u64,
     pub objects: u64,
@@ -202,7 +202,7 @@ pub struct CommunityStorage {
 /// The full computed sweep result: fleet physical/logical totals,
 /// per-community logical breakdown, and anomaly/visibility gauges. Pure
 /// data — no I/O, cheap to clone into a cached snapshot.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BucketSnapshot {
     /// Every listed object, every class (kind=physical).
     pub physical_bytes: u64,
@@ -420,6 +420,27 @@ mod tests {
 
     fn community(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    #[test]
+    fn bucket_snapshot_json_round_trip_preserves_community_keys() {
+        let community = community(7);
+        let mut snapshot = BucketSnapshot {
+            physical_objects: 3,
+            ..BucketSnapshot::default()
+        };
+        snapshot.per_community.insert(
+            community,
+            CommunityStorage {
+                bytes: 42,
+                objects: 1,
+            },
+        );
+
+        let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let decoded: BucketSnapshot =
+            serde_json::from_value(encoded).expect("deserialize snapshot");
+        assert_eq!(decoded, snapshot);
     }
 
     // --- classify_key ---
