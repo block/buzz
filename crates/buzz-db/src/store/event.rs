@@ -1687,12 +1687,17 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     sqlx::query(
                         r#"
                         UPDATE thread_metadata
-                        SET reply_count = reply_count + 1, last_reply_at = NOW()
+                        SET reply_count = reply_count + 1, last_reply_at = NOW(),
+                            last_reply_received_at = CASE WHEN $3::timestamptz IS NULL
+                                THEN last_reply_received_at
+                                ELSE GREATEST(last_reply_received_at, $3) END
                         WHERE community_id = $1 AND event_id = $2
                         "#,
                     )
                     .bind(community_id.as_uuid())
                     .bind(pid)
+                    // The parent is the root only when no root is given.
+                    .bind(meta.root_event_id.is_none().then_some(received_at))
                     .execute(&mut **tx)
                     .await?;
 
@@ -1700,12 +1705,14 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                         sqlx::query(
                             r#"
                             UPDATE thread_metadata
-                            SET descendant_count = descendant_count + 1
+                            SET descendant_count = descendant_count + 1,
+                                last_reply_received_at = GREATEST(last_reply_received_at, $3)
                             WHERE community_id = $1 AND event_id = $2
                             "#,
                         )
                         .bind(community_id.as_uuid())
                         .bind(root_id)
+                        .bind(received_at)
                         .execute(&mut **tx)
                         .await?;
                     }

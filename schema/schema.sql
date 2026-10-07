@@ -559,6 +559,8 @@ CREATE TABLE thread_metadata (
     descendant_count        INT NOT NULL DEFAULT 0,
     last_reply_at           TIMESTAMPTZ,
     broadcast               BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Root rows only: arrival of the latest reply anywhere under the root.
+    last_reply_received_at  TIMESTAMPTZ,
     PRIMARY KEY (community_id, event_created_at, event_id),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
 );

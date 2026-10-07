@@ -135,6 +135,9 @@ impl Db {
                     (array_agg(n.id ORDER BY n.arrival DESC,n.id))[1] AS id, max(n.arrival) AS arrival
                 FROM personal_read_frontiers tf
                 CROSS JOIN LATERAL (SELECT GREATEST(tf.through_timestamp, r.threads_floor) AS position) p
+                JOIN thread_metadata root ON root.community_id=$1 AND root.channel_id=r.id
+                    AND root.depth=0 AND root.event_id=tf.root_id
+                    AND root.last_reply_received_at > p.position
                 CROSS JOIN LATERAL (
                     SELECT count(*)::int AS unread,
                         (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS id,
