@@ -251,6 +251,100 @@ async fn bench_unread() {
     );
     sidebar_bench(&db, c, &actor, "+ far-behind thread, 20k unread replies").await;
 
+    // Phase 5: the same far-behind thread with its 20k replies spread over
+    // about five days (one every 20s), each arriving as it was authored.
+    // Ingest stamps real arrival, so the history is rewritten to arrive
+    // when authored and the actor's floors moved before it.
+    let spread = channels[2];
+    let start = ts() - 5 * 86_400;
+    let root = ev(&others[0], start, vec![]);
+    top(&db, c, spread, &root).await;
+    let mine = ev(&actor, start + 1, vec![]);
+    rep(&db, c, spread, &root, &mine).await;
+    for i in 0..20_000u64 {
+        let tags = if i % 1667 == 0 {
+            mention(&actor)
+        } else {
+            vec![]
+        };
+        let r = ev(&others[(i % 8) as usize], start + 10 + i * 20, tags);
+        rep(&db, c, spread, &root, &r).await;
+    }
+    for sql in [
+        "UPDATE events SET received_at=created_at+interval '1 second'
+         WHERE community_id=$1 AND channel_id=$2",
+        "UPDATE event_mentions m SET received_at=e.received_at FROM events e
+         WHERE m.community_id=$1 AND m.channel_id=$2 AND e.community_id=$1
+            AND e.created_at=m.event_created_at AND e.id=m.event_id",
+        "UPDATE thread_metadata tm SET last_reply_received_at=(SELECT max(received_at)
+            FROM events WHERE community_id=$1 AND channel_id=$2)
+         WHERE community_id=$1 AND channel_id=$2 AND depth=0",
+        "UPDATE channels SET last_timeline_received_at=(SELECT max(received_at)
+            FROM events WHERE community_id=$1 AND channel_id=$2)
+         WHERE community_id=$1 AND id=$2",
+        "UPDATE channel_members SET joined_at=to_timestamp($3)-interval '1 hour'
+         WHERE community_id=$1 AND channel_id=$2",
+        "UPDATE personal_read_accounts SET started_at=to_timestamp($3)-interval '1 hour'
+         WHERE community_id=$1",
+        // The actor read the thread through their own reply, five days
+        // ago. As in phase 4, the timeline is read (through the channel's
+        // first message), so only the thread is behind; the first channel
+        // read was a whole-channel cut, so that cut moves back too.
+        "UPDATE personal_read_frontiers f SET through_timestamp=(SELECT max(received_at)
+            FROM events e WHERE e.community_id=$1 AND e.channel_id=$2
+                AND e.created_at <= to_timestamp($3)+interval '1 second')
+         WHERE community_id=$1 AND channel_id=$2 AND root_id<>''::bytea",
+        "UPDATE personal_read_frontiers f SET through_timestamp=(SELECT max(received_at)
+            FROM events WHERE community_id=$1 AND channel_id=$2),
+            threads_through_timestamp=(SELECT max(received_at)
+            FROM events e WHERE e.community_id=$1 AND e.channel_id=$2
+                AND e.created_at <= to_timestamp($3)+interval '1 second')
+         WHERE community_id=$1 AND channel_id=$2 AND root_id=''::bytea",
+    ] {
+        sqlx::query(sql)
+            .bind(c.as_uuid())
+            .bind(spread)
+            .bind(start as f64)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let page = db
+        .personal_read_sidebar_channels(c, &actor.public_key(), &[spread])
+        .await
+        .unwrap();
+    let row = &page.channels[0];
+    println!(
+        "BENCH spread thread: channel unread={} threads={} thread mentions={}",
+        row.unread,
+        row.threads.len(),
+        row.threads.first().map_or(0, |t| t.mentions)
+    );
+    assert!(
+        !row.unread && row.threads.len() == 1 && row.threads[0].mentions == 12,
+        "the spread thread must be far behind with every mention unread"
+    );
+    let mut v = Vec::new();
+    for _ in 0..30 {
+        let t = Instant::now();
+        db.personal_read_sidebar_channels(c, &actor.public_key(), &[spread])
+            .await
+            .unwrap();
+        v.push(t.elapsed());
+    }
+    stats("sidebar spread thread alone, 20k replies over 5 days", v);
+    let mut v = Vec::new();
+    for _ in 0..30 {
+        let t = Instant::now();
+        db.personal_read_sidebar_channels(c, &actor.public_key(), &[quiet])
+            .await
+            .unwrap();
+        v.push(t.elapsed());
+    }
+    stats("sidebar burst thread alone, 20k replies in 10 min", v);
+    sidebar_bench(&db, c, &actor, "+ spread thread").await;
+
     // Concurrency: 16 writers into one channel, then into 16 channels.
     for (label, spread) in [("same channel", false), ("16 channels", true)] {
         let started = Instant::now();
