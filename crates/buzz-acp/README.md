@@ -169,7 +169,7 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 | `!cancel` | Cancels the current in-flight turn for the command's resolved session scope, if any. |
 | `!rotate` | Rotates the ACP session for the command's resolved session scope. If a turn is in flight, it is cancelled and that scoped session is invalidated when the task returns; otherwise the cached scoped session is invalidated immediately. The next queued/received event in that scope starts a fresh session. |
 
-Under the default `channel` policy, a session scope is the whole channel, so these commands retain their channel-wide behavior. Under the `thread` policy, post the command as a reply in the target thread so `!cancel` or `!rotate` affects only that thread. DMs remain one conversation scope. `!cancel` is a no-op when its scope is idle.
+Under the default `thread` policy, post the command as a reply in the target thread so `!cancel` or `!rotate` affects only that thread. Under the `channel` policy, a session scope is the whole channel, so these commands keep their channel-wide behavior. DMs remain one conversation scope. `!cancel` is a no-op when its scope is idle.
 
 Owner control commands must be kind:9 stream messages from the owner, must have body exactly `!cancel`, `!rotate`, or `!shutdown` after trimming, and must mention this agent with a separate `p` tag. They are consumed by the harness instead of being forwarded to the agent. An inline `@Name` changes the body and does not match. With the Buzz CLI, target a thread while preserving the exact command body by passing the mention separately:
 
