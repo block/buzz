@@ -27,3 +27,6 @@ mod threads_postgres_tests;
 
 #[cfg(test)]
 mod arrival_postgres_tests;
+
+#[cfg(test)]
+mod bench_postgres_tests;
