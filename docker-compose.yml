@@ -100,22 +100,24 @@ services:
       com.buzz.env: "dev"
     restart: unless-stopped
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    container_name: buzz-minio
-    command: server /data --console-address ":9001"
+  rustfs:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff # 1.0.0
+    container_name: buzz-rustfs
     environment:
-      MINIO_ROOT_USER: buzz_dev
-      MINIO_ROOT_PASSWORD: buzz_dev_secret
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY: buzz_dev
+      RUSTFS_SECRET_KEY: buzz_dev_secret
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     networks:
       - buzz-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -125,26 +127,32 @@ services:
         limits:
           memory: 256m
     labels:
-      com.buzz.service: "minio"
+      com.buzz.service: "rustfs"
       com.buzz.env: "dev"
     restart: unless-stopped
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    container_name: buzz-minio-init
+  rustfs-init:
+    image: rustfs/rc@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699 # v0.1.36
+    container_name: buzz-rustfs-init
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
     networks:
       - buzz-net
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 buzz_dev buzz_dev_secret &&
-        mc mb --ignore-existing local/buzz-media &&
-        mc anonymous set none local/buzz-media
-      "
+    environment:
+      BUZZ_S3_ACCESS_KEY: buzz_dev
+      BUZZ_S3_SECRET_KEY: buzz_dev_secret
+      BUZZ_S3_BUCKET: buzz-media
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - >-
+        rc alias set local http://rustfs:9000
+        "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}" &&
+        rc bucket create "local/$${BUZZ_S3_BUCKET}" --ignore-existing --quiet &&
+        rc bucket anonymous set private "local/$${BUZZ_S3_BUCKET}"
     labels:
-      com.buzz.service: "minio-init"
+      com.buzz.service: "rustfs-init"
       com.buzz.env: "dev"
     restart: "no"
 
@@ -174,10 +182,10 @@ volumes:
     name: buzz-postgres-data
     labels:
       com.buzz.volume: "postgres"
-  minio-data:
-    name: buzz-minio-data
+  rustfs-data:
+    name: buzz-rustfs-data
     labels:
-      com.buzz.volume: "minio"
+      com.buzz.volume: "rustfs"
   prometheus-data:
     name: buzz-prometheus-data
     labels:

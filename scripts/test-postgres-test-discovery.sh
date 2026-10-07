@@ -198,7 +198,7 @@ cat >"$fixture_root/src/hybrid.rs" <<'RS'
 #[cfg(test)]
 mod postgres_tests {
     #[test]
-    #[ignore = "requires Postgres and MinIO"]
+    #[ignore = "requires Postgres and S3-compatible object storage"]
     fn hybrid_without_external_module() {}
 }
 RS
@@ -214,7 +214,7 @@ cat >"$fixture_root/src/name_is_not_classification.rs" <<'RS'
 #[cfg(test)]
 mod postgres_tests {
     #[test]
-    #[ignore = "requires Postgres and MinIO"]
+    #[ignore = "requires Postgres and S3-compatible object storage"]
     fn external_infra_prefix_is_not_enough() {}
 }
 RS

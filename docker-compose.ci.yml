@@ -1,12 +1,11 @@
-# CI pulls the published image; only minio-image.yml builds it.
-# MINIO_CI_IMAGE lets the publisher smoke-test an unpublished image or an
-# operator reproduce a run with its recorded run-specific tag/digest.
+# CI explicitly selects the same digest-pinned object-storage images as the
+# development and deployment Compose files.
 services:
-  minio:
-    image: ${MINIO_CI_IMAGE:-ghcr.io/block/buzz-minio:latest}
+  rustfs:
+    image: rustfs/rustfs@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff # 1.0.0
     platform: linux/amd64
     pull_policy: always
-  minio-init:
-    image: ${MINIO_CI_IMAGE:-ghcr.io/block/buzz-minio:latest}
+  rustfs-init:
+    image: rustfs/rc@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699 # v0.1.36
     platform: linux/amd64
     pull_policy: always

@@ -30,7 +30,7 @@ cd "${REPO_ROOT}"
 # ---- Confirm ----------------------------------------------------------------
 
 if [[ "${1:-}" != "--yes" ]]; then
-  echo -e "${YELLOW}WARNING: This will DELETE all development data (desktop state, postgres, minio volumes).${NC}"
+  echo -e "${YELLOW}WARNING: This will DELETE all development data (desktop state, postgres, rustfs volumes).${NC}"
   echo -e "   Installed Buzz app state and its production keyring are preserved."
   echo -e "   Redis data is ephemeral and always wiped on restart."
   echo ""

@@ -61,7 +61,11 @@ err()   { echo -e "${RED}[relay-test]${NC} $*" >&2; }
 cd "${REPO_ROOT}"
 
 log "Starting docker compose services..."
-docker compose up -d postgres redis minio minio-init
+if ! docker compose up -d postgres redis rustfs rustfs-init; then
+  err "dependency image/startup failure while starting Compose services"
+  "${SCRIPT_DIR}/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
+  exit 1
+fi
 
 # ── Wait for services to be healthy ──────────────────────────────────────────
 
@@ -78,13 +82,39 @@ wait_healthy() {
     sleep 2
   done
   err "${service} did not become healthy within 120s"
-  docker logs "${container}" || true
+  err "dependency readiness failure: ${service}"
+  "${SCRIPT_DIR}/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
+  return 1
+}
+
+wait_completed() {
+  local service="$1"
+  local container="$2"
+  log "Waiting for ${service} to complete..."
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null || echo "not_found")
+    if [ "${status}" = "exited" ]; then
+      exit_code=$(docker inspect --format='{{.State.ExitCode}}' "${container}" 2>/dev/null || echo "unknown")
+      if [ "${exit_code}" = "0" ]; then
+        ok "${service} completed"
+        return 0
+      fi
+      err "${service} failed with exit code ${exit_code}"
+      docker logs "${container}" || true
+      return 1
+    fi
+    sleep 2
+  done
+  err "${service} did not complete within 120s"
+  err "dependency initialization failure: ${service}"
+  "${SCRIPT_DIR}/diagnose-compose-runtime.sh" postgres redis rustfs rustfs-init || true
   return 1
 }
 
 wait_healthy "Postgres" "buzz-postgres"
 wait_healthy "Redis" "buzz-redis"
-wait_healthy "MinIO" "buzz-minio"
+wait_healthy "RustFS" "buzz-rustfs"
+wait_completed "RustFS bucket initialization" "buzz-rustfs-init"
 
 # ── Apply database schema ────────────────────────────────────────────────────
 
