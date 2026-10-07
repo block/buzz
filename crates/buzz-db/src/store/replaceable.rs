@@ -127,7 +127,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         LockType::Replacement,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
-            .execute(&mut **tx),
+            .execute(tx.conn()),
     )
     .await?;
 
@@ -175,7 +175,7 @@ async fn replace_parameterized_event_in_transaction_impl(
     .bind(kind_i32)
     .bind(pubkey_bytes.as_slice())
     .bind(d_tag)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.conn())
     .await?;
     let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs {
         sqlx::query_as(
@@ -186,7 +186,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         .bind(kind_i32)
         .bind(pubkey_bytes.as_slice())
         .bind(d_tag)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.conn())
         .await?
     } else {
         None
@@ -256,7 +256,7 @@ async fn replace_parameterized_event_in_transaction_impl(
     // (including mention indexing) rolls the whole replacement back and leaves
     // the caller's transaction usable with the previous live head restored.
     sqlx::query("SAVEPOINT parameterized_replace")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
     let written: Result<bool> = async {
         if existing.is_some() {
@@ -264,14 +264,14 @@ async fn replace_parameterized_event_in_transaction_impl(
                 sqlx::query_scalar(
                     "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
                 )
-                .fetch_one(&mut **tx)
+                .fetch_one(tx.conn())
                 .await?
             } else {
                 None
             };
             if is_nip_rs {
                 sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-                    .execute(&mut **tx)
+                    .execute(tx.conn())
                     .await?;
             }
             let statement = if hard_delete_superseded {
@@ -286,14 +286,14 @@ async fn replace_parameterized_event_in_transaction_impl(
                 .bind(kind_i32)
                 .bind(pubkey_bytes.as_slice())
                 .bind(d_tag)
-                .execute(&mut **tx)
+                .execute(tx.conn())
                 .await?;
 
             if is_nip_rs {
                 let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
                 sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
                     .bind(previous_value)
-                    .execute(&mut **tx)
+                    .execute(tx.conn())
                     .await?;
             }
 
@@ -302,7 +302,7 @@ async fn replace_parameterized_event_in_transaction_impl(
                     sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
                         .bind(community_id.as_uuid())
                         .bind(existing_id)
-                        .execute(&mut **tx)
+                        .execute(tx.conn())
                         .await?;
                 }
             }
@@ -327,7 +327,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         .bind(channel_id)
         .bind(d_tag)
         .bind(crate::event::extract_not_before(event))
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
 
         if insert_result.rows_affected() == 0 {
@@ -348,7 +348,7 @@ async fn replace_parameterized_event_in_transaction_impl(
             .bind(d_tag)
             .bind(created_at)
             .bind(incoming_id)
-            .execute(&mut **tx)
+            .execute(tx.conn())
             .await?;
         }
 
@@ -361,7 +361,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         Ok(true) => ParameterizedReplaceStatus::Inserted,
         Ok(false) => {
             sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
-                .execute(&mut **tx)
+                .execute(tx.conn())
                 .await?;
             ParameterizedReplaceStatus::Duplicate
         }
@@ -369,7 +369,7 @@ async fn replace_parameterized_event_in_transaction_impl(
             // Restore the caller's transaction; the original error is the
             // one worth reporting if the rollback itself also fails.
             if let Err(rollback_error) = sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
-                .execute(&mut **tx)
+                .execute(tx.conn())
                 .await
             {
                 tracing::warn!(error = %rollback_error, "parameterized replacement savepoint rollback failed");
@@ -378,7 +378,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         }
     };
     sqlx::query("RELEASE SAVEPOINT parameterized_replace")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
 
     Ok(ParameterizedReplaceResult::new(
@@ -436,7 +436,7 @@ impl Db {
                     observability::LockType::Replacement,
                     sqlx::query("SELECT pg_advisory_xact_lock($1)")
                         .bind(lock_key)
-                        .execute(&mut *tx),
+                        .execute(tx.conn()),
                 )
                 .await?;
 
@@ -454,7 +454,7 @@ impl Db {
                     .bind(kind_i32)
                     .bind(pubkey_bytes.as_slice())
                     .bind(channel_id)
-                    .fetch_optional(&mut *tx)
+                    .fetch_optional(tx.conn())
                     .await?;
 
                 // Stale-write protection: reject if incoming is not newer.
@@ -491,7 +491,7 @@ impl Db {
                 .bind(kind_i32)
                 .bind(pubkey_bytes.as_slice())
                 .bind(channel_id)
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
 
                 // Insert the new event inside the same transaction.
@@ -516,7 +516,7 @@ impl Db {
                 .bind(received_at)
                 .bind(channel_id)
                 .bind(d_tag.as_deref())
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
 
                 let was_inserted = insert_result.rows_affected() > 0;
@@ -1195,7 +1195,7 @@ mod postgres_tests {
         let leaked: Option<String> = sqlx::query_scalar(
             "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .expect("read hard-delete opt-in after replacement");
         assert_ne!(leaked.as_deref(), Some("on"));
@@ -1207,7 +1207,7 @@ mod postgres_tests {
         .bind(community.as_uuid())
         .bind(keys.public_key().to_bytes())
         .bind(&victim_d_tag)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await;
         assert!(
             unauthorized.is_err(),
@@ -1405,7 +1405,7 @@ mod postgres_tests {
         assert!(error.to_string().contains("injected mention failure"));
 
         let probe: i32 = sqlx::query_scalar("SELECT 1")
-            .fetch_one(&mut *tx)
+            .fetch_one(tx.conn())
             .await
             .expect("inner failure must leave caller transaction usable");
         assert_eq!(probe, 1);
@@ -1418,7 +1418,7 @@ mod postgres_tests {
         .bind(buzz_core::kind::KIND_PROJECT as i32)
         .bind(keys.public_key().to_bytes())
         .bind(&d_tag)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .expect("load live project after failed indexing");
         assert_eq!(live_id, old.id.as_bytes().to_vec());
@@ -1426,7 +1426,7 @@ mod postgres_tests {
             sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
                 .bind(community.as_uuid())
                 .bind(new.id.as_bytes().as_slice())
-                .fetch_one(&mut *tx)
+                .fetch_one(tx.conn())
                 .await
                 .expect("count rolled-back project");
         assert_eq!(new_rows, 0);
@@ -1505,7 +1505,7 @@ mod postgres_tests {
         .bind(buzz_core::kind::KIND_PROJECT as i32)
         .bind(keys.public_key().to_bytes())
         .bind(&d_tag)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .expect("caller transaction remains usable after duplicate");
         assert_eq!(live_id, old.id.as_bytes().to_vec());

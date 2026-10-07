@@ -124,7 +124,7 @@ pub(crate) async fn enqueue_mentions_in_transaction(
     }
     separated.push_unseparated(") ON CONFLICT DO NOTHING");
 
-    Ok(query.build().execute(&mut **tx).await?.rows_affected())
+    Ok(query.build().execute(tx.conn()).await?.rows_affected())
 }
 
 /// Register target pubkeys for one deployment-global listener.

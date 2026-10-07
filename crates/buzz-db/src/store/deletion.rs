@@ -6985,7 +6985,7 @@ mod postgres_tests {
         .bind(request.community_id.as_uuid())
         .bind(pubkey.to_vec())
         .bind("during")
-        .execute(&mut *admitted_writer)
+        .execute(admitted_writer.conn())
         .await
         .expect("update allowlist note")
         .rows_affected();

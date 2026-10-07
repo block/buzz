@@ -174,7 +174,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(soft_delete_discovery.contains("WriterOperation::EventWrite"));
     assert!(soft_delete_discovery.contains("begin_community_event_write_transaction("));
-    assert!(soft_delete_discovery.contains("execute(&mut *tx)"));
+    assert!(soft_delete_discovery.contains("execute(tx.conn())"));
 
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
     assert!(side_effects.contains("query_events_for_event_write"));
@@ -1162,71 +1162,31 @@ pub(crate) async fn admitted_writer(tx: &mut AdmittedTx) {
 }
 
 #[test]
-fn admitted_tx_is_constructed_only_at_the_admission_chokepoints() {
-    use std::path::{Path, PathBuf};
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let path = entry.expect("read directory entry").path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push(path);
-            }
-        }
-    }
-
-    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    collect_rs_files(&src_root, &mut files);
-    let mut constructors = Vec::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(&src_root)
-            .expect("file is under src root")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let source = std::fs::read_to_string(&path).expect("read source file");
-        // Comment lines are skipped so the `compile_fail` doctests on
-        // `AdmittedTx`, which name the constructor, are not counted as calls.
-        for line in source
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-        {
-            for _ in line.matches("AdmittedTx::admitted(") {
-                constructors.push(relative.clone());
-            }
-        }
-    }
-    // One wrap after `guard_transaction` in the shared chokepoint, one after
-    // `guard_transaction_with_serving_lease` in the serving-lease writer.
+fn admitted_tx_is_constructed_only_by_admitting_constructors() {
+    // The fields are private to `runtime/admitted_tx.rs`, so only that file can
+    // build the value. Pin that each function there that builds it also admits
+    // the transaction it wraps, so a new unguarded constructor cannot slip in.
+    let source = include_str!("../src/runtime/admitted_tx.rs");
+    let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
+    let production: String = production
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let constructors: Vec<&str> = function_slices(&production)
+        .into_iter()
+        .filter(|function| function.contains("Self {"))
+        .collect();
     assert_eq!(
-        constructors,
-        ["runtime/mod.rs", "runtime/mod.rs"],
-        "AdmittedTx must only be constructed right after community admission"
+        constructors.len(),
+        2,
+        "AdmittedTx must have exactly the two admitting constructors"
     );
-
-    let runtime = include_str!("../src/runtime/mod.rs");
-    for (guard, label) in [
-        (
-            ".guard_transaction(&mut tx, community)",
-            "shared event-write chokepoint",
-        ),
-        (
-            ".guard_transaction_with_serving_lease(&mut tx, lease)",
-            "serving-lease writer",
-        ),
-    ] {
-        let after_guard = runtime
-            .split_once(guard)
-            .unwrap_or_else(|| panic!("{label} must admit its transaction"))
-            .1;
-        let before_next_fn = after_guard
-            .split_once("fn ")
-            .map_or(after_guard, |(head, _)| head);
+    for constructor in constructors {
         assert!(
-            before_next_fn.contains("AdmittedTx::admitted("),
-            "{label} must wrap the transaction only after admission"
+            constructor.contains(".guard_transaction(&mut tx, community)")
+                || constructor.contains(".guard_transaction_with_serving_lease(&mut tx, lease)"),
+            "AdmittedTx constructor must admit the transaction it wraps: {constructor}"
         );
     }
 }
@@ -1284,31 +1244,38 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
         }
     }
 
-    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    collect_rs_files(&src_root, &mut files);
-    assert!(
-        !files.is_empty(),
-        "guarded-table scan must see production source files"
-    );
-
+    // `buzz-relay` is scanned too: relay code reaches fenced tables only through
+    // `buzz-db` helpers, and a direct relay write must meet the same rule.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut checked_guarded_files = 0usize;
-    for path in files {
-        let relative = path
-            .strip_prefix(&src_root)
-            .expect("file is under src root")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let source = std::fs::read_to_string(&path).expect("read source file");
-        let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
-        if production_contains_guarded_write(production) {
-            checked_guarded_files += 1;
-            let violations = syntactic_guarded_write_route_violations(production);
-            assert!(
-                violations.is_empty(),
-                "{relative} has guarded-table INSERT/UPDATE/DELETE seams that neither open the \
-                 tenant-local chokepoint nor take `&mut AdmittedTx`: {violations:?}"
-            );
+    for (crate_name, src_root) in [
+        ("buzz-db", manifest.join("src")),
+        ("buzz-relay", manifest.join("../buzz-relay/src")),
+    ] {
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(
+            !files.is_empty(),
+            "guarded-table scan must see {crate_name} production source files"
+        );
+        for path in files {
+            let relative = path
+                .strip_prefix(&src_root)
+                .expect("file is under src root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(&path).expect("read source file");
+            let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
+            if production_contains_guarded_write(production) {
+                checked_guarded_files += 1;
+                let violations = syntactic_guarded_write_route_violations(production);
+                assert!(
+                    violations.is_empty(),
+                    "{crate_name}/src/{relative} has guarded-table INSERT/UPDATE/DELETE seams \
+                     that neither open the tenant-local chokepoint nor take `&mut AdmittedTx`: \
+                     {violations:?}"
+                );
+            }
         }
     }
     assert!(

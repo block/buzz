@@ -403,7 +403,7 @@ pub async fn huddle_started_link_exists_in_transaction(
     .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
     .bind(uuid_needle)
     .bind(HUDDLE_LINK_CANDIDATE_LIMIT)
-    .fetch_all(tx.as_mut())
+    .fetch_all(tx.conn())
     .await?;
 
     Ok(candidates
@@ -496,7 +496,7 @@ async fn insert_event_on(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
@@ -1167,7 +1167,7 @@ pub async fn soft_delete_by_coordinate(
     .await?;
     let purged = if may_be_retention_free(kind) {
         purge_retention_free_events(
-            &mut tx,
+            tx.conn(),
             community_id,
             RetentionFreeTarget::Coordinate {
                 kind,
@@ -1198,7 +1198,7 @@ pub async fn soft_delete_by_coordinate(
     .bind(pubkey)
     .bind(d_tag)
     .bind(deletion_created_at)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -1333,7 +1333,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
     let community_id = tx.community();
-    let tx: &mut PgConnection = tx;
+    let tx: &mut PgConnection = tx.conn();
     use crate::store::replaceable::event_replacement_lock_key;
 
     // Derive the target event's kind and channel_id inside the transaction so
@@ -1741,7 +1741,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
@@ -1771,7 +1771,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             .bind(meta.root_event_created_at)
             .bind(meta.depth)
             .bind(broadcast_val)
-            .execute(&mut **tx)
+            .execute(tx.conn())
             .await?;
 
             // Only bump reply counts if the metadata row was actually inserted.
@@ -1798,7 +1798,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     .bind(parent_ts)
                     .bind(pid)
                     .bind(meta.channel_id)
-                    .execute(&mut **tx)
+                    .execute(tx.conn())
                     .await?;
 
                     // Ensure the root also has a row (may differ from parent for nested replies).
@@ -1821,7 +1821,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                             .bind(root_ts)
                             .bind(root_id)
                             .bind(meta.channel_id)
-                            .execute(&mut **tx)
+                            .execute(tx.conn())
                             .await?;
                         }
                     }
@@ -1835,7 +1835,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     )
                     .bind(community_id.as_uuid())
                     .bind(pid)
-                    .execute(&mut **tx)
+                    .execute(tx.conn())
                     .await?;
 
                     if let Some(root_id) = meta.root_event_id {
@@ -1848,7 +1848,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                         )
                         .bind(community_id.as_uuid())
                         .bind(root_id)
-                        .execute(&mut **tx)
+                        .execute(tx.conn())
                         .await?;
                     }
                 }
@@ -1894,7 +1894,7 @@ async fn acquire_canvas_coordinate_lock(tx: &mut AdmittedTx, channel_id: Uuid) -
     );
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_key)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
     Ok(())
 }
@@ -2026,7 +2026,7 @@ pub async fn insert_canvas_head_checked(
     .bind(community_id.as_uuid())
     .bind(kind_i32)
     .bind(channel_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     // Idempotent replay: the incoming event is already the live head.
@@ -2689,7 +2689,7 @@ impl Db {
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .bind(relay_pubkey)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         tx.commit().await?;

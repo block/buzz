@@ -125,7 +125,7 @@ pub async fn add_reaction(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
     tx.commit().await?;
@@ -160,7 +160,7 @@ pub(crate) async fn add_reaction_tx(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
 
     Ok(result.rows_affected() != 0)
@@ -196,7 +196,7 @@ pub async fn insert_reaction_event_with_thread_metadata(
     )
     .bind(community_id.as_uuid())
     .bind(target_event_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     let Some(target_row) = target_row else {
@@ -273,7 +273,7 @@ pub async fn remove_reaction(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -306,7 +306,7 @@ pub async fn remove_reaction_by_source_event_id(
     )
     .bind(community.as_uuid())
     .bind(reaction_event_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -394,7 +394,7 @@ pub async fn set_reaction_event_id(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;

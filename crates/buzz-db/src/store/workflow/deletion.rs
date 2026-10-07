@@ -95,7 +95,7 @@ async fn delete_workflow_in_transaction(
         crate::observability::LockType::Replacement,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
-            .execute(&mut **tx),
+            .execute(tx.conn()),
     )
     .await?;
 
@@ -108,7 +108,7 @@ async fn delete_workflow_in_transaction(
     .bind(KIND_WORKFLOW_DEF as i32)
     .bind(owner_pubkey)
     .bind(d_tag)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.conn())
     .await?;
     if head.is_some_and(|created_at| created_at > cutoff) {
         return Ok(WorkflowDeletionOutcome::default());
@@ -127,7 +127,7 @@ async fn delete_workflow_in_transaction(
     .bind(owner_pubkey)
     .bind(workflow_id)
     .bind(d_tag)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.conn())
     .await?;
     let definitions = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
@@ -138,7 +138,7 @@ async fn delete_workflow_in_transaction(
     .bind(owner_pubkey)
     .bind(d_tag)
     .bind(cutoff)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
     let changed = row.is_some() || definitions.rows_affected() > 0;
     let channel_id = row

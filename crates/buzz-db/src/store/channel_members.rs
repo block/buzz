@@ -209,7 +209,35 @@ pub async fn acquire_channel_membership_lock_in_transaction(
     channel_id: Uuid,
 ) -> Result<()> {
     let community_id = tx.community();
-    acquire_channel_membership_lock(tx, community_id, channel_id).await
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await
+}
+
+/// Lock the live channel row on a caller-owned transaction and return its
+/// `archived_at` (`None` when the channel is missing, deleted, or not archived).
+///
+/// The `FOR NO KEY UPDATE` row lock makes `archive_channel`'s
+/// `UPDATE channels SET archived_at = NOW()` wait until the caller commits or
+/// rolls back, so a join cannot commit into a channel archived concurrently.
+/// `FOR UPDATE` would invert the lock order against `add_member`, whose
+/// membership INSERT needs `KEY SHARE` on `channels` for its foreign key
+/// after taking the advisory membership lock; `FOR NO KEY UPDATE` still blocks
+/// archive (a non-key update) but is compatible with `KEY SHARE`. Re-reading
+/// under the lock is safe: the caller already holds it.
+pub async fn lock_channel_archived_at_in_transaction(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<Option<DateTime<Utc>>> {
+    let community_id = tx.community();
+    let archived_at: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+        "SELECT archived_at FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         FOR NO KEY UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(archived_at.flatten())
 }
 
 /// Check whether a pubkey is an active channel member on a caller-owned transaction.
@@ -230,7 +258,7 @@ pub async fn is_member_in_transaction(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.conn())
     .await?;
     let cnt: i64 = row.try_get("cnt")?;
     Ok(cnt > 0)
@@ -266,7 +294,7 @@ pub async fn insert_auto_membership_in_transaction(
     .bind(channel_id)
     .bind(pubkey)
     .bind(invited_by)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
     Ok(())
 }
@@ -298,7 +326,7 @@ impl LockedMemberSnapshot {
         .bind(self.tx.community().as_uuid())
         .bind(self.relay_pubkey.as_slice())
         .bind(self.channel_id)
-        .fetch_optional(&mut *self.tx)
+        .fetch_optional(self.tx.conn())
         .await?;
         Ok(value.map(|timestamp| timestamp.timestamp() as u64))
     }
@@ -336,7 +364,7 @@ impl LockedMemberSnapshot {
         .bind(kind)
         .bind(pubkey.as_slice())
         .bind(channel_id)
-        .fetch_optional(&mut *self.tx)
+        .fetch_optional(self.tx.conn())
         .await?;
         let incoming_id = event.id.as_bytes().as_slice();
         if let Some((existing_ts, existing_id)) = existing {
@@ -356,7 +384,7 @@ impl LockedMemberSnapshot {
         }
         sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL")
             .bind(community_id.as_uuid()).bind(kind).bind(pubkey.as_slice()).bind(channel_id)
-            .execute(&mut *self.tx).await?;
+            .execute(self.tx.conn()).await?;
         let received_at = Utc::now();
         let tags = serde_json::to_value(&event.tags)?;
         let sig = event.sig.serialize();
@@ -364,7 +392,7 @@ impl LockedMemberSnapshot {
             .bind(community_id.as_uuid()).bind(event.id.as_bytes().as_slice())
             .bind(pubkey.as_slice()).bind(created_at).bind(kind).bind(tags)
             .bind(&event.content).bind(sig.as_slice()).bind(received_at).bind(channel_id)
-            .bind(crate::event::extract_d_tag(event)).execute(&mut *self.tx).await?;
+            .bind(crate::event::extract_d_tag(event)).execute(self.tx.conn()).await?;
         if inserted.rows_affected() == 0 {
             return Err(DbError::InvalidData(
                 "member snapshot event id already exists".into(),
@@ -421,10 +449,10 @@ pub async fn lock_member_snapshot(
         crate::observability::LockType::Replacement,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(replacement_lock)
-            .execute(&mut *tx),
+            .execute(tx.conn()),
     )
     .await?;
-    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
@@ -436,7 +464,7 @@ pub async fn lock_member_snapshot(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.conn())
     .await?;
     let members = rows
         .into_iter()

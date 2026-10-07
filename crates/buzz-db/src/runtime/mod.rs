@@ -124,7 +124,7 @@ pub(crate) async fn insert_mentions_in_transaction(
 
         qb.push(" ON CONFLICT DO NOTHING");
 
-        qb.build().execute(&mut **tx).await?;
+        qb.build().execute(tx.conn()).await?;
     }
     Ok(())
 }
@@ -145,11 +145,8 @@ async fn begin_community_event_write_transaction_with_metric_population(
             observability::acquire_writer_with_legacy_metrics(pool, operation).await?
         }
     };
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    deletion::DeletionStore::new(pool.clone())
-        .guard_transaction(&mut tx, community)
-        .await?;
-    Ok(AdmittedTx::admitted(tx, community))
+    let tx = sqlx::Transaction::begin(connection, None).await?;
+    AdmittedTx::admit(tx, &deletion::DeletionStore::new(pool.clone()), community).await
 }
 
 #[derive(Clone, Copy)]
@@ -1294,7 +1291,8 @@ impl Db {
     /// fenced statement. The returned [`AdmittedTx`] is the only type the
     /// event-write `*_in_transaction` helpers accept, and it carries
     /// `community`, so the compiler rejects a raw transaction or one admitted
-    /// for another community. [`AdmittedTx::commit`] is the only commit path.
+    /// for another community. Outside this crate, [`AdmittedTx::commit`] is
+    /// the only commit path; see [`AdmittedTx`] for the in-crate limit.
     pub async fn begin_event_write_transaction(
         &self,
         community: CommunityId,
@@ -1319,7 +1317,6 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let community_id = lease.community_id;
         let kind_u16 = event.kind.as_u16();
         let kind_u32 = u32::from(kind_u16);
         if kind_u32 == buzz_core::kind::KIND_AUTH {
@@ -1332,11 +1329,9 @@ impl Db {
         let connection =
             observability::acquire_writer(&self.pool, observability::WriterOperation::EventWrite)
                 .await?;
-        let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        self.deletion_store()
-            .guard_transaction_with_serving_lease(&mut tx, lease)
-            .await?;
-        let mut tx = AdmittedTx::admitted(tx, community_id);
+        let tx = sqlx::Transaction::begin(connection, None).await?;
+        let mut tx =
+            AdmittedTx::admit_with_serving_lease(tx, &self.deletion_store(), lease).await?;
         event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result =
             event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;
@@ -1346,17 +1341,17 @@ impl Db {
             // existing best-effort contract: an indexing failure never rejects
             // an otherwise valid event.
             sqlx::query("SAVEPOINT serving_write_mentions")
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
             match insert_mentions_in_transaction(&mut tx, event, channel_id).await {
                 Ok(()) => {
                     sqlx::query("RELEASE SAVEPOINT serving_write_mentions")
-                        .execute(&mut *tx)
+                        .execute(tx.conn())
                         .await?;
                 }
                 Err(e) => {
                     sqlx::query("ROLLBACK TO SAVEPOINT serving_write_mentions")
-                        .execute(&mut *tx)
+                        .execute(tx.conn())
                         .await?;
                     tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
                 }

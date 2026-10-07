@@ -269,21 +269,21 @@ pub async fn accept_lease_event(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(address_lock)
-            .execute(&mut *tx),
+            .execute(tx.conn()),
     )
     .await?;
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(author_lock)
-            .execute(&mut *tx),
+            .execute(tx.conn()),
     )
     .await?;
     // T1b: an activation can flip the community from "no eligible lease" to
     // "eligible", so it must serialize against the trigger's shared gate lock.
     // Acquired after the address/author locks to keep one global lock order.
     if active.is_some() {
-        acquire_push_gate_lock(&mut tx, community).await?;
+        acquire_push_gate_lock(tx.conn(), community).await?;
     }
 
     if let Some(row) = sqlx::query(
@@ -291,7 +291,7 @@ pub async fn accept_lease_event(
     )
     .bind(community.as_uuid())
     .bind(version.source_event_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?
     {
         let existing_author: Vec<u8> = row.try_get("author")?;
@@ -308,7 +308,7 @@ pub async fn accept_lease_event(
     .bind(community.as_uuid())
     .bind(author)
     .bind(installation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?
     {
         let current_created_at: i64 = row.try_get("source_created_at")?;
@@ -336,7 +336,7 @@ pub async fn accept_lease_event(
     )
     .bind(community.as_uuid())
     .bind(author)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if let Some(active) = active {
@@ -346,7 +346,7 @@ pub async fn accept_lease_event(
         .bind(community.as_uuid())
         .bind(author)
         .bind(installation_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await?;
         if active_count >= max_active_leases {
             return Ok(AcceptLeaseOutcome::LeaseQuotaExceeded);
@@ -359,7 +359,7 @@ pub async fn accept_lease_event(
         .bind(installation_id)
         .bind(active.app_profile)
         .bind(active.endpoint_hash)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await?;
         if duplicate {
             return Ok(AcceptLeaseOutcome::EndpointAlreadyLeased);
@@ -372,7 +372,7 @@ pub async fn accept_lease_event(
     .bind(community.as_uuid())
     .bind(author)
     .bind(installation_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
     let created_at = DateTime::from_timestamp(version.source_created_at, 0)
         .ok_or(crate::DbError::InvalidTimestamp(version.source_created_at))?;
@@ -387,7 +387,7 @@ pub async fn accept_lease_event(
     .bind(&event.content)
     .bind(event.sig.serialize().as_slice())
     .bind(installation_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     {
         if let Some(outcome) = constraint_acceptance_outcome(&error) {
@@ -422,7 +422,7 @@ pub async fn accept_lease_event(
     .bind(version.source_event_id).bind(version.source_created_at).bind(version.generation)
     .bind(is_active).bind(app_profile).bind(endpoint_hash).bind(endpoint_grant)
     .bind(max_class).bind(subscriptions).bind(version.expires_at)
-    .execute(&mut *tx).await
+    .execute(tx.conn()).await
     {
         if let Some(outcome) = constraint_acceptance_outcome(&error) {
             return Ok(outcome);
@@ -430,7 +430,7 @@ pub async fn accept_lease_event(
         return Err(error.into());
     }
     if is_active {
-        backfill_push_match_jobs(&mut tx, community).await?;
+        backfill_push_match_jobs(tx.conn(), community).await?;
     }
     tx.commit().await?;
     Ok(AcceptLeaseOutcome::Accepted)
