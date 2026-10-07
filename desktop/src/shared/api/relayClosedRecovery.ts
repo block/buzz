@@ -31,9 +31,8 @@ type ClosedRepairOptions = {
   requestRepair?: (
     request: ChannelReconnectRepairRequest,
   ) => Promise<RelayEvent[]>;
-  /** Connection generation the CLOSED frame arrived on. */
-  generation?: number;
-  isActive?: () => boolean;
+  /** Current connection generation; a repair stops once it changes. */
+  connectionGeneration?: () => number;
 };
 
 export function clearClosedRetry(subscription: LiveSubscription) {
@@ -49,8 +48,7 @@ export function handleRelayClosed({
   sendReq,
   closeSubscription,
   requestRepair,
-  generation = 0,
-  isActive = () => true,
+  connectionGeneration = () => 0,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
@@ -136,8 +134,7 @@ export function handleRelayClosed({
     message,
     sendReq,
     requestRepair,
-    generation,
-    isActive,
+    connectionGeneration,
   });
 }
 
@@ -148,8 +145,7 @@ function recoverLiveSubscriptionFromClosed({
   message,
   sendReq,
   requestRepair,
-  generation = 0,
-  isActive = () => true,
+  connectionGeneration = () => 0,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
@@ -223,6 +219,7 @@ function recoverLiveSubscriptionFromClosed({
       shouldPageReconnectReplay(subscription.filter);
     const replaySince = reconnectReplaySince(subscription, shouldPageReplay);
     const willRepair = shouldPageReplay && replaySince !== undefined;
+    const generation = connectionGeneration();
     if (willRepair) beginReconnectRepair(subscription, generation);
 
     void (async () => {
@@ -246,7 +243,7 @@ function recoverLiveSubscriptionFromClosed({
         channelId,
         replaySince,
         generation,
-        isActive,
+        isActive: () => connectionGeneration() === generation,
         requestRepair,
       });
     })().catch((error) => {
@@ -259,8 +256,7 @@ function recoverLiveSubscriptionFromClosed({
         message,
         sendReq,
         requestRepair,
-        generation,
-        isActive,
+        connectionGeneration,
       });
     });
   };

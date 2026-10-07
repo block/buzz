@@ -75,7 +75,6 @@ import {
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 type UserStatusInput = { text: string; emoji: string; expiresAt?: number };
-type LiveCallbacks = { onFlush?: () => void };
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
@@ -333,12 +332,11 @@ export class RelayClient {
     return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
   }
 
-  /** Subscribe to channel rows and aux starting now, with no history replay. */
   /** Subscribe to channel rows and aux, with one callback per dispatched batch. */
   async subscribeToChannelLive(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
-    options?: LiveCallbacks,
+    onFlush?: () => void,
   ) {
     return this.subscribe(
       buildChannelLiveFilter(channelId),
@@ -347,7 +345,7 @@ export class RelayClient {
       undefined,
       undefined,
       undefined,
-      options,
+      onFlush,
     );
   }
 
@@ -621,7 +619,7 @@ export class RelayClient {
     readinessTimeoutMs = 250,
     signal?: AbortSignal,
     priority?: "interactive",
-    options?: LiveCallbacks,
+    onFlush?: () => void,
   ) {
     const epoch = this.sessionEpoch;
     const sessionSignal = this.liveSessionAbort.signal;
@@ -640,7 +638,7 @@ export class RelayClient {
       filter,
       priority,
       onEvent,
-      onFlush: options?.onFlush,
+      onFlush,
       onRemoved,
     };
     const dispose = async () => {
@@ -936,8 +934,7 @@ export class RelayClient {
           ),
         closeSubscription: (subId) => this.closeSubscription(subId),
         requestRepair: getChannelReconnectRepairEvents,
-        generation,
-        isActive: () => this.connectionGeneration === generation,
+        connectionGeneration: () => this.connectionGeneration,
       });
       if (!this.subscriptions.has(rest[0])) this.liveReqDrain.cancel(rest[0]);
       this.channelAccessRevocations.notify(subscription, rest[1]);

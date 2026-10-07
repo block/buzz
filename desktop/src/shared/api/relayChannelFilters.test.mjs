@@ -134,7 +134,7 @@ test("CLOSED retry pages a gap larger than the live limit from last-seen author 
         // The restored live REQ may already have delivered the newest row.
         return [recoveredEvents.at(-1), ...recoveredEvents];
       },
-      generation: 7,
+      connectionGeneration: () => 7,
     });
 
     assert.equal(typeof retry, "function");

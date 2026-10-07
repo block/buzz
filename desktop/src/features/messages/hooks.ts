@@ -452,13 +452,11 @@ export function useChannelSubscription(channel: Channel | null) {
             shouldProjectOnFlush = appendMessage(event) || shouldProjectOnFlush;
           }
         },
-        {
-          onFlush: () => {
-            if (!isDisposed && shouldProjectOnFlush) {
-              projectChannelWindowMessages(queryClient, channelId);
-            }
-            shouldProjectOnFlush = false;
-          },
+        () => {
+          if (!isDisposed && shouldProjectOnFlush) {
+            projectChannelWindowMessages(queryClient, channelId);
+          }
+          shouldProjectOnFlush = false;
         },
       )
       .then(
