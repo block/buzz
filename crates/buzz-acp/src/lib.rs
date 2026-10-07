@@ -3818,6 +3818,12 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
 /// those batches dead-letter immediately. Session limits *do* recover, but not
 /// inside the ~25 minute ordinary retry budget (#5918).
 fn is_session_limit_error(error: &acp::AcpError) -> bool {
+    // JSON-RPC -32003 is the typed rate-limit / session-limit signal from
+    // some agents. Claude still folds quota into -32603, so prose matching
+    // below remains required.
+    if matches!(error, acp::AcpError::AgentError { code: -32003, .. }) {
+        return true;
+    }
     let acp::AcpError::AgentError { message, .. } = error else {
         return false;
     };
@@ -8527,6 +8533,18 @@ mod error_outcome_emission_tests {
             code: -32603,
             message: "Internal error: You've hit your session limit · resets 1:50pm (America/Buenos_Aires)"
                 .to_string(),
+        };
+        assert!(is_session_limit_error(&e));
+        assert!(!is_auth_error(&e));
+    }
+
+    #[test]
+    fn is_session_limit_error_matches_rate_limit_code() {
+        // Prose alone would miss this — no "resets" token — so the -32003
+        // code arm must catch it before the generic retry ladder burns the batch.
+        let e = acp::AcpError::AgentError {
+            code: -32003,
+            message: "Agent reported error (code -32003): Rate limited".to_string(),
         };
         assert!(is_session_limit_error(&e));
         assert!(!is_auth_error(&e));
