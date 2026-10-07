@@ -32,6 +32,9 @@ CREATE TABLE personal_read_frontiers (
 );
 
 
+-- Arrival time of a thread root's latest reply: the sidebar skips threads
+-- with nothing new since the reader's position without reading replies.
+ALTER TABLE thread_metadata ADD COLUMN last_reply_received_at TIMESTAMPTZ;
 
 SELECT attach_community_write_fence('personal_read_accounts');
 SELECT attach_community_write_fence('personal_read_frontiers');

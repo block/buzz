@@ -236,24 +236,19 @@ async fn accounts(pool: &PgPool, community: CommunityId) -> i64 {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn counts_stop_at_the_advertised_cap_and_serialize_as_integers() {
+async fn unread_is_presence_and_serializes_as_booleans() {
     let (db, _, community, channel, actor, _) = fixture().await;
     let author = Keys::generate();
     let base = now();
     let mut last = None;
-    for i in 0..u64::from(UNREAD_CAP) + 20 {
+    for i in 0..120 {
         last = Some(post(&db, community, channel, &author, base + i, vec![]).await);
     }
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(
-        row.unread, UNREAD_CAP,
-        "a count at the cap means at least the cap"
-    );
     let wire = serde_json::to_value(&row).unwrap();
-    assert_eq!(wire["unread"], 99);
-    assert_eq!(wire["attention"], 0);
-    assert_eq!(wire["unread_thread_count"], 0);
-    for gone in ["latest_message_complete", "account", "status"] {
+    assert_eq!(wire["unread"], true);
+    assert_eq!(wire["attention"], false);
+    for gone in ["latest_message_complete", "account", "status", "unread_thread_count"] {
         assert!(wire.get(gone).is_none(), "{gone}");
     }
     let last = last.unwrap();
@@ -262,14 +257,14 @@ async fn counts_stop_at_the_advertised_cap_and_serialize_as_integers() {
         apply(&db, community, &actor, mark(channel, None, &last)).await,
         IntentOutcome::Applied
     );
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
+    assert!(!sidebar(&db, community, &actor).await.unread);
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn joining_starts_caught_up_and_counts_only_what_arrives_after() {
     let (db, pool, community, channel, owner, event) = fixture().await;
-    assert_eq!(sidebar(&db, community, &owner).await.unread, 1);
+    assert!(sidebar(&db, community, &owner).await.unread);
     let joiner = Keys::generate();
     start(&pool, community, &joiner).await;
     let before = accounts(&pool, community).await;
@@ -285,7 +280,7 @@ async fn joining_starts_caught_up_and_counts_only_what_arrives_after() {
     let row = sidebar(&db, community, &joiner).await;
     assert_eq!(
         (row.unread, row.attention),
-        (0, 0),
+        (false, false),
         "history before joining is read"
     );
     assert_eq!(row.latest_message_id, Some(event.id.to_hex()));
@@ -308,7 +303,7 @@ async fn joining_starts_caught_up_and_counts_only_what_arrives_after() {
     )
     .await;
     let row = sidebar(&db, community, &joiner).await;
-    assert_eq!((row.unread, row.attention), (1, 1));
+    assert_eq!((row.unread, row.attention), (false, true), "a mention is attention, not backlog");
     assert_eq!(
         states(&db, community, &joiner, channel, None, &[&later]).await,
         [serde_json::json!({"status":"unread","reason":"mention"})]
@@ -350,18 +345,18 @@ async fn rejoining_starts_caught_up_again() {
     )
     .await
     .unwrap();
-    assert_eq!(sidebar(&db, community, &owner).await.unread, 2);
+    assert!(sidebar(&db, community, &owner).await.unread);
     db.add_member(community, channel, &pk, MemberRole::Member, None)
         .await
         .unwrap();
     let row = sidebar(&db, community, &member).await;
-    assert_eq!(row.unread, 0, "messages from while away are read");
+    assert!(!row.unread, "messages from while away are read");
     assert_eq!(
         status(&db, community, &member, channel, None, &[&away]).await,
         ["read"]
     );
     post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
-    assert_eq!(sidebar(&db, community, &member).await.unread, 1);
+    assert!(sidebar(&db, community, &member).await.unread);
 }
 
 #[tokio::test]
@@ -408,8 +403,8 @@ async fn read_state_starts_caught_up_at_the_first_intent() {
     .await;
     let row = sidebar(&db, community, &member).await;
     assert_eq!(
-        (row.unread, row.attention, row.unread_thread_count),
-        (0, 0, 0)
+        (row.unread, row.attention, row.threads.len()),
+        (false, false, 0)
     );
     assert_eq!(row.latest_message_id, Some(before.id.to_hex()));
     assert_eq!(
@@ -423,7 +418,7 @@ async fn read_state_starts_caught_up_at_the_first_intent() {
         IntentOutcome::Applied
     );
     let row = sidebar(&db, community, &member).await;
-    assert_eq!((row.unread, row.unread_thread_count), (0, 0));
+    assert_eq!((row.unread, row.threads.len()), (false, 0));
     assert_eq!(
         status(&db, community, &member, channel, None, &[&before]).await,
         ["read"]
@@ -441,7 +436,7 @@ async fn read_state_starts_caught_up_at_the_first_intent() {
     .await;
     post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
     let row = sidebar(&db, community, &member).await;
-    assert_eq!((row.unread, row.unread_thread_count), (2, 1));
+    assert_eq!((row.unread, row.attention, row.threads.len()), (true, true, 1));
 }
 
 #[tokio::test]
@@ -461,7 +456,7 @@ async fn sidebar_is_read_only_and_does_not_wait_for_account() {
         .fetch_all(&mut *held)
         .await
         .unwrap();
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
+    assert!(!sidebar(&db, community, &actor).await.unread);
     held.rollback().await.unwrap();
 }
 
@@ -539,7 +534,7 @@ async fn diff_alone_leaves_the_sidebar_row_unchanged() {
     )
     .await;
     let after = serde_json::to_value(sidebar(&db, community, &actor).await).unwrap();
-    assert_eq!(before["unread"], 1);
+    assert_eq!(before["unread"], true);
     assert_eq!(before, after, "not unread, not attention, not latest");
 }
 
@@ -560,7 +555,7 @@ async fn latest_includes_own_and_excludes_deleted_and_auxiliary() {
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(row.latest_message_id, Some(own.id.to_hex()));
     assert_eq!(row.latest_message_at, Some((base + 1) as i64));
-    assert_eq!(row.unread, 1, "own, deleted and reaction do not count");
+    assert!(row.unread, "own, deleted and reaction do not count");
     // An empty channel has no latest message.
     db.create_channel(
         community,
@@ -621,16 +616,15 @@ async fn position_is_monotonic_and_rejects_malformed_anchors() {
         vec![],
     )
     .await;
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 1);
+    assert!(sidebar(&db, community, &actor).await.unread);
     for anchor in [&later, &event] {
         assert_eq!(
             apply(&db, community, &actor, mark(channel, None, anchor)).await,
             IntentOutcome::Applied
         );
     }
-    assert_eq!(
-        sidebar(&db, community, &actor).await.unread,
-        0,
+    assert!(
+        !sidebar(&db, community, &actor).await.unread,
         "never moves back"
     );
     let at_later: bool = sqlx::query_scalar(
@@ -684,7 +678,7 @@ async fn contexts_bound_selectors_and_share_one_state_per_message() {
         status(&db, community, &actor, channel, Some(&root), &both).await,
         ["unavailable", "unread", "not_counted"]
     );
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 2);
+    assert!(sidebar(&db, community, &actor).await.unread);
     assert_eq!(
         accounts(&pool, community).await,
         1,

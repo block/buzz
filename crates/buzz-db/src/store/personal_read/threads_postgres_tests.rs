@@ -65,9 +65,10 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
     assert_eq!(thread_rows(&pool, community, &starter).await, root_row);
     assert!(thread_rows(&pool, community, &bystander).await.is_empty());
     let row = sidebar(&db, community, &starter).await;
+    // Only the reply is unread: attention, but no ordinary timeline backlog.
     assert_eq!(
-        (row.unread, row.attention, row.unread_thread_count),
-        (1, 1, 1)
+        (row.unread, row.attention, row.threads.len()),
+        (false, true, 1)
     );
     assert_eq!(row.threads[0].latest_reply_id, own.id.to_hex());
     assert_eq!(
@@ -75,7 +76,7 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
         [serde_json::json!({"status":"unread","reason":"conversation"})]
     );
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread_thread_count, row.threads.len()), (0, 0));
+    assert!(row.threads.is_empty());
 
     // Someone else replies: the actor, now a member, has it unread, beside
     // the fixture's message and the root on the timeline.
@@ -92,10 +93,9 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
     .await;
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(
-        (row.unread, row.attention, row.unread_thread_count),
-        (3, 1, 1)
+        (row.unread, row.attention, row.threads.len()),
+        (true, true, 1)
     );
-    assert_eq!(row.threads[0].unread, 1);
     assert_eq!(row.threads[0].latest_reply_id, other.id.to_hex());
 
     // A mention makes a channel member a thread member; a non-member gets nothing.
@@ -118,8 +118,8 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
     let row = sidebar(&db, community, &bystander).await;
     // The mention, and the root on the timeline.
     assert_eq!(
-        (row.unread, row.attention, row.unread_thread_count),
-        (2, 1, 1)
+        (row.unread, row.attention, row.threads.len()),
+        (true, true, 1)
     );
     assert_eq!(
         states(
@@ -200,13 +200,13 @@ async fn reading_a_thread_moves_a_members_row_and_never_joins() {
         false,
     )
     .await;
-    assert_eq!(sidebar(&db, community, &actor).await.threads[0].unread, 1);
+    assert_eq!(sidebar(&db, community, &actor).await.threads.len(), 1);
     assert_eq!(
         apply(&db, community, &actor, mark(channel, Some(&root), &root)).await,
         IntentOutcome::Applied
     );
     assert_eq!(
-        sidebar(&db, community, &actor).await.unread_thread_count,
+        sidebar(&db, community, &actor).await.threads.len(),
         1,
         "never backwards"
     );
@@ -216,8 +216,8 @@ async fn reading_a_thread_moves_a_members_row_and_never_joins() {
     );
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(
-        (row.unread, row.unread_thread_count),
-        (1, 0),
+        (row.unread, row.threads.len()),
+        (true, 0),
         "the root itself is on the timeline"
     );
 }
@@ -263,8 +263,8 @@ async fn dm_replies_make_every_member_a_thread_member() {
         .channels
         .remove(0);
     assert_eq!(
-        (row.unread, row.attention, row.unread_thread_count),
-        (2, 2, 1)
+        (row.unread, row.attention, row.threads.len()),
+        (false, true, 1)
     );
 }
 
@@ -316,7 +316,11 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
         IntentOutcome::Applied
     );
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.unread, 2, "top at +20 and reply at +30 remain");
+    assert_eq!(
+        (row.unread, row.attention),
+        (true, true),
+        "top at +20 and reply at +30 remain"
+    );
     assert_eq!(row.threads.len(), 1);
     assert_eq!(row.threads[0].latest_reply_id, second.id.to_hex());
 
@@ -326,8 +330,8 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
     );
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(
-        (row.unread, row.unread_thread_count),
-        (0, 0),
+        (row.unread, row.attention, row.threads.len()),
+        (false, false, 0),
         "every thread is covered"
     );
 
@@ -355,7 +359,7 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
     )
     .await;
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.unread, 2);
+    assert_eq!((row.unread, row.attention), (false, true));
     assert_eq!(row.threads[0].latest_reply_id, newer.id.to_hex());
     assert_eq!(
         status(
@@ -453,11 +457,7 @@ async fn thread_summaries_order_cap_and_count_every_unread_thread() {
     }
     let row = sidebar(&db, community, &actor).await;
     // The fixture's message is one ordinary timeline unread.
-    assert_eq!((row.unread, row.attention), (9, 8));
-    assert_eq!(
-        row.unread_thread_count, 6,
-        "counts threads beyond the listed five"
-    );
+    assert_eq!((row.unread, row.attention, row.threads.len()), (true, true, 5));
     let mut tied = [roots[0].id.to_hex(), roots[1].id.to_hex()];
     tied.sort();
     let order: Vec<_> = row.threads.iter().map(|t| t.root_id.clone()).collect();
@@ -471,7 +471,6 @@ async fn thread_summaries_order_cap_and_count_every_unread_thread() {
             roots[4].id.to_hex()
         ]
     );
-    assert_eq!(row.threads[2].unread, 3);
     assert_eq!(row.threads[2].latest_reply_id, last.unwrap().id.to_hex());
     assert_eq!(row.threads[2].latest_reply_at, (base + 140) as i64);
     // The row's activity is the greatest author time among the newest messages.
@@ -491,12 +490,10 @@ async fn thread_summaries_order_cap_and_count_every_unread_thread() {
         IntentOutcome::Applied
     );
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread_thread_count, row.threads.len()), (5, 5));
+    assert_eq!(row.threads.len(), 5);
+    assert!(row.threads.iter().all(|t| t.root_id != first.root_id));
     // Plus the fixture's timeline message.
-    assert_eq!(
-        row.unread,
-        1 + row.threads.iter().map(|t| t.unread).sum::<u32>()
-    );
+    assert!(row.unread);
 }
 
 #[tokio::test]
@@ -539,7 +536,7 @@ async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
     .await;
 
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.unread, 3, "the root and two replies");
+    assert_eq!((row.unread, row.attention), (true, true), "the root and two replies");
     assert_eq!(row.threads.len(), 2);
     let listed = &row.threads[1];
     assert_eq!(listed.root_id, diff.id.to_hex());
@@ -562,7 +559,7 @@ async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
         IntentOutcome::Applied
     );
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.unread, 2);
+    assert_eq!((row.unread, row.attention), (true, true));
     assert_eq!(row.threads.len(), 1);
     assert_eq!(row.threads[0].latest_reply_id, elsewhere.id.to_hex());
 }

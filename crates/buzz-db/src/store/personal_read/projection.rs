@@ -1,10 +1,9 @@
-//! Forward counting from read positions. A caught-up reader examines almost
-//! nothing: each count reads only what arrived after its position, and stops
-//! at [`UNREAD_CAP`].
+//! Unread presence from read positions. Every fact is an existence probe
+//! that stops at the first qualifying row, so a caught-up reader examines
+//! almost nothing and nothing is counted.
 
 use super::{model::*, writes};
 use buzz_core::CommunityId;
-use serde::Deserialize;
 use sqlx::{Acquire, Row};
 use uuid::Uuid;
 
@@ -16,9 +15,13 @@ use crate::{observability, Db, DbError, Result};
 const ON_TIMELINE: &str = "(tm.root_event_id IS NULL OR tm.root_event_id=e.id
     OR (tm.depth=1 AND tm.broadcast))";
 
-/// Whether event `e` is directed at the actor (hex `$hex`) by its tags.
-const DIRECTED_TAGS: &str = "EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) t(tag)
-    WHERE (tag->>0='p' AND lower(tag->>1)=$hex) OR (tag->>0='broadcast' AND tag->>1='1'))";
+/// Event `e` is eligible and unread against `r.position`, and `tm` is its
+/// thread row. Author time ranges from the position less the arrival skew.
+const UNREAD_EVENT: &str = "e.created_at >= r.position-$8 AND e.received_at > r.position
+    AND e.kind=ANY($6) AND e.pubkey<>$2 AND e.deleted_at IS NULL";
+
+const EVENT_THREAD_ROW: &str = "LEFT JOIN thread_metadata tm ON tm.community_id=$1
+    AND tm.event_created_at=e.created_at AND tm.event_id=e.id";
 
 impl Db {
     /// Read a bounded joined roster from the writer in one read-only snapshot.
@@ -75,13 +78,18 @@ impl Db {
         // the actor's first intent, so nothing counts). A channel's is its
         // frontier, never earlier than joining: a new member starts caught
         // up. A thread row exists only for the actor's threads (see
-        // `membership`), and a whole-channel cut covers them all. Each count
-        // ranges over author time from the position less the arrival skew
-        // (served by idx_events_community_channel_created or
-        // idx_thread_metadata_window), filters on arrival, and stops at the
-        // cap: rows the filters reject are read but bound nothing. The latest message is the last arrival among
-        // the newest messages and everything counted, so marking through it
-        // reads every counted message whatever its author time.
+        // `membership`), and a whole-channel cut covers them all.
+        //
+        // Each fact is the first qualifying row of one index range:
+        // - ordinary: the channel's timeline after the position, skipping
+        //   directed messages (idx_events_community_channel_created);
+        // - mention: the actor's own mentions (idx_event_mentions_pubkey_created);
+        // - broadcast: the channel's depth-1 replies (idx_thread_metadata_channel_depth);
+        // - direct: any unread timeline message in a DM;
+        // - threads: roots in the channel whose last reply arrived after the
+        //   actor's position, then their unread replies (anchor and display time).
+        // The latest message is the last arrival among the newest messages and
+        // every unread message found, so marking through it reads what was found.
         let sql = format!(
             r#"WITH roster AS MATERIALIZED (
                 SELECT c.id, c.name, c.channel_type::text AS channel_type,
@@ -100,11 +108,12 @@ impl Db {
                 ORDER BY c.id LIMIT $5
              )
              SELECT r.id, r.name, r.channel_type, r.archived, r.hidden,
-                (SELECT v.id FROM (VALUES (latest.arrival, latest.id),
-                        (timeline.arrival, timeline.id), (threads.arrival, threads.id)) v(arrival, id)
+                (SELECT v.id FROM (VALUES (latest.arrival, latest.id), (ordinary.arrival, ordinary.id),
+                        (directed.arrival, directed.id), (threads.arrival, threads.id)) v(arrival, id)
                     WHERE v.id IS NOT NULL ORDER BY v.arrival DESC, v.id LIMIT 1) AS latest_message_id,
                 latest.at AS latest_message_at,
-                COALESCE(timeline.unread, 0) AS unread, COALESCE(timeline.attention, 0) AS attention,
+                ordinary.id IS NOT NULL AS unread,
+                directed.id IS NOT NULL OR threads.id IS NOT NULL AS attention,
                 COALESCE(threads.items, '[]') AS threads
              FROM roster r
              LEFT JOIN LATERAL (
@@ -115,49 +124,68 @@ impl Db {
                     ORDER BY created_at DESC LIMIT $7) newest
              ) latest ON true
              LEFT JOIN LATERAL (
-                SELECT count(*)::int AS unread, count(*) FILTER (WHERE directed)::int AS attention,
-                    (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS id,
-                    max(received_at) AS arrival
-                FROM (
-                    SELECT e.id, e.received_at, r.channel_type='dm' OR {DIRECTED_TAGS} AS directed
-                    FROM events e
-                    LEFT JOIN thread_metadata tm ON tm.community_id=$1
-                        AND tm.event_created_at=e.created_at AND tm.event_id=e.id
-                    WHERE e.community_id=$1 AND e.channel_id=r.id
-                        AND e.created_at >= r.position-$8 AND e.received_at > r.position
-                        AND e.kind=ANY($6) AND e.pubkey<>$2 AND e.deleted_at IS NULL AND {ON_TIMELINE}
-                    ORDER BY e.created_at LIMIT $9
-                ) counted
-             ) timeline ON true
+                SELECT encode(e.id,'hex') AS id, e.received_at AS arrival
+                FROM events e {EVENT_THREAD_ROW}
+                WHERE r.channel_type<>'dm' AND e.community_id=$1 AND e.channel_id=r.id
+                    AND {UNREAD_EVENT} AND {ON_TIMELINE}
+                    AND NOT (tm.depth=1 AND tm.broadcast) IS TRUE
+                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) t(tag)
+                        WHERE tag->>0='p' AND lower(tag->>1)=$hex)
+                ORDER BY e.created_at LIMIT 1
+             ) ordinary ON true
+             LEFT JOIN LATERAL (
+                SELECT id, arrival FROM (
+                    (SELECT encode(e.id,'hex') AS id, e.received_at AS arrival
+                    FROM events e {EVENT_THREAD_ROW}
+                    WHERE r.channel_type='dm' AND e.community_id=$1 AND e.channel_id=r.id
+                        AND {UNREAD_EVENT} AND {ON_TIMELINE}
+                    ORDER BY e.created_at LIMIT 1)
+                    UNION ALL
+                    (SELECT encode(e.id,'hex'), e.received_at
+                    FROM event_mentions m JOIN events e ON e.community_id=$1
+                        AND e.created_at=m.event_created_at AND e.id=m.event_id
+                    {EVENT_THREAD_ROW}
+                    WHERE r.channel_type<>'dm' AND m.community_id=$1 AND m.pubkey_hex=$hex
+                        AND m.event_created_at >= r.position-$8 AND m.channel_id=r.id
+                        AND e.channel_id=r.id AND {UNREAD_EVENT} AND {ON_TIMELINE}
+                    LIMIT 1)
+                    UNION ALL
+                    (SELECT encode(e.id,'hex'), e.received_at
+                    FROM thread_metadata tm JOIN events e ON e.community_id=$1
+                        AND e.created_at=tm.event_created_at AND e.id=tm.event_id
+                    WHERE r.channel_type<>'dm' AND tm.community_id=$1 AND tm.channel_id=r.id
+                        AND tm.depth=1 AND tm.broadcast AND tm.event_created_at >= r.position-$8
+                        AND {UNREAD_EVENT}
+                    LIMIT 1)
+                ) found ORDER BY arrival DESC LIMIT 1
+             ) directed ON true
              LEFT JOIN LATERAL (
                 SELECT jsonb_agg(jsonb_build_object('root_id',encode(tf.root_id,'hex'),
-                        'unread',n.unread,'latest_reply_id',n.id,'latest_reply_at',n.at)) AS items,
+                        'latest_reply_id',n.id,'latest_reply_at',n.at)) AS items,
                     (array_agg(n.id ORDER BY n.arrival DESC,n.id))[1] AS id, max(n.arrival) AS arrival
                 FROM personal_read_frontiers tf
+                JOIN thread_metadata root ON root.community_id=$1 AND root.channel_id=r.id
+                    AND root.depth=0 AND root.event_id=tf.root_id
                 CROSS JOIN LATERAL (SELECT GREATEST(tf.through_timestamp, r.threads_floor) AS position) p
                 CROSS JOIN LATERAL (
-                    SELECT count(*)::int AS unread,
-                        (array_agg(encode(id,'hex') ORDER BY received_at DESC,id))[1] AS id,
-                        max(extract(epoch FROM created_at)::bigint) AS at,
-                        max(received_at) AS arrival
-                    FROM (
-                        SELECT e.id, e.created_at, e.received_at
-                        FROM thread_metadata tm JOIN events e ON e.community_id=$1
-                            AND e.created_at=tm.event_created_at AND e.id=tm.event_id
-                        WHERE tm.community_id=$1 AND tm.root_event_id=tf.root_id
-                            AND tm.channel_id=r.id AND tm.event_id<>tf.root_id
-                            AND tm.event_created_at >= p.position-$8
-                            AND e.received_at > p.position AND e.kind=ANY($6) AND e.pubkey<>$2
-                            AND e.deleted_at IS NULL AND NOT (tm.depth=1 AND tm.broadcast)
-                        ORDER BY tm.event_created_at LIMIT $9
-                    ) counted
+                    SELECT (array_agg(encode(e.id,'hex') ORDER BY e.received_at DESC,e.id))[1] AS id,
+                        max(extract(epoch FROM e.created_at)::bigint) AS at,
+                        max(e.received_at) AS arrival
+                    FROM thread_metadata tm JOIN events e ON e.community_id=$1
+                        AND e.created_at=tm.event_created_at AND e.id=tm.event_id
+                    WHERE tm.community_id=$1 AND tm.root_event_id=tf.root_id
+                        AND tm.channel_id=r.id AND tm.event_id<>tf.root_id
+                        AND tm.event_created_at >= p.position-$8
+                        AND e.received_at > p.position AND e.kind=ANY($6) AND e.pubkey<>$2
+                        AND e.deleted_at IS NULL AND NOT (tm.depth=1 AND tm.broadcast)
                 ) n
                 WHERE tf.community_id=$1 AND tf.actor=$2 AND tf.channel_id=r.id
-                    AND tf.root_id<>''::bytea AND n.unread > 0
+                    AND tf.root_id<>''::bytea AND root.last_reply_received_at > p.position
+                    AND n.id IS NOT NULL
              ) threads ON true
              ORDER BY r.id"#
         )
-        .replace("$hex", "$10");
+        .replace("$hex", "$9");
         // Only compile-time constants are interpolated.
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(community.as_uuid())
@@ -168,7 +196,6 @@ impl Db {
             .bind(ELIGIBLE_KINDS.as_slice())
             .bind(LATEST_PROBE as i64)
             .bind(skew())
-            .bind(i64::from(UNREAD_CAP))
             .bind(actor.to_hex())
             .fetch_all(&mut *tx)
             .await?;
@@ -176,23 +203,19 @@ impl Db {
         let has_more = rows.len() > limit;
         let mut channels = Vec::with_capacity(limit);
         for row in rows.into_iter().take(limit) {
-            let threads: Vec<ThreadRow> = serde_json::from_value(row.try_get("threads")?)
+            let threads: Vec<ThreadReadSummary> = serde_json::from_value(row.try_get("threads")?)
                 .map_err(|_| DbError::InvalidData("invalid thread summaries".into()))?;
-            let thread_unread: u32 = threads.iter().map(|t| t.unread).sum();
-            let unread = row.try_get::<i32, _>("unread")? as u32;
-            let attention = row.try_get::<i32, _>("attention")? as u32;
             channels.push(ChannelReadSummary {
                 channel_id: row.try_get("id")?,
                 name: row.try_get("name")?,
                 channel_type: row.try_get("channel_type")?,
                 archived: row.try_get("archived")?,
                 hidden: row.try_get("hidden")?,
-                unread: clamp(unread + thread_unread),
-                attention: clamp(attention + thread_unread),
-                unread_thread_count: clamp(threads.len() as u32),
+                unread: row.try_get("unread")?,
+                attention: row.try_get("attention")?,
                 latest_message_id: row.try_get("latest_message_id")?,
                 latest_message_at: row.try_get("latest_message_at")?,
-                threads: summarize(threads.into_iter().map(ThreadRow::into).collect()),
+                threads: summarize(threads),
             });
         }
         let next_cursor = if has_more {
@@ -214,29 +237,6 @@ pub(super) fn skew() -> chrono::Duration {
     chrono::Duration::seconds(i64::from(MAX_ARRIVAL_SKEW_SECONDS))
 }
 
-fn clamp(n: u32) -> u32 {
-    n.min(UNREAD_CAP)
-}
-
-#[derive(Deserialize)]
-struct ThreadRow {
-    root_id: String,
-    unread: u32,
-    latest_reply_id: String,
-    latest_reply_at: i64,
-}
-
-impl From<ThreadRow> for ThreadReadSummary {
-    fn from(t: ThreadRow) -> Self {
-        Self {
-            root_id: t.root_id,
-            unread: clamp(t.unread),
-            latest_reply_id: t.latest_reply_id,
-            latest_reply_at: t.latest_reply_at,
-        }
-    }
-}
-
 /// Order newest unread reply first (root ID breaks ties) and cap the list.
 pub(super) fn summarize(mut items: Vec<ThreadReadSummary>) -> Vec<ThreadReadSummary> {
     items.sort_unstable_by(|a, b| {
@@ -255,7 +255,6 @@ mod tests {
     fn item(root: u8, at: i64) -> ThreadReadSummary {
         ThreadReadSummary {
             root_id: hex::encode([root; 32]),
-            unread: 1,
             latest_reply_id: hex::encode([root; 32]),
             latest_reply_at: at,
         }

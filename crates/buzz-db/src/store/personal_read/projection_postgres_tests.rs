@@ -26,7 +26,7 @@ async fn sidebar_sql_eligibility_matches_selector() {
                     .unwrap();
                 let expected = u32::from(ELIGIBLE_KINDS.contains(&kind) && !own && !deleted);
                 assert_eq!(
-                    page.channels[0].unread, expected,
+                    u32::from(page.channels[0].unread), expected,
                     "kind={kind} own={own} deleted={deleted}"
                 );
                 let contexts = db
@@ -47,7 +47,7 @@ async fn sidebar_sql_eligibility_matches_selector() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn sidebar_directed_fact_matches_selector_classifier() {
-    let (db, pool, community, channel, actor, _) = fixture().await;
+    let (db, pool, community, channel, actor, event) = fixture().await;
     let actor_hex = actor.public_key().to_hex();
     let fullwidth: String = actor_hex
         .chars()
@@ -79,14 +79,36 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
         .await
         .unwrap();
         for tags in &cases {
-            let expected =
-                u32::from(classification::reason(channel_type, &actor_hex, tags).is_some());
+            // A top-level message: `broadcast` tags alone direct nothing.
+            let reason = classification::reason(channel_type, &actor_hex, tags, false);
+            let expected = (channel_type != "dm" && reason.is_none(), reason.is_some());
             sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
                 .bind(community.as_uuid())
                 .bind(json!(tags))
                 .execute(&pool)
                 .await
                 .unwrap();
+            // Mirror ingest's mention index (`runtime::insert_mentions`).
+            sqlx::query("DELETE FROM event_mentions WHERE community_id=$1")
+                .bind(community.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mentioned = tags.iter().any(|t| {
+                t.len() >= 2 && t[0] == "p" && t[1].eq_ignore_ascii_case(&actor_hex)
+            });
+            if mentioned {
+                sqlx::query(
+                    "INSERT INTO event_mentions (community_id,pubkey_hex,event_id,event_created_at,channel_id,event_kind)
+                     SELECT community_id,$2,id,created_at,channel_id,kind FROM events WHERE community_id=$1 AND id=$3",
+                )
+                .bind(community.as_uuid())
+                .bind(&actor_hex)
+                .bind(event.id.as_bytes().as_slice())
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
             let row = db
                 .personal_read_sidebar(community, &actor.public_key(), 20, None)
                 .await
@@ -95,7 +117,7 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
                 .remove(0);
             assert_eq!(
                 (row.unread, row.attention),
-                (1, expected),
+                expected,
                 "channel_type={channel_type} tags={tags:?}"
             );
         }

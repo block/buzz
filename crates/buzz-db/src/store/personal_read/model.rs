@@ -51,8 +51,6 @@ pub enum IntentOutcome {
 pub const MAX_CHANNELS: usize = 20;
 /// Maximum unread-thread summaries per channel row.
 pub const MAX_THREAD_SUMMARIES: usize = 5;
-/// Counts stop here: a count equal to the cap means at least the cap ("99+").
-pub const UNREAD_CAP: u32 = 99;
 /// Ingest rejects author times further than this from relay time, so anything
 /// that arrived after a position has an author time no earlier than this
 /// before it. Forward scans range over author time and filter on arrival.
@@ -73,18 +71,15 @@ pub struct ChannelReadSummary {
     pub archived: bool,
     /// Existing DM visibility preference (not an authorization decision).
     pub hidden: bool,
-    /// Unread timeline messages plus unread replies in the actor's threads,
-    /// clamped at [`UNREAD_CAP`].
-    pub unread: u32,
-    /// The unread subset with a [`Reason`]: everything but ordinary timeline
-    /// messages. Clamped at [`UNREAD_CAP`].
-    pub attention: u32,
-    /// The actor's threads with at least one unread reply, clamped at
-    /// [`UNREAD_CAP`].
-    pub unread_thread_count: u32,
+    /// An unread timeline message without a [`Reason`] exists: ordinary
+    /// backlog. Never true in a DM, where every message is direct.
+    pub unread: bool,
+    /// An unread message with a [`Reason`] exists: a direct, mention or
+    /// broadcast timeline message, or a reply in one of the actor's threads.
+    pub attention: bool,
     /// Last eligible nondeleted event to arrive among the channel's newest
-    /// and everything counted, whatever its author: `mark_channel_read`
-    /// through it reads the row.
+    /// and the unread messages found, whatever its author:
+    /// `mark_channel_read` through it reads the row.
     pub latest_message_id: Option<String>,
     /// Display activity: the greatest author time (Unix seconds) among the
     /// channel's newest, not necessarily latest_message_id's own. None
@@ -94,13 +89,11 @@ pub struct ChannelReadSummary {
     pub threads: Vec<ThreadReadSummary>,
 }
 
-/// Unread replies in one of the actor's threads. No conversation bytes.
-#[derive(Debug, Serialize)]
+/// One of the actor's threads with an unread reply. No conversation bytes.
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ThreadReadSummary {
     /// Canonical thread-root event ID.
     pub root_id: String,
-    /// Unread replies in this thread, clamped at [`UNREAD_CAP`].
-    pub unread: u32,
     /// Last unread reply to arrive: marking through it reads the thread.
     pub latest_reply_id: String,
     /// Greatest author time (Unix seconds) among unread replies, not
