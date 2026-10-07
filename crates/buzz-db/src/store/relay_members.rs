@@ -138,6 +138,85 @@ async fn list_relay_members_with_operation(
         .map_err(crate::error::DbError::from)
 }
 
+/// Active communities (or just `only`, whatever its lifecycle state) whose
+/// newest relay-signed kind:13534 snapshot is absent or whose `member` tags
+/// differ from the canonical `relay_members` rows.
+///
+/// The snapshot is the newest non-deleted, community-global kind:13534 event
+/// signed by `relay_pubkey` (ties broken by `id ASC`, as event reads do). The
+/// comparison is a multiset of `(lowercase pubkey, role)` pairs: the snapshot
+/// side takes every `member` tag with at least three fields. Both sides are
+/// built in Postgres, so the sweep costs one round trip however many
+/// communities exist.
+async fn nip43_membership_snapshot_drift(
+    pool: &PgPool,
+    relay_pubkey: &nostr::PublicKey,
+    only: Option<CommunityId>,
+) -> Result<Vec<crate::usage::CommunityHost>> {
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT c.id, c.host
+        FROM communities c
+        LEFT JOIN LATERAL (
+            SELECT e.tags
+            FROM events e
+            WHERE e.community_id = c.id
+              AND e.kind = $2
+              AND e.pubkey = $1
+              AND e.channel_id IS NULL
+              AND e.deleted_at IS NULL
+            ORDER BY e.created_at DESC, e.id ASC
+            LIMIT 1
+        ) snapshot ON TRUE
+        WHERE CASE
+                WHEN $3::uuid IS NULL THEN
+                    c.archived_at IS NULL
+                    AND c.deleted_at IS NULL
+                    AND c.deletion_state = 'active'
+                ELSE c.id = $3::uuid
+              END
+          AND (
+            snapshot.tags IS NULL
+            OR (
+                SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_array(lower(tag->>1), tag->>2)
+                        ORDER BY lower(tag->>1) COLLATE "C", tag->>2 COLLATE "C"
+                    ),
+                    '[]'::jsonb
+                )
+                FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(snapshot.tags) = 'array'
+                         THEN snapshot.tags ELSE '[]'::jsonb END
+                ) AS tag
+                WHERE tag->>0 = 'member' AND tag->>2 IS NOT NULL
+            ) IS DISTINCT FROM (
+                SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_array(lower(m.pubkey), m.role)
+                        ORDER BY lower(m.pubkey) COLLATE "C", m.role COLLATE "C"
+                    ),
+                    '[]'::jsonb
+                )
+                FROM relay_members m
+                WHERE m.community_id = c.id
+            )
+          )
+        "#,
+    )
+    .bind(relay_pubkey.to_bytes().to_vec())
+    .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+    .bind(only.map(|community| *community.as_uuid()))
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, host)| crate::usage::CommunityHost { id, host })
+        .collect())
+}
+
 /// Adds a new relay member to `community`.
 ///
 /// Returns `true` if the row was actually inserted, `false` if the pubkey
@@ -1049,110 +1128,37 @@ impl Db {
 
     /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
     /// from the canonical membership rows for `community_id`.
-    ///
-    /// Snapshot and canonical rows are compared directly rather than by
-    /// timestamp: relay membership events use whole-second Nostr timestamps,
-    /// and multiple mutations within one second must still be repaired.
     #[datastore_span(
         name = "nip43_membership_snapshot_needs_reconciliation",
         system = "postgresql"
     )]
-    #[deprecated(
-        note = "use nip43_membership_snapshot_needs_reconciliation_for_bootstrap or nip43_membership_snapshot_needs_reconciliation_for_maintenance"
-    )]
+    #[deprecated(note = "use nip43_membership_snapshots_needing_reconciliation")]
     pub async fn nip43_membership_snapshot_needs_reconciliation(
         &self,
         community_id: CommunityId,
         relay_pubkey: &nostr::PublicKey,
     ) -> Result<bool> {
-        self.nip43_membership_snapshot_needs_reconciliation_with_operation(
-            community_id,
-            relay_pubkey,
-            observability::WriterOperation::Maintenance,
-        )
-        .await
+        let drifted =
+            nip43_membership_snapshot_drift(&self.pool, relay_pubkey, Some(community_id)).await?;
+        Ok(!drifted.is_empty())
     }
 
-    /// Startup-attributed variant of the NIP-43 snapshot comparison.
+    /// Returns every active community whose relay-authored NIP-43 snapshot is
+    /// absent or differs from its canonical membership rows, in one query.
+    ///
+    /// Snapshot and canonical rows are compared directly rather than by
+    /// timestamp: relay membership events use whole-second Nostr timestamps,
+    /// multiple mutations within one second must still be repaired, and a
+    /// removed member leaves no row to timestamp.
     #[datastore_span(
-        name = "nip43_membership_snapshot_needs_reconciliation_for_bootstrap",
+        name = "nip43_membership_snapshots_needing_reconciliation",
         system = "postgresql"
     )]
-    pub async fn nip43_membership_snapshot_needs_reconciliation_for_bootstrap(
+    pub async fn nip43_membership_snapshots_needing_reconciliation(
         &self,
-        community_id: CommunityId,
         relay_pubkey: &nostr::PublicKey,
-    ) -> Result<bool> {
-        self.nip43_membership_snapshot_needs_reconciliation_with_operation(
-            community_id,
-            relay_pubkey,
-            observability::WriterOperation::Bootstrap,
-        )
-        .await
-    }
-
-    /// Periodic maintenance variant of the NIP-43 snapshot comparison.
-    #[datastore_span(
-        name = "nip43_membership_snapshot_needs_reconciliation_for_maintenance",
-        system = "postgresql"
-    )]
-    pub async fn nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-        &self,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-    ) -> Result<bool> {
-        self.nip43_membership_snapshot_needs_reconciliation_with_operation(
-            community_id,
-            relay_pubkey,
-            observability::WriterOperation::Maintenance,
-        )
-        .await
-    }
-
-    async fn nip43_membership_snapshot_needs_reconciliation_with_operation(
-        &self,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-        operation: observability::WriterOperation,
-    ) -> Result<bool> {
-        let snapshot = crate::event::query_events_with_operation(
-            &self.pool,
-            &crate::event::EventQuery {
-                kinds: Some(vec![buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32]),
-                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
-                global_only: true,
-                limit: Some(1),
-                ..crate::event::EventQuery::for_community(community_id)
-            },
-            operation,
-        )
-        .await?
-        .into_iter()
-        .next();
-        let members =
-            list_relay_members_with_operation(&self.pool, community_id, operation).await?;
-
-        let Some(snapshot) = snapshot else {
-            return Ok(true);
-        };
-        let mut snapshot_members = snapshot
-            .event
-            .tags
-            .iter()
-            .filter_map(|tag| {
-                let parts = tag.as_slice();
-                (parts.first().map(String::as_str) == Some("member") && parts.len() >= 3)
-                    .then(|| (parts[1].to_ascii_lowercase(), parts[2].clone()))
-            })
-            .collect::<Vec<_>>();
-        let mut canonical_members = members
-            .into_iter()
-            .map(|member| (member.pubkey.to_ascii_lowercase(), member.role))
-            .collect::<Vec<_>>();
-        snapshot_members.sort_unstable();
-        canonical_members.sort_unstable();
-
-        Ok(snapshot_members != canonical_members)
+    ) -> Result<Vec<crate::usage::CommunityHost>> {
+        nip43_membership_snapshot_drift(&self.pool, relay_pubkey, None).await
     }
 
     /// Atomically publish a NIP-43 membership snapshot under a single
@@ -1780,5 +1786,260 @@ mod postgres_tests {
                 .role,
             "owner"
         );
+    }
+
+    /// Inserts a kind:13534 row directly so a test controls author, scope,
+    /// timestamp, event id, deletion, and tags independently.
+    async fn insert_snapshot(
+        pool: &PgPool,
+        community: CommunityId,
+        author: &nostr::PublicKey,
+        snapshot: Snapshot,
+        tags: serde_json::Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+                  channel_id, deleted_at) \
+             VALUES ($1, $2, $3, to_timestamp($4), $5, $6, '', $7, $8, \
+                     CASE WHEN $9 THEN now() END)",
+        )
+        .bind(community.as_uuid())
+        .bind(snapshot.id.to_vec())
+        .bind(author.to_bytes().to_vec())
+        .bind(snapshot.created_at as f64)
+        .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+        .bind(tags)
+        .bind(vec![0u8; 64])
+        .bind(snapshot.channel_id)
+        .bind(snapshot.deleted)
+        .execute(pool)
+        .await
+        .expect("insert kind:13534 fixture");
+    }
+
+    #[derive(Clone, Copy)]
+    struct Snapshot {
+        id: [u8; 32],
+        created_at: i64,
+        channel_id: Option<Uuid>,
+        deleted: bool,
+    }
+
+    impl Snapshot {
+        fn at(created_at: i64, id_byte: u8) -> Self {
+            Self {
+                id: [id_byte; 32],
+                created_at,
+                channel_id: None,
+                deleted: false,
+            }
+        }
+    }
+
+    fn member_tags(members: &[(&str, &str)]) -> serde_json::Value {
+        serde_json::Value::Array(
+            members
+                .iter()
+                .map(|(pubkey, role)| serde_json::json!(["member", pubkey, role]))
+                .collect(),
+        )
+    }
+
+    async fn drifted(pool: &PgPool, relay: &nostr::PublicKey) -> std::collections::HashSet<Uuid> {
+        nip43_membership_snapshot_drift(pool, relay, None)
+            .await
+            .expect("drift query")
+            .into_iter()
+            .map(|host| host.id)
+            .collect()
+    }
+
+    /// One query must flag exactly the communities whose newest relay-signed,
+    /// community-global, non-deleted snapshot is absent or carries a
+    /// different `(pubkey, role)` multiset than `relay_members`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn snapshot_drift_flags_exactly_the_communities_out_of_step() {
+        let pool = setup_pool().await;
+        let relay = nostr::Keys::generate().public_key();
+        let stranger = nostr::Keys::generate().public_key();
+        let now = chrono::Utc::now().timestamp();
+
+        // (label, expect drift). Every case gets its own community with an
+        // owner plus one member; its snapshots are written below.
+        let cases = [
+            ("no snapshot", true),
+            ("matching snapshot", false),
+            ("matching snapshot, uppercase tag pubkeys", false),
+            (
+                "matching snapshot plus ignored non-member and short tags",
+                false,
+            ),
+            ("role differs", true),
+            ("member missing from snapshot (same-second add)", true),
+            ("extra member in snapshot (removal)", true),
+            ("duplicate member tag", true),
+            ("only a stranger-signed snapshot", true),
+            ("only a channel-scoped snapshot", true),
+            ("newest matching snapshot deleted, stale one left", true),
+            ("newest snapshot stale, older one matches", true),
+            ("newest snapshot matches, older one stale", false),
+            ("same-second tie, lower id matches", false),
+            ("same-second tie, lower id stale", true),
+            ("non-array tags", true),
+        ];
+
+        let mut expected = std::collections::HashSet::new();
+        let mut matched = std::collections::HashSet::new();
+        for (label, drift) in cases {
+            let (community, owner) = owned_community(&pool).await;
+            let member = test_pubkey();
+            add_relay_member(&pool, community, &member, "member", Some(&owner))
+                .await
+                .expect("add member");
+            let good = member_tags(&[(&owner, "owner"), (&member, "member")]);
+            let stale = member_tags(&[(&owner, "owner")]);
+            match label {
+                "no snapshot" => {}
+                "matching snapshot" => {
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), good).await
+                }
+                "matching snapshot, uppercase tag pubkeys" => {
+                    let upper = member_tags(&[
+                        (&owner.to_ascii_uppercase(), "owner"),
+                        (&member.to_ascii_uppercase(), "member"),
+                    ]);
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), upper).await
+                }
+                "matching snapshot plus ignored non-member and short tags" => {
+                    let tags = serde_json::json!([
+                        ["d", "ignored"],
+                        ["member", member],
+                        ["member", owner, "owner"],
+                        ["p", owner, "owner"],
+                        ["member", member, "member"],
+                    ]);
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), tags).await
+                }
+                "role differs" => {
+                    let tags = member_tags(&[(&owner, "owner"), (&member, "admin")]);
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), tags).await
+                }
+                "member missing from snapshot (same-second add)" => {
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), stale).await
+                }
+                "extra member in snapshot (removal)" => {
+                    let tags = member_tags(&[
+                        (&owner, "owner"),
+                        (&member, "member"),
+                        (&test_pubkey(), "member"),
+                    ]);
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), tags).await
+                }
+                "duplicate member tag" => {
+                    let tags =
+                        member_tags(&[(&owner, "owner"), (&member, "member"), (&member, "member")]);
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), tags).await
+                }
+                "only a stranger-signed snapshot" => {
+                    insert_snapshot(&pool, community, &stranger, Snapshot::at(now, 1), good).await
+                }
+                "only a channel-scoped snapshot" => {
+                    let scoped = Snapshot {
+                        channel_id: Some(Uuid::new_v4()),
+                        ..Snapshot::at(now, 1)
+                    };
+                    insert_snapshot(&pool, community, &relay, scoped, good).await
+                }
+                "newest matching snapshot deleted, stale one left" => {
+                    let deleted = Snapshot {
+                        deleted: true,
+                        ..Snapshot::at(now, 2)
+                    };
+                    insert_snapshot(&pool, community, &relay, deleted, good).await;
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now - 10, 1), stale)
+                        .await
+                }
+                "newest snapshot stale, older one matches" => {
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 2), stale).await;
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now - 10, 1), good).await
+                }
+                "newest snapshot matches, older one stale" => {
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 2), good).await;
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now - 10, 1), stale)
+                        .await
+                }
+                "same-second tie, lower id matches" => {
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), good).await;
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 2), stale).await
+                }
+                "same-second tie, lower id stale" => {
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), stale).await;
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 2), good).await
+                }
+                "non-array tags" => {
+                    let tags = serde_json::json!({ "member": owner });
+                    insert_snapshot(&pool, community, &relay, Snapshot::at(now, 1), tags).await
+                }
+                other => unreachable!("unhandled case {other}"),
+            }
+            if drift {
+                expected.insert(*community.as_uuid());
+            }
+            matched.insert((*community.as_uuid(), label));
+        }
+
+        let flagged = drifted(&pool, &relay).await;
+        for (id, label) in &matched {
+            assert_eq!(
+                flagged.contains(id),
+                expected.contains(id),
+                "{label}: drift flag"
+            );
+        }
+    }
+
+    /// The sweep skips archived and logically deleted communities, while the
+    /// single-community compatibility check still answers for any community.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn snapshot_drift_sweep_skips_inactive_communities() {
+        let pool = setup_pool().await;
+        let relay = nostr::Keys::generate().public_key();
+
+        let (active, _) = owned_community(&pool).await;
+        let (archived, _) = owned_community(&pool).await;
+        sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+            .bind(archived.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("archive fixture");
+        let mut inactive = vec![("archived", archived)];
+        for state in ["quiescing", "fenced", "tombstone"] {
+            let (community, _) = owned_community(&pool).await;
+            crate::test_support::set_deletion_state(&pool, *community.as_uuid(), state).await;
+            inactive.push((state, community));
+        }
+
+        let flagged = drifted(&pool, &relay).await;
+        assert!(
+            flagged.contains(active.as_uuid()),
+            "active community without a snapshot"
+        );
+        for (label, community) in &inactive {
+            assert!(
+                !flagged.contains(community.as_uuid()),
+                "{label} community swept"
+            );
+            assert_eq!(
+                nip43_membership_snapshot_drift(&pool, &relay, Some(*community))
+                    .await
+                    .expect("single-community drift")
+                    .len(),
+                1,
+                "{label}: single-community check still reports drift"
+            );
+        }
     }
 }

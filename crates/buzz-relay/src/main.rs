@@ -851,35 +851,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     step.finish();
 
-    // NIP-43: reconcile the event-backed roster for every provisioned
-    // community before opening the listener. `relay_members` is canonical;
-    // this repairs pre-snapshot communities and any publication that failed
-    // after a membership transaction committed.
+    // NIP-43: keep every active community's relay-signed kind:13534 snapshot
+    // in step with the canonical `relay_members` rows. Membership writes
+    // republish on every change; this background sweep repairs snapshots that
+    // are missing or whose publication failed after the membership commit.
+    // It runs off the startup path: the first pass starts now and each later
+    // pass follows the interval, so a large deployment opens its listener
+    // without waiting on it. A failed community is retried on the next pass.
     if config.require_relay_membership {
-        let mut step = StepTimer::start(StartupStep::Nip43Reconcile);
-        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
-            &state,
-            buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Bootstrap,
-        )
-        .await
-        {
-            Ok(summary) => {
-                if summary.failed > 0 {
-                    step.degrade();
-                }
-                info!(
-                    count = summary.repaired,
-                    failed = summary.failed,
-                    "NIP-43 membership snapshots reconciled on startup"
-                );
-            }
-            Err(error) => {
-                step.degrade();
-                tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
-            }
-        }
-        step.finish();
-
         let reconcile_state = Arc::clone(&state);
         let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
             .ok()
@@ -888,17 +867,24 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             .max(1);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            interval.tick().await;
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut first_pass = true;
             loop {
                 interval.tick().await;
-                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
+                let started = std::time::Instant::now();
+                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshot_drift(
                     &reconcile_state,
-                    buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Maintenance,
                 )
                 .await
                 {
-                    Ok(summary) if summary.repaired > 0 => {
-                        info!(count = summary.repaired, "NIP-43 membership snapshots repaired")
+                    Ok(summary) if first_pass || summary.repaired > 0 || summary.failed > 0 => {
+                        info!(
+                            count = summary.repaired,
+                            failed = summary.failed,
+                            elapsed_ms =
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            "NIP-43 membership snapshots reconciled"
+                        )
                     }
                     Ok(_) => {}
                     Err(error) => tracing::warn!(
@@ -906,6 +892,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                         "periodic NIP-43 membership snapshot reconciliation failed"
                     ),
                 }
+                first_pass = false;
             }
         });
     }

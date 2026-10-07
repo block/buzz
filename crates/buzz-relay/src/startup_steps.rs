@@ -69,8 +69,6 @@ pub enum StartupStep {
     ChannelRosterFence,
     /// Repair large NIP-29 channel roster snapshots.
     LargeRosterReconcile,
-    /// Reconcile every community's NIP-43 membership snapshot.
-    Nip43Reconcile,
     /// Bind the private health listener.
     HealthBind,
     /// Bind the public relay listener.
@@ -79,7 +77,7 @@ pub enum StartupStep {
 
 impl StartupStep {
     /// The complete `phase` label vocabulary.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 17] = [
         Self::DbConnect,
         Self::DbMigrate,
         Self::PartitionEnsure,
@@ -95,7 +93,6 @@ impl StartupStep {
         Self::GitConformanceProbe,
         Self::ChannelRosterFence,
         Self::LargeRosterReconcile,
-        Self::Nip43Reconcile,
         Self::HealthBind,
         Self::ListenerBind,
     ];
@@ -118,7 +115,6 @@ impl StartupStep {
             Self::GitConformanceProbe => "git_conformance_probe",
             Self::ChannelRosterFence => "channel_roster_fence",
             Self::LargeRosterReconcile => "large_roster_reconcile",
-            Self::Nip43Reconcile => "nip43_reconcile",
             Self::HealthBind => "health_bind",
             Self::ListenerBind => "listener_bind",
         }
@@ -314,9 +310,12 @@ mod tests {
     #[test]
     fn running_step_is_current_and_has_no_duration() {
         let mut held = None;
-        let gauges = gauges(|| held = Some(StepTimer::start(StartupStep::Nip43Reconcile)));
-        assert_eq!(get(&gauges, CURRENT_METRIC, "nip43_reconcile"), Some(1.0));
-        assert_eq!(get(&gauges, SECONDS_METRIC, "nip43_reconcile"), None);
+        let gauges = gauges(|| held = Some(StepTimer::start(StartupStep::LargeRosterReconcile)));
+        assert_eq!(
+            get(&gauges, CURRENT_METRIC, "large_roster_reconcile"),
+            Some(1.0)
+        );
+        assert_eq!(get(&gauges, SECONDS_METRIC, "large_roster_reconcile"), None);
         std::mem::forget(held);
     }
 

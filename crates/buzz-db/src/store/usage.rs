@@ -531,12 +531,6 @@ impl Db {
     pub async fn active_community_hosts(&self) -> Result<Vec<CommunityHost>> {
         active_community_hosts(&self.pool, observability::WriterOperation::Maintenance).await
     }
-
-    /// Return active community host mappings during startup bootstrap work.
-    #[datastore_span(name = "bootstrap_community_hosts", system = "postgresql")]
-    pub async fn bootstrap_community_hosts(&self) -> Result<Vec<CommunityHost>> {
-        active_community_hosts(&self.pool, observability::WriterOperation::Bootstrap).await
-    }
 }
 
 #[cfg(test)]
@@ -834,7 +828,7 @@ mod postgres_tests {
         assert_eq!(found.unwrap().host, host);
     }
 
-    /// Regression for #7558: maintenance and bootstrap enumeration return only
+    /// Regression for #7558: maintenance enumeration returns only
     /// active communities. Archived, logically deleted (quiescing/fenced), and
     /// tombstoned rows are skipped on every sweep, and the tombstone row itself
     /// is left intact for retention. The usage-metrics map stays unfiltered so
@@ -861,31 +855,29 @@ mod postgres_tests {
 
         let db = Db::from_pool(pool.clone());
         for sweep in 0..2 {
-            for (caller, hosts) in [
-                ("maintenance", db.active_community_hosts().await),
-                ("bootstrap", db.bootstrap_community_hosts().await),
+            let hosts = db
+                .active_community_hosts()
+                .await
+                .unwrap_or_else(|e| panic!("maintenance sweep {sweep}: {e}"));
+            let ids: std::collections::HashSet<Uuid> = hosts.iter().map(|h| h.id).collect();
+            assert_eq!(
+                hosts
+                    .iter()
+                    .find(|h| h.id == active)
+                    .map(|h| h.host.as_str()),
+                Some(active_host.as_str()),
+                "maintenance sweep {sweep}: active community must be returned"
+            );
+            for (label, id) in [
+                ("archived", archived),
+                ("quiescing", quiescing),
+                ("fenced", fenced),
+                ("tombstone", tombstone),
             ] {
-                let hosts = hosts.unwrap_or_else(|e| panic!("{caller} sweep {sweep}: {e}"));
-                let ids: std::collections::HashSet<Uuid> = hosts.iter().map(|h| h.id).collect();
-                assert_eq!(
-                    hosts
-                        .iter()
-                        .find(|h| h.id == active)
-                        .map(|h| h.host.as_str()),
-                    Some(active_host.as_str()),
-                    "{caller} sweep {sweep}: active community must be returned"
+                assert!(
+                    !ids.contains(&id),
+                    "maintenance sweep {sweep}: {label} community must be excluded"
                 );
-                for (label, id) in [
-                    ("archived", archived),
-                    ("quiescing", quiescing),
-                    ("fenced", fenced),
-                    ("tombstone", tombstone),
-                ] {
-                    assert!(
-                        !ids.contains(&id),
-                        "{caller} sweep {sweep}: {label} community must be excluded"
-                    );
-                }
             }
         }
 

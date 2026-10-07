@@ -3097,21 +3097,6 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
-/// Reconcile every community's event-backed NIP-43 membership view.
-///
-/// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
-/// or its member/role set differs from the canonical rows. This makes the sweep
-/// safe to run at startup and periodically without producing an event stream
-/// when nothing changed. A failure in one community is logged and counted but
-/// does not prevent the remaining communities from being repaired.
-#[derive(Clone, Copy)]
-pub enum Nip43ReconciliationPurpose {
-    /// Before listener admission opens.
-    Bootstrap,
-    /// Periodic background repair after startup.
-    Maintenance,
-}
-
 /// Per-item counts from one snapshot reconciliation sweep.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReconcileSummary {
@@ -3122,79 +3107,38 @@ pub struct ReconcileSummary {
 }
 
 /// Preserve the original maintenance reconciliation API for downstream callers.
-#[deprecated(note = "use reconcile_nip43_membership_snapshots_with_purpose")]
+#[deprecated(note = "use reconcile_nip43_membership_snapshot_drift")]
 pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
-    reconcile_nip43_membership_snapshots_with_purpose(
-        state,
-        Nip43ReconciliationPurpose::Maintenance,
-    )
-    .await
-    .map(|summary| summary.repaired)
+    reconcile_nip43_membership_snapshot_drift(state)
+        .await
+        .map(|summary| summary.repaired)
 }
 
-/// Reconcile NIP-43 snapshots with explicit startup or maintenance attribution.
-pub async fn reconcile_nip43_membership_snapshots_with_purpose(
+/// Reconcile every active community's event-backed NIP-43 membership view.
+///
+/// `relay_members` is canonical. One query finds the active communities whose
+/// relay-signed snapshot is absent or whose member/role set differs from the
+/// canonical rows; only those are republished, so a sweep over a converged
+/// deployment costs one query and produces no events. A failure in one
+/// community is logged and counted but does not prevent the remaining
+/// communities from being repaired; the next sweep retries it.
+pub async fn reconcile_nip43_membership_snapshot_drift(
     state: &Arc<AppState>,
-    purpose: Nip43ReconciliationPurpose,
 ) -> anyhow::Result<ReconcileSummary> {
-    let communities = match purpose {
-        Nip43ReconciliationPurpose::Bootstrap => state.db.bootstrap_community_hosts().await?,
-        Nip43ReconciliationPurpose::Maintenance => state.db.active_community_hosts().await?,
-    };
-    let mut reconciled = 0usize;
-    let mut failed = 0usize;
-    let total = communities.len();
-    let started = std::time::Instant::now();
+    let communities = state
+        .db
+        .nip43_membership_snapshots_needing_reconciliation(&state.relay_keypair.public_key())
+        .await?;
+    let mut summary = ReconcileSummary::default();
 
-    for (index, community) in communities.into_iter().enumerate() {
-        if nip43_progress_due(purpose, index, total) {
-            info!(
-                done = index,
-                total,
-                republished = reconciled,
-                failed,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "NIP-43 startup reconciliation progress"
-            );
-        }
+    for community in communities {
         let community_id = buzz_core::CommunityId::from_uuid(community.id);
         let host = community.host;
-        let result = async {
-            let needs_reconciliation = match purpose {
-                Nip43ReconciliationPurpose::Bootstrap => {
-                    state
-                        .db
-                        .nip43_membership_snapshot_needs_reconciliation_for_bootstrap(
-                            community_id,
-                            &state.relay_keypair.public_key(),
-                        )
-                        .await?
-                }
-                Nip43ReconciliationPurpose::Maintenance => {
-                    state
-                        .db
-                        .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-                            community_id,
-                            &state.relay_keypair.public_key(),
-                        )
-                        .await?
-                }
-            };
-            if !needs_reconciliation {
-                return Ok::<bool, anyhow::Error>(false);
-            }
-
-            let tenant = TenantContext::resolved(community_id, host.clone());
-            publish_nip43_membership_list(&tenant, state).await?;
-            Ok::<bool, anyhow::Error>(true)
-        }
-        .await;
-
-        match result {
-            Ok(true) => reconciled += 1,
-            Ok(false) => {}
+        let tenant = TenantContext::resolved(community_id, host.clone());
+        match publish_nip43_membership_list(&tenant, state).await {
+            Ok(()) => summary.repaired += 1,
             Err(error) => {
-                failed += 1;
+                summary.failed += 1;
                 metrics::counter!("buzz_nip43_membership_reconciliation_failures_total")
                     .increment(1);
                 warn!(%community_id, %host, %error, "NIP-43 membership reconciliation failed");
@@ -3202,25 +3146,9 @@ pub async fn reconcile_nip43_membership_snapshots_with_purpose(
         }
     }
 
-    metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
-    Ok(ReconcileSummary {
-        repaired: reconciled,
-        failed,
-    })
-}
-
-/// Communities between startup NIP-43 reconciliation progress logs.
-const NIP43_BOOTSTRAP_PROGRESS_INTERVAL: usize = 5_000;
-
-/// Whether a sweep logs progress before processing community `done` of
-/// `total`. Only the startup sweep logs (the 60 s maintenance sweep stays
-/// quiet): every [`NIP43_BOOTSTRAP_PROGRESS_INTERVAL`] communities, never at
-/// the start (nothing done yet) and never past the end.
-fn nip43_progress_due(purpose: Nip43ReconciliationPurpose, done: usize, total: usize) -> bool {
-    matches!(purpose, Nip43ReconciliationPurpose::Bootstrap)
-        && done > 0
-        && done < total
-        && done.is_multiple_of(NIP43_BOOTSTRAP_PROGRESS_INTERVAL)
+    metrics::counter!("buzz_nip43_membership_reconciliations_total")
+        .increment(summary.repaired as u64);
+    Ok(summary)
 }
 
 /// Publish a kind:13534 relay membership list event (NIP-43).
@@ -3846,37 +3774,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nip43_progress_logs_every_interval_inside_the_startup_sweep_only() {
-        use Nip43ReconciliationPurpose::{Bootstrap, Maintenance};
-        const STEP: usize = NIP43_BOOTSTRAP_PROGRESS_INTERVAL;
-        let total = 79_942;
-        let due: Vec<usize> = (0..total)
-            .filter(|&done| nip43_progress_due(Bootstrap, done, total))
-            .collect();
-        assert_eq!(due.first(), Some(&STEP));
-        assert_eq!(due.len(), total / STEP);
-        assert!(due.iter().all(|done| done.is_multiple_of(STEP)));
-
-        // (purpose, done, total, expected)
-        for (purpose, done, total, expected) in [
-            (Bootstrap, STEP, total, true),
-            (Maintenance, STEP, total, false),
-            (Bootstrap, 0, total, false),
-            (Bootstrap, STEP - 1, total, false),
-            (Bootstrap, STEP, STEP, false),
-            (Bootstrap, STEP, STEP + 1, true),
-        ] {
-            assert_eq!(
-                nip43_progress_due(purpose, done, total),
-                expected,
-                "done={done} total={total} bootstrap={}",
-                matches!(purpose, Bootstrap)
-            );
-        }
-        assert!(!(0..total).any(|done| nip43_progress_due(Maintenance, done, total)));
-    }
-
-    #[test]
     fn workflow_deletion_retry_matches_authorized_dispatch() {
         let keys = nostr::Keys::generate();
         let workflow = format!("30620:{}:workflow", keys.public_key());
@@ -4130,12 +4027,9 @@ mod tests {
             let recorder = DebuggingRecorder::new();
             let _guard = metrics::set_default_local_recorder(&recorder);
             for sweep in 0..3 {
-                reconcile_nip43_membership_snapshots_with_purpose(
-                    &state,
-                    Nip43ReconciliationPurpose::Maintenance,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("maintenance sweep {sweep}: {e}"));
+                reconcile_nip43_membership_snapshot_drift(&state)
+                    .await
+                    .unwrap_or_else(|e| panic!("maintenance sweep {sweep}: {e}"));
             }
 
             assert_eq!(
