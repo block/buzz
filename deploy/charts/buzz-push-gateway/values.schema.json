@@ -34,6 +34,16 @@
       }
     },
     "apnsKey": false,
+    "deploymentAnnotations": {
+      "type": "object",
+      "properties": {
+        "buzz.block.xyz/release-namespace": false,
+        "buzz.block.xyz/external-network-policy": false
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "podAnnotations": {
       "type": "object",
       "additionalProperties": {
