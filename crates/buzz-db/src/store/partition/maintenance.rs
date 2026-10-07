@@ -892,7 +892,9 @@ fn collision_message(name: &str) -> String {
 ///
 /// Such a key is invisible to the parent's counterpart set. Dropping the
 /// catch-all would silently drop it and lock its other table without `NOWAIT`
-/// while holding the parent.
+/// while holding the parent. The referenced arm also matches the catch-all's
+/// clone of a key referencing the parent; the parent refusal runs first, so
+/// that arm is a backstop.
 async fn catch_all_foreign_key_refusal(
     connection: &mut PgConnection,
     catch_all: &CatchAllReplacement,
@@ -911,7 +913,7 @@ async fn catch_all_foreign_key_refusal(
     .await?;
     Ok(names.map(|names| {
         format!(
-            "catch-all {} has foreign keys not inherited from the parent ({names}); \
+            "catch-all {} has foreign keys outside the parent's counterpart set ({names}); \
              the counterpart lock set is not proven",
             catch_all.name
         )

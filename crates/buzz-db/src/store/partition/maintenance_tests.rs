@@ -878,7 +878,8 @@ mod postgres_tests {
             "{result:?}"
         );
         let kept: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_constraint WHERE conname = 'catch_all_reviewer'",
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'catch_all_reviewer' \
+             AND connamespace = current_schema()::regnamespace",
         )
         .fetch_one(&pool)
         .await
