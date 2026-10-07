@@ -257,6 +257,9 @@ pub async fn insert_auto_membership_in_transaction(
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
         VALUES ($1, $2, $3, 'member'::member_role, $4)
         ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            -- A rejoin starts caught up: unread counts from here.
+            joined_at = CASE WHEN channel_members.removed_at IS NULL
+                THEN channel_members.joined_at ELSE now() END,
             removed_at = NULL,
             removed_by = NULL,
             role = EXCLUDED.role
@@ -601,6 +604,9 @@ pub async fn add_member(
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
         VALUES ($1, $2, $3, $4::member_role, $5)
         ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            -- A rejoin starts caught up: unread counts from here.
+            joined_at = CASE WHEN channel_members.removed_at IS NULL
+                THEN channel_members.joined_at ELSE now() END,
             removed_at = NULL,
             removed_by = NULL,
             role = EXCLUDED.role

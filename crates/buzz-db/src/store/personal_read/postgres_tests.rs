@@ -317,6 +317,55 @@ async fn joining_starts_caught_up_and_counts_only_what_arrives_after() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn rejoining_starts_caught_up_again() {
+    let (db, pool, community, channel, owner, _) = fixture().await;
+    let member = Keys::generate();
+    let pk = member.public_key().to_bytes();
+    start(&pool, community, &member).await;
+    db.add_member(community, channel, &pk, MemberRole::Member, None)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE channel_members SET joined_at=now()-interval '1 hour'
+         WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+    )
+    .bind(community.as_uuid())
+    .bind(channel)
+    .bind(pk.as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    db.remove_member(community, channel, &pk, &pk)
+        .await
+        .unwrap();
+    let away = post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
+    // Re-adding an active member (a role change) must not move the position.
+    let owner_pk = owner.public_key().to_bytes();
+    db.add_member(
+        community,
+        channel,
+        &owner_pk,
+        MemberRole::Owner,
+        Some(&owner_pk),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sidebar(&db, community, &owner).await.unread, 2);
+    db.add_member(community, channel, &pk, MemberRole::Member, None)
+        .await
+        .unwrap();
+    let row = sidebar(&db, community, &member).await;
+    assert_eq!(row.unread, 0, "messages from while away are read");
+    assert_eq!(
+        status(&db, community, &member, channel, None, &[&away]).await,
+        ["read"]
+    );
+    post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
+    assert_eq!(sidebar(&db, community, &member).await.unread, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn read_state_starts_caught_up_at_the_first_intent() {
     let (db, pool, community, channel, _, _) = fixture().await;
     let member = Keys::generate();
