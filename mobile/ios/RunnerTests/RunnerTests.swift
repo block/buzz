@@ -206,11 +206,11 @@ class RunnerTests: XCTestCase {
     let title = NavigationTitleView(title: "general", subtitle: "36 members", color: .label)
     wrapper.addSubview(title)
     let label = UILabel()
-    title.addSubview(label)
+    title.contentView.addSubview(label)
     XCTAssertTrue(title.acceptsTitleTouch(in: label))
     XCTAssertTrue(title.acceptsTitleTouch(in: title))
     let disclosure = UIButton(type: .custom)
-    title.addSubview(disclosure)
+    title.contentView.addSubview(disclosure)
     XCTAssertFalse(title.acceptsTitleTouch(in: disclosure))
     var activated = false
     title.onActivate = { activated = true }
@@ -555,6 +555,7 @@ class RunnerTests: XCTestCase {
     }
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
     window.rootViewController = parent
     window.makeKeyAndVisible()
     defer { window.isHidden = true }
