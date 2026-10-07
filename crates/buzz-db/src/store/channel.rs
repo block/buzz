@@ -150,6 +150,9 @@ pub async fn create_channel(
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
         VALUES ($1, $2, $3, 'owner', $4)
         ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            -- A rejoin starts caught up: unread counts from here.
+            joined_at = CASE WHEN channel_members.removed_at IS NULL
+                THEN channel_members.joined_at ELSE now() END,
             removed_at = NULL,
             removed_by = NULL,
             role = EXCLUDED.role
@@ -249,6 +252,9 @@ pub async fn create_channel_with_id(
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'owner', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                -- A rejoin starts caught up: unread counts from here.
+                joined_at = CASE WHEN channel_members.removed_at IS NULL
+                    THEN channel_members.joined_at ELSE now() END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
