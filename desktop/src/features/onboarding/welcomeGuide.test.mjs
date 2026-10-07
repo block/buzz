@@ -9,6 +9,8 @@ import {
   pickWelcomeGuideAgentForRelay,
   pickWelcomeTeamStarterAgentForRelay,
   welcomeStarterRuntimeUpdate,
+  welcomeTeammateAccessUpdate,
+  welcomeTeammateHasExpectedAccess,
   WELCOME_GUIDE_AGENT_NAME,
   WELCOME_GUIDE_PERSONA_ID,
   WELCOME_TEAM_ID,
@@ -294,7 +296,7 @@ test("welcome team starter definitions and role identities are stable", () => {
   assert.deepEqual(WELCOME_TEAM_STARTERS, [
     { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
     { name: "Honey", personaId: "builtin:honey", role: "teammate" },
-    { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+    { name: "Pollen", personaId: "builtin:bumble", role: "teammate" },
   ]);
 });
 
@@ -330,14 +332,14 @@ test("starter matching uses persona identity rather than display name", () => {
 });
 
 test("starter matching is relay scoped and normalizes trailing slashes", () => {
-  const bumble = WELCOME_TEAM_STARTERS[2];
+  const pollen = WELCOME_TEAM_STARTERS[2];
   const otherRelay = makeAgent({
-    personaId: bumble.personaId,
+    personaId: pollen.personaId,
     relayUrl: RELAY_B,
     status: "running",
   });
   const matchingRelay = makeAgent({
-    personaId: bumble.personaId,
+    personaId: pollen.personaId,
     relayUrl: `${RELAY_A}/`,
     pubkey: PUB_B,
   });
@@ -345,7 +347,7 @@ test("starter matching is relay scoped and normalizes trailing slashes", () => {
   assert.equal(
     pickWelcomeTeamStarterAgentForRelay(
       [otherRelay, matchingRelay],
-      bumble,
+      pollen,
       RELAY_A,
     ),
     matchingRelay,
@@ -378,4 +380,75 @@ test("starter matching prefers running, then deployed instances", () => {
     pickWelcomeTeamStarterAgentForRelay([stopped, deployed], fizz, RELAY_A),
     deployed,
   );
+});
+
+test("owner-only-access policy accepts local Welcome teammates", () => {
+  const teammate = makeAgent({
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), true);
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, false), false);
+});
+
+test("access remediation converges for an upgraded owner-only install", () => {
+  // Pre-existing installs allowlisted the lead. An owner-only build must move
+  // them to owner-only, and the write it makes must satisfy the predicate, so
+  // the next provisioning pass makes no further write.
+  const allowlisted = makeAgent({
+    respondTo: "allowlist",
+    respondToAllowlist: [PUB_B],
+  });
+  const update = welcomeTeammateAccessUpdate(allowlisted, PUB_B, true);
+  assert.deepEqual(update, {
+    pubkey: PUB_A,
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
+  const remediated = makeAgent({
+    respondTo: update.respondTo,
+    respondToAllowlist: update.respondToAllowlist,
+  });
+  assert.equal(welcomeTeammateHasExpectedAccess(remediated, PUB_B, true), true);
+  assert.equal(welcomeTeammateAccessUpdate(remediated, PUB_B, true), null);
+});
+
+test("access remediation allowlists the lead when the build is not owner-only", () => {
+  const ownerOnly = makeAgent({
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
+  const update = welcomeTeammateAccessUpdate(ownerOnly, PUB_B, false);
+  assert.deepEqual(update, {
+    pubkey: PUB_A,
+    respondTo: "allowlist",
+    respondToAllowlist: [PUB_B],
+  });
+  const remediated = makeAgent({
+    respondTo: update.respondTo,
+    respondToAllowlist: update.respondToAllowlist,
+  });
+  assert.equal(
+    welcomeTeammateHasExpectedAccess(remediated, PUB_B, false),
+    true,
+  );
+  assert.equal(welcomeTeammateAccessUpdate(remediated, PUB_B, false), null);
+});
+
+test("access remediation skips a teammate that already allows the lead", () => {
+  const allowlisted = makeAgent({
+    respondTo: "allowlist",
+    respondToAllowlist: [PUB_B, PUB_C],
+  });
+  assert.equal(welcomeTeammateAccessUpdate(allowlisted, PUB_B, false), null);
+});
+
+test("owner-only-access policy accepts provider Welcome teammates", () => {
+  const teammate = makeAgent({
+    backend: { type: "provider", id: "remote", config: {} },
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), true);
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, false), false);
 });

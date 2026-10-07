@@ -54,9 +54,9 @@ sidecar before accessing the shared content-addressed blob. Unknown feedback,
 unreferenced hashes, malformed paths, and cross-community substitutions all
 collapse to `404`.
 
-Only `GET` and `HEAD` are routed. Existing community `/media/*` authorization is
-unchanged, including `BUZZ_REQUIRE_MEDIA_GET_AUTH`; the browser receives no
-Blossom credential or reusable signed URL. Responses are uncached, `nosniff`,
+Only `GET` and `HEAD` are routed. Community `/media/*` reads always require
+Blossom authorization and relay membership; the browser receives no reusable
+signed URL. Responses are uncached, `nosniff`,
 governed by a restrictive CSP, streamed from object storage, and non-previewable
 content retains attachment disposition. Successful reads produce a structured
 trace containing feedback ID, community ID, and attachment hash, but no feedback

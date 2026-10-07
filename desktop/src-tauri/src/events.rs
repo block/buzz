@@ -8,11 +8,15 @@
 //!
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
-
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+mod message_tags;
+
+use message_tags::{
+    append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
+};
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -76,56 +80,6 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
     Ok(tags)
 }
 
-fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mention in mentions {
-        if mention.first().map(String::as_str) != Some("mention") {
-            return Err(format!(
-                "mention reference tags must use 'mention' prefix (got {:?})",
-                mention.first()
-            ));
-        }
-        let Some(pubkey) = mention.get(1) else {
-            return Err("mention reference tag missing pubkey".into());
-        };
-        check_pubkey(pubkey)?;
-        tags.push(tag(vec!["mention", &pubkey.to_ascii_lowercase()])?);
-    }
-    Ok(())
-}
-
-/// Validate and append imeta tags. Rejects any tag whose first element is not "imeta"
-/// to prevent injection of arbitrary tags (e.g., forged "h", "e", or "p" tags).
-fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mt in media_tags {
-        if mt.first().map(String::as_str) != Some("imeta") {
-            return Err(format!(
-                "media tags must use 'imeta' prefix (got {:?})",
-                mt.first()
-            ));
-        }
-        let parts: Vec<&str> = mt.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid imeta tag: {e}"))?);
-    }
-    Ok(())
-}
-
-/// Validate and append NIP-30 custom-emoji tags. Mirrors `imeta_tags`: rejects
-/// any tag whose first element is not "emoji" so this path can't be used to
-/// smuggle forged "h"/"e"/"p" tags. Each tag is `["emoji", shortcode, url]`.
-fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for et in emoji_tags {
-        if et.first().map(String::as_str) != Some("emoji") {
-            return Err(format!(
-                "emoji tags must use 'emoji' prefix (got {:?})",
-                et.first()
-            ));
-        }
-        let parts: Vec<&str> = et.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid emoji tag: {e}"))?);
-    }
-    Ok(())
-}
-
 /// Validate a hex pubkey is exactly 64 hex characters.
 fn check_pubkey(pubkey: &str) -> Result<(), String> {
     if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -180,7 +134,6 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, String> {
 }
 
 /// Kind 9002 — update channel name/description/visibility/ttl.
-///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
 pub fn build_update_channel(
@@ -295,6 +248,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -303,6 +257,9 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    link_preview_tags: &[Vec<String>],
+    sent_from_thread_tag: Option<&[String]>,
+    relay_base: &str,
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -312,6 +269,9 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        link_preview_tags,
+        sent_from_thread_tag,
+        relay_base,
         &[],
     )
 }
@@ -330,8 +290,14 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    link_preview_tags: &[Vec<String>],
+    sent_from_thread_tag: Option<&[String]>,
+    relay_base: &str,
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
+    if sent_from_thread_tag.is_some() && thread_ref.is_some() {
+        return Err("sent-from-thread provenance requires a top-level message".into());
+    }
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
@@ -341,25 +307,10 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
+    append_sent_from_thread_tag(sent_from_thread_tag, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
-}
-
-fn append_client_tags(client_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for client_tag in client_tags {
-        if client_tag.first().map(String::as_str) != Some("client") {
-            return Err(format!(
-                "client tags must use 'client' prefix (got {:?})",
-                client_tag.first()
-            ));
-        }
-        if client_tag.len() < 2 {
-            return Err("client tag missing marker".into());
-        }
-        let parts: Vec<&str> = client_tag.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid client tag: {e}"))?);
-    }
-    Ok(())
 }
 
 /// Kind 45001 — forum post.
@@ -396,34 +347,37 @@ pub fn build_forum_comment(
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
 }
 
-/// Kind 40003 — edit a message. Carries the full new content AND a fresh
-/// imeta tag set; the receiver overlays the imeta tags onto the original
-/// event so the rendered message reflects exactly the edited state. NIP-30
-/// custom-emoji tags ride along the same way so an edited body's `:shortcode:`s
-/// stay resolvable (the send path attaches these too).
-///
-/// `mentions` carries the pubkeys of mentions that are *newly added* by this
-/// edit (the caller diffs the edited body against the original). Only those get
-/// a `p` tag so the newly-mentioned party is notified/woken, while a typo-fix
-/// edit that leaves the mention set unchanged emits no `p` tags and never
-/// re-wakes anyone. This mirrors the send path's `mention_tags` (dedup +
-/// lowercase); the receiver overlays these onto the original event's audience.
+pub struct MessageEditTags<'a> {
+    pub media: &'a [Vec<String>],
+    pub custom_emoji: &'a [Vec<String>],
+    pub mentions: &'a [&'a str],
+    pub mention_refs: Option<&'a [Vec<String>]>,
+}
+
+/// Kind 40003 — edit a message with full content, media, emoji, mentions,
+/// and optional monotonic link-preview suppression.
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
     content: &str,
-    media_tags: &[Vec<String>],
-    custom_emoji_tags: &[Vec<String>],
-    mentions: &[&str],
+    edit_tags: MessageEditTags<'_>,
+    suppress_link_previews: bool,
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
-    tags.extend(mention_tags(mentions)?);
-    imeta_tags(media_tags, &mut tags)?;
-    emoji_tags(custom_emoji_tags, &mut tags)?;
+    tags.extend(mention_tags(edit_tags.mentions)?);
+    imeta_tags(edit_tags.media, &mut tags)?;
+    emoji_tags(edit_tags.custom_emoji, &mut tags)?;
+    if let Some(mention_refs) = edit_tags.mention_refs {
+        mention_reference_tags(mention_refs, &mut tags)?;
+        tags.push(tag(vec!["buzz:mention-snapshot"])?);
+    }
+    if suppress_link_previews {
+        tags.push(tag(vec!["link-preview", "none"])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
 }
 
@@ -802,47 +756,12 @@ pub fn build_dm_hide(channel_id: &str) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(41012), "").tags(tags))
 }
 
-/// Kind 30620 — replaceable workflow definition.
-///
-/// The `d` tag carries the workflow id; `h` tag carries the channel id; the
-/// content is the YAML definition. Same (pubkey, d) replaces the prior version.
-pub fn build_workflow_definition(
-    workflow_id: &str,
-    channel_id: &str,
-    yaml_definition: &str,
-) -> Result<EventBuilder, String> {
-    check_content(yaml_definition)?;
-    let tags = vec![tag(vec!["d", workflow_id])?, tag(vec!["h", channel_id])?];
-    Ok(EventBuilder::new(Kind::Custom(30620), yaml_definition.to_string()).tags(tags))
-}
+mod workflows;
 
-/// Kind 5 — NIP-09 deletion targeting a kind:30620 workflow definition.
-pub fn build_workflow_delete(
-    workflow_id: &str,
-    owner_pubkey_hex: &str,
-) -> Result<EventBuilder, String> {
-    let coord = format!("30620:{owner_pubkey_hex}:{workflow_id}");
-    let tags = vec![tag(vec!["a", &coord])?];
-    Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
-}
-
-/// Kind 46020 — trigger a workflow run by id.
-pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["d", workflow_id])?];
-    Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
-}
-
-/// Kind 46030 — grant an approval token (with optional note).
-pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
-}
-
-/// Kind 46031 — deny an approval token (with optional note).
-pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
-}
+pub use workflows::{
+    build_approval_deny, build_approval_grant, build_workflow_definition, build_workflow_delete,
+    build_workflow_trigger,
+};
 
 // ── Transport ────────────────────────────────────────────────────────────────
 
@@ -931,24 +850,35 @@ mod tests {
         assert_eq!(event.pubkey.to_hex(), TARGET_HEX);
     }
 
-    // ── build_message_edit `p`-tag emission (lane 8ace8eed) ──────────────
-    //
-    // The composer diffs the edited body's mentions against the original and
-    // hands `build_message_edit` only the *newly added* pubkeys. These tests
-    // pin the builder's contract given that contract: emit a `p` per added
-    // mention (deduped, lowercased), and none when the added set is empty
-    // (typo-fix edit) — so an unchanged mention set re-wakes nobody.
-
     const CH_ID: &str = "11111111-1111-4111-8111-111111111111";
     const ALICE_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const BOB_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 
     fn edit_tags(mentions: &[&str]) -> Vec<Vec<String>> {
+        edit_tags_with_refs(mentions, Some(&[]))
+    }
+
+    fn edit_tags_with_refs(
+        mentions: &[&str],
+        mention_refs: Option<&[Vec<String>]>,
+    ) -> Vec<Vec<String>> {
         let channel = Uuid::parse_str(CH_ID).unwrap();
         let target =
             EventId::from_hex("d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1")
                 .unwrap();
-        let builder = build_message_edit(channel, target, "hi @alice", &[], &[], mentions).unwrap();
+        let builder = build_message_edit(
+            channel,
+            target,
+            "hi @alice",
+            MessageEditTags {
+                media: &[],
+                custom_emoji: &[],
+                mentions,
+                mention_refs,
+            },
+            false,
+        )
+        .unwrap();
         let secret = nostr::SecretKey::from_hex(
             "0000000000000000000000000000000000000000000000000000000000000003",
         )
@@ -962,7 +892,6 @@ mod tests {
         let tags = edit_tags(&[ALICE_HEX]);
         assert_eq!(tags[0][0], "h");
         assert_eq!(tags[1][0], "e");
-        // The `p` tag rides right after the `e` tag (insertion order).
         assert_eq!(tags[2], vec!["p".to_string(), ALICE_HEX.to_string()]);
     }
 
@@ -977,6 +906,42 @@ mod tests {
                 .any(|t| t.first().map(String::as_str) == Some("p")),
             "unchanged-mention edit must not emit any `p` tag, got {tags:?}"
         );
+    }
+
+    #[test]
+    fn edit_emits_full_mention_reference_snapshot() {
+        let tags = edit_tags_with_refs(&[], Some(&[vec!["mention".into(), ALICE_HEX.into()]]));
+        assert!(
+            tags.iter().any(|tag| tag == &["mention", ALICE_HEX]),
+            "stable mention reference must be present: {tags:?}"
+        );
+        assert!(
+            tags.iter().any(|tag| tag == &["buzz:mention-snapshot"]),
+            "snapshot marker must be present: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn empty_edit_mention_snapshot_is_explicit() {
+        let tags = edit_tags_with_refs(&[], Some(&[]));
+        assert!(
+            tags.iter().any(|tag| tag == &["buzz:mention-snapshot"]),
+            "empty snapshot must still clear stale references: {tags:?}"
+        );
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.first().map(String::as_str) == Some("mention")));
+    }
+
+    #[test]
+    fn partial_edit_omits_mention_snapshot() {
+        let tags = edit_tags_with_refs(&[], None);
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.first().map(String::as_str) == Some("mention")));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.first().map(String::as_str) == Some("buzz:mention-snapshot")));
     }
 
     #[test]

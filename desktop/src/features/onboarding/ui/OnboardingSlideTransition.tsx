@@ -14,6 +14,7 @@ export type OnboardingTransitionDirection = "forward" | "backward";
 export type OnboardingTransitionEffect =
   | "fade"
   | "line-slide"
+  | "mask-reveal-down"
   | "mask-reveal-up"
   | "none";
 

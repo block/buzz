@@ -11,7 +11,6 @@ import {
   ensureChannelAgentPresetInChannel,
   provisionChannelManagedAgent,
 } from "@/features/agents/channelAgents";
-import { resolveSnapshotAvatarPng } from "@/features/agents/ui/snapshotAvatarPng";
 import {
   channelsQueryKey,
   upsertCachedChannelMember,
@@ -19,10 +18,13 @@ import {
 import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
+  useAppFocused,
+  useFocusedRefetchInterval,
+} from "@/shared/lib/useDocumentVisible";
+import {
   createManagedAgent,
   deleteManagedAgent,
   deleteCustomHarness,
-  discoverAcpRuntimes,
   discoverBackendProviders,
   discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
@@ -33,12 +35,14 @@ import {
   getManagedAgentLog,
   getRuntimeFileConfig,
   installAcpRuntime,
+  invokeTauri,
   listManagedAgents,
   listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
+import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
@@ -47,18 +51,13 @@ import {
 } from "@/shared/api/tauriManagedAgents";
 import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgentRuntimeHooks";
 import {
+  acpRuntimesQueryKey,
+  refreshAcpRuntimes,
+} from "@/features/agents/acpRuntimesQuery";
+export { useAcpRuntimesQueryForced } from "@/features/agents/acpRuntimesQuery";
+import {
   createPersona,
   deletePersona,
-  exportAgentSnapshot,
-  encodeAgentSnapshotForSend,
-  previewAgentSnapshotImport,
-  confirmAgentSnapshotImport,
-  type AgentSnapshotImportPreview,
-  type AgentSnapshotImportConfirm,
-  type AgentSnapshotImportResult,
-  type EncodedSnapshotPayload,
-  type SnapshotMemoryLevel,
-  type SnapshotFormat,
   listPersonas,
   setPersonaActive,
   updatePersona,
@@ -92,6 +91,7 @@ export {
   useTeamsQuery,
   useUpdateTeamMutation,
 } from "@/features/agents/teamHooks";
+export * from "@/features/agents/snapshotHooks";
 export type {
   AttachManagedAgentToChannelInput,
   AttachManagedAgentToChannelResult,
@@ -104,10 +104,30 @@ export type {
   ProvisionChannelManagedAgentResult,
 } from "@/features/agents/channelAgents";
 
+export const AGENTS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/**
+ * Matches the query's 30 s poll so a focus-return refetches anything older
+ * than one poll tick. This detail-view query mounts only on the agent-detail
+ * surface and is not part of the app-wide focus storm.
+ */
+export const MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS = 30_000;
+
+/** Focus-refetch policy for relay-agent and managed-agent queries; consumed by focusRefetchPolicy.test.mjs. */
+export const agentsFocusRefetchPolicy = {
+  staleTime: AGENTS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
+
+/** Focus-refetch policy for the managed-agent-log query; consumed by focusRefetchPolicy.test.mjs. */
+export const managedAgentLogFocusRefetchPolicy = {
+  staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
+
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
-export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
@@ -183,12 +203,26 @@ function invalidateManagedAgentQueriesInBackground(
   );
 }
 
+/**
+ * Discover the ACP runtime catalog.
+ *
+ * This always serves the **cheap** backend path: the last cached runtime
+ * availability + auth statuses, no process spawns, low-millisecond. Hot
+ * surfaces (channel switch, composer, member bar) render from cache — a
+ * 30-minute `staleTime` keeps channel switches from re-triggering discovery.
+ *
+ * Fresh auth/version state (Settings, onboarding sign-in, post-mutation) comes
+ * from `refreshAcpRuntimes`, which runs the expensive forced path explicitly
+ * and writes the result into this same cache. Keeping the query's own
+ * `queryFn` cheap guarantees an automatic staleness refetch never re-runs the
+ * probe pipeline.
+ */
 export function useAcpRuntimesQuery(options?: { enabled?: boolean }) {
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: acpRuntimesQueryKey,
-    queryFn: discoverAcpRuntimes,
-    staleTime: 60_000,
+    queryFn: () => discoverAcpRuntimes(),
+    staleTime: 30 * 60_000,
   });
 }
 
@@ -222,7 +256,7 @@ export function useConnectAcpRuntimeMutation() {
     mutationFn: (input: { runtimeId: string; methodId: string }) =>
       connectAcpRuntime(input.runtimeId, input.methodId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
       void queryClient.invalidateQueries({ queryKey: acpAuthMethodsQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
@@ -234,7 +268,7 @@ export function useInstallAcpRuntimeMutation() {
   return useMutation({
     mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
   });
@@ -251,7 +285,7 @@ export function useSaveCustomHarnessMutation() {
       originalId?: string;
     }) => saveCustomHarness(definition, originalId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
     },
   });
 }
@@ -261,7 +295,7 @@ export function useDeleteCustomHarnessMutation() {
   return useMutation({
     mutationFn: (id: string) => deleteCustomHarness(id),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void refreshAcpRuntimes(queryClient);
     },
   });
 }
@@ -321,31 +355,28 @@ export function useManagedAgentPrereqsQuery(
 }
 
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
+  const refetchInterval = useFocusedRefetchInterval(AGENTS_FOCUS_STALE_TIME_MS);
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
-    staleTime: 30_000,
-    // Relay agent profiles (kind:10100) are near-static and the backing
-    // `list_relay_agents` command is an unfiltered relay query for the whole
-    // profile set — mounted on ~13 always-live surfaces (channel screen,
-    // members bar, mentions, sidebar, profile popovers), so a tight interval
-    // re-pulls the full set app-wide. This poll is also the ONLY refresh path:
-    // the `agents-data-changed` event fires only for local persona/team/managed
-    // reconcile (kinds PERSONA/TEAM/MANAGED_AGENT), never for kind:10100. So we
-    // keep polling but at a relaxed cadence and pause it while backgrounded.
-    refetchInterval: 5 * 60_000,
-    refetchIntervalInBackground: false,
+    // Relay agent discovery is scoped to the viewer's relay-signed channel
+    // memberships, then resolves exact agent/profile/policy coordinates in
+    // protocol-sized batches. Polling remains the only refresh path for remote
+    // changes, so keep it relaxed and pause while backgrounded.
+    refetchInterval,
     enabled: options?.enabled,
+    ...agentsFocusRefetchPolicy,
   });
 }
 
 export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
+  const appFocused = useAppFocused();
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: managedAgentsQueryKey,
     queryFn: listManagedAgents,
-    staleTime: 5_000,
     refetchInterval: (query) => {
+      if (!appFocused) return false;
       const agents = query.state.data as ManagedAgent[] | undefined;
       // Only local "running" agents need polling: process state can change
       // with no relay event to signal it, so this poll is the only liveness
@@ -356,6 +387,7 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         ? 5_000
         : false;
     },
+    ...agentsFocusRefetchPolicy,
   });
 }
 
@@ -535,7 +567,24 @@ export function useStartManagedAgentMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    // Accepts a bare pubkey, or an object carrying the tenant scope a
+    // long-lived callback captured before its first await (the backend
+    // fails closed on a mid-flight community/identity switch).
+    mutationFn: (
+      input:
+        | string
+        | {
+            pubkey: string;
+            expectedRelayUrl?: string;
+            expectedSignerPubkey?: string;
+          },
+    ) =>
+      typeof input === "string"
+        ? startManagedAgent(input)
+        : startManagedAgent(input.pubkey, {
+            expectedRelayUrl: input.expectedRelayUrl,
+            expectedSignerPubkey: input.expectedSignerPubkey,
+          }),
     onSuccess: (updated) => {
       queryClient.setQueryData<ManagedAgent[]>(
         managedAgentsQueryKey,
@@ -647,6 +696,12 @@ export function useAttachManagedAgentToChannelMutation(
           pubkey: result.agent.pubkey,
         }),
       );
+      void invokeTauri("sync_agents_to_active_huddle", {
+        channelId: effectiveChannelId,
+        agentPubkeys: [result.agent.pubkey],
+      }).catch((error) => {
+        console.warn("Could not sync attached agent into Huddle:", error);
+      });
     },
     onSettled: (_data, _err, variables) => {
       // Invalidate the effective channel (the one the server actually mutated)
@@ -802,99 +857,20 @@ export function useCreateChannelManagedAgentsMutation(
   });
 }
 
-export function useExportAgentSnapshotMutation() {
-  return useMutation({
-    mutationFn: async ({
-      id,
-      memoryLevel,
-      format,
-      memorySourcePubkey,
-      avatarUrl,
-    }: {
-      id: string;
-      memoryLevel: SnapshotMemoryLevel;
-      format: SnapshotFormat;
-      memorySourcePubkey?: string | null;
-      avatarUrl?: string | null;
-    }) => {
-      const avatarPngDataUrl =
-        format === "png"
-          ? await resolveSnapshotAvatarPng(avatarUrl)
-          : undefined;
-      return exportAgentSnapshot(
-        id,
-        memoryLevel,
-        format,
-        memorySourcePubkey,
-        avatarPngDataUrl,
-      );
-    },
-  });
-}
-
-export function useEncodeAgentSnapshotForSendMutation() {
-  return useMutation({
-    mutationFn: ({
-      id,
-      memoryLevel,
-      format,
-      memorySourcePubkey,
-      avatarPngDataUrl,
-    }: {
-      id: string;
-      memoryLevel: SnapshotMemoryLevel;
-      format: SnapshotFormat;
-      memorySourcePubkey?: string | null;
-      avatarPngDataUrl?: string;
-    }) =>
-      encodeAgentSnapshotForSend(
-        id,
-        memoryLevel,
-        format,
-        memorySourcePubkey,
-        avatarPngDataUrl,
-      ),
-  });
-}
-
-export function usePreviewAgentSnapshotImportMutation() {
-  return useMutation({
-    mutationFn: ({
-      fileBytes,
-      fileName,
-    }: {
-      fileBytes: number[];
-      fileName: string;
-    }) => previewAgentSnapshotImport(fileBytes, fileName),
-  });
-}
-
-export function useConfirmAgentSnapshotImportMutation() {
-  return useMutation({
-    mutationFn: (input: AgentSnapshotImportConfirm) =>
-      confirmAgentSnapshotImport(input),
-  });
-}
-
-// Re-export import types for consumers that import from hooks.
-export type {
-  AgentSnapshotImportPreview,
-  AgentSnapshotImportConfirm,
-  AgentSnapshotImportResult,
-  EncodedSnapshotPayload,
-};
-
 export function useManagedAgentLogQuery(
   pubkey: string | null,
   lineCount = 120,
 ) {
+  const refetchInterval = useFocusedRefetchInterval(
+    pubkey ? MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS : false,
+  );
   return useQuery({
     queryKey: ["managed-agent-log", pubkey, lineCount],
     queryFn: () => getManagedAgentLog(pubkey as string, lineCount),
     enabled: pubkey !== null,
     retry: false,
-    staleTime: 3_000,
-    refetchInterval: pubkey ? 30_000 : false,
+    refetchInterval,
+    ...managedAgentLogFocusRefetchPolicy,
   });
 }
 
@@ -902,12 +878,13 @@ export const agentConfigSurfaceQueryKey = (pubkey: string) =>
   ["agent-config-surface", pubkey] as const;
 
 export function useAgentConfigSurface(pubkey: string | null) {
+  const refetchInterval = useFocusedRefetchInterval(30_000);
   return useQuery({
     queryKey: agentConfigSurfaceQueryKey(pubkey ?? ""),
     queryFn: () => getAgentConfigSurface(pubkey ?? ""),
     enabled: !!pubkey,
-    staleTime: 10_000,
-    refetchInterval: 30_000,
+    refetchInterval,
+    ...agentsFocusRefetchPolicy,
   });
 }
 
@@ -939,7 +916,6 @@ export function useRuntimeFileConfigQuery(
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
 export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
-
 /**
  * Query safely displayable baked build env entries. The backend masks secrets,
  * so this is only used for inherited provider/model/effort labels.

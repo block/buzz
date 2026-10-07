@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, Eye, EyeOff, Pencil } from "lucide-react";
+import { Check, ChevronDown, Copy, Pencil } from "lucide-react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -12,8 +12,6 @@ import {
   useProfileQuery,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
-import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
-import { getNsec } from "@/shared/api/tauriIdentity";
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
@@ -24,6 +22,11 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
+import { PrivateKeyBackupRow } from "./PrivateKeyBackupRow";
+import {
+  SettingsOptionGroup,
+  SettingsOptionGroupList,
+} from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SignOutSection } from "./SignOutSection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
@@ -85,92 +88,6 @@ function IdentityRow({
           <Copy className="h-4 w-4 shrink-0" />
           Copy
         </button>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Collapsible row that reveals the user's nsec on demand.
- * The nsec is fetched only when first expanded and cleared on collapse.
- */
-function NsecRevealRow() {
-  const [isOpen, setIsOpen] = React.useState(false);
-  const [nsec, setNsec] = React.useState<string | null>(null);
-  const [isLoading, setIsLoading] = React.useState(false);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  // Guards against a late-resolving getNsec() repopulating state after Hide
-  // or after the settings panel unmounts.
-  const fetchCancelledRef = React.useRef(false);
-
-  React.useEffect(() => {
-    return () => {
-      fetchCancelledRef.current = true;
-      setNsec(null);
-    };
-  }, []);
-
-  async function handleReveal() {
-    if (!isOpen) {
-      fetchCancelledRef.current = false;
-      setIsOpen(true);
-      setIsLoading(true);
-      setLoadError(null);
-      try {
-        const value = await getNsec();
-        if (!fetchCancelledRef.current) setNsec(value);
-      } catch (err) {
-        if (!fetchCancelledRef.current)
-          setLoadError(
-            err instanceof Error
-              ? err.message
-              : "Failed to retrieve private key.",
-          );
-      } finally {
-        if (!fetchCancelledRef.current) setIsLoading(false);
-      }
-    } else {
-      // Cancel any in-flight fetch before clearing state.
-      fetchCancelledRef.current = true;
-      setNsec(null);
-      setIsOpen(false);
-    }
-  }
-
-  return (
-    <div className="px-4 py-3" data-testid="profile-private-key-row">
-      <div className="flex items-center justify-between gap-4">
-        <p className="text-sm font-medium">Private key</p>
-        <button
-          aria-label={isOpen ? "Hide private key" : "Reveal private key"}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          data-testid="profile-private-key-toggle"
-          onClick={() => void handleReveal()}
-          type="button"
-        >
-          {isOpen ? (
-            <>
-              <EyeOff className="h-4 w-4 shrink-0" />
-              Hide
-            </>
-          ) : (
-            <>
-              <Eye className="h-4 w-4 shrink-0" />
-              Reveal
-            </>
-          )}
-        </button>
-      </div>
-      {isOpen ? (
-        <div className="mt-2">
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : loadError ? (
-            <p className="text-sm text-destructive">{loadError}</p>
-          ) : nsec ? (
-            <NsecMaskedDisplay nsec={nsec} />
-          ) : null}
-        </div>
       ) : null}
     </div>
   );
@@ -755,15 +672,9 @@ export function ProfileSettingsCard({
                       data-testid="profile-readonly-content"
                       inert={isAvatarEditorOpen ? true : undefined}
                     >
-                      <div className="space-y-12">
-                        <div
-                          className="overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-xs divide-y divide-border/55"
-                          data-testid="profile-metadata-card"
-                        >
-                          <div className="flex min-h-14 items-center justify-between gap-4 px-4 py-3">
-                            <h2 className="text-lg font-semibold tracking-tight">
-                              Profile info
-                            </h2>
+                      <SettingsOptionGroupList>
+                        <SettingsOptionGroup
+                          headerAction={
                             <EditProfileMetadataButton
                               disabled={updateProfileMutation.isPending}
                               isEditing={isEditingProfileMetadata}
@@ -771,8 +682,10 @@ export function ProfileSettingsCard({
                               onClick={handleProfileMetadataEdit}
                               testId="profile-metadata-edit"
                             />
-                          </div>
-
+                          }
+                          data-testid="profile-metadata-card"
+                          title="Profile info"
+                        >
                           <div className="flex min-h-16 items-center gap-4 px-4 py-3">
                             <div className="min-w-0 flex-1 space-y-1">
                               <label
@@ -843,22 +756,25 @@ export function ProfileSettingsCard({
                               )}
                             </div>
                           </div>
-                        </div>
+                        </SettingsOptionGroup>
 
-                        <div>
+                        <SettingsOptionGroup title="Identity">
                           <details
-                            className="group overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-xs"
+                            className="group divide-y divide-border/55"
                             data-testid="profile-identity-card"
                           >
                             <summary
-                              className="group/identity flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-sm transition-colors duration-150 ease-out hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden"
+                              className="group/identity flex min-h-16 cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 transition-colors duration-150 ease-out hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden"
                               data-testid="profile-identity-toggle"
                             >
                               <div className="min-w-0">
-                                <h2 className="text-lg font-semibold tracking-tight">
-                                  Identity
-                                </h2>
-                                <p className="mt-1 text-sm font-normal text-muted-foreground">
+                                <p className="text-sm font-medium">
+                                  Identity details
+                                </p>
+                                <p
+                                  className="text-sm font-normal text-muted-foreground/70"
+                                  data-settings-subcopy
+                                >
                                   Your keypair and NIP-05 handle are fixed for
                                   this device.
                                 </p>
@@ -866,7 +782,7 @@ export function ProfileSettingsCard({
                               <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-open:rotate-180 group-hover/identity:text-foreground group-focus-visible/identity:text-foreground" />
                             </summary>
                             <div
-                              className="border-t border-border/55 divide-y divide-border/55"
+                              className="divide-y divide-border/55"
                               data-testid="profile-identity-details"
                             >
                               <IdentityRow
@@ -883,11 +799,11 @@ export function ProfileSettingsCard({
                                 testId="profile-nip05"
                                 value={nip05Handle}
                               />
-                              <NsecRevealRow />
+                              <PrivateKeyBackupRow />
                             </div>
                           </details>
-                        </div>
-                      </div>
+                        </SettingsOptionGroup>
+                      </SettingsOptionGroupList>
                     </div>
 
                     {shouldRenderAvatarEditor ? (

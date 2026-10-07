@@ -11,16 +11,18 @@ export function buildIndependentThreadPanel(
   ...formatArgs: Tail<Parameters<typeof formatTimelineMessages>>
 ) {
   if (!rootId) {
-    return buildThreadPanelData([], null, replyTargetId, expandedReplyIds);
+    return {
+      ...buildThreadPanelData([], null, replyTargetId, expandedReplyIds),
+      messages: [],
+    };
   }
   const head = channelEvents.find((event) => event.id === rootId);
   const events = head ? [head, ...replyEvents] : replyEvents;
-  return buildThreadPanelData(
-    formatTimelineMessages(events, ...formatArgs),
-    rootId,
-    replyTargetId,
-    expandedReplyIds,
-  );
+  const messages = formatTimelineMessages(events, ...formatArgs);
+  return {
+    ...buildThreadPanelData(messages, rootId, replyTargetId, expandedReplyIds),
+    messages,
+  };
 }
 
 type Tail<T extends readonly unknown[]> = T extends readonly [

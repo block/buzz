@@ -1,0 +1,1250 @@
+{
+  "_comment": "Hand-curated model capability manifest — the single runtime artifact. Consumed directly by Rust (include_str! + serde + OnceLock) and TypeScript (JSON import + zod). No codegen. Exact records are AUTHORITATIVE six-axis snapshots: they do NOT inherit from family rules at runtime. MAINTENANCE RULE: any capability change to a family/prefix rule or a provider fallback must audit every exact_record whose _provenance names that source and update the snapshot (and its corpus expectations) wherever the contract change is intended. Divergence between an exact snapshot and its origin rule is legal and sometimes correct (e.g. provider-advertised effort overrides).",
+  "_sources": {
+    "models_dev": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0)",
+    "anthropic_thinking": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking (July 2025)",
+    "anthropic_effort": "https://platform.claude.com/docs/en/build-with-claude/effort (July 2025)",
+    "openai_reasoning": "https://platform.openai.com/docs/guides/reasoning (July 2025)"
+  },
+  "family_tokens": [
+    "claude-",
+    "gpt-",
+    "kimi-"
+  ],
+  "family_rules": [
+    {
+      "id": "anthropic-manual-budget-claude3",
+      "match_kind": "prefix",
+      "match_value": "claude-3",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "manual-budget",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-manual-budget-opus-4-5",
+      "match_kind": "exact",
+      "match_value": "claude-opus-4-5",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "manual-budget",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-xhigh-opus-4-7",
+      "match_kind": "prefix",
+      "match_value": "claude-opus-4-7",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-xhigh-opus-4-8",
+      "match_kind": "prefix",
+      "match_value": "claude-opus-4-8",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-xhigh-opus-5",
+      "match_kind": "prefix",
+      "match_value": "claude-opus-5",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-xhigh-sonnet-5",
+      "match_kind": "prefix",
+      "match_value": "claude-sonnet-5",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-xhigh-fable-5",
+      "match_kind": "prefix",
+      "match_value": "claude-fable-5",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-xhigh-mythos-5",
+      "match_kind": "prefix",
+      "match_value": "claude-mythos-5",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-no-xhigh-opus-4-6",
+      "match_kind": "prefix",
+      "match_value": "claude-opus-4-6",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-no-xhigh-sonnet-4-6",
+      "match_kind": "prefix",
+      "match_value": "claude-sonnet-4-6",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "anthropic-adaptive-no-xhigh-mythos-preview",
+      "match_kind": "prefix",
+      "match_value": "claude-mythos-preview",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
+      "id": "openai-gpt5-pro",
+      "match_kind": "prefix",
+      "match_value": "gpt-5-pro",
+      "match_aliases": [
+        "gpt5-pro"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "openai-gpt5-6",
+      "match_kind": "prefix",
+      "match_value": "gpt-5.6",
+      "match_aliases": [
+        "gpt5.6",
+        "gpt-5-6",
+        "gpt5-6"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "openai-gpt5-5",
+      "match_kind": "prefix",
+      "match_value": "gpt-5.5",
+      "match_aliases": [
+        "gpt5.5",
+        "gpt-5-5",
+        "gpt5-5"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "openai-gpt5-4",
+      "match_kind": "prefix",
+      "match_value": "gpt-5.4",
+      "match_aliases": [
+        "gpt5.4",
+        "gpt-5-4",
+        "gpt5-4"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "openai-gpt5-1",
+      "match_kind": "prefix",
+      "match_value": "gpt-5.1",
+      "match_aliases": [
+        "gpt5.1",
+        "gpt-5-1",
+        "gpt5-1"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "none",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "openai-gpt5-base",
+      "match_kind": "prefix",
+      "match_value": "gpt-5",
+      "match_aliases": [
+        "gpt5"
+      ],
+      "providers": [
+        "openai",
+        "databricks",
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "dbv2-kimi-k3-exact",
+      "_comment": "Databricks Kimi K3 aliases share the exact record's upstream Moonshot capabilities. Kimi is absent from the Databricks models.dev catalog, so retain the established MLflow Chat route; upstream models.dev advertises a reasoning toggle and effort values low|high|max, with no documented default. The toggle is not representable on the MLflow Chat request schema (only reasoning_effort is), so thinking_mode stays none, matching the kimi-k2-7-code precedent.",
+      "match_kind": "exact",
+      "match_value": "kimi-k3",
+      "providers": [
+        "databricks_v2"
+      ],
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard"
+    },
+    {
+      "id": "dbv2-claude-prefix",
+      "_comment": "DBv2-only broad Claude prefix. Replaces the routing role of the dropped dbv2-claude-code-names-segment 'claude' token: uncurated databricks-claude-* endpoints still route via Anthropic Messages with conservative (omit-fields) effort classification. Bare code-name segments without a leading 'claude-' (e.g. opus-5, goose-opus-5) are deliberately dropped and fall through to the databricks_v2 concrete-unknown fallback (mlflow-chat) — segment-anywhere matching is not expressible as a prefix.",
+      "match_kind": "prefix",
+      "match_value": "claude",
+      "providers": [
+        "databricks_v2"
+      ],
+      "thinking_mode": "omit-fields",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    }
+  ],
+  "_comment_databricks_v2_known_models": "Curated fallback catalog for Databricks v2: the model IDs offered when an authenticated api/ai-gateway/v2/endpoints call succeeds but returns an empty list (see catalog.rs authenticated_empty_v2_catalog). Both IDs also have full exact_records, so once offered they classify precisely. Uniqueness enforced by validate_manifest().",
+  "databricks_v2_known_models": [
+    "databricks-gpt-5-5",
+    "databricks-claude-opus-4-7"
+  ],
+  "exact_records": [
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-4-mini",
+      "registry_label": "GPT-5.4 mini",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "thinking_mode+default_effort+databricks_v2_wire_route+normalization_policy: family:openai-gpt5-4; supported_efforts: curated override",
+      "source": "models.dev reasoning_options: low|medium|high (family rule adds none+xhigh — adopt provider-advertised)",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises low|medium|high. Family rule (gpt5-4) adds none+xhigh. Provider-advertised wins per plan F1 policy.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-gpt-5-4-mini\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-4-nano",
+      "registry_label": "GPT-5.4 nano",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "thinking_mode+default_effort+databricks_v2_wire_route+normalization_policy: family:openai-gpt5-4; supported_efforts: curated override",
+      "source": "models.dev reasoning_options: low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises low|medium|high. Same as gpt-5-4-mini. Adopt.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-gpt-5-4-nano\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-fable-5",
+      "registry_label": "Claude Fable 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-fable-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-8",
+      "registry_label": "Claude Opus 4.8",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-opus-4-8",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-5",
+      "registry_label": "Claude Opus 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-opus-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-sonnet-5",
+      "registry_label": "Claude Sonnet 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-sonnet-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-6-sol",
+      "registry_label": "GPT-5.6 Sol",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "thinking_mode+default_effort+databricks_v2_wire_route+normalization_policy: family:openai-gpt5-6; supported_efforts: curated override",
+      "source": "models.dev reasoning_options: low|medium|high|max (family rule adds none+xhigh — provider-advertised wins per plan F1)",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises [low, medium, high, max]. Family rule (gpt5-6) has none+xhigh+max; sol endpoint does not expose none or xhigh. Provider-advertised wins.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-gpt-5-6-sol\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\",\"max\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-5",
+      "registry_label": "GPT-5.5",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "thinking_mode+default_effort+databricks_v2_wire_route+normalization_policy: family:openai-gpt5-5; supported_efforts: curated override",
+      "source": "models.dev reasoning_options: low|medium|high (family rule adds none+xhigh — provider-advertised wins per plan F1)",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev (pinned payload) advertises [low, medium, high]. Family rule (gpt5-5) has none+xhigh; this Databricks endpoint does not expose none or xhigh. Provider-advertised wins.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-gpt-5-5\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-7",
+      "registry_label": "Claude Opus 4.7",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-opus-4-7",
+      "source": "DATABRICKS_V2_KNOWN_MODELS; family rule anthropic-adaptive-xhigh-opus-4-7 applies",
+      "_reconciliation": "no-effort-divergence",
+      "_reconciliation_note": "models.dev advertises reasoning_options=[{\"type\":\"budget_tokens\",\"min\":1024}]. This is a different capability axis (extended thinking token budget), not an effort-level selector. No effort divergence to reconcile — efforts for this model come from the anthropic family rule (anthropic-adaptive-xhigh-opus-4-7).",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-claude-opus-4-7\"].reasoning_options=[{\"type\":\"budget_tokens\",\"min\":1024}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-6-luna",
+      "registry_label": "GPT-5.6 Luna",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "thinking_mode+default_effort+databricks_v2_wire_route+normalization_policy: family:openai-gpt5-6; supported_efforts: curated override",
+      "source": "models.dev reasoning_options: low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises [low, medium, high]. Family rule (gpt5-6) has none+xhigh+max; luna endpoint does not expose none, xhigh, or max. Provider-advertised wins.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-04): providers.databricks.models[\"databricks-gpt-5-6-luna\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-6-terra",
+      "registry_label": "GPT-5.6 Terra",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "thinking_mode+default_effort+databricks_v2_wire_route+normalization_policy: family:openai-gpt5-6; supported_efforts: curated override",
+      "source": "models.dev reasoning_options: low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises [low, medium, high]. Family rule (gpt5-6) has none+xhigh+max; terra endpoint does not expose none, xhigh, or max. Provider-advertised wins.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-04): providers.databricks.models[\"databricks-gpt-5-6-terra\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-haiku-4-5",
+      "registry_label": "Claude Haiku 4.5 (latest)",
+      "thinking_mode": "omit-fields",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:dbv2-claude-prefix",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-1",
+      "registry_label": "Claude Opus 4.1 (latest)",
+      "thinking_mode": "omit-fields",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:dbv2-claude-prefix",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-5",
+      "registry_label": "Claude Opus 4.5 (latest)",
+      "thinking_mode": "manual-budget",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-manual-budget-opus-4-5",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-6",
+      "registry_label": "Claude Opus 4.6",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-no-xhigh-opus-4-6",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-sonnet-4",
+      "registry_label": "Claude Sonnet 4.5",
+      "thinking_mode": "omit-fields",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:dbv2-claude-prefix",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-sonnet-4-5",
+      "registry_label": "Claude Sonnet 4.5 (latest)",
+      "thinking_mode": "omit-fields",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:dbv2-claude-prefix",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-sonnet-4-6",
+      "registry_label": "Claude Sonnet 4.6",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-no-xhigh-sonnet-4-6",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-2-5-flash",
+      "registry_label": "Gemini 2.5 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-2-5-pro",
+      "registry_label": "Gemini 2.5 Pro",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-1-flash-lite",
+      "registry_label": "Gemini 3.1 Flash Lite Preview",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-1-pro",
+      "registry_label": "Gemini 3.1 Pro Preview Custom Tools",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-flash",
+      "registry_label": "Gemini 3 Flash Preview",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-pro",
+      "registry_label": "Gemini 3 Pro Preview",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-glm-5-2",
+      "registry_label": "GLM-5.2",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5",
+      "registry_label": "GPT-5",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "all axes materialized from family:openai-gpt5-base",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-1",
+      "registry_label": "GPT-5.1",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "none",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "all axes materialized from family:openai-gpt5-1",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-2",
+      "registry_label": "GPT-5.2",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "pinned snapshot preserving the removed dbv2-gpt-code-names-segment outcome (efforts none..xhigh + openai-clamp-max-to-xhigh). Deliberately diverges from the openai-gpt5-base prefix (which yields minimal..high + openai-standard); the divergence is the whole reason this exact record is pinned rather than derived.",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-4",
+      "registry_label": "GPT-5.4",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "all axes materialized from family:openai-gpt5-4",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-mini",
+      "registry_label": "GPT-5 Mini",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "all axes materialized from family:openai-gpt5-base",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-nano",
+      "registry_label": "GPT-5 Nano",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "_provenance": "all axes materialized from family:openai-gpt5-base",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-oss-120b",
+      "registry_label": "GPT OSS 120B",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-oss-20b",
+      "registry_label": "GPT OSS 20B",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-kimi-k3",
+      "registry_label": "Kimi K3",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "databricks_v2_wire_route: provider fallback (databricks_v2/concrete_unknown); thinking_mode+supported_efforts: models.dev Moonshot Kimi K3 catalog; default_effort: no documented default",
+      "_source": "models.dev Moonshot Kimi K3 reasoning_options: toggle + low|high|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default. The MLflow Chat request schema cannot express a reasoning toggle (only reasoning_effort is representable), so thinking_mode maps to none rather than the upstream toggle, matching the kimi-k2-7-code precedent.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-20, SHA-256 7ccb5635f682e4248ad8d39f515fbe3f2bb10e67bbc7fa1b94e66dddb00779e5): providers.moonshotai.models[\"kimi-k3\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]; Databricks endpoint absent from providers.databricks.models"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-kimi-k2-7-code",
+      "registry_label": "Kimi K2.7 Code",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    }
+  ],
+  "provider_fallbacks": {
+    "anthropic": {
+      "blank": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "adaptive",
+        "supported_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "high",
+        "normalization_policy": "none"
+      },
+      "concrete_unknown": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "omit-fields",
+        "supported_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "high",
+        "normalization_policy": "none"
+      }
+    },
+    "openai": {
+      "blank": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "openai-clamp-max-to-xhigh"
+      },
+      "concrete_unknown": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "openai-clamp-max-to-xhigh"
+      }
+    },
+    "databricks_v2": {
+      "blank": {
+        "databricks_v2_wire_route": "route-unknown",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "openai-clamp-max-to-xhigh"
+      },
+      "concrete_unknown": {
+        "databricks_v2_wire_route": "mlflow-chat",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "openai-clamp-max-to-xhigh"
+      }
+    },
+    "databricks": {
+      "blank": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "openai-clamp-max-to-xhigh"
+      },
+      "concrete_unknown": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "openai-clamp-max-to-xhigh"
+      }
+    },
+    "openrouter": {
+      "blank": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "none"
+      },
+      "concrete_unknown": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "none"
+      }
+    },
+    "_default": {
+      "blank": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "none"
+      },
+      "concrete_unknown": {
+        "databricks_v2_wire_route": "not-applicable",
+        "thinking_mode": "none",
+        "supported_efforts": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default_effort": "medium",
+        "normalization_policy": "none"
+      }
+    }
+  }
+}

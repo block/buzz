@@ -84,6 +84,11 @@ export function TeamsSection({
 
       {!isLoading ? (
         <div className={IDENTITY_CARD_GRID_CLASS}>
+          <NewTeamCard
+            isPending={isPending}
+            onCreate={onCreate}
+            onImport={onImport}
+          />
           {teams.map((team) => {
             const resolution = resolveTeamPersonas(team, personas);
             const missingPersonaCount = resolution.missingPersonaCount;
@@ -169,11 +174,6 @@ export function TeamsSection({
               </TeamIdentityCard>
             );
           })}
-          <NewTeamCard
-            isPending={isPending}
-            onCreate={onCreate}
-            onImport={onImport}
-          />
         </div>
       ) : null}
 

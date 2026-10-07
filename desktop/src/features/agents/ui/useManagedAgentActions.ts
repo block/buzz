@@ -1,4 +1,6 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   type AttachManagedAgentToChannelResult,
@@ -14,18 +16,15 @@ import {
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { usePresenceQuery } from "@/features/presence/hooks";
-import type {
-  AgentPersona,
-  Channel,
-  CreateManagedAgentResponse,
-  ManagedAgent,
-} from "@/shared/api/types";
+import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
+  respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
@@ -37,6 +36,7 @@ import {
 } from "../lib/instanceInputForDefinition";
 
 export function useManagedAgentActions() {
+  const queryClient = useQueryClient();
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -51,12 +51,13 @@ export function useManagedAgentActions() {
   const [isCreateOpen, setIsCreateOpen] = React.useState(false);
   const [agentToAddToChannel, setAgentToAddToChannel] =
     React.useState<ManagedAgent | null>(null);
-  const [createdAgent, setCreatedAgent] =
-    React.useState<CreateManagedAgentResponse | null>(null);
   const [startingPersonaIds, setStartingPersonaIds] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
   const startingPersonaIdsRef = React.useRef(new Set<string>());
+  const [restartingAgentPubkey, setRestartingAgentPubkey] = React.useState<
+    string | null
+  >(null);
   const [logAgentPubkey, setLogAgentPubkey] = React.useState<string | null>(
     null,
   );
@@ -174,6 +175,30 @@ export function useManagedAgentActions() {
     }
   }
 
+  async function handleRestart(pubkey: string) {
+    if (restartingAgentPubkey) return;
+    clearFeedback();
+    setRestartingAgentPubkey(pubkey);
+    try {
+      const agent = managedAgents.find(
+        (candidate) => candidate.pubkey === pubkey,
+      );
+      if (!agent) return;
+      await respawnManagedAgentWithRules({
+        agent,
+        startManagedAgent: startMutation.mutateAsync,
+        stopManagedAgent: stopMutation.mutateAsync,
+        onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
+      });
+    } catch (error) {
+      setActionErrorMessage(
+        error instanceof Error ? error.message : "Failed to restart agent.",
+      );
+    } finally {
+      setRestartingAgentPubkey(null);
+    }
+  }
+
   function setPersonaStartPending(personaId: string, pending: boolean) {
     const next = new Set(startingPersonaIdsRef.current);
     if (pending) {
@@ -201,13 +226,11 @@ export function useManagedAgentActions() {
       const input = await buildInstanceInputForDefinition(persona, runtime);
 
       const created = await createAgentMutation.mutateAsync(input);
-      setCreatedAgent(created);
+      toast.success("Agent created");
       const notices = [...warnings];
 
       if (created.spawnError) {
         setActionErrorMessage(created.spawnError);
-      } else {
-        notices.push(`Started ${created.agent.name}.`);
       }
 
       if (created.profileSyncError) {
@@ -276,6 +299,9 @@ export function useManagedAgentActions() {
     await Promise.allSettled(
       channelIds.map((channelId) => removeChannelMember(channelId, pubkey)),
     );
+    // Direct writes bypass the member mutations' invalidation; without this,
+    // the deleted agent stays in cached rosters for the freshness window.
+    await invalidateChannelMembersRosters(queryClient, channelIds);
   }
 
   async function handleDelete(pubkey: string) {
@@ -387,6 +413,7 @@ export function useManagedAgentActions() {
   }
 
   const isPending =
+    restartingAgentPubkey !== null ||
     createAgentMutation.isPending ||
     startMutation.isPending ||
     stopMutation.isPending ||
@@ -411,8 +438,6 @@ export function useManagedAgentActions() {
     setIsCreateOpen,
     agentToAddToChannel,
     setAgentToAddToChannel,
-    createdAgent,
-    setCreatedAgent,
     logAgentPubkey,
     setLogAgentPubkey,
     actionNoticeMessage,
@@ -420,8 +445,10 @@ export function useManagedAgentActions() {
     actionErrorMessage,
     setActionErrorMessage,
     startingAgentPubkey,
+    restartingAgentPubkey,
     startingPersonaIds,
     handleStart,
+    handleRestart,
     handleStartPersona,
     handleStop,
     handleDelete,

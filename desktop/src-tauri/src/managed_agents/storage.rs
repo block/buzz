@@ -52,6 +52,34 @@ fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Install-log path for `runtime_id`, alongside the agent logs.
+pub fn install_log_path(app: &AppHandle, runtime_id: &str) -> Result<PathBuf, String> {
+    Ok(managed_agents_logs_dir(app)?.join(install_log_filename(runtime_id)?))
+}
+
+/// Filename for a runtime's install log, or an error for an id that must not
+/// become one.
+///
+/// The id is validated rather than trusted: ids reach this from user-defined
+/// custom harnesses as well as the catalog, and a `../` or a separator in one
+/// would place the log outside the logs directory. Rejecting beats sanitizing —
+/// a rejected id means no log, while a rewritten one could collide with another
+/// runtime's.
+fn install_log_filename(runtime_id: &str) -> Result<String, String> {
+    if runtime_id.is_empty() || !runtime_id.chars().all(is_safe_id_char) {
+        return Err(format!(
+            "unsafe runtime id for a log filename: {runtime_id}"
+        ));
+    }
+    Ok(format!("install-{runtime_id}.log"))
+}
+
+/// Characters allowed in a runtime id used as a filename. Excludes `/`, `\`,
+/// `:` and `.`, so no id can traverse or escape the logs directory.
+fn is_safe_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
 pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
 }
@@ -628,6 +656,62 @@ pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .create(true)
         .append(true)
+        .open(path)
+        .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
+}
+
+/// Start a new install-log session at `path`: keep the previous run as
+/// `<path>.1` and return a freshly created, empty current file.
+///
+/// Rotating per *run* rather than by size is what bounds this file. A run
+/// writes one record per executed attempt, each capped by the log-scale
+/// capture, so one run's file is bounded by steps × attempts × cap and the
+/// history on disk is bounded at two runs. Size-triggered rotation could not
+/// promise either: it never replaced an existing `.1`, and on Windows —
+/// where rename does not replace its destination — it stopped working
+/// altogether once `.1` existed, leaving the current file to grow.
+///
+/// The old `.1` is therefore *removed* before the rename rather than renamed
+/// over. Every step is best-effort: a rotation that fails must not cost the
+/// user the install, so the session continues with a truncated current file.
+pub(crate) fn start_install_log_session(path: &Path) -> Result<File, String> {
+    if path.exists() {
+        let mut previous = path.as_os_str().to_owned();
+        previous.push(".1");
+        let previous = PathBuf::from(previous);
+        let _ = fs::remove_file(&previous);
+        let _ = fs::rename(path, &previous);
+    }
+    open_install_log(path, /* truncate */ true)
+}
+
+/// Open an install log for appending one more record to the current session.
+pub(crate) fn open_install_log_file(path: &Path) -> Result<File, String> {
+    open_install_log(path, /* truncate */ false)
+}
+
+/// Open an install log owner-only.
+///
+/// The mode is set *in the create* rather than chmod'd afterwards, so the file
+/// is never briefly group/world-readable. Install output can carry registry
+/// tokens and proxy credentials echoed by a failing installer, so the window
+/// matters even though it is short. An existing file's mode is left as-is —
+/// `OpenOptions::mode` only applies on creation, and silently re-tightening a
+/// file the user relaxed is not this function's call to make.
+fn open_install_log(path: &Path, truncate: bool) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.create(true);
+    if truncate {
+        options.write(true).truncate(true);
+    } else {
+        options.append(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
         .open(path)
         .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
 }

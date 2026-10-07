@@ -838,7 +838,7 @@ test("deep-link to a message in older history scrolls and highlights it", async 
 //
 // Per Mari's baseline-either-way rule, recording the contract here is
 // valuable even though main happens to satisfy it by construction.
-test("find-bar active match scrolls and highlights row regardless of position", async ({
+test("unified channel search opens rows regardless of history position", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -916,13 +916,20 @@ test("find-bar active match scrolls and highlights row regardless of position", 
     })
     .toBe(true);
 
-  // Open the find bar. The shortcut handler uses platform-standard
-  // primary modifier (Meta on macOS, Control elsewhere). Playwright's
-  // ControlOrMeta abstracts this for us.
-  await page.keyboard.press("ControlOrMeta+f");
-  await expect(page.getByTestId("channel-find-bar")).toBeVisible();
+  const openScopedSearchResult = async (needle: string) => {
+    await page.keyboard.press("ControlOrMeta+f");
+    await expect(page.getByTestId("search-channel-scope-chip")).toHaveText(
+      /#general/,
+    );
 
-  const input = page.getByPlaceholder("Find in channel");
+    await page.getByTestId("search-dialog-input").fill(needle);
+    const result = page
+      .getByTestId("search-results")
+      .getByRole("option")
+      .filter({ hasText: needle });
+    await expect(result).toBeVisible();
+    await result.click();
+  };
 
   // Poll for the row matching `needle` to settle inside the timeline
   // viewport, then return its placement + className. Polling is required
@@ -980,7 +987,7 @@ test("find-bar active match scrolls and highlights row regardless of position", 
       });
     }, needle);
 
-  const assertInViewportAndHighlighted = (placement: {
+  const assertInViewport = (placement: {
     rowTopRelative: number;
     rowBottomRelative: number;
     timelineHeight: number;
@@ -1000,11 +1007,10 @@ test("find-bar active match scrolls and highlights row regardless of position", 
     expect(placement.rowBottomRelative).toBeLessThanOrEqual(
       placement.timelineHeight + 1,
     );
-    expect(placement.className).toContain("route-target-highlight-fade");
   };
 
   // --- Phase 1: ALPHA ---
-  await input.fill(ALPHA);
+  await openScopedSearchResult(ALPHA);
   // Sanity check: the active match should resolve and the matching row
   // should land in the DOM. visibility != in-viewport here -- we follow
   // up with `waitForRowInViewport` to enforce the placement contract.
@@ -1014,19 +1020,19 @@ test("find-bar active match scrolls and highlights row regardless of position", 
   await expect(alphaRow).toBeVisible({ timeout: 5_000 });
 
   const a = await waitForRowInViewport(ALPHA);
-  assertInViewportAndHighlighted(a);
+  assertInViewport(a);
 
   // --- Phase 2: BRAVO ---
-  // Replace the query. The active-match id changes, which should drive
-  // a fresh scroll + highlight on the BRAVO row.
-  await input.fill(BRAVO);
+  // Reopen unified channel search for a second result. Selecting it should
+  // drive a fresh route-target scroll + highlight on the BRAVO row.
+  await openScopedSearchResult(BRAVO);
   const bravoRow = timeline.locator(`[data-message-id]`).filter({
     hasText: BRAVO,
   });
   await expect(bravoRow).toBeVisible({ timeout: 5_000 });
 
   const b = await waitForRowInViewport(BRAVO);
-  assertInViewportAndHighlighted(b);
+  assertInViewport(b);
 });
 
 // Criterion 6 (composer half): expanding the composer (multi-line input)

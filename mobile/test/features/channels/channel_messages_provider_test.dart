@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -99,6 +100,57 @@ void main() {
       );
     },
   );
+
+  test('retains historical and live Huddle end events in the window', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _huddleEvent(
+            id: 'ended-history',
+            kind: EventKind.huddleEnded,
+            createdAt: 20,
+          ),
+          _huddleEvent(
+            id: 'started',
+            kind: EventKind.huddleStarted,
+            createdAt: 10,
+          ),
+          _bounds(),
+        ],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['started', 'ended-history'],
+    );
+
+    relaySession.emit(
+      _huddleEvent(
+        id: 'ended-live',
+        kind: EventKind.huddleEnded,
+        createdAt: 30,
+      ),
+    );
+    await _pumpEventQueue();
+
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['started', 'ended-history', 'ended-live'],
+    );
+  });
 
   test('still loads history when live subscription fails', () async {
     final relaySession = _RecordingRelaySessionNotifier(failSubscribe: true);
@@ -572,6 +624,106 @@ void main() {
     },
   );
 
+  test(
+    'a live reply reaches the store so its parent badge can count it',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      relaySession.emit(
+        _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      // The reply is retained as the local half of the summary merge. It is
+      // filtered out of the main timeline by `buildMainTimelineEntries`, which
+      // owns reply visibility.
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['root', 'reply'],
+      );
+      expect(
+        buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: container
+              .read(channelMessagesProvider(_channelId).notifier)
+              .threadSummaries,
+        ).map((entry) => entry.message.id),
+        ['root'],
+      );
+    },
+  );
+
+  test('a reply newer than the relay recount raises the badge', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'root', createdAt: 10), _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    relaySession.emit(
+      _event(
+        id: 'reply-1',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    );
+    relaySession.emit(_summary(rootId: 'root', replyCount: 1, createdAt: 20));
+    // A second reply lands, and its recount is lost or still in flight.
+    relaySession.emit(
+      _event(
+        id: 'reply-2',
+        createdAt: 21,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    );
+    await _pumpEventQueue();
+
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(notifier.threadSummaries['root']?.replyCount, 1);
+    final entries = buildMainTimelineEntries(
+      formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ),
+      relaySummaries: notifier.threadSummaries,
+    );
+    expect(entries.single.message.id, 'root');
+    expect(entries.single.summary!.replyCount, 2);
+    expect(entries.single.summary!.lastReplyAt, 21);
+  });
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -635,6 +787,26 @@ NostrEvent _event({
       ...extraTags,
     ],
     content: id,
+    sig: 'sig',
+  );
+}
+
+NostrEvent _huddleEvent({
+  required String id,
+  required int kind,
+  required int createdAt,
+}) {
+  return NostrEvent(
+    id: id,
+    pubkey: 'alice',
+    createdAt: createdAt,
+    kind: kind,
+    tags: const [
+      ['h', _channelId],
+    ],
+    content: jsonEncode({
+      'ephemeral_channel_id': '22222222-2222-4222-8222-222222222222',
+    }),
     sig: 'sig',
   );
 }

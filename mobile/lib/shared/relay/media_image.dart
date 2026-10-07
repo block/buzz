@@ -177,6 +177,7 @@ class MediaImage extends ConsumerWidget {
   final double? height;
   final String? semanticLabel;
   final ImageErrorWidgetBuilder? errorBuilder;
+  final ImageFrameBuilder? frameBuilder;
   final FilterQuality filterQuality;
   final double? decodeWidth;
   final bool boundDecodeToLayout;
@@ -189,6 +190,7 @@ class MediaImage extends ConsumerWidget {
     this.height,
     this.semanticLabel,
     this.errorBuilder,
+    this.frameBuilder,
     this.filterQuality = FilterQuality.medium,
     this.decodeWidth,
     this.boundDecodeToLayout = true,
@@ -231,6 +233,7 @@ class MediaImage extends ConsumerWidget {
       height: height,
       semanticLabel: semanticLabel,
       errorBuilder: errorBuilder,
+      frameBuilder: frameBuilder,
       filterQuality: filterQuality,
       gaplessPlayback: true,
     );

@@ -5,6 +5,7 @@ import {
   Bot,
   FileText,
   HatGlasses,
+  LineSquiggle,
   Pencil,
   Play,
   UploadCloud,
@@ -36,6 +37,30 @@ import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerImageEditor } from "./ComposerImageEditor";
 
+/**
+ * Reveal-on-interaction for the composer's media action buttons.
+ *
+ * These stay invisible until the thumbnail is hovered, but `display: none`
+ * cannot hold focus, which would leave keyboard-only users unable to reach
+ * them at all. Hiding with `opacity-0` instead keeps them in the tab order,
+ * and `pointer-events-none` until hover/focus means a mouse behaves exactly as
+ * it did before — an invisible overlay never swallows a click. Keyboard focus
+ * and Enter are unaffected by `pointer-events`.
+ */
+const COMPOSER_MEDIA_REVEAL_CLASS =
+  "pointer-events-none opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100";
+
+/** Corner "remove attachment" badge on a composer thumbnail. */
+const COMPOSER_MEDIA_REMOVE_CLASS = cn(
+  "absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background",
+  COMPOSER_MEDIA_REVEAL_CLASS,
+);
+
+const COMPOSER_MEDIA_HOVER_ACTION_CLASS = cn(
+  "absolute inset-0 z-[1] flex items-center justify-center rounded-2xl bg-black/35 text-white backdrop-blur-[1px] hover:bg-black/45",
+  COMPOSER_MEDIA_REVEAL_CLASS,
+);
+
 /** Dashed-border overlay shown when a file is dragged over the composer form. */
 export function DropZoneOverlay({ className }: { className?: string }) {
   return (
@@ -61,6 +86,12 @@ type ComposerAttachmentsProps = {
   attachments: ImetaMedia[];
   isUploading?: boolean;
   onCancelUpload?: (previewId: number) => void;
+  /** Remove a local attachment that has not started uploading yet. */
+  onRemoveQueued?: (previewId: number) => void;
+  /** Toggle spoiler state for a queued video before it receives a URL. */
+  onToggleQueuedSpoiler?: (previewId: number) => void;
+  /** Local previews that are queued for upload when the message is sent. */
+  queuedPreviews?: UploadingAttachmentPreview[];
   uploadingCount?: number;
   uploadingPreviews?: UploadingAttachmentPreview[];
   /** Upload annotated bytes as a replacement for the attachment at `url`. */
@@ -287,9 +318,13 @@ const MediaAttachmentItem = React.forwardRef<
   const handleRevert = React.useCallback(() => {
     onRevert?.(attachment.url);
   }, [attachment.url, onRevert]);
+  const handleOpenLightbox = React.useCallback(() => {
+    setOpen(true);
+  }, []);
 
   return (
     <motion.div
+      data-testid="composer-media-attachment"
       ref={ref}
       layout
       initial={false}
@@ -435,12 +470,6 @@ const MediaAttachmentItem = React.forwardRef<
                           className={cn(
                             LIGHTBOX_BUTTON_CLASS,
                             "h-auto min-w-0",
-                            // Active state driven by component state, not
-                            // Radix's data-state: the TooltipTrigger clobbers
-                            // the Toggle's data-state attribute. Swap the
-                            // circular pill for the shared button radius with
-                            // a visible ring so a spoilered attachment reads
-                            // as "selected" on the dark lightbox backdrop.
                             isSpoilered &&
                               "rounded-lg bg-white/25 text-white ring-2 ring-white",
                           )}
@@ -486,15 +515,51 @@ const MediaAttachmentItem = React.forwardRef<
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <button
+              aria-label="Remove attachment"
               type="button"
               onClick={() => onRemove(attachment.url)}
-              className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+              className={COMPOSER_MEDIA_REMOVE_CLASS}
             >
               <X className="h-2.5 w-2.5" />
             </button>
           </TooltipTrigger>
           <TooltipContent>Remove attachment</TooltipContent>
         </Tooltip>
+        {canEdit ? (
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <button
+                className={COMPOSER_MEDIA_HOVER_ACTION_CLASS}
+                data-testid="composer-attachment-annotate"
+                onClick={handleOpenLightbox}
+                type="button"
+              >
+                <LineSquiggle className="h-5 w-5" />
+                <span className="sr-only">Draw on image</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Draw on image</TooltipContent>
+          </Tooltip>
+        ) : null}
+        {isVideo && onToggleSpoiler ? (
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <button
+                aria-label={isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+                aria-pressed={isSpoilered}
+                className={COMPOSER_MEDIA_HOVER_ACTION_CLASS}
+                data-testid="composer-video-spoiler"
+                onClick={() => onToggleSpoiler(attachment.url)}
+                type="button"
+              >
+                <HatGlasses className="h-5 w-5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
       </div>
     </motion.div>
   );
@@ -511,6 +576,9 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   uploadingCount = 0,
   uploadingPreviews = [],
   onCancelUpload,
+  onRemoveQueued,
+  onToggleQueuedSpoiler,
+  queuedPreviews = [],
   onEditSave,
   onRemove,
   onRevert,
@@ -518,7 +586,8 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   onToggleSpoiler,
   spoileredUrls,
 }: ComposerAttachmentsProps) {
-  if (attachments.length === 0 && !isUploading) return null;
+  if (attachments.length === 0 && queuedPreviews.length === 0 && !isUploading)
+    return null;
 
   const uploadPlaceholders: UploadingAttachmentPreview[] =
     uploadingPreviews.length > 0
@@ -579,9 +648,10 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <button
+                        aria-label="Remove attachment"
                         type="button"
                         onClick={() => onRemove(attachment.url)}
-                        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
                       >
                         <X className="h-2.5 w-2.5" />
                       </button>
@@ -607,6 +677,93 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 onToggleSpoiler={onToggleSpoiler}
                 originalUrl={originalUrl}
               />
+            );
+          })}
+          {queuedPreviews.map((preview) => {
+            const isVideo = preview.type?.startsWith("video/") ?? false;
+            const isMedia = preview.type?.startsWith("image/") || isVideo;
+            return (
+              <motion.div
+                animate={{ opacity: 1, scale: 1 }}
+                className="group relative"
+                data-testid="composer-queued-media-attachment"
+                exit={{ opacity: 0, scale: 0.8 }}
+                initial={{ opacity: 0, scale: 0.8 }}
+                key={`queued-attachment-${preview.id}`}
+                layout
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+              >
+                {isMedia ? (
+                  <div
+                    className="relative h-[55px] max-w-[55px]"
+                    style={composerMediaStyle()}
+                  >
+                    <div className="h-full w-full overflow-hidden rounded-2xl border border-border/70 bg-muted">
+                      {preview.posterUrl ? (
+                        <img
+                          alt={preview.filename ?? "Queued attachment"}
+                          className="h-full w-full object-cover"
+                          src={preview.posterUrl}
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                          <Play className="size-5" />
+                        </div>
+                      )}
+                    </div>
+                    {preview.spoilered ? (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]">
+                        <HatGlasses className="h-4 w-4" />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="flex h-5 max-w-40 items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate text-2xs text-muted-foreground">
+                      {preview.filename ?? "Attachment"}
+                    </span>
+                  </div>
+                )}
+                {onRemoveQueued ? (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label="Remove attachment"
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
+                        onClick={() => onRemoveQueued(preview.id)}
+                        type="button"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove attachment</TooltipContent>
+                  </Tooltip>
+                ) : null}
+                {isVideo && onToggleQueuedSpoiler ? (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label={
+                          preview.spoilered
+                            ? "Remove spoiler"
+                            : "Mark as spoiler"
+                        }
+                        aria-pressed={preview.spoilered}
+                        className={COMPOSER_MEDIA_HOVER_ACTION_CLASS}
+                        data-testid="composer-queued-video-spoiler"
+                        onClick={() => onToggleQueuedSpoiler(preview.id)}
+                        type="button"
+                      >
+                        <HatGlasses className="h-5 w-5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {preview.spoilered ? "Remove spoiler" : "Mark as spoiler"}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : null}
+              </motion.div>
             );
           })}
           {isUploading &&

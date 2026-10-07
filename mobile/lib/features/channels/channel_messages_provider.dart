@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
-import 'channel_management_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
@@ -222,11 +221,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _lastKnownMessages = merged;
       state = AsyncData(merged);
     }
-
-    if (event.kind == EventKind.systemMessage &&
-        _isMembershipEvent(event.content)) {
-      ref.invalidate(channelMembersProvider(channelId));
-    }
   }
 
   void _handleWindowLiveEvent(NostrEvent event) {
@@ -260,7 +254,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           ),
         );
       }
-      if (!_isBroadcastReply(event)) return false;
+      // Replies are kept in the store rather than dropped here, matching
+      // desktop: the main timeline filters them out at render
+      // (`buildMainTimelineEntries`), and their parent's "N replies" row needs
+      // them as the local half of the summary merge when the relay's
+      // best-effort recount is delayed, lost, or older than this reply.
     }
     // Thread summaries are neither a timeline row nor an aux event, but they are
     // how the root's "N replies" row learns a reply landed — a reply itself
@@ -286,12 +284,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ref
         .read(pendingLocalMessagesProvider(channelId).notifier)
         .confirm(eventIds);
-  }
-
-  static bool _isMembershipEvent(String content) {
-    return content.contains('member_joined') ||
-        content.contains('member_left') ||
-        content.contains('member_removed');
   }
 
   /// Adds a just-signed outgoing message before the relay acknowledges it.
@@ -505,12 +497,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     });
     return true;
   }
-}
-
-bool _isBroadcastReply(NostrEvent event) {
-  return event.tags.any(
-    (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
-  );
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;

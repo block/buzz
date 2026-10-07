@@ -12,8 +12,8 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
-/** Hover the trigger, then slide the cursor onto the tooltip popup and
- * assert the tooltip dismisses instead of persisting. */
+/** Hover the trigger through the shared dwell, then slide the cursor onto the
+ * tooltip popup and assert the tooltip dismisses instead of persisting. */
 async function expectTooltipDismissesOnLeave(
   page: import("@playwright/test").Page,
   trigger: import("@playwright/test").Locator,
@@ -22,7 +22,9 @@ async function expectTooltipDismissesOnLeave(
   await trigger.hover();
 
   const tip = page.getByRole("tooltip", { name: tooltipName });
-  await expect(tip).toBeVisible();
+  await page.waitForTimeout(400);
+  await expect(tip).toHaveCount(0);
+  await expect(tip).toBeVisible({ timeout: 1_000 });
 
   // Slide off the trigger onto the tooltip popup.
   const box = await tip.boundingBox();
@@ -48,6 +50,26 @@ test("composer toolbar tooltip dismisses when cursor leaves the trigger", async 
   );
 });
 
+test("adjacent composer tooltips each require a fresh dwell", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-insert-mention").hover();
+  await page.waitForTimeout(400);
+  const mentionTooltip = page.getByRole("tooltip", { name: "Mention someone" });
+  await expect(mentionTooltip).toHaveCount(0);
+  await expect(mentionTooltip).toBeVisible({ timeout: 1_000 });
+
+  await page.getByRole("button", { name: "Attach file" }).hover();
+  await page.waitForTimeout(400);
+  const attachTooltip = page.getByRole("tooltip", { name: "Attach file" });
+  await expect(attachTooltip).toHaveCount(0);
+  await expect(attachTooltip).toBeVisible({ timeout: 1_000 });
+});
+
 test("formatting sub-toolbar tooltip dismisses when cursor leaves the trigger", async ({
   page,
 }) => {
@@ -60,6 +82,9 @@ test("formatting sub-toolbar tooltip dismisses when cursor leaves the trigger", 
 
   const bold = page.getByRole("button", { name: "Bold" });
   await expect(bold).toBeVisible();
+  // The formatting strip animates into place; wait for its delayed entrance to
+  // settle so the pointer remains over the trigger for the full dwell.
+  await page.waitForTimeout(300);
 
   // Tooltip text is "<label> (<shortcut>)" for items that carry a shortcut.
   await expectTooltipDismissesOnLeave(page, bold, "Bold (⌘B)");

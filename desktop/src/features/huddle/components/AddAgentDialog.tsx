@@ -1,20 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Bot } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 import * as React from "react";
 
-import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { Dialog } from "@/shared/ui/dialog";
+import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
+import type { ManagedAgentBackend } from "@/shared/api/types";
 
 type ManagedAgentSummary = {
   pubkey: string;
   name: string;
   status: string;
+  avatar_url: string | null;
+  backend: ManagedAgentBackend;
 };
 
 type AgentAddResult = {
@@ -24,12 +22,14 @@ type AgentAddResult = {
 };
 
 type AddAgentDialogProps = {
+  open: boolean;
   onClose: () => void;
   onAdd: (pubkey: string) => Promise<AgentAddResult>;
   currentAgentPubkeys: string[];
 };
 
 export function AddAgentDialog({
+  open,
   onClose,
   onAdd,
   currentAgentPubkeys,
@@ -41,27 +41,68 @@ export function AddAgentDialog({
   const [warning, setWarning] = React.useState<string | null>(null);
 
   React.useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setAgents([]);
+    setLoading(true);
+    setAdding(null);
+    setError(null);
+    setWarning(null);
+
     invoke<ManagedAgentSummary[]>("list_managed_agents")
-      .then(setAgents)
+      .then((nextAgents) => {
+        if (!cancelled) setAgents(nextAgents);
+      })
       .catch((e: unknown) => {
+        if (cancelled) return;
         console.error("Failed to load agents:", e);
         setError("Could not load agents.");
       })
-      .finally(() => setLoading(false));
-  }, []);
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
 
-  // Only show running agents that aren't already in the huddle.
-  const runningAgents = agents.filter(
-    (a) => a.status === "running" && !currentAgentPubkeys.includes(a.pubkey),
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const availableAgents = agents.filter(
+    (agent) =>
+      !currentAgentPubkeys.some(
+        (pubkey) => pubkey.toLowerCase() === agent.pubkey.toLowerCase(),
+      ),
   );
 
-  async function handleAdd(pubkey: string) {
+  async function handleAdd(agent: ManagedAgentSummary) {
     if (adding) return;
-    setAdding(pubkey);
+    setAdding(agent.pubkey);
     setError(null);
     setWarning(null);
+    let startedForAdd = false;
     try {
-      const result = await onAdd(pubkey);
+      const isLocal = agent.backend.type === "local";
+      const needsStart = isLocal
+        ? agent.status !== "running"
+        : agent.status !== "deployed";
+      if (needsStart && isLocal) {
+        await invoke("start_managed_agent", { pubkey: agent.pubkey });
+        startedForAdd = true;
+      }
+      const result = await onAdd(agent.pubkey);
+      if (needsStart && !isLocal) {
+        try {
+          await invoke("start_managed_agent", { pubkey: agent.pubkey });
+        } catch (startError: unknown) {
+          const msg =
+            startError instanceof Error
+              ? startError.message
+              : String(startError);
+          setWarning(`Added to huddle, but could not start agent: ${msg}`);
+          console.error("Failed to start agent after huddle add:", startError);
+          return;
+        }
+      }
       if (result.parent_error) {
         // Agent was added to the ephemeral channel but parent channel add failed.
         // Show as a warning — don't close the dialog so the user can see it.
@@ -72,6 +113,16 @@ export function AddAgentDialog({
         onClose();
       }
     } catch (e: unknown) {
+      if (startedForAdd) {
+        try {
+          await invoke("stop_managed_agent", { pubkey: agent.pubkey });
+        } catch (rollbackError: unknown) {
+          console.error(
+            "Failed to stop agent after huddle add failed:",
+            rollbackError,
+          );
+        }
+      }
       const msg = e instanceof Error ? e.message : String(e);
       setError(`Failed to add agent: ${msg}`);
       console.error("Failed to add agent to huddle:", e);
@@ -85,76 +136,68 @@ export function AddAgentDialog({
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
-      open
+      open={open}
     >
-      <DialogContent className="flex max-h-[60vh] max-w-sm flex-col gap-0 p-0">
-        <DialogHeader className="border-b px-6 py-4">
-          <DialogTitle>Add Agent to Huddle</DialogTitle>
-          <DialogDescription>
-            Select a running agent to join the huddle.
-          </DialogDescription>
-        </DialogHeader>
+      <ChooserDialogContent
+        className="max-w-xl"
+        data-testid="add-huddle-agent-dialog"
+        headerSubtitle="Choose an agent to join this huddle."
+        scrollAreaClassName="space-y-5"
+        title="Add agents"
+      >
+        {error ? (
+          <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
 
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          {error && (
-            <p className="mb-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </p>
-          )}
+        {warning ? (
+          <p className="rounded-lg border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+            {warning}
+          </p>
+        ) : null}
 
-          {warning && (
-            <div className="mb-3 flex items-start justify-between gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
-              <span>{warning}</span>
-              <button
-                className="shrink-0 font-medium underline-offset-2 hover:underline"
-                onClick={onClose}
-                type="button"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-
-          {loading ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
-              Loading agents…
-            </p>
-          ) : runningAgents.length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
-              {agents.filter((a) => a.status === "running").length > 0
-                ? "All running agents are already in this huddle."
-                : "No running agents found."}
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1">
-              {runningAgents.map((agent) => (
+        {loading ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            Loading agents…
+          </p>
+        ) : availableAgents.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            All available agents are already in this huddle.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {availableAgents.map((agent) => {
+              const isAdding = adding === agent.pubkey;
+              return (
                 <li key={agent.pubkey}>
                   <button
-                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
-                    disabled={adding === agent.pubkey}
-                    onClick={() => void handleAdd(agent.pubkey)}
+                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                    disabled={adding !== null}
+                    onClick={() => void handleAdd(agent)}
                     type="button"
                   >
-                    <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <span className="flex-1 truncate font-medium">
+                    <ProfileAvatar
+                      avatarUrl={agent.avatar_url}
+                      className="h-9 w-9 shrink-0 text-xs"
+                      label={agent.name}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
                       {agent.name}
                     </span>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {agent.status}
-                    </span>
+                    {isAdding ? (
+                      <LoaderCircle
+                        aria-label={`Adding ${agent.name}`}
+                        className="h-4 w-4 shrink-0 animate-spin text-muted-foreground"
+                      />
+                    ) : null}
                   </button>
                 </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="border-t px-6 py-4">
-          <Button className="w-full" onClick={onClose} variant="outline">
-            Cancel
-          </Button>
-        </div>
-      </DialogContent>
+              );
+            })}
+          </ul>
+        )}
+      </ChooserDialogContent>
     </Dialog>
   );
 }

@@ -129,10 +129,12 @@ const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
  * header's breadcrumb, where the eye already is — the sliver carries no label of
  * its own.
  *
- * `z-41` puts the overlay above the channel timeline, its `z-40` composer
- * overlay and the `z-30` shared header backdrop, while staying below the global
- * `z-45` top chrome. Setting z-index on the positioned container also gives the
- * drawer its own stacking context, so the panel chrome inside it is isolated.
+ * `z-41` places the drawer above the channel section (whose inner `isolate`
+ * wrapper traps the timeline's z-50 pill, z-40 composer overlay, and z-50 drop
+ * overlay) and the `z-30` shared header backdrop, while staying below the
+ * global `z-45` top chrome. Setting z-index on the positioned container also
+ * gives the drawer its own stacking context, so the panel chrome inside is
+ * isolated.
  */
 export function FocusThreadDrawer({
   channelName,

@@ -52,6 +52,8 @@ pub(crate) struct KnownAcpRuntime {
     pub max_tokens_env_var: Option<&'static str>,
     /// Env var for normalizing `context_limit`. `None` when not applicable.
     pub context_limit_env_var: Option<&'static str>,
+    /// Env var for normalizing `max_rounds`. `None` when not applicable.
+    pub max_rounds_env_var: Option<&'static str>,
     /// Normalized field keys that must be set for this harness to function.
     /// Used by the config bridge to mark fields as required in the UI.
     /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").

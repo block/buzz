@@ -159,6 +159,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         relayUrl: invite.relayUrl,
         pubkey: keys.public,
         nsec: keys.nsec,
+        sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );
       await ref
           .read(authProvider.notifier)

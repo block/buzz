@@ -5,7 +5,7 @@ import {
   getProjectRepoDiff,
 } from "@/shared/api/projectGit";
 import type { ProjectRepoDiff } from "@/shared/api/types";
-import type { Project } from "./hooks";
+import type { Repository as Project } from "./hooks";
 
 async function fetchProjectCommitDiff(
   project: Project,

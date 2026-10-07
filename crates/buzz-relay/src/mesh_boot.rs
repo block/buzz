@@ -411,6 +411,7 @@ fn advertise_addrs(endpoint: &MeshEndpoint) -> Vec<String> {
 pub async fn boot_mesh(
     config: &Config,
     redis_pool: deadpool_redis::Pool,
+    db: buzz_db::Db,
     relay_keypair: &nostr::Keys,
     shutting_down: Arc<AtomicBool>,
 ) -> anyhow::Result<Option<MeshHandle>> {
@@ -508,7 +509,7 @@ pub async fn boot_mesh(
     transport.set_inbound(Box::new(dispatcher.clone()));
 
     Ok(Some(MeshHandle {
-        directory: SessionDirectory::new(redis_pool),
+        directory: SessionDirectory::with_db(redis_pool, db),
         transport,
         membership: membership_arc,
         local_runtime_id: runtime_id,
@@ -535,7 +536,13 @@ mod tests {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap();
         let keys = nostr::Keys::generate();
-        let handle = boot_mesh(&config, pool, &keys, Arc::new(AtomicBool::new(false)))
+        let db = buzz_db::Db::from_pool(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                .expect("lazy database pool"),
+        );
+        let handle = boot_mesh(&config, pool, db, &keys, Arc::new(AtomicBool::new(false)))
             .await
             .expect("off path is never an error");
         assert!(handle.is_none());

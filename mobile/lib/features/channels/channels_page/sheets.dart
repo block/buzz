@@ -91,14 +91,6 @@ class _CreateChannelSheet extends HookConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Create a new $kindLabel',
-                style: context.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.3,
-                ),
-              ),
-              const SizedBox(height: Grid.sm),
               _CreateChannelFieldLabel(label: 'Name'),
               const SizedBox(height: Grid.xxs),
               _CreateChannelFieldShell(
@@ -537,14 +529,6 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'New message',
-                style: context.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.3,
-                ),
-              ),
-              const SizedBox(height: Grid.xs),
               GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onTap: isSubmitting.value ? null : queryFocusNode.requestFocus,

@@ -56,7 +56,7 @@ function resolveSourcePath(basePath) {
 const stubModules = new Map([
   [
     "emoji-mart",
-    "export const init = () => {};\n" +
+    "export const init = (...args) => globalThis.__BUZZ_TEST_EMOJI_MART_INIT__?.(...args);\n" +
       "export const SearchIndex = { search: async () => [] };\n" +
       "export default {};\n",
   ],
@@ -87,6 +87,10 @@ export function resolve(specifier, context, nextResolve) {
   }
   if (specifier === "@features-manifest") {
     const resolved = path.join(repoRoot, "preview-features.json");
+    return nextResolve(toFileSpecifier(resolved), context);
+  }
+  if (specifier === "@model-capabilities-manifest") {
+    const resolved = path.join(repoRoot, "scripts", "model-capabilities.json");
     return nextResolve(toFileSpecifier(resolved), context);
   }
   if (specifier.startsWith("@/")) {

@@ -10,7 +10,7 @@ This NIP defines `kind:30175` persona events — public, addressable definitions
 
 ## Kind
 
-This NIP claims `kind:30175` for agent persona definitions. It is in the NIP-33 parameterized replaceable range (30000–39999) per [NIP-01](01.md): addressed by `(pubkey, kind, d_tag)`, with only the latest event per address retained.
+This NIP claims `kind:30175` for agent persona definitions and `kind:30178` for the shareable team-catalog projection (see "Team catalog projection: kind:30178"). Both are in the NIP-33 parameterized replaceable range (30000–39999) per [NIP-01](01.md): addressed by `(pubkey, kind, d_tag)`, with only the latest event per address retained.
 
 A dedicated kind (rather than encoding personas as NIP-78 `kind:30078` "Application-specific Data") is taken for the same reasons as [NIP-AE](NIP-AE.md): (1) it isolates this NIP's address space from any other application using the same pubkey — persona slugs cannot collide with another app's `d` tag choices; (2) it lets observers, indexers, and unknown-kind viewers identify persona events from the kind alone, without parsing content as a namespace demultiplexer.
 
@@ -162,6 +162,8 @@ Owners MAY publish [NIP-09](09.md) deletion requests targeting persona events. A
 
 A subsequent write with a later timestamp resurrects the slug under NIP-33 replacement semantics.
 
+The same applies to `kind:30178`: a deletion request SHOULD carry `["k", "30178"]` and the `a`-tag identifier `30178:<pubkey_o>:<team-id>`. Unsharing is distinct from deletion — it is a newer valid head at the same coordinate published *without* the `shared` tag, which keeps the projection readable to its author while retracting it from foreign readers.
+
 ## Relationships to other NIPs
 
 ### NIP-AE (Agent Engrams)
@@ -216,6 +218,29 @@ surface per-event errors.
 
 Agents spawned from a persona carry [NIP-OA](NIP-OA.md) owner attestation — an `auth` tag proving that `pubkey_o` authorized the agent's key. The persona event itself does not contain attestation; it is the *definition* from which attestation is issued at spawn time.
 
+## Team catalog projection: kind:30178
+
+Kind `30178` is the **shareable projection of a team**: owner-authored, parameterized replaceable, addressed by `(pubkey_o, 30178, d)` where `d` is the team's stable local id. Its `content` is a versioned JSON body carrying sanitized team fields plus ordered, *embedded* member definition projections. The content schema is defined by the client that publishes it; this section specifies only the envelope and the relay's contract.
+
+```jsonc
+{
+  "kind": 30178,
+  "pubkey": "<pubkey_o>",
+  "created_at": <unix_seconds>,
+  "tags": [
+    ["d", "<team-id>"],
+    ["shared", "true"]     // optional; presence opts the projection into community reads
+  ],
+  "content": "<json_body>"
+}
+```
+
+**Why a separate kind rather than a `shared` tag on the team event (kind:30176).** A team's members are `kind:30175` definitions, which are author-only unless individually shared — so a foreign reader of a shared team could never hydrate its members. Kind `30178` embeds the member projections instead of referencing them: the share is atomic, it covers built-in members that have no `30175` head at all, it is immune to local-id/`d`-tag divergence, and an unshared `30175` stays private. Kind `30176`'s wire body is untouched, so device sync keeps its contract.
+
+**The `d` tag is a team id, not a persona slug.** It is either a UUID or a built-in identifier such as `builtin-team:welcome`. The colon is illegal under the persona slug grammar, and rewriting ids to fit would break NIP-33 addressing against the team's own `kind:30176` head — so the relay applies a laxer rule (see below) to `30178` than to `30175`.
+
+**Content carries only sanitized fields.** No environment variables, no `respond_to` allowlist pubkeys, no source or local ids, no filesystem paths, no secrets. Sharing a team makes the team's and every member's instructions community-readable plaintext.
+
 ## Relay behavior
 
 ### Ingest validation
@@ -226,9 +251,19 @@ Agents spawned from a persona carry [NIP-OA](NIP-OA.md) owner attestation — an
 - The relay MUST enforce that the `d` tag is non-empty (standard NIP-33 requirement for parameterized replaceable events).
 - The relay MUST enforce shared-tag shape: if a `shared` tag is present, it MUST consist of **exactly two elements** — `["shared", "true"]`. Extra elements (e.g. `["shared","true","extra"]`), wrong values (`["shared","false"]`), missing values (`["shared"]`), or duplicate `shared` tags are all rejected with `invalid:`. The two-element exact-shape constraint is required so that the relay's SQL visibility clause (`tags @> '[["shared","true"]]'`) never matches a stored malformed tag via JSONB containment supersets.
 
+### Ingest validation: kind:30178
+
+Kind `30178` is stored globally and its content is unvalidated, exactly as for `30175`. The envelope rules differ in one respect — the `d` grammar:
+
+- The relay MUST enforce the same `shared`-tag exact shape as `30175`, for the same reason: the read gate and the SQL containment clause must agree on every stored event.
+- The relay MUST enforce **exactly one** `d` tag whose value is non-empty, at most 64 characters, and free of Unicode control characters and whitespace. Tags are counted by their first element, so a valueless `["d"]` counts toward the total and fails the value check on its own — otherwise `["d"]` alongside `["d","<team-id>"]` would pass, and a consumer that reads `["d"]` as an empty-valued first `d` tag would address the event at `""` while this relay addresses it at `<team-id>`. Without the non-empty check, generic NIP-33 storage maps a missing or empty `d` to the empty coordinate, collapsing every team into the single `(pubkey_o, 30178, "")` slot — last-write-wins data loss. The character bound keeps the value usable as a NIP-33 coordinate and as a log field.
+- The relay MUST NOT apply the persona slug grammar to a `30178` `d` tag; team ids legitimately contain characters (notably `:`) that the slug grammar forbids.
+
 ### Access control: author-only-unless-shared
 
 Kind `30175` uses **shared-tag-gated read semantics** to protect system prompts and `respond_to_allowlist` from being visible to all community members as a side-effect of device sync.
+
+The gate is kind-generic: the relay applies it to every kind in `SHARED_GATED_KINDS` (`buzz-core/src/kind.rs`), currently `30175` and the `30178` team-catalog projection described below. The rules and enforcement surfaces are identical for each member kind.
 
 **Rules:**
 
@@ -239,13 +274,13 @@ Kind `30175` uses **shared-tag-gated read semantics** to protect system prompts 
 
 These rules are enforced at the following relay read surfaces (content and event existence are withheld on all of them):
 
-- **REQ historical delivery** — foreign requests silently omit unshared persona events, even in mixed-kind filters (`{kinds:[30175,9]}`). The visibility check is applied **before `ORDER BY … LIMIT`** at the SQL level (`persona_reader` field in `EventQuery`), so a page of newer private personas cannot starve an older shared persona off the candidate set — the catalog's primary all-author query pattern is correctly served.
+- **REQ historical delivery** — foreign requests silently omit unshared persona events, even in mixed-kind filters (`{kinds:[30175,9]}`). The visibility check is applied **before `ORDER BY … LIMIT`** at the SQL level (`shared_gated_reader` field in `EventQuery`), so a page of newer private personas cannot starve an older shared persona off the candidate set — the catalog's primary all-author query pattern is correctly served.
 - **NIP-01 `ids` lookup** — knowing an event id does NOT grant access to an unshared persona. The result gate returns nothing.
 - **Live fan-out** — unshared personas are delivered only to the author's connections. Shared personas fan out community-wide.
-- **COUNT** — the fast SQL `count_events()` path is bypassed when the filter can match `kind:30175`. A per-event fallback applies the shared-tag check, preventing existence-leak via COUNT.
-- **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. The SQL-level `persona_reader` clause also applies before `LIMIT`, preventing older shared personas from being starved by newer private ones on paginated catalog queries. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
-- **NIP-98 HTTP bridge `/count`** — `needs_persona_filtering` forces the per-event fallback path for any filter that can match `kind:30175`; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
-- **FTS (NIP-50 search) and `/search`** — kind `30175` is not in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared persona. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
+- **COUNT** — the fast SQL `count_events()` path is bypassed when the filter can match a shared-gated kind. A per-event fallback applies the shared-tag check, preventing existence-leak via COUNT.
+- **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. The SQL-level `shared_gated_reader` clause also applies before `LIMIT`, preventing older shared personas from being starved by newer private ones on paginated catalog queries. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
+- **NIP-98 HTTP bridge `/count`** — `needs_shared_gate_filtering` forces the per-event fallback path for any filter that can match a shared-gated kind; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
+- **FTS (NIP-50 search) and `/search`** — no shared-gated kind is in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared event. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
 
 **Device sync is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events, which are always returned regardless of shared state.
 
@@ -263,6 +298,7 @@ These rules are enforced at the following relay read surfaces (content and event
 - **Slug collision across pubkeys.** Two different owners can publish personas with the same slug. Clients MUST always scope queries by author pubkey, not just slug.
 - **Metadata exposure.** The `(pubkey, kind:30175, slug)` triple reveals persona existence. Event timestamps reveal edit history.
 - **No owner write authority over agents.** Persona events define *what* an agent should be; they do not grant runtime control over a running agent. The agent consumes the persona at spawn time. Updates to the persona event do not automatically propagate to running agents.
+- **Sharing a team shares every member's instructions.** A `kind:30178` head carrying `["shared","true"]` exposes the team's own fields *and* the embedded projection of every member — including members whose own `kind:30175` heads are unshared and therefore still private. Clients MUST make this explicit at the point of sharing; the relay cannot infer it.
 
 ## Reference test vectors
 

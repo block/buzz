@@ -231,6 +231,19 @@ async function fetchProxyPort(): Promise<number | null> {
   return cachedPort;
 }
 
+/**
+ * Ensure the relay-origin lookup is active after a community cache reset.
+ *
+ * Consumers that classify relay-owned URLs may render before any media URL
+ * asks for the proxy port. Starting the shared fetch here keeps host
+ * classification independent from incidental image/video rendering.
+ */
+export function ensureRelayOriginFetch(): void {
+  if (!portPromise && typeof window !== "undefined") {
+    portPromise = fetchProxyPort();
+  }
+}
+
 /** Eagerly fetch the port at module load so it's ready by first render. */
 // The try/catch inside fetchProxyPort handles non-Tauri environments gracefully
 // (invoke will throw, we retry until timeout, then give up — no side effects).
@@ -319,7 +332,7 @@ export function rewriteRelayUrl(url: string): string {
   }
 
   if (!portPromise && typeof window !== "undefined") {
-    portPromise = fetchProxyPort();
+    ensureRelayOriginFetch();
   }
 
   return `buzz-media://localhost/media/${m[1]}`;

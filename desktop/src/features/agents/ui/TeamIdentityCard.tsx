@@ -203,7 +203,7 @@ function TeamAvatarItem({
 
 function getTeamFooterModelLabel(personas: AgentPersona[]) {
   const modelLabels = personas
-    .map((persona) => formatAgentModelLabel(persona.model))
+    .map((persona) => formatAgentModelLabel(persona.model, persona.provider))
     .filter((model): model is string => Boolean(model));
 
   if (modelLabels.length === 0) return "Auto";

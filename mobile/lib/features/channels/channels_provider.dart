@@ -9,9 +9,11 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
-import 'channel_management_provider.dart' show channelDetailsProvider;
+import 'channel_management_provider.dart'
+    show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
-import 'read_state/read_state_provider.dart';
+import 'huddle_channel_filter.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -35,8 +37,12 @@ const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   static const _backstopInterval = Duration(seconds: 60);
 
-  final List<void Function()> _unsubscribers = [];
+  final Map<String, void Function()> _unsubscribersByChannel = {};
+  Future<void> _liveSubscriptionQueue = Future.value();
+  List<Channel> _desiredLiveChannels = const [];
+  Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
+  String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
@@ -45,6 +51,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _authoredRootIds = {};
   String? _threadInterestPubkey;
   bool _hasLoaded = false;
+  String? _memberSnapshotRelayBaseUrl;
+  String? _memberSnapshotPubkey;
+  Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
+
+  /// The member snapshot already returned while loading the channel list.
+  ///
+  /// Mention autocomplete can use this synchronously while its independent
+  /// channel-member refresh is still in flight.
+  List<ChannelMember> cachedMembersForChannel(String channelId) =>
+      _memberSnapshotsByChannelId[channelId] ?? const [];
 
   Map<String, int> get latestObservedByChannel =>
       Map.unmodifiable(_latestObservedByChannel);
@@ -58,7 +74,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   @override
   Future<List<Channel>> build() async {
-    ref.watch(relayConfigProvider);
+    final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
+    final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+    if (_memberSnapshotRelayBaseUrl != relayBaseUrl ||
+        _memberSnapshotPubkey != pubkey) {
+      _memberSnapshotRelayBaseUrl = relayBaseUrl;
+      _memberSnapshotPubkey = pubkey;
+      _memberSnapshotsByChannelId = const {};
+    }
     final connected = Completer<void>();
     final sessionState = ref.read(relaySessionProvider);
     final waitingForInitialConnection =
@@ -147,7 +170,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         .whereType<String>()
         .toSet()
         .toList();
-    if (channelIds.isEmpty) return const [];
+    _cacheMemberSnapshots(memberships, replaceAll: true);
+    if (channelIds.isEmpty) {
+      if (subscribeLive) await _subscribeLive(const []);
+      return const [];
+    }
 
     // Step 2: pull channel metadata in one batched filter.
     final metas = await session.fetchHistory(
@@ -203,6 +230,21 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     final hiddenDmIds = await _fetchHiddenDmIds(session, myPk);
+    // Fetch the authoritative membership snapshots before filtering Huddle
+    // backing channels. The relay-signed kind:39000 metadata identifies the
+    // relay, not the channel creator; the owner role in kind:39002 is the
+    // canonical creator identity used to reject forged Huddle links.
+    final memberEvents = await session.fetchHistory(
+      NostrFilter(
+        kinds: const [39002],
+        tags: {'#d': channelIds},
+        limit: channelIds.length,
+      ),
+    );
+    final huddleBackingIds = huddleBackingChannelIds(
+      await _fetchHuddleStarts(session, channelIds),
+      memberEvents,
+    );
 
     final channels = <Channel>[];
     for (final event in dedupedMetas) {
@@ -212,6 +254,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         displayNames: displayNames,
       );
       if (channel.isDm && hiddenDmIds.contains(channel.id)) continue;
+      if (huddleBackingIds.contains(channel.id) &&
+          channel.isStream &&
+          channel.isPrivate) {
+        continue;
+      }
       // Ephemeral (TTL) channels are surfaced in the list with an
       // `_EphemeralBadge` rendered in `channels_page.dart` — they shouldn't be
       // hidden. Desktop shows them too. Previously dropped here unconditionally,
@@ -219,14 +266,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       channels.add(channel);
     }
 
-    // Batch-fetch member counts via kind:39002 membership events.
-    final memberEvents = await session.fetchHistory(
-      NostrFilter(
-        kinds: const [39002],
-        tags: {'#d': channelIds},
-        limit: channelIds.length,
-      ),
-    );
+    // Use the membership snapshots already fetched above for both Huddle
+    // linkage validation and member-count hydration.
+    if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
     final memberCounts = <String, int>{};
     for (final event in memberEvents) {
       final chId = event.getTagValue('d');
@@ -252,53 +294,34 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // see every channel as having no messages. Skipped on backstop refreshes since
     // live subscriptions keep lastMessageAt current after the initial load.
     if (fetchLastMessage) {
-      final lastMessageResults = await Future.wait(
-        channels.map((channel) async {
-          if (!channel.isMember || channel.isArchived) return null;
-          try {
-            if (channel.isDm) {
-              final events = await session.fetchHistory(
-                NostrFilter(
-                  kinds: EventKind.channelMessageEventKinds,
-                  tags: {
-                    '#h': [channel.id],
-                  },
-                  limit: 1,
-                ),
-              );
-              if (events.isEmpty) return null;
-              return MapEntry(channel.id, events.first.createdAt);
-            }
-            final events = await session.fetchHistory(
-              NostrFilter(
-                kinds: EventKind.channelMessageEventKinds,
-                tags: {
-                  '#h': [channel.id],
-                },
-                limit: 20,
-              ),
-            );
-            for (final event in events) {
-              if (shouldNotifyForEvent(
-                event,
-                myPk,
-                mutedChannelIds: _mutedChannelIds(),
-                channelId: channel.id,
-              )) {
-                return MapEntry(channel.id, event.createdAt);
-              }
-            }
-            return null;
-          } catch (_) {
-            return null;
-          }
-        }),
-      );
-
+      final activeChannels = [
+        for (final channel in channels)
+          if (channel.isMember && !channel.isArchived) channel,
+      ];
+      final channelById = {
+        for (final channel in activeChannels) channel.id: channel,
+      };
+      final events = await _fetchLastMessageEvents(session, activeChannels);
       final lastMessageMap = <String, int>{};
-      for (final entry
-          in lastMessageResults.whereType<MapEntry<String, int>>()) {
-        lastMessageMap[entry.key] = entry.value;
+      final mutedChannelIds = _mutedChannelIds();
+      for (final event in events) {
+        final channelId = event.channelId;
+        if (channelId == null) continue;
+        final channel = channelById[channelId];
+        if (channel == null) continue;
+        if (!channel.isDm &&
+            !shouldNotifyForEvent(
+              event,
+              myPk,
+              mutedChannelIds: mutedChannelIds,
+              channelId: channelId,
+            )) {
+          continue;
+        }
+        final current = lastMessageMap[channelId];
+        if (current == null || event.createdAt > current) {
+          lastMessageMap[channelId] = event.createdAt;
+        }
       }
 
       for (var i = 0; i < channels.length; i++) {
@@ -349,6 +372,104 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     return channels;
   }
 
+  void _cacheMemberSnapshots(
+    Iterable<NostrEvent> events, {
+    bool replaceAll = false,
+  }) {
+    final latestByChannelId = <String, NostrEvent>{};
+    for (final event in events) {
+      final channelId = event.getTagValue('d');
+      if (channelId == null) continue;
+      final current = latestByChannelId[channelId];
+      if (current == null || event.createdAt > current.createdAt) {
+        latestByChannelId[channelId] = event;
+      }
+    }
+
+    final snapshots = replaceAll
+        ? <String, List<ChannelMember>>{}
+        : Map<String, List<ChannelMember>>.of(_memberSnapshotsByChannelId);
+    snapshots.addAll({
+      for (final entry in latestByChannelId.entries)
+        entry.key: List.unmodifiable([
+          for (final member in membersFromEvent(entry.value))
+            ChannelMember(
+              pubkey: member.pubkey,
+              role: member.role,
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(
+                entry.value.createdAt * 1000,
+                isUtc: true,
+              ),
+            ),
+        ]),
+    });
+    _memberSnapshotsByChannelId = Map.unmodifiable(snapshots);
+  }
+
+  /// Fetches each channel's independent latest-message window in one HTTP
+  /// bridge request. The relay preserves NIP-01 per-filter limits while
+  /// executing the filters with bounded concurrency, avoiding an unbounded
+  /// burst of websocket REQs on communities with many channels.
+  Future<List<NostrEvent>> _fetchLastMessageEvents(
+    RelaySessionNotifier session,
+    List<Channel> channels,
+  ) async {
+    if (channels.isEmpty) return const [];
+
+    final filters = [
+      for (final channel in channels)
+        NostrFilter(
+          kinds: EventKind.channelMessageEventKinds,
+          tags: {
+            '#h': [channel.id],
+          },
+          limit: channel.isDm ? 1 : 20,
+        ),
+    ];
+
+    return _fetchChannelHistoryBatch(
+      session,
+      filters,
+      operation: 'latest-message query',
+    );
+  }
+
+  Future<List<NostrEvent>> _fetchChannelHistoryBatch(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters, {
+    required String operation,
+  }) async {
+    if (filters.isEmpty) return const [];
+
+    try {
+      return await session.queryRelay(filters);
+    } catch (error) {
+      debugPrint(
+        '[ChannelsNotifier] batched $operation failed; '
+        'using bounded websocket fallback: $error',
+      );
+    }
+
+    const fallbackConcurrency = 4;
+    final events = <NostrEvent>[];
+    for (var start = 0; start < filters.length; start += fallbackConcurrency) {
+      final end = min(start + fallbackConcurrency, filters.length);
+      final results = await Future.wait(
+        filters.sublist(start, end).map((filter) async {
+          try {
+            return await session.fetchHistory(filter);
+          } catch (_) {
+            return const <NostrEvent>[];
+          }
+        }),
+      );
+      for (final result in results) {
+        events.addAll(result);
+      }
+    }
+    return events;
+  }
+
   Future<Set<String>> _fetchHiddenDmIds(
     RelaySessionNotifier session,
     String myPk,
@@ -368,6 +489,29 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       };
     } catch (_) {
       return const {};
+    }
+  }
+
+  Future<List<NostrEvent>> _fetchHuddleStarts(
+    RelaySessionNotifier session,
+    List<String> parentChannelIds,
+  ) async {
+    if (parentChannelIds.isEmpty) return const [];
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return await session.fetchHistory(
+        NostrFilter(
+          kinds: const [EventKind.huddleStarted],
+          tags: {'#h': parentChannelIds},
+          since: now - const Duration(hours: 2).inSeconds,
+          limit: 500,
+        ),
+      );
+    } catch (error) {
+      debugPrint(
+        '[ChannelsNotifier] Huddle backing-channel query failed: $error',
+      );
+      return const [];
     }
   }
 
@@ -423,50 +567,114 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// Subscribe per-channel to live events (requires `#h` tag for relay
   /// channel-scoped fan-out). Also starts a 60s WS backstop poll to detect
   /// newly created channels we don't yet have subscriptions for.
-  Future<void> _subscribeLive(List<Channel> channels) async {
-    _clearLiveSubscriptions();
-    final subscriptionVersion = _subscriptionVersion;
-    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
-      return;
-    }
-
-    final session = ref.read(relaySessionProvider.notifier);
+  Future<void> _subscribeLive(List<Channel> channels) {
     final channelIds = {
       for (final channel in channels)
         if (channel.isMember && !channel.isArchived) channel.id,
     };
+    final relayBaseUrl = ref.read(relayConfigProvider).baseUrl;
+    _desiredLiveChannels = channels;
+    _desiredLiveChannelIds = channelIds;
+    final subscriptionVersion = ++_subscriptionVersion;
 
-    final subscriptions = await Future.wait(
-      channelIds.map((channelId) async {
-        try {
-          return await session.subscribe(
-            NostrFilter(
-              kinds: EventKind.channelEventKinds,
-              tags: {
-                '#h': [channelId],
-              },
-              limit: 0,
-            ),
-            _handleLiveEvent,
-          );
-        } catch (error) {
-          debugPrint(
-            '[ChannelsNotifier] live subscription failed for $channelId: $error',
-          );
-          return null;
-        }
-      }),
+    final sync = _liveSubscriptionQueue.then(
+      (_) =>
+          _syncLiveSubscriptions(relayBaseUrl, subscriptionVersion, channels),
     );
+    _liveSubscriptionQueue = sync.catchError((Object error, StackTrace stack) {
+      debugPrint(
+        '[ChannelsNotifier] live subscription sync failed: $error\n$stack',
+      );
+    });
+    return sync;
+  }
 
-    if (subscriptionVersion != _subscriptionVersion ||
-        ref.read(relaySessionProvider).status != SessionStatus.connected) {
-      for (final unsubscribe in subscriptions.whereType<void Function()>()) {
-        unsubscribe();
-      }
+  Future<void> _syncLiveSubscriptions(
+    String relayBaseUrl,
+    int subscriptionVersion,
+    List<Channel> channels,
+  ) async {
+    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
       return;
     }
 
-    _unsubscribers.addAll(subscriptions.whereType<void Function()>());
+    if (subscriptionVersion != _subscriptionVersion) {
+      await _syncLiveSubscriptions(
+        ref.read(relayConfigProvider).baseUrl,
+        _subscriptionVersion,
+        _desiredLiveChannels,
+      );
+      return;
+    }
+
+    if (_subscriptionRelayBaseUrl != relayBaseUrl) {
+      for (final unsubscribe in _unsubscribersByChannel.values) {
+        unsubscribe();
+      }
+      _unsubscribersByChannel.clear();
+      _subscriptionRelayBaseUrl = relayBaseUrl;
+    }
+    if (ref.read(relayConfigProvider).baseUrl != relayBaseUrl) {
+      return;
+    }
+    final session = ref.read(relaySessionProvider.notifier);
+    final channelIds = _desiredLiveChannelIds;
+
+    for (final entry in _unsubscribersByChannel.entries.toList()) {
+      if (channelIds.contains(entry.key)) continue;
+      _unsubscribersByChannel.remove(entry.key);
+      entry.value();
+    }
+
+    for (final channelId in channelIds) {
+      if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+        return;
+      }
+      if (_unsubscribersByChannel.containsKey(channelId)) continue;
+      try {
+        final unsubscribe = await session.subscribe(
+          NostrFilter(
+            kinds: EventKind.channelEventKinds,
+            tags: {
+              '#h': [channelId],
+            },
+            limit: 0,
+          ),
+          _handleLiveEvent,
+        );
+        if (ref.read(relaySessionProvider).status != SessionStatus.connected ||
+            !_desiredLiveChannelIds.contains(channelId) ||
+            ref.read(relayConfigProvider).baseUrl != relayBaseUrl ||
+            _subscriptionRelayBaseUrl != relayBaseUrl) {
+          unsubscribe();
+          return;
+        }
+        final replaced = _unsubscribersByChannel[channelId];
+        if (replaced != null) {
+          unsubscribe();
+          continue;
+        }
+        _unsubscribersByChannel[channelId] = unsubscribe;
+      } catch (error) {
+        debugPrint(
+          '[ChannelsNotifier] live subscription failed for $channelId: $error',
+        );
+      }
+    }
+
+    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+      return;
+    }
+
+    if (subscriptionVersion != _subscriptionVersion) {
+      final desiredChannelIds = _desiredLiveChannelIds;
+      for (final entry in _unsubscribersByChannel.entries.toList()) {
+        if (desiredChannelIds.contains(entry.key)) continue;
+        _unsubscribersByChannel.remove(entry.key);
+        entry.value();
+      }
+      return;
+    }
 
     unawaited(_catchUpUnreadEvents(channels));
 
@@ -490,47 +698,34 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       debugPrint('[ChannelsNotifier] unread catch-up skipped: $error');
       return;
     }
-    final futures = <Future<void>>[];
-
-    for (final channel in channels) {
-      if (!channel.isMember || channel.isArchived) continue;
-      final readAt = readState.effectiveTimestamp(channel.id);
-      futures.add(
-        _catchUpUnreadEventsForChannel(
-          session,
-          channel,
-          myPk,
-          readAt,
-          mutedChannelIds,
-        ),
-      );
-    }
-
-    const batchSize = 5;
-    for (var i = 0; i < futures.length; i += batchSize) {
-      await Future.wait(futures.sublist(i, min(i + batchSize, futures.length)));
-    }
-
-    state = state.whenData((channels) => List<Channel>.of(channels));
-  }
-
-  Future<void> _catchUpUnreadEventsForChannel(
-    RelaySessionNotifier session,
-    Channel channel,
-    String myPk,
-    int? readAt,
-    Set<String> mutedChannelIds,
-  ) async {
-    try {
-      final events = await session.fetchHistory(
+    final activeChannels = [
+      for (final channel in channels)
+        if (channel.isMember && !channel.isArchived) channel,
+    ];
+    final channelById = {
+      for (final channel in activeChannels) channel.id: channel,
+    };
+    final readAtByChannel = {
+      for (final channel in activeChannels)
+        channel.id: readState.effectiveTimestamp(channel.id),
+    };
+    final filters = [
+      for (final channel in activeChannels)
         NostrFilter(
           kinds: EventKind.channelMessageEventKinds,
           tags: {
             '#h': [channel.id],
           },
-          since: readAt == null ? 0 : readAt + 1,
+          since: (readAtByChannel[channel.id] ?? -1) + 1,
           limit: _unreadCatchUpLimit,
         ),
+    ];
+
+    try {
+      final events = await _fetchChannelHistoryBatch(
+        session,
+        filters,
+        operation: 'unread catch-up',
       );
 
       for (final event in events) {
@@ -540,6 +735,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
 
       for (final event in events) {
+        final channelId = event.channelId;
+        if (channelId == null) continue;
+        final channel = channelById[channelId];
+        if (channel == null) continue;
+        final readAt = readAtByChannel[channelId];
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
         if (!shouldNotifyForEvent(
@@ -556,10 +756,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         _recordUnreadEvent(channel, event, myPk);
       }
     } catch (error) {
-      debugPrint(
-        '[ChannelsNotifier] unread catch-up failed for ${channel.id}: $error',
-      );
+      debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
     }
+
+    state = state.whenData((channels) => List<Channel>.of(channels));
   }
 
   void _handleLiveEvent(NostrEvent event) {
@@ -734,10 +934,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   void _clearLiveSubscriptions() {
     _subscriptionVersion++;
-    for (final unsubscribe in _unsubscribers) {
+    _desiredLiveChannels = const [];
+    _desiredLiveChannelIds = const {};
+    for (final unsubscribe in _unsubscribersByChannel.values) {
       unsubscribe();
     }
-    _unsubscribers.clear();
+    _unsubscribersByChannel.clear();
+    _subscriptionRelayBaseUrl = null;
     _backstopTimer?.cancel();
     _backstopTimer = null;
   }

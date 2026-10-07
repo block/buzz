@@ -12,6 +12,11 @@ export type ProfileAvatarEditorProps = {
   onEmojiAvatarChange?: () => void;
   onCustomColorPickerOpenChange?: (isOpen: boolean) => void;
   onModeChange?: (mode: AvatarMode) => void;
+  /**
+   * Reports a temporary local object URL while an image upload is pending, then
+   * emits `null` when that preview is cleared or replaced by the remote URL.
+   */
+  onLocalPreviewChange?: (url: string | null) => void;
   onUploadedAvatarChange?: (url: string | null) => void;
   onUploadingChange?: (isUploading: boolean) => void;
   onAnimatedAvatarApply?: (url: string) => void;

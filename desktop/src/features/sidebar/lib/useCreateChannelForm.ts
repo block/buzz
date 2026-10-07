@@ -46,6 +46,7 @@ export type CreateChannelFormState = {
   errorMessage: string | null;
   selectedTemplateId: string | null;
   handleTemplateChange: (templateId: string) => void;
+  handleTemplateCreated: (template: ChannelTemplate) => void;
   templates: ChannelTemplate[];
   nameInputRef: React.RefObject<HTMLInputElement | null>;
   isCreating: boolean;
@@ -120,6 +121,13 @@ export function useCreateChannelForm({
     return () => globalThis.clearTimeout(timerId);
   }, [active, autoFocusName, initialName]);
 
+  const applyTemplate = React.useCallback((template: ChannelTemplate) => {
+    setSelectedTemplateId(template.id);
+    setDescription(template.description ?? "");
+    if (!visibilityTouchedRef.current) setVisibility(template.visibility);
+    setErrorMessage(null);
+  }, []);
+
   const handleTemplateChange = React.useCallback(
     (templateId: string) => {
       if (!templateId) {
@@ -135,12 +143,9 @@ export function useCreateChannelForm({
       );
       if (!template) return;
 
-      setSelectedTemplateId(templateId);
-      setDescription(template.description ?? "");
-      if (!visibilityTouchedRef.current) setVisibility(template.visibility);
-      setErrorMessage(null);
+      applyTemplate(template);
     },
-    [templates],
+    [applyTemplate, templates],
   );
 
   const handleSubmit = React.useCallback(
@@ -211,6 +216,7 @@ export function useCreateChannelForm({
     errorMessage,
     selectedTemplateId,
     handleTemplateChange,
+    handleTemplateCreated: applyTemplate,
     templates,
     nameInputRef,
     isCreating,

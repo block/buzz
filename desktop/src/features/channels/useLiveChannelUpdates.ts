@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
@@ -110,13 +111,19 @@ function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   );
 }
 
-function trackSeenEvent(seenEventIds: Set<string>, eventId: string): boolean {
+const SEEN_NOTIFICATION_EVENT_LIMIT = 5_000;
+
+export function trackSeenEvent(
+  seenEventIds: Set<string>,
+  eventId: string,
+  limit = 200,
+): boolean {
   if (seenEventIds.has(eventId)) {
     return false;
   }
 
   seenEventIds.add(eventId);
-  if (seenEventIds.size > 200) {
+  if (seenEventIds.size > limit) {
     const oldestEventId = seenEventIds.values().next().value;
     if (oldestEventId) {
       seenEventIds.delete(oldestEventId);
@@ -135,6 +142,11 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
+  // Reconnect replay overlaps each live filter by five seconds so no message is
+  // lost at the boundary. Keep one shared guard for every notification side
+  // effect: the same event can be replayed repeatedly while a relay flaps, and
+  // mention events also arrive through both the channel and mention filters.
+  const seenNotificationEventIdsRef = React.useRef(new Set<string>());
   const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
   if (channelsInvalidateRef.current === null) {
     channelsInvalidateRef.current = createTrailingDebounce(() => {
@@ -164,7 +176,6 @@ export function useLiveChannelUpdates(
       ),
     [channels],
   );
-  const seenDmEventIdsRef = React.useRef(new Set<string>());
   const dmSubscriptionStartedAtRef = React.useRef(0);
 
   // Reset subscription timestamp when identity changes.
@@ -181,56 +192,48 @@ export function useLiveChannelUpdates(
     [channels],
   );
 
-  const handleDmEvent = React.useEffectEvent((event: RelayEvent) => {
-    // Only human-visible message kinds should fire DM notifications.
-    if (!isDmNotifiableKind(event.kind)) {
-      return;
-    }
+  const handleDmEvent = React.useEffectEvent(
+    (event: RelayEvent, isFirstNotificationDelivery: boolean) => {
+      // Only human-visible message kinds should fire DM notifications.
+      if (!isDmNotifiableKind(event.kind) || !isFirstNotificationDelivery) {
+        return;
+      }
 
-    // Suppress backlog events that predate our subscription — these are
-    // historical replays, not live messages.
-    if (event.created_at < dmSubscriptionStartedAtRef.current) {
-      return;
-    }
+      // Suppress backlog events that predate our subscription — these are
+      // historical replays, not live messages.
+      if (event.created_at < dmSubscriptionStartedAtRef.current) {
+        return;
+      }
 
-    const channelId = getChannelIdFromTags(event.tags);
-    if (!channelId) {
-      return;
-    }
+      const channelId = getChannelIdFromTags(event.tags);
+      if (!channelId) {
+        return;
+      }
 
-    if (!isExternalMentionEvent(event, normalizedCurrentPubkey)) {
-      return;
-    }
+      if (!isExternalMentionEvent(event, normalizedCurrentPubkey)) {
+        return;
+      }
 
-    const dmChannel = dmChannelMap.get(channelId);
-    if (!dmChannel) {
-      return;
-    }
+      const dmChannel = dmChannelMap.get(channelId);
+      if (!dmChannel) {
+        return;
+      }
 
-    if (!trackSeenEvent(seenDmEventIdsRef.current, event.id)) {
-      return;
-    }
+      // Don't fire a notification for the channel the user is already viewing,
+      // unless the notify-while-viewing setting opts in.
+      if (channelId === activeChannelId && !options.notifyForActiveChannel) {
+        return;
+      }
 
-    // Don't fire a notification for the channel the user is already viewing,
-    // unless the notify-while-viewing setting opts in.
-    if (channelId === activeChannelId && !options.notifyForActiveChannel) {
-      return;
-    }
-
-    options.onDmMessage?.(event, dmChannel);
-  });
+      options.onDmMessage?.(event, dmChannel);
+    },
+  );
 
   const handleIncomingMessage = React.useEffectEvent((event: RelayEvent) => {
     const channelId = getChannelIdFromTags(event.tags);
     if (!channelId) {
       return;
     }
-
-    // Track DM events even for the active channel so the dedup set stays
-    // current. The handler itself skips firing the notification callback
-    // when the user is already viewing the DM (unless opted in via
-    // notifyForActiveChannel).
-    handleDmEvent(event);
 
     if (!liveChannelIds.has(channelId)) {
       if (channelId !== activeChannelId) {
@@ -244,6 +247,13 @@ export function useLiveChannelUpdates(
       event.kind,
       isDmChannel,
     );
+
+    // Recency is presentation state, not notification state. Every recognized
+    // message advances Recent ordering, including self-authored and muted
+    // messages that the notification policy deliberately filters below.
+    if (isUnreadTriggerKind) {
+      updateChannelLastMessageAt(queryClient, channelId, event.created_at);
+    }
 
     // Let the caller observe self-authored trigger events (e.g. to track
     // thread participation) before the author-exclusion guard filters them.
@@ -263,9 +273,21 @@ export function useLiveChannelUpdates(
       isUnreadTriggerKind &&
       (normalizedCurrentPubkey.length === 0 ||
         event.pubkey.toLowerCase() !== normalizedCurrentPubkey);
+    const isFirstNotificationDelivery =
+      !isExternalTriggerEvent ||
+      trackSeenEvent(
+        seenNotificationEventIdsRef.current,
+        event.id,
+        SEEN_NOTIFICATION_EVENT_LIMIT,
+      );
     const isThreadedReply = isThreadReply(event.tags);
 
-    if (isExternalTriggerEvent) {
+    // DM alerts and every other notification side effect share this delivery
+    // decision, preventing a replayed event from escaping through a second
+    // callback path.
+    handleDmEvent(event, isFirstNotificationDelivery);
+
+    if (isExternalTriggerEvent && isFirstNotificationDelivery) {
       const shouldNotify = shouldNotifyForEvent(
         event,
         normalizedCurrentPubkey,

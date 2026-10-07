@@ -37,6 +37,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   searchableNamesLowerRef: React.RefObject<string[]>;
   candidates: readonly T[];
   activePersonaIds: ReadonlySet<string>;
+  agentProvenanceReady: boolean;
   channelType?: ChannelType | null;
   currentPubkey?: string | null;
   ownerProfiles?: UserProfileLookup;
@@ -72,6 +73,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   return {
     type: "match",
     suggestion: mapMentionCandidateToSuggestion({
+      agentProvenanceReady: opts.agentProvenanceReady,
       candidate,
       label,
       channelType: opts.channelType,

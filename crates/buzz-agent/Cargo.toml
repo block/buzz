@@ -41,8 +41,10 @@ axum = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
 sha2 = { workspace = true }
+url = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
+dirs = "6"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

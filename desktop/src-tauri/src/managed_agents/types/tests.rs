@@ -442,6 +442,21 @@ fn managed_agent_record_without_key_deserializes_empty() {
     .expect("keyring-backed record without inline key should deserialize");
 
     assert_eq!(record.private_key_nsec, "");
+    assert!(
+        !record.provider_policy_pending,
+        "pre-pending stores must deserialize as acknowledged"
+    );
+}
+
+#[test]
+fn pending_provider_policy_round_trips() {
+    let mut record = sample_agent_record();
+    record.provider_policy_pending = true;
+
+    let json = serde_json::to_string(&record).expect("serialize pending policy");
+    let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("reload pending policy");
+
+    assert!(reloaded.provider_policy_pending);
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {
@@ -692,5 +707,95 @@ fn mint_rejects_out_of_range_input_parallelism() {
     assert!(
         !err.contains("definition"),
         "input-branch error must not blame the definition: {err}"
+    );
+}
+
+// ── Restart-diff wire shape ─────────────────────────────────────────────────
+
+fn summary_fixture(
+    restart_diff: Vec<crate::managed_agents::spawn_snapshot::RestartDiffEntry>,
+) -> super::ManagedAgentSummary {
+    super::ManagedAgentSummary {
+        pubkey: "aa".repeat(32),
+        name: "test".into(),
+        persona_id: None,
+        runtime: None,
+        team_id: None,
+        relay_url: String::new(),
+        acp_command: "buzz-acp".into(),
+        agent_command: "goose".into(),
+        agent_command_override: None,
+        agent_args: Vec::new(),
+        mcp_command: String::new(),
+        turn_timeout_seconds: 320,
+        idle_timeout_seconds: None,
+        max_turn_duration_seconds: None,
+        parallelism: 1,
+        system_prompt: None,
+        avatar_url: None,
+        model: None,
+        model_source: None,
+        provider: None,
+        persona_out_of_date: false,
+        persona_orphaned: false,
+        // Both fields derive from one vector in `build_managed_agent_summary`;
+        // the fixture reproduces that rule rather than letting them disagree.
+        needs_restart: !restart_diff.is_empty(),
+        restart_diff,
+        env_vars: Default::default(),
+        backend: super::BackendKind::Local,
+        backend_agent_id: None,
+        status: "running".into(),
+        pid: Some(4242),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        last_started_at: None,
+        last_stopped_at: None,
+        last_exit_code: None,
+        last_error: None,
+        last_error_code: None,
+        start_on_app_launch: false,
+        auto_restart_on_config_change: false,
+        log_path: String::new(),
+        respond_to: RespondTo::OwnerOnly,
+        respond_to_allowlist: Vec::new(),
+    }
+}
+
+#[test]
+fn summary_without_drift_omits_restart_diff_from_the_wire() {
+    // An adopted `runtime_pid`-only process is never stamped, so its summary
+    // carries an empty vector. `skip_serializing_if` must then drop the key
+    // entirely — the frontend normalizes omission to `[]`, and emitting an
+    // empty array on every stopped agent would bloat every list response.
+    let wire = serde_json::to_value(summary_fixture(Vec::new())).expect("summary serializes");
+    assert_eq!(wire.get("needs_restart"), Some(&serde_json::json!(false)));
+    assert!(
+        wire.get("restart_diff").is_none(),
+        "empty restart_diff must be omitted, got: {wire}"
+    );
+}
+
+#[test]
+fn summary_with_drift_serializes_restart_diff_entries() {
+    // The other side of the same rule: a present entry must reach the wire
+    // under its snake_case key with the tagged change payload intact.
+    let wire = serde_json::to_value(summary_fixture(vec![
+        crate::managed_agents::spawn_snapshot::RestartDiffEntry {
+            field: "model".into(),
+            change: crate::managed_agents::spawn_snapshot::diff::RestartChange::Value {
+                before: serde_json::json!("gpt-5"),
+                after: serde_json::json!("claude-4"),
+            },
+        },
+    ]))
+    .expect("summary serializes");
+    assert_eq!(wire.get("needs_restart"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        wire.get("restart_diff"),
+        Some(&serde_json::json!([{
+            "field": "model",
+            "change": { "kind": "value", "before": "gpt-5", "after": "claude-4" },
+        }]))
     );
 }

@@ -128,6 +128,13 @@ export function slotForFeedKind(
   return "needs_action";
 }
 
+export function shouldPlayNotificationSound(
+  channelId: string | null | undefined,
+  silentChannelIds?: ReadonlySet<string>,
+): boolean {
+  return !channelId || !silentChannelIds?.has(channelId);
+}
+
 const cache = new Map<SoundName, HTMLAudioElement>();
 
 function getAudio(name: SoundName): HTMLAudioElement {

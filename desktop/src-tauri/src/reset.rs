@@ -463,6 +463,26 @@ mod tests {
         assert_eq!(kc.delete_calls.get(), 1, "keychain deleted once");
     }
 
+    // ── NIP-49: the boot wipe destroys the app-managed key backup ─────────────
+
+    #[test]
+    fn test_wipe_removes_app_managed_key_backup() {
+        let tmp = TempDir::new().unwrap();
+        let app_data = make_app_data(&tmp);
+        let backup = crate::key_backup::backup_file_path(&app_data);
+        std::fs::write(&backup, b"encrypted-backup-bytes").unwrap();
+
+        write_sentinel(&app_data).unwrap();
+        let kc = FakeKeychain::ok();
+        let outcome = run_boot_reset_with_keychain(make_ctx(&app_data, &kc, false));
+
+        assert!(outcome.completed);
+        assert!(
+            !backup.exists(),
+            "sign-out wipe must destroy the app-managed key backup"
+        );
+    }
+
     // ── Test 3: keychain failure keeps sentinel ────────────────────────────────
 
     #[test]

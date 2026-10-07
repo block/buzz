@@ -57,9 +57,26 @@ async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     url
 }
 
+struct CannedResponse {
+    status: u16,
+    body: Value,
+}
+
 /// Like `spawn_fake_llm` but also captures the full JSON request body from each
 /// incoming HTTP request. Returns (url, captured_requests).
 async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    spawn_capturing_fake_llm_with_statuses(
+        responses
+            .into_iter()
+            .map(|body| CannedResponse { status: 200, body })
+            .collect(),
+    )
+    .await
+}
+
+async fn spawn_capturing_fake_llm_with_statuses(
+    responses: Vec<CannedResponse>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
@@ -122,15 +139,22 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
                 }
 
                 // Send canned response.
-                let body = queue
-                    .lock()
-                    .await
-                    .pop_front()
-                    .unwrap_or_else(|| json!({ "error": "no canned response" }));
-                let body_s = serde_json::to_string(&body).unwrap();
+                let response = queue.lock().await.pop_front().unwrap_or(CannedResponse {
+                    status: 500,
+                    body: json!({ "error": "no canned response" }),
+                });
+                let body_s = serde_json::to_string(&response.body).unwrap();
+                let reason = if response.status == 200 {
+                    "OK"
+                } else {
+                    "Error"
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_s.len(), body_s,
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.status,
+                    reason,
+                    body_s.len(),
+                    body_s,
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
                 let _ = sock.shutdown().await;
@@ -313,6 +337,164 @@ async fn tool_call_then_end_turn() {
     // Final response.
     let v = h.recv_until(|v| v["id"] == json!(p_id)).await;
     assert_eq!(v["result"]["stopReason"], "end_turn");
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_image_response_recovers_without_replaying_image() {
+    let responses = vec![
+        CannedResponse {
+            status: 200,
+            body: openai_tool_call("call_image", "fake__tool_0", json!({})),
+        },
+        CannedResponse {
+            status: 404,
+            body: json!({
+                "error": { "message": "No endpoints found that support image input" }
+            }),
+        },
+        CannedResponse {
+            status: 200,
+            body: openai_text("recovered"),
+        },
+    ];
+    let (url, captures) = spawn_capturing_fake_llm_with_statuses(responses).await;
+    let mut h = Harness::spawn(&url).await;
+
+    h.send(
+        "initialize",
+        json!({"protocolVersion":2,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    let session_id = h
+        .send(
+            "session/new",
+            json!({
+                "cwd": "/tmp",
+                "mcpServers": [{
+                    "name": "fake",
+                    "command": env!("CARGO_BIN_EXE_fake-mcp"),
+                    "args": [],
+                    "env": [{ "name": "FAKE_MCP_IMAGE_RESULT", "value": "1" }],
+                }],
+            }),
+        )
+        .await;
+    let session = h.recv_until(|v| v["id"] == json!(session_id)).await;
+    let sid = session["result"]["sessionId"].as_str().unwrap();
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{"type":"text","text":"inspect the image"}],
+            }),
+        )
+        .await;
+    loop {
+        let message = h.recv().await;
+        if message.get("method") == Some(&json!("session/request_permission")) {
+            h.write(json!({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
+            }))
+            .await;
+        } else if message["id"] == json!(prompt_id) {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+
+    let requests = captures.lock().await;
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected tool, rejection, recovery requests"
+    );
+    let rejected = requests[1].to_string();
+    assert!(
+        rejected.contains("data:image/png;base64,aW1n"),
+        "second request must contain the MCP image: {rejected}"
+    );
+    let recovered = requests[2].to_string();
+    assert!(
+        !recovered.contains("image_url") && !recovered.contains("data:image"),
+        "recovery request must not replay image input: {recovered}"
+    );
+    assert!(
+        recovered.contains("does not support image input")
+            && recovered.contains("text-based inspection"),
+        "recovery request must give the model actionable guidance: {recovered}"
+    );
+    assert!(
+        recovered.contains("call_image") && recovered.contains("tool_call_id"),
+        "recovery must preserve tool-call/result pairing: {recovered}"
+    );
+    drop(requests);
+    h.shutdown().await;
+}
+
+/// The recovery path must only fire when it actually removed an image. If the
+/// provider emits the unsupported-image phrase while history holds no image
+/// (a misclassification, or a provider that returns the phrase for an
+/// unrelated reason), mutating nothing and continuing would spin the turn loop
+/// forever — `max_rounds` defaults to 0 (unlimited) in production, so nothing
+/// downstream bounds it. The turn must fail with the typed error instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_image_without_image_in_history_fails_instead_of_looping() {
+    // Five rejections but MAX_ROUNDS=4: if the guard is removed the loop
+    // re-requests without ever mutating history and drains the queue.
+    let responses = (0..5)
+        .map(|_| CannedResponse {
+            status: 404,
+            body: json!({
+                "error": { "message": "No endpoints found that support image input" }
+            }),
+        })
+        .collect();
+    let (url, captures) = spawn_capturing_fake_llm_with_statuses(responses).await;
+    let mut h = Harness::spawn(&url).await;
+
+    h.send(
+        "initialize",
+        json!({"protocolVersion":2,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    let session_id = h
+        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let session = h.recv_until(|v| v["id"] == json!(session_id)).await;
+    let sid = session["result"]["sessionId"].as_str().unwrap();
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{"type":"text","text":"no image here"}],
+            }),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+
+    assert!(
+        reply.get("result").is_none(),
+        "an unrecoverable image rejection must not complete the turn: {reply}"
+    );
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("image input unsupported"),
+        "the typed error must surface to the caller: {reply}"
+    );
+    assert_eq!(
+        captures.lock().await.len(),
+        1,
+        "the loop must not re-request after a rejection it could not repair"
+    );
     h.shutdown().await;
 }
 
@@ -928,6 +1110,135 @@ async fn no_usage_turn_emits_no_usage_notification() {
     assert!(
         !found,
         "expected NO usage_update notification when provider reports no usage; frames: {frames_before:#?}"
+    );
+
+    h.shutdown().await;
+}
+
+/// Usage must be reported after EVERY provider round, not only once the turn
+/// returns.
+///
+/// A turn is many provider round-trips over many minutes. While the only report
+/// was the one `session/prompt` sends after the turn returns, a turn whose
+/// process was killed mid-flight reported nothing at all: its counters lived in
+/// the prompt task's stack frame, the provider had already billed them, and no
+/// consumer ever saw them. That is not a corner case for a long-horizon
+/// benchmark — every phase of a `continue_until_timeout` run is terminated
+/// mid-turn by design, which under-reported one measured run's cost several-fold.
+///
+/// Two rounds with distinct usage. The assertion that matters is the FIRST
+/// notification: it must carry round 1's counts alone, proving it was sent
+/// before round 2 had returned, so a kill between the rounds would still have
+/// left round 1 on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_is_reported_after_each_round_not_only_at_turn_end() {
+    let url = spawn_fake_llm(vec![
+        openai_tool_call_with_usage("call_round1", "fake__noop", json!({}), 15, 6),
+        openai_text_with_usage("done", 20, 8),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+
+    let (frames_before, response) = recv_until_with_drain(&mut h, |v| v["id"] == p_id).await;
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "turn must complete with end_turn"
+    );
+
+    let usage: Vec<&Value> = frames_before
+        .iter()
+        .filter(|v| is_usage_update(v))
+        .collect();
+    assert!(
+        usage.len() >= 2,
+        "expected a usage_update per round (2 rounds), got {}; frames: {frames_before:#?}",
+        usage.len()
+    );
+
+    // Round 1 alone — emitted while round 2 was still outstanding.
+    assert_eq!(
+        usage[0]["params"]["update"]["accumulatedInputTokens"],
+        json!(15u64),
+        "first notification must carry round 1's input tokens only"
+    );
+    assert_eq!(
+        usage[0]["params"]["update"]["accumulatedOutputTokens"],
+        json!(6u64),
+        "first notification must carry round 1's output tokens only"
+    );
+
+    // The last one is the turn total and is what a high-water-mark consumer keeps.
+    let last = usage[usage.len() - 1];
+    assert_eq!(
+        last["params"]["update"]["accumulatedInputTokens"],
+        json!(35u64),
+        "final notification must carry the turn total 15+20=35"
+    );
+    assert_eq!(
+        last["params"]["update"]["accumulatedOutputTokens"],
+        json!(14u64),
+        "final notification must carry the turn total 6+8=14"
+    );
+
+    h.shutdown().await;
+}
+
+/// A mid-turn report must be SESSION-cumulative, not turn-local.
+///
+/// The baseline handed to the run loop is a snapshot taken when the turn began;
+/// if it were dropped, a consumer taking the high-water mark per session would
+/// see turn 2's first round (a small number) arrive after turn 1's total and
+/// discard it, silently losing turn 2 for any turn that never completed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_turn_usage_includes_earlier_turns() {
+    let url = spawn_fake_llm(vec![
+        openai_text_with_usage("turn one", 10, 5),
+        openai_tool_call_with_usage("call_t2", "fake__noop", json!({}), 20, 8),
+        openai_text_with_usage("turn two done", 30, 9),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 1"}]}),
+        )
+        .await;
+    let (_, _) = recv_until_with_drain(&mut h, |v| v["id"] == p1).await;
+
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 2"}]}),
+        )
+        .await;
+    let (frames_before, _) = recv_until_with_drain(&mut h, |v| v["id"] == p2).await;
+
+    let first = frames_before
+        .iter()
+        .find(|v| is_usage_update(v))
+        .unwrap_or_else(|| {
+            panic!("expected a usage_update during turn 2; frames: {frames_before:#?}")
+        });
+    assert_eq!(
+        first["params"]["update"]["accumulatedInputTokens"],
+        json!(30u64),
+        "turn 2 round 1 must report 10 (turn 1) + 20 (this round), not 20"
+    );
+    assert_eq!(
+        first["params"]["update"]["accumulatedOutputTokens"],
+        json!(13u64),
+        "turn 2 round 1 must report 5 (turn 1) + 8 (this round), not 8"
     );
 
     h.shutdown().await;

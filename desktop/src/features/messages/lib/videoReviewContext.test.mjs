@@ -4,7 +4,10 @@ import test from "node:test";
 import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewCommentsForRoot,
+  buildVideoReviewCommentRootIdsByMessageId,
   buildVideoReviewContextForMessage,
+  buildVideoReviewContextsByMessageId,
+  hasRenderedVideoAttachment,
   hasVideoAttachment,
 } from "./videoReviewContext.ts";
 
@@ -57,6 +60,63 @@ test("hasVideoAttachment detects markdown and imeta videos", () => {
   );
 
   assert.equal(hasVideoAttachment(message({ body: "plain text" })), false);
+  assert.equal(
+    hasVideoAttachment(
+      message({
+        body: "orphan metadata only",
+        tags: [["imeta", "url https://cdn.example.com/cut.mp4", "m video/mp4"]],
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    hasRenderedVideoAttachment(
+      message({
+        body: "orphan metadata only",
+        tags: [["imeta", "url https://cdn.example.com/cut.mp4", "m video/mp4"]],
+      }),
+    ),
+    false,
+  );
+});
+test("hasVideoAttachment uses the Markdown renderer's video classification", () => {
+  assert.equal(
+    hasVideoAttachment(
+      message({ body: "![Demo](https://cdn.example.com/cut.mp4)" }),
+    ),
+    true,
+  );
+  assert.equal(
+    hasVideoAttachment(
+      message({ body: "![Poster](https://cdn.example.com/cut.jpg)" }),
+    ),
+    false,
+  );
+  assert.equal(
+    hasVideoAttachment(
+      message({
+        body: "![Demo](https://relay/media/cut.mp4)",
+        tags: [["imeta", "url https://relay/media/cut.mp4", "m image/png"]],
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    hasVideoAttachment(
+      message({
+        body: "![Demo][clip]\n\n[clip]: https://cdn.example.com/cut.mp4",
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    hasVideoAttachment(
+      message({
+        body: "```md\n![Demo](https://cdn.example.com/cut.mp4)\n```",
+      }),
+    ),
+    false,
+  );
 });
 
 test("buildVideoReviewCommentsByRootId includes nested descendants", () => {
@@ -158,6 +218,90 @@ test("buildVideoReviewCommentsForRoot returns descendants for one root", () => {
   );
 });
 
+test("buildVideoReviewCommentRootIdsByMessageId targets the nearest video ancestor", () => {
+  const root = message({ id: "root", body: "Review request" });
+  const firstVideo = message({
+    id: "first-video",
+    body: "![video](https://relay/media/a.mp4)",
+    parentId: root.id,
+    rootId: root.id,
+  });
+  const firstComment = message({
+    id: "first-comment",
+    body: "[00:01] tighten this",
+    parentId: firstVideo.id,
+    rootId: root.id,
+  });
+  const nestedVideo = message({
+    id: "nested-video",
+    body: "![video](https://relay/media/b.mp4)",
+    parentId: firstComment.id,
+    rootId: root.id,
+  });
+  const nestedComment = message({
+    id: "nested-comment",
+    body: "[00:02] check this frame",
+    parentId: nestedVideo.id,
+    rootId: root.id,
+  });
+  const plainReply = message({
+    id: "plain-reply",
+    body: "No video ancestor",
+    parentId: root.id,
+    rootId: root.id,
+  });
+
+  const rootIds = buildVideoReviewCommentRootIdsByMessageId([
+    root,
+    firstVideo,
+    firstComment,
+    nestedVideo,
+    nestedComment,
+    plainReply,
+  ]);
+
+  assert.deepEqual(
+    [...rootIds.entries()],
+    [
+      [firstComment.id, firstVideo.id],
+      [nestedComment.id, nestedVideo.id],
+    ],
+  );
+});
+
+test("buildVideoReviewCommentRootIdsByMessageId can require rendered video roots", () => {
+  const orphanVideo = message({
+    id: "orphan-video",
+    body: "metadata only",
+    tags: [["imeta", "url https://relay/media/a.mp4", "m video/mp4"]],
+  });
+  const comment = message({
+    id: "comment",
+    body: "[00:01] review this",
+    parentId: orphanVideo.id,
+    rootId: orphanVideo.id,
+  });
+
+  assert.deepEqual(
+    [
+      ...buildVideoReviewCommentRootIdsByMessageId([
+        orphanVideo,
+        comment,
+      ]).entries(),
+    ],
+    [[comment.id, orphanVideo.id]],
+  );
+  assert.deepEqual(
+    [
+      ...buildVideoReviewCommentRootIdsByMessageId(
+        [orphanVideo, comment],
+        hasRenderedVideoAttachment,
+      ).entries(),
+    ],
+    [],
+  );
+});
+
 test("buildVideoReviewContextForMessage posts against the source video", async () => {
   const video = message({
     id: "video",
@@ -208,4 +352,31 @@ test("buildVideoReviewContextForMessage posts against the source video", async (
       sourceId: "video",
     },
   ]);
+});
+
+test("buildVideoReviewContextsByMessageId includes video replies", () => {
+  const root = message({ id: "root", body: "Review request" });
+  const videoReply = message({
+    id: "video-reply",
+    body: "![video](https://relay/media/a.mp4)",
+    parentId: root.id,
+    rootId: root.id,
+  });
+  const comment = message({
+    id: "comment",
+    body: "[00:01] tighten this",
+    parentId: videoReply.id,
+    rootId: root.id,
+  });
+
+  const contexts = buildVideoReviewContextsByMessageId({
+    channelId: "channel",
+    messages: [root, videoReply, comment],
+  });
+
+  assert.deepEqual([...contexts.keys()], [videoReply.id]);
+  assert.deepEqual(
+    contexts.get(videoReply.id)?.comments.map((item) => item.id),
+    [comment.id],
+  );
 });

@@ -34,12 +34,13 @@ function install(ls) {
 }
 
 test("startup recovery removes disposable caches but preserves user state", () => {
-  const ls = makeQuotaLocalStorage({ maxEntries: 5 });
+  const ls = makeQuotaLocalStorage({ maxEntries: 6 });
   install(ls);
   ls.store.set("buzz-channel-messages.v1:relay:chan", "big");
   ls.store.set("buzz-channels.v1:relay", "big");
   ls.store.set("buzz-timeline-skeleton-shape.v1:chan", "small");
   ls.store.set("buzz-sidebar-skeleton-shape.v1:community:user", "small");
+  ls.store.set("buzz-user-labels.v1:relay", "small");
   ls.store.set("buzz-communities", "keep");
 
   recoverLocalStorageQuotaOnStartup();
@@ -51,6 +52,7 @@ test("startup recovery removes disposable caches but preserves user state", () =
     ls.getItem("buzz-sidebar-skeleton-shape.v1:community:user"),
     null,
   );
+  assert.equal(ls.getItem("buzz-user-labels.v1:relay"), null);
   assert.equal(ls.getItem("buzz-communities"), "keep");
   assert.equal(ls.getItem("buzz-local-storage-quota-recovery.v1"), "1");
 });
@@ -199,4 +201,41 @@ test("returns false when eviction frees nothing", () => {
   assert.equal(setLocalStorageItemWithRecovery("k", "v"), false);
   assert.equal(ls.getItem("k"), null);
   assert.equal(ls.getItem("buzz-workspaces"), "keep");
+});
+
+test("buzz-observed-unread.v1: prefix participates in LRU eviction and durable state survives", () => {
+  // Sentinel: fails if buzz-observed-unread.v1: is removed from PURE_CACHE_KEY_PREFIXES —
+  // the bucket becomes invisible to LRU and the wrong entry is evicted instead.
+  const ls = makeQuotaLocalStorage({ maxEntries: 20 });
+  install(ls);
+  ls.store.set("buzz-communities", "keep");
+
+  const snapshot = (updatedAt) =>
+    JSON.stringify({ updatedAt, payload: "x".repeat(400_000) });
+  const observedKey = "buzz-observed-unread.v1:wss://relay.example.com:pk1";
+  const olderKey = "buzz-channel-messages.v1:relay:older";
+  const newestKey = "buzz-channel-messages.v1:relay:newest";
+
+  // Seed observed-unread (oldest updatedAt=1) and a sibling channel-messages entry (updatedAt=2).
+  assert.equal(setLocalStorageItemWithRecovery(observedKey, snapshot(1)), true);
+  assert.equal(setLocalStorageItemWithRecovery(olderKey, snapshot(2)), true);
+
+  // Writing a third pure-cache entry (updatedAt=3) pushes the total above the 2 MiB budget.
+  // The observed-unread entry must be evicted first (oldest LRU); the sibling survives.
+  assert.equal(setLocalStorageItemWithRecovery(newestKey, snapshot(3)), true);
+  assert.equal(
+    ls.getItem(observedKey),
+    null,
+    "observed-unread bucket must be evicted as the oldest LRU pure-cache entry",
+  );
+  assert.notEqual(
+    ls.getItem(olderKey),
+    null,
+    "channel-messages bucket with newer updatedAt must survive",
+  );
+  assert.equal(
+    ls.getItem("buzz-communities"),
+    "keep",
+    "durable state must survive",
+  );
 });

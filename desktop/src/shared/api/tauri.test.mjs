@@ -211,6 +211,52 @@ test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape",
   );
 });
 
+// ── max_parallelism → maxParallelism mapping ──────────────────────────────────
+
+test("fromRawAcpRuntimeCatalogEntry maps max_parallelism to maxParallelism when present", () => {
+  const raw = {
+    id: "openclaw",
+    label: "OpenClaw",
+    availability: "not_installed",
+    command: null,
+    source: "preset",
+    default_args: [],
+    can_auto_install: false,
+    requires_external_cli: false,
+    install_hint: "",
+    install_instructions_url: "",
+    max_parallelism: 5,
+  };
+  const entry = fromRawAcpRuntimeCatalogEntry(raw);
+  assert.equal(
+    entry.maxParallelism,
+    5,
+    "max_parallelism: 5 must map to maxParallelism: 5",
+  );
+});
+
+test("fromRawAcpRuntimeCatalogEntry omits maxParallelism when max_parallelism is absent", () => {
+  const raw = {
+    id: "goose",
+    label: "Goose",
+    availability: "available",
+    command: "goose",
+    source: "builtin",
+    default_args: [],
+    can_auto_install: false,
+    requires_external_cli: false,
+    install_hint: "",
+    install_instructions_url: "",
+    // No max_parallelism field — uncapped harness.
+  };
+  const entry = fromRawAcpRuntimeCatalogEntry(raw);
+  assert.equal(
+    entry.maxParallelism,
+    undefined,
+    "uncapped harness must have maxParallelism: undefined",
+  );
+});
+
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
 test("teardown — restore Date.now", () => {

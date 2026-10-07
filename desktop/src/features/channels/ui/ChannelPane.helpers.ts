@@ -43,6 +43,20 @@ export function isWelcomeSetupSystemMessage(message: TimelineMessage) {
   }
 }
 
+export function isChannelCreatedSystemMessage(message: TimelineMessage) {
+  if (message.kind !== KIND_SYSTEM_MESSAGE) {
+    return false;
+  }
+
+  try {
+    return (
+      (JSON.parse(message.body) as { type?: string }).type === "channel_created"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function mentionsKnownAgent(
   mentionPubkeys: string[],
   knownAgentPubkeys: ReadonlySet<string>,

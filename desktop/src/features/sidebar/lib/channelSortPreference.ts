@@ -1,7 +1,8 @@
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 import type { Channel } from "@/shared/api/types";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sort.v1";
+export const MAX_CHANNEL_SORT_GROUPS = 104;
 
 export type ChannelSortMode = "alpha" | "recent";
 
@@ -66,6 +67,23 @@ export function stripOrphanedSectionModes(
   return { ...store, groups: Object.fromEntries(kept) };
 }
 
+export function boundChannelSortStore(
+  store: ChannelSortStore,
+): ChannelSortStore {
+  const entries = Object.entries(store.groups);
+  if (entries.length <= MAX_CHANNEL_SORT_GROUPS) return store;
+  const isFixedGroup = (key: string) =>
+    key === "starred" ||
+    key === "channels" ||
+    key === "forums" ||
+    key === "dms";
+  const fixed = entries.filter(([key]) => isFixedGroup(key));
+  const custom = entries
+    .filter(([key]) => !isFixedGroup(key))
+    .slice(-(MAX_CHANNEL_SORT_GROUPS - fixed.length));
+  return { ...store, groups: Object.fromEntries([...fixed, ...custom]) };
+}
+
 export function parseChannelSortPayload(
   json: unknown,
 ): ChannelSortStore | null {
@@ -83,7 +101,7 @@ export function parseChannelSortPayload(
           ),
         )
       : {};
-  return { version: 1, groups };
+  return boundChannelSortStore({ version: 1, groups });
 }
 
 export function readChannelSortStore(
@@ -107,7 +125,7 @@ export function writeChannelSortStore(
   try {
     window.localStorage.setItem(
       storageKey(pubkey, relayUrl),
-      JSON.stringify(store),
+      JSON.stringify(boundChannelSortStore(store)),
     );
     return true;
   } catch {
@@ -128,8 +146,17 @@ function channelRecencyMs(channel: Channel): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 export function compareChannelsByName(left: Channel, right: Channel): number {
-  return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
+  return (
+    compareCodeUnits(left.name.toLowerCase(), right.name.toLowerCase()) ||
+    compareCodeUnits(left.id, right.id)
+  );
 }
 
 /**

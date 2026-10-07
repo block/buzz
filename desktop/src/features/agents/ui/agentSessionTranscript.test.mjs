@@ -1879,3 +1879,201 @@ test("buildTranscript five-section system prompt card is standalone with all sec
     "prompt context must NOT contain system-prompt sections (Base/System/Team Instructions/Core Memory/Channel Canvas)",
   );
 });
+
+// --- claude-agent-acp _meta.systemPrompt.append transport ---
+
+test("buildTranscript session/new via _meta.systemPrompt.append produces identical standalone card as bare systemPrompt field", () => {
+  // claude-agent-acp delivers the system prompt at _meta.systemPrompt.append
+  // instead of the bare systemPrompt field. The observer must extract it and
+  // build the identical standalone card (same five sections, same acpSource,
+  // same turnId: null, same placement before the first turn).
+  const CH = "55555555-5555-5555-5555-555555555555";
+  const SYSTEM_PROMPT = [
+    "[Base]",
+    "You are a helpful assistant.",
+    "",
+    "[System]",
+    "Custom persona.",
+    "",
+    "---",
+    "# Team Instructions",
+    "Always tag on handoff.",
+    "",
+    "[Agent Memory \u2014 core]",
+    "I am Duncan.",
+    "",
+    "[Channel Canvas]",
+    "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "Last modified: 2026-07-01T10:00:00Z",
+    "Fetch current content with: buzz canvas get --channel 55555555-5555-5555-5555-555555555555",
+  ].join("\n");
+
+  const makeEvents = (params) => [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { jsonrpc: "2.0", id: 1, method: "session/new", params },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-cc",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-cc", isNewSession: true },
+    },
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-cc",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-cc",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: hello`,
+            },
+            { type: "text", text: "[Thread context]\nPrior messages here." },
+          ],
+        },
+      },
+    },
+  ];
+
+  // Build transcript from the claude-agent-acp _meta transport.
+  const metaEvents = makeEvents({
+    _meta: { systemPrompt: { append: SYSTEM_PROMPT } },
+  });
+  const metaRaw = buildTranscript(metaEvents);
+  const metaBlocks = buildTranscriptDisplayBlocks(metaRaw);
+  const metaFlat = flattenDisplayBlocks(metaBlocks);
+
+  // Also build from the standard bare-field transport for comparison.
+  const fieldEvents = makeEvents({ systemPrompt: SYSTEM_PROMPT });
+  const fieldRaw = buildTranscript(fieldEvents);
+  const fieldBlocks = buildTranscriptDisplayBlocks(fieldRaw);
+
+  // (a) Both produce exactly one standalone system-prompt single block.
+  const metaSPBlocks = metaBlocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
+  );
+  const fieldSPBlocks = fieldBlocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
+  );
+  assert.equal(
+    metaSPBlocks.length,
+    1,
+    "_meta: exactly one standalone system-prompt block",
+  );
+  assert.equal(
+    fieldSPBlocks.length,
+    1,
+    "field: exactly one standalone system-prompt block",
+  );
+
+  // (b) Both carry the same five ordered sections.
+  const EXPECTED_TITLES = [
+    "Base",
+    "System",
+    "Team Instructions",
+    "Core Memory",
+    "Channel Canvas",
+  ];
+  const metaTitles = (metaSPBlocks[0].item?.sections ?? []).map((s) => s.title);
+  const fieldTitles = (fieldSPBlocks[0].item?.sections ?? []).map(
+    (s) => s.title,
+  );
+  assert.deepEqual(
+    metaTitles,
+    EXPECTED_TITLES,
+    "_meta: five sections in order",
+  );
+  assert.deepEqual(
+    fieldTitles,
+    EXPECTED_TITLES,
+    "field: five sections in order",
+  );
+
+  // (c) System prompt appears before Prompt context in both display orders.
+  const metaSPIdx = metaFlat.findIndex((i) => i.title === "System prompt");
+  const metaPCIdx = metaFlat.findIndex((i) => i.title === "Prompt context");
+  assert.ok(metaSPIdx !== -1, "_meta: System prompt item present");
+  assert.ok(metaPCIdx !== -1, "_meta: Prompt context item present");
+  assert.ok(
+    metaSPIdx < metaPCIdx,
+    `_meta: System prompt (${metaSPIdx}) must precede Prompt context (${metaPCIdx})`,
+  );
+
+  // (d) The _meta item has turnId: null (standalone, not in a turn bucket).
+  const metaSPRawIdx = metaRaw.findIndex((i) => i.title === "System prompt");
+  assert.equal(
+    metaRaw[metaSPRawIdx]?.turnId ?? null,
+    null,
+    "_meta: system-prompt item must have turnId=null",
+  );
+});
+
+test("buildTranscript session/new bare systemPrompt field takes precedence over _meta.systemPrompt.append", () => {
+  // When both transports are present (non-standard but must not regress),
+  // the standard bare field must win — a reversed ?? would silently use the
+  // wrong text and the card body would differ from the wire source of truth.
+  const CH = "66666666-6666-6666-6666-666666666666";
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-both",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nWinner.",
+          _meta: { systemPrompt: { append: "[Base]\nLoser." } },
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const spItem = rawItems.find((i) => i.title === "System prompt");
+  assert.ok(spItem, "System prompt item must be present");
+  const bodies = (spItem.sections ?? []).map((s) => s.body).join("|");
+  assert.ok(
+    bodies.includes("Winner"),
+    "bare systemPrompt must win over _meta.systemPrompt.append",
+  );
+  assert.ok(
+    !bodies.includes("Loser"),
+    "_meta.systemPrompt.append must not appear when bare field is present",
+  );
+});

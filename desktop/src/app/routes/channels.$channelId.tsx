@@ -7,6 +7,8 @@ import {
   type ProfilePanelTab,
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
+import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingView";
+import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteSearch = {
@@ -57,10 +59,17 @@ const ChannelRouteScreen = React.lazy(async () => {
 function ChannelRouteComponent() {
   const { channelId } = Route.useParams();
   const search = Route.useSearch();
+  const isHuddleTranscript = huddleWindowChannelId() !== null;
 
   return (
     <React.Suspense
-      fallback={<ViewLoadingFallback includeHeader kind="channel" />}
+      fallback={
+        isHuddleTranscript ? (
+          <HuddleStartingView />
+        ) : (
+          <ViewLoadingFallback includeHeader kind="channel" />
+        )
+      }
     >
       <ChannelRouteScreen
         autoSendDraftKey={search.autoSend ?? null}

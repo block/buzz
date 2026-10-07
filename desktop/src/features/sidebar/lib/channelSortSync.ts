@@ -10,8 +10,15 @@ import {
   parseChannelSortPayload,
   type ChannelSortStore,
 } from "./channelSortPreference";
+import {
+  advanceWatermark,
+  readWatermark,
+  runBootstrap,
+  type FetchResult,
+} from "./sidebarSyncWatermark";
 
 const D_TAG = "channel-sort";
+const BLOB_TYPE = D_TAG;
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteSortPrefs = {
@@ -44,17 +51,20 @@ async function decryptAndParse(
  */
 export class ChannelSortSyncManager {
   private pubkey: string;
+  private relayUrl: string;
   private debounceTimer: number | null = null;
-  private lastRemoteCreatedAt = 0;
+  private lastRemoteCreatedAt: number;
   private pendingStore: ChannelSortStore | null = null;
   private lastPublishedStore: ChannelSortStore | null = null;
   private destroyed = false;
 
-  constructor(pubkey: string) {
+  constructor(pubkey: string, relayUrl: string) {
     this.pubkey = pubkey;
+    this.relayUrl = relayUrl;
+    this.lastRemoteCreatedAt = readWatermark(pubkey, BLOB_TYPE, relayUrl);
   }
 
-  async fetchRemoteSortPrefs(): Promise<RemoteSortPrefs | null> {
+  async fetchRemoteSortPrefs(): Promise<FetchResult<RemoteSortPrefs>> {
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_SORT],
@@ -62,19 +72,31 @@ export class ChannelSortSyncManager {
         "#d": [D_TAG],
         limit: 1,
       });
-      if (events.length === 0) return null;
-      if (events[0].pubkey !== this.pubkey) return null;
-      const result = await decryptAndParse(events[0]);
-      if (result) {
-        this.lastRemoteCreatedAt = Math.max(
-          this.lastRemoteCreatedAt,
-          result.createdAt,
-        );
+      if (events.length === 0 || events[0].pubkey !== this.pubkey) {
+        return { status: "absent" };
       }
-      return result;
+      const event = events[0];
+      this.recordRemoteHead(event.created_at);
+      const result = await decryptAndParse(event);
+      if (!result) {
+        return { status: "failed", createdAt: event.created_at };
+      }
+      return {
+        status: "found",
+        data: result,
+        createdAt: result.createdAt,
+        eventId: result.eventId,
+      };
     } catch {
-      return null;
+      return { status: "failed" };
     }
+  }
+
+  private recordRemoteHead(createdAt: number): void {
+    if (createdAt > this.lastRemoteCreatedAt) {
+      this.lastRemoteCreatedAt = createdAt;
+    }
+    advanceWatermark(this.pubkey, BLOB_TYPE, this.relayUrl, createdAt);
   }
 
   cancelPendingPublish(): void {
@@ -110,11 +132,17 @@ export class ChannelSortSyncManager {
         limit: 1,
       });
       if (events.length === 0 || events[0].pubkey !== this.pubkey) return store;
-      const remote = await decryptAndParse(events[0]);
+      const event = events[0];
+      // Snapshot the watermark before advancing it: after recordRemoteHead
+      // runs, lastRemoteCreatedAt equals event.created_at, so the LWW
+      // comparison remote.createdAt > lastRemoteCreatedAt would always be
+      // false and silently suppress the merge.
+      const headBeforeFetch = this.lastRemoteCreatedAt;
+      this.recordRemoteHead(event.created_at);
+      const remote = await decryptAndParse(event);
       if (!remote) return store;
       // Sort prefs use whole-blob LWW: take whichever is newer
-      if (remote.createdAt > this.lastRemoteCreatedAt) {
-        this.lastRemoteCreatedAt = remote.createdAt;
+      if (remote.createdAt > headBeforeFetch) {
         return remote.store;
       }
       return store;
@@ -174,10 +202,7 @@ export class ChannelSortSyncManager {
         "Timed out publishing channel sort preferences.",
         "Failed to publish channel sort preferences.",
       );
-      this.lastRemoteCreatedAt = Math.max(
-        this.lastRemoteCreatedAt,
-        event.created_at,
-      );
+      this.recordRemoteHead(event.created_at);
       this.lastPublishedStore = merged;
       this.pendingStore = null;
     } catch (error) {
@@ -197,12 +222,11 @@ export class ChannelSortSyncManager {
       },
       (event: RelayEvent) => {
         if (event.pubkey !== this.pubkey) return;
+        // Record the raw head before decrypt so an undecryptable live event
+        // still advances the watermark and blocks future seed-publish.
+        this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.lastRemoteCreatedAt = Math.max(
-              this.lastRemoteCreatedAt,
-              result.createdAt,
-            );
             onUpdate(result);
           }
         });
@@ -210,14 +234,28 @@ export class ChannelSortSyncManager {
     );
   }
 
+  /**
+   * Fetches the remote blob on first mount, records the remote head, and
+   * delegates the seed/hold/apply-remote decision to `runBootstrap`.
+   */
+  async bootstrap(localStore: ChannelSortStore) {
+    const fetchResult = await this.fetchRemoteSortPrefs();
+    return runBootstrap({
+      fetchResult,
+      lastHead: this.lastRemoteCreatedAt,
+      localStore,
+      isLocalNonEmpty: (s) => Object.keys(s.groups).length > 0,
+      publishFn: (s) => this.publishSortPrefs(s),
+    });
+  }
+
   destroy(): void {
     // Cancel any pending publish and mark this manager as destroyed so any
-    // in-flight doPublish() calls abort before reaching relayClient. The
-    // scoped localStorage write is already durable; when the user returns to
-    // this relay the existing seed-publish guard will re-publish from local
-    // state. Flushing here would race against community switching and could
-    // publish relay A's sort prefs to relay B via the shared relayClient
-    // singleton.
+    // in-flight doPublish() calls abort before reaching relayClient.
+    // Pending debounce-window changes are intentionally dropped: flushing
+    // could publish relay A's sort prefs to relay B via the shared relayClient
+    // singleton. On return, bootstrap's found path whole-blob-replaces from
+    // remote, so any dropped pending edit is lost.
     this.destroyed = true;
     this.cancelPendingPublish();
     this.pendingStore = null;

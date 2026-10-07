@@ -85,8 +85,9 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
 
       switch (action) {
         case _QuickAction.createChannel:
-          final created = await showModalBottomSheet<Channel>(
+          final created = await showBuzzModalBottomSheet<Channel>(
             context: context,
+            title: 'Create a new channel',
             constraints: _quickActionSheetConstraints(context),
             isScrollControlled: true,
             showDragHandle: true,
@@ -96,8 +97,9 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
             await openChannel(created);
           }
         case _QuickAction.newDm:
-          final opened = await showModalBottomSheet<Channel>(
+          final opened = await showBuzzModalBottomSheet<Channel>(
             context: context,
+            title: 'New message',
             constraints: _quickActionSheetConstraints(context),
             isScrollControlled: true,
             showDragHandle: true,
@@ -161,8 +163,10 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
                   openEdgeOffset: rightInset - Grid.gutter,
-                  onToggle: () =>
-                      quickActionsOpen.value = !quickActionsOpen.value,
+                  onToggle: () {
+                    unawaited(HapticFeedback.lightImpact());
+                    quickActionsOpen.value = !quickActionsOpen.value;
+                  },
                   onSelected: (action) => unawaited(selectQuickAction(action)),
                 ),
               ),

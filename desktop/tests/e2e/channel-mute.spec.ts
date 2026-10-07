@@ -80,12 +80,38 @@ test.describe("channel muting", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
     const engRow = page.getByTestId("channel-engineering");
+    const engLabel = engRow.locator("[data-sidebar-row-label]");
     await expect(engRow).toBeVisible();
-    await expect(engRow).toHaveCSS("opacity", "0.5");
+    await expect(engRow).toHaveCSS("opacity", "1");
+    await expect(engLabel).toHaveCSS("opacity", "0.5");
+    await expect(engRow.locator("svg.lucide-hash")).toHaveCSS("opacity", "0.5");
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
   });
 
-  test("03 — muted channel with @mention shows unread dot", async ({
+  test("02b — muted channels recede further in dark mode", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("buzz-theme", "buzz-dark");
+    });
+    await seedMuteState(page, ENGINEERING_CHANNEL_ID);
+    await installMockBridge(page);
+
+    await page.goto("/");
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await page.getByTestId("channel-random").click();
+
+    const engRow = page.getByTestId("channel-engineering");
+    await expect(engRow).toHaveCSS("opacity", "1");
+    await expect(engRow.locator("[data-sidebar-row-label]")).toHaveCSS(
+      "opacity",
+      "0.45",
+    );
+    await expect(engRow.locator("svg.lucide-hash")).toHaveCSS(
+      "opacity",
+      "0.45",
+    );
+  });
+
+  test("03 — muted channel with a top-level @mention is emphasized", async ({
     page,
   }) => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
@@ -123,7 +149,13 @@ test.describe("channel muting", () => {
       },
     );
 
-    await expect(page.getByTestId("channel-unread-engineering")).toBeVisible();
+    await expect(page.getByTestId("channel-engineering")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
+    await expect(
+      page.getByTestId("channel-unread-dot-engineering"),
+    ).toHaveCount(0);
   });
 
   test("04 — context menu shows Unmute channel when muted", async ({

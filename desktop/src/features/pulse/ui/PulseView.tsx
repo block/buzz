@@ -102,6 +102,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       if (!agentsByPubkey.has(agent.pubkey)) {
         agentsByPubkey.set(agent.pubkey, {
           pubkey: agent.pubkey,
+          ownerPubkey: null,
           name: agent.name,
           agentType: agent.agentCommand,
           channels: [],

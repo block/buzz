@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
@@ -65,6 +65,22 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Resolve the process working directory for ACP session metadata and prompts.
+///
+/// `std::env::current_dir()` returns an absolute path on every supported
+/// platform. Keep the explicit invariant check so a future source cannot
+/// silently introduce a relative path, and surface resolution failures instead
+/// of substituting a misleading Unix-specific fallback.
+fn current_working_directory() -> Result<String> {
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    ensure!(
+        cwd.is_absolute(),
+        "current working directory is not absolute: {}",
+        cwd.display()
+    );
+    Ok(cwd.to_string_lossy().into_owned())
+}
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -361,50 +377,242 @@ async fn check_sibling_via_profile(
     false
 }
 
-const OBSERVER_PUBLISH_INTERVAL: Duration = Duration::from_millis(167);
-const OBSERVER_PUBLISH_LIMIT_PER_MINUTE: usize = 90;
+/// Observer frames are published at a global rate of AT MOST ONE relay frame
+/// per tick — not one per channel, and not one per drain. Everything that
+/// accumulates between ticks waits in [`ObserverPublishQueue`] as events and
+/// is packed greedily into that single frame. One update per second is smooth
+/// enough for a human watching the session viewer, and the global budget is
+/// what makes the relay cost model flat: observer frames bill the agent's
+/// `LimitType::Messages` quota (`agent_standard_messages_per_min` = 120,
+/// enforced in relay `connection.rs::enforce_ws_admission`), shared with the
+/// agent's real chat messages. At 1 frame/s telemetry spends at most 60/min —
+/// half that budget — regardless of how many channels are active. A slower
+/// tick (e.g. 2s → 30/min) would leave more quota headroom for chat at the
+/// price of doubled viewer latency; this constant is the knob.
+const OBSERVER_PUBLISH_TICK: Duration = Duration::from_secs(1);
 
-struct ObserverPublishPacer {
-    next_publish: tokio::time::Instant,
-    published: VecDeque<tokio::time::Instant>,
+/// Byte budget for EVERYTHING retained while awaiting a publish slot: the
+/// event FIFO (serialized, post-`fit_observer_event_to_budget` bytes) PLUS
+/// the chunk coalescer's pending buffer (serialized event skeletons + raw
+/// accumulated text). Both stores count against this one cap — a
+/// high-cardinality chunk flood (many distinct coalescer keys) is bounded
+/// exactly like a plain event flood; neither buffer is a bypass around the
+/// other. Lossless-ness is bounded by this budget: each publish slot packs
+/// one ~64KB frame, gathered queue-wide for the front channel, so a single
+/// channel drains at ~64KB/s and 4 MiB buys roughly **64 seconds** of
+/// sustained over-production before the oldest items are dropped WITH
+/// accounting (a warn carrying the dropped-event count). With C channels
+/// producing concurrently the slots round-robin between them, so the
+/// per-channel drain is ~64KB/Cs and the budget shortens accordingly —
+/// still bytes-per-slot, never events-per-slot (see
+/// [`ObserverPublishQueue::next_frame`]). Beyond-budget floods therefore
+/// degrade to designed, visible loss — strictly better than the
+/// pre-batching pacer's silent 90/min drop.
+const OBSERVER_PENDING_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Observer event kind for a batch envelope wrapping multiple events.
+///
+/// The payload is `{"events": [<ObserverEvent>, ...]}` with every inner event
+/// carrying its own `seq`/`timestamp`, so consumers process inner events
+/// exactly as they would unbatched ones. Single pending events are published
+/// unwrapped, so the envelope only appears when there is something to batch.
+const OBSERVER_BATCH_KIND: &str = "batch";
+
+/// Collects observer events awaiting a publish slot.
+///
+/// Chunk-type events ride the [`ObserverChunkCoalescer`]; everything else is
+/// appended in arrival order, force-flushing pending chunks first — the same
+/// ordering rule the pre-batching publisher enforced, so merged chunk text can
+/// never leapfrog a tool call that arrived mid-stream.
+///
+/// Events wait here as EVENTS, not pre-sealed frames: each publish slot packs
+/// one frame at publish time ([`Self::next_frame`]), so a backlog keeps
+/// compacting into full frames instead of freezing into a frame queue.
+///
+/// The queue is bounded by [`OBSERVER_PENDING_QUEUE_MAX_BYTES`]. When a
+/// sustained flood outruns the one-frame-per-tick drain for longer than the
+/// budget, the OLDEST events are dropped (the viewer wants recent state) with
+/// accounting: a warning carrying the dropped-event count, and
+/// `dropped_events` for tests.
+#[derive(Default)]
+struct ObserverPublishQueue {
+    coalescer: ObserverChunkCoalescer,
+    /// `(serialized_len, source_events, event)`, oldest first. Length is
+    /// captured at enqueue (post-fit) so byte accounting never re-serializes
+    /// on eviction; `source_events` is how many GENERATED observer events the
+    /// entry represents (a merged chunk carries every chunk it absorbed), so
+    /// eviction accounting stays in source units after flush.
+    events: VecDeque<(usize, u64, observer::ObserverEvent)>,
+    pending_bytes: usize,
+    /// SOURCE observer events lost to byte-budget eviction. Counted in
+    /// generated-event units, not retained entries: a coalesced entry that
+    /// merged N chunks accounts for N when evicted. A PUBLISHED merged entry
+    /// delivers all N sources' text in one event, so the invariant is
+    /// `ingested == dropped_events + Σ source_events over published events`.
+    dropped_events: u64,
 }
 
-impl ObserverPublishPacer {
-    fn new() -> Self {
-        Self {
-            // No initial burst: even the first snapshot frame waits for its slot.
-            next_publish: tokio::time::Instant::now() + OBSERVER_PUBLISH_INTERVAL,
-            published: VecDeque::with_capacity(OBSERVER_PUBLISH_LIMIT_PER_MINUTE),
+impl ObserverPublishQueue {
+    fn ingest(&mut self, event: observer::ObserverEvent) {
+        // ObserverChunkCoalescer::ingest returns immediately-publishable events
+        // (force-flushed pending chunks + non-chunk passthrough, or a pending
+        // set displaced by the 60KB pre-flush); they join the queue in the
+        // order the coalescer emitted them, each carrying the count of source
+        // events it represents.
+        for (source_events, ready) in self.coalescer.ingest(event) {
+            self.enqueue(source_events, ready);
+        }
+        self.enforce_byte_budget();
+    }
+
+    fn enqueue(&mut self, source_events: u64, mut event: observer::ObserverEvent) {
+        // Pre-trim at enqueue so (a) byte accounting reflects what will ship
+        // and (b) one oversized leaf cannot force every frame it touches into
+        // whole-envelope elision downstream.
+        fit_observer_event_to_budget(&mut event);
+        let bytes = serialized_len(&event);
+        self.pending_bytes += bytes;
+        self.events.push_back((bytes, source_events, event));
+    }
+
+    /// Total bytes retained across BOTH stores — the event FIFO and the
+    /// coalescer's pending chunk buffer. The budget binds this sum; counting
+    /// only the FIFO would let a high-cardinality chunk flood (many distinct
+    /// coalescer keys, nothing ever flushing) grow unbounded outside the cap.
+    fn total_pending_bytes(&self) -> usize {
+        self.pending_bytes + self.coalescer.pending_bytes
+    }
+
+    /// Enforce [`OBSERVER_PENDING_QUEUE_MAX_BYTES`] over the total, dropping
+    /// OLDEST items first with accounting in SOURCE-event units. Global age
+    /// order across the two stores is structural: every enqueue path flushes
+    /// the coalescer first, so every pending coalescer entry is strictly newer
+    /// than every queued event — eviction is queue front, then coalescer
+    /// front. The `> 1` guard never drops the sole remaining item (any single
+    /// fitted event or pre-flush-capped chunk entry is far under the budget).
+    fn enforce_byte_budget(&mut self) {
+        let mut dropped = 0u64;
+        while self.total_pending_bytes() > OBSERVER_PENDING_QUEUE_MAX_BYTES
+            && self.events.len() + self.coalescer.pending.len() > 1
+        {
+            if let Some((bytes, source_events, _)) = self.events.pop_front() {
+                self.pending_bytes -= bytes;
+                dropped += source_events;
+            } else {
+                dropped += self.coalescer.drop_oldest().expect("guard ensures an item");
+            }
+        }
+        if dropped > 0 {
+            self.dropped_events += dropped;
+            tracing::warn!(
+                dropped,
+                total_dropped = self.dropped_events,
+                pending_bytes = self.total_pending_bytes(),
+                "observer publish queue over byte budget; dropped oldest events"
+            );
         }
     }
 
-    async fn wait(&mut self) {
-        loop {
-            let now = tokio::time::Instant::now();
-            while self
-                .published
-                .front()
-                .is_some_and(|sent| now.duration_since(*sent) >= Duration::from_secs(60))
-            {
-                self.published.pop_front();
-            }
+    /// True when nothing is waiting anywhere — the event queue AND the
+    /// coalescer's pending chunk buffer.
+    fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.coalescer.pending.is_empty()
+    }
 
-            let minute_slot = self.published.front().and_then(|sent| {
-                (self.published.len() >= OBSERVER_PUBLISH_LIMIT_PER_MINUTE)
-                    .then_some(*sent + Duration::from_secs(60))
-            });
-            let publish_at =
-                minute_slot.map_or(self.next_publish, |slot| slot.max(self.next_publish));
-            if publish_at > now {
-                tokio::time::sleep_until(publish_at).await;
-                continue;
-            }
-
-            let published_at = tokio::time::Instant::now();
-            self.published.push_back(published_at);
-            self.next_publish = published_at + OBSERVER_PUBLISH_INTERVAL;
-            return;
+    /// Pack and remove AT MOST ONE publishable frame: the front event's
+    /// channel, gathered queue-wide in FIFO order (packed greedily until
+    /// adding the next event would push the envelope over
+    /// `OBSERVER_MAX_PLAINTEXT_LEN`). Singletons ship unwrapped.
+    ///
+    /// Two invariants bound the gather:
+    /// - A frame never mixes channels (the desktop archive indexes a frame
+    ///   under its decrypted top-level `channelId`), and events keep their
+    ///   FIFO order *within* each channel. Cross-channel frame order MAY
+    ///   differ from arrival order — the desktop tolerates that everywhere:
+    ///   the transcript store sorts + rebuilds on out-of-order arrival, the
+    ///   archive is per-channel by construction, and the turn store's
+    ///   watermark is keyed per (agent, channel).
+    /// - A NULL-channel event is a BARRIER nothing gathers across: null-scope
+    ///   events (`agent_panic`-class) can causally couple to any channel, so
+    ///   their relative order against every channel is preserved exactly.
+    ///   Null-channel events themselves ship only as their contiguous front
+    ///   run.
+    ///
+    /// Gathering queue-wide (not just the front run) is what keeps the drain
+    /// rate in BYTES per slot rather than front-run-length events per slot:
+    /// with round-robin producers (channel A, B, A, B, ...) a front-run
+    /// packer degrades to ~1 event per slot regardless of size, silently
+    /// growing latency without ever tripping the byte budget.
+    ///
+    /// Pending coalesced chunks are flushed into the queue first, so a
+    /// publish slot never leaves merged chunk text stranded behind the tick.
+    fn next_frame(&mut self) -> Option<observer::ObserverEvent> {
+        for (source_events, ready) in self.coalescer.flush() {
+            self.enqueue(source_events, ready);
         }
+        let channel = self.events.front()?.2.channel_id.clone();
+
+        let mut picked: Vec<observer::ObserverEvent> = Vec::new();
+        let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
+            VecDeque::with_capacity(self.events.len());
+        let mut gathering = true;
+        while let Some((bytes, source_events, event)) = self.events.pop_front() {
+            if gathering && event.channel_id == channel {
+                picked.push(event);
+                if picked.len() > 1
+                    && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
+                {
+                    // Frame full: the overflow event stays queued and leads
+                    // its channel's next slot.
+                    let event = picked.pop().expect("len > 1");
+                    kept.push_back((bytes, source_events, event));
+                    gathering = false;
+                } else {
+                    self.pending_bytes -= bytes;
+                }
+            } else {
+                if gathering && (channel.is_none() || event.channel_id.is_none()) {
+                    // Null-channel barrier (or, for a null-channel frame, the
+                    // end of its contiguous front run): stop gathering.
+                    gathering = false;
+                }
+                kept.push_back((bytes, source_events, event));
+            }
+        }
+        self.events = kept;
+        Some(seal_batch(picked))
+    }
+}
+
+/// A single event ships unwrapped; two or more get the batch envelope.
+fn seal_batch(mut events: Vec<observer::ObserverEvent>) -> observer::ObserverEvent {
+    if events.len() == 1 {
+        return events.pop().expect("len == 1");
+    }
+    batch_envelope(&events)
+}
+
+/// Build the batch envelope for a set of same-channel events.
+///
+/// Envelope metadata mirrors the LAST inner event — the same convention the
+/// chunk coalescer uses for merged chunks — so `(timestamp, seq)` ordering and
+/// the desktop's latest-live-session tracking see the newest state.
+fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent {
+    let last = events
+        .last()
+        .expect("batch envelope needs at least 1 event");
+    observer::ObserverEvent {
+        seq: last.seq,
+        timestamp: last.timestamp.clone(),
+        kind: OBSERVER_BATCH_KIND.to_string(),
+        agent_index: last.agent_index,
+        channel_id: last.channel_id.clone(),
+        session_id: last.session_id.clone(),
+        turn_id: last.turn_id.clone(),
+        started_at: last.started_at.clone(),
+        payload: serde_json::json!({
+            "events": serde_json::to_value(events).unwrap_or_default(),
+        }),
     }
 }
 
@@ -445,29 +653,26 @@ async fn run_relay_observer_publisher(
     owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
 ) {
-    let mut coalescer = ObserverChunkCoalescer::default();
-    let mut pacer = ObserverPublishPacer::new();
+    let mut queue = ObserverPublishQueue::default();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
-        for event in coalescer.ingest(event) {
-            publish_relay_observer_event(
-                &publisher,
-                &keys,
-                &agent_pubkey_hex,
-                &owner_pubkey_hex,
-                &owner_pubkey,
-                &mut pacer,
-                event,
-            )
-            .await;
-        }
+        queue.ingest(event);
     }
 
-    let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Global pacer: AT MOST ONE relay frame per tick, no matter how many
+    // channels are active or how large the backlog is. `interval_at` starts
+    // the first tick a full period out, so a pre-loaded snapshot (up to the
+    // 1,000-event replay buffer on reconnect) cannot burst at t=0 — the old
+    // pacer's explicit "no initial burst" property, restored.
+    let mut publish_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + OBSERVER_PUBLISH_TICK,
+        OBSERVER_PUBLISH_TICK,
+    );
+    publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut closed = false;
     loop {
         tokio::select! {
-            result = rx.recv() => {
+            result = rx.recv(), if !closed => {
                 match result {
                     Ok(event) => {
                         // Skip live events already delivered via the snapshot
@@ -475,40 +680,29 @@ async fn run_relay_observer_publisher(
                         if event.seq <= max_snapshot_seq {
                             continue;
                         }
-                        for event in coalescer.ingest(event) {
-                            publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                            ).await;
-                        }
+                        queue.ingest(event);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        for event in coalescer.flush() {
-                            publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                            ).await;
-                        }
                         tracing::warn!(dropped = count, "relay observer publisher lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        for event in coalescer.flush() {
-                            publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                            ).await;
-                        }
-                        break;
+                        // Producer gone: stop selecting on the receiver and let
+                        // the tick arm drain what remains — still one frame per
+                        // tick. An unpaced final drain would be a burst bypass
+                        // around everything the pacer exists to prevent.
+                        closed = true;
                     }
                 }
             }
-            _ = flush_interval.tick() => {
-                // Periodic flush ensures live streaming even during continuous chunk delivery.
-                for event in coalescer.flush() {
+            _ = publish_tick.tick() => {
+                if let Some(frame) = queue.next_frame() {
                     publish_relay_observer_event(
                         &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                        &owner_pubkey_hex, &owner_pubkey, frame,
                     ).await;
+                }
+                if closed && queue.is_empty() {
+                    break;
                 }
             }
         }
@@ -518,12 +712,25 @@ async fn run_relay_observer_publisher(
 #[derive(Default)]
 struct ObserverChunkCoalescer {
     pending: Vec<PendingObserverChunk>,
+    /// Approximate serialized bytes retained in `pending` (each entry's
+    /// serialized skeleton at creation plus appended chunk text). Counted
+    /// against [`OBSERVER_PENDING_QUEUE_MAX_BYTES`] by the owning
+    /// [`ObserverPublishQueue`] so this buffer can never grow outside the
+    /// queue's byte budget (a distinct-key chunk flood parks everything here
+    /// and nothing would otherwise bound it).
+    pending_bytes: usize,
 }
 
 struct PendingObserverChunk {
     key: ObserverChunkKey,
     event: observer::ObserverEvent,
     text: String,
+    /// Bytes this entry contributes to `pending_bytes`.
+    bytes: usize,
+    /// GENERATED observer events merged into this entry (1 at creation, +1
+    /// per absorbed chunk). Evicting the entry loses this many source events,
+    /// so drop accounting must charge this count, not 1.
+    source_events: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -544,10 +751,13 @@ struct ObserverChunkKey {
 const OBSERVER_CHUNK_MAX_TEXT_BYTES: usize = 60_000;
 
 impl ObserverChunkCoalescer {
-    fn ingest(&mut self, event: observer::ObserverEvent) -> Vec<observer::ObserverEvent> {
+    /// Returns immediately-publishable events, each paired with the number of
+    /// SOURCE observer events it represents (merged chunks carry the count of
+    /// every chunk they absorbed; passthrough events are always 1).
+    fn ingest(&mut self, event: observer::ObserverEvent) -> Vec<(u64, observer::ObserverEvent)> {
         let Some((key, text)) = observer_chunk_key_and_text(&event) else {
             let mut events = self.flush();
-            events.push(event);
+            events.push((1, event));
             return events;
         };
 
@@ -556,25 +766,64 @@ impl ObserverChunkCoalescer {
             if pending.text.len() + text.len() >= OBSERVER_CHUNK_MAX_TEXT_BYTES {
                 let events = self.flush();
                 // Start a new pending entry with the current chunk.
-                self.pending.push(PendingObserverChunk { key, event, text });
+                self.push_pending(key, event, text);
                 return events;
             }
             pending.text.push_str(&text);
+            pending.bytes += text.len();
+            pending.source_events += 1;
+            self.pending_bytes += text.len();
             pending.event.seq = event.seq;
             pending.event.timestamp = event.timestamp;
             return Vec::new();
         }
 
-        self.pending.push(PendingObserverChunk { key, event, text });
+        self.push_pending(key, event, text);
         Vec::new()
     }
 
-    fn flush(&mut self) -> Vec<observer::ObserverEvent> {
+    fn push_pending(
+        &mut self,
+        key: ObserverChunkKey,
+        event: observer::ObserverEvent,
+        text: String,
+    ) {
+        // The entry RETAINS the first chunk's text twice until flush: once
+        // inside the serialized skeleton (`event.payload` still carries it)
+        // and once as the extracted `text` copy that appends grow. Both are
+        // real memory, so both count — charging only `serialized_len` lets a
+        // high-cardinality flood retain up to 2x the byte budget (each entry
+        // undercounts by exactly its first chunk's length).
+        let bytes = serialized_len(&event) + text.len();
+        self.pending_bytes += bytes;
+        self.pending.push(PendingObserverChunk {
+            key,
+            event,
+            text,
+            bytes,
+            source_events: 1,
+        });
+    }
+
+    /// Evict the OLDEST pending entry for byte-budget enforcement. Returns
+    /// the number of SOURCE events the entry represented (its merged chunk
+    /// count), or `None` when there is nothing to drop.
+    fn drop_oldest(&mut self) -> Option<u64> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let removed = self.pending.remove(0);
+        self.pending_bytes -= removed.bytes;
+        Some(removed.source_events)
+    }
+
+    fn flush(&mut self) -> Vec<(u64, observer::ObserverEvent)> {
+        self.pending_bytes = 0;
         self.pending
             .drain(..)
             .map(|mut pending| {
                 set_observer_chunk_text(&mut pending.event.payload, pending.text);
-                pending.event
+                (pending.source_events, pending.event)
             })
             .collect()
     }
@@ -793,10 +1042,8 @@ async fn publish_relay_observer_event(
     agent_pubkey_hex: &str,
     owner_pubkey_hex: &str,
     owner_pubkey: &PublicKey,
-    pacer: &mut ObserverPublishPacer,
     mut event: observer::ObserverEvent,
 ) {
-    pacer.wait().await;
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
@@ -840,6 +1087,7 @@ fn handle_relay_observer_control_event(
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
+    event_publisher: RelayEventPublisher,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -885,10 +1133,160 @@ fn handle_relay_observer_control_event(
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("publish_project_owner_announcements") => {
+            handle_publish_project_owner_announcements_control(
+                &payload,
+                keys,
+                observer,
+                event_publisher,
+            );
+        }
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectOwnerAnnouncementControl {
+    request_id: String,
+    announcements: Vec<ProjectOwnerAnnouncementTemplate>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectOwnerAnnouncementTemplate {
+    kind: u16,
+    content: String,
+    created_at: Option<u64>,
+    tags: Vec<Vec<String>>,
+}
+
+fn handle_publish_project_owner_announcements_control(
+    payload: &serde_json::Value,
+    keys: &nostr::Keys,
+    observer: Option<&observer::ObserverHandle>,
+    publisher: RelayEventPublisher,
+) {
+    let Ok(control) = serde_json::from_value::<ProjectOwnerAnnouncementControl>(payload.clone())
+    else {
+        tracing::warn!("project announcement control frame has an invalid payload");
+        return;
+    };
+    if Uuid::parse_str(&control.request_id).is_err()
+        || control.announcements.is_empty()
+        || control.announcements.len() > 2
+    {
+        tracing::warn!("project announcement control frame has invalid request metadata");
+        return;
+    }
+
+    let keys = keys.clone();
+    let observer = observer.cloned();
+    tokio::spawn(async move {
+        let events = match build_project_owner_announcement_events(control.announcements, &keys) {
+            Ok(events) => events,
+            Err(error) => {
+                emit_project_owner_control_result(
+                    observer.as_ref(),
+                    &control.request_id,
+                    "error",
+                    &[],
+                    Some(error.to_string()),
+                );
+                return;
+            }
+        };
+        let mut published_events = Vec::with_capacity(events.len());
+        for event in events {
+            if let Err(error) = publisher.publish_event(event.clone()).await {
+                emit_project_owner_control_result(
+                    observer.as_ref(),
+                    &control.request_id,
+                    "error",
+                    &published_events,
+                    Some(format!("publish project announcement: {error}")),
+                );
+                return;
+            }
+            published_events.push(event);
+        }
+        emit_project_owner_control_result(
+            observer.as_ref(),
+            &control.request_id,
+            "ok",
+            &published_events,
+            None,
+        );
+    });
+}
+
+fn build_project_owner_announcement_events(
+    announcements: Vec<ProjectOwnerAnnouncementTemplate>,
+    keys: &nostr::Keys,
+) -> Result<Vec<nostr::Event>> {
+    let now = nostr::Timestamp::now().as_secs();
+    announcements
+        .into_iter()
+        .map(|template| {
+            if !matches!(template.kind, 30_617 | 30_621) {
+                anyhow::bail!("unsupported project announcement kind");
+            }
+            if !template.tags.iter().any(|tag| {
+                tag.first().is_some_and(|value| value == "d")
+                    && tag.get(1).is_some_and(|value| !value.trim().is_empty())
+            }) {
+                anyhow::bail!("project announcement is missing its address");
+            }
+            let tags = template
+                .tags
+                .into_iter()
+                .map(|tag| {
+                    nostr::Tag::parse(tag)
+                        .map_err(|error| anyhow::anyhow!("invalid project tag: {error}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let created_at = template.created_at.unwrap_or(now);
+            if created_at > now.saturating_add(300) {
+                anyhow::bail!("project announcement timestamp is too far in the future");
+            }
+            nostr::EventBuilder::new(nostr::Kind::Custom(template.kind), template.content)
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(keys)
+                .map_err(|error| anyhow::anyhow!("sign project announcement: {error}"))
+        })
+        .collect()
+}
+
+fn emit_project_owner_control_result(
+    observer: Option<&observer::ObserverHandle>,
+    request_id: &str,
+    status: &str,
+    events: &[nostr::Event],
+    error: Option<String>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    observer.emit(
+        "control_result",
+        None,
+        &observer::ObserverContext {
+            channel_id: None,
+            session_id: None,
+            turn_id: None,
+            started_at: None,
+        },
+        serde_json::json!({
+            "type": "publish_project_owner_announcements",
+            "requestId": request_id,
+            "status": status,
+            "events": events,
+            "error": error,
+        }),
+    );
 }
 
 /// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
@@ -954,6 +1352,13 @@ fn handle_switch_model_control(
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
+    // Opaque per-pick correlator, echoed on every result frame so the Desktop
+    // can ignore a replayed result for an earlier pick. Optional: absent on
+    // older Desktop clients, in which case the frames simply carry no id.
+    let request_id = payload
+        .get("requestId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
 
     // A turn is in flight for this channel iff a task_map entry exists. The
     // agent is moved out of the pool during a turn, so the control oneshot is
@@ -970,7 +1375,10 @@ fn handle_switch_model_control(
         if signal_in_flight_task(
             pool,
             channel_id,
-            ControlSignal::SwitchModel(model_id.to_string()),
+            ControlSignal::SwitchModel {
+                model_id: model_id.to_string(),
+                request_id: request_id.clone(),
+            },
         ) {
             "sent"
         } else {
@@ -978,7 +1386,7 @@ fn handle_switch_model_control(
         }
     } else {
         // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
+        match pool.switch_idle_agent_model(channel_id, model_id, request_id.clone()) {
             IdleSwitchResult::Switched => "switched",
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
@@ -999,6 +1407,9 @@ fn handle_switch_model_control(
                 "type": "switch_model",
                 "status": status,
                 "modelId": model_id,
+                // Echo the correlator on the immediate ack so a `sent` /
+                // `turn_ending` / idle-path terminal frame matches the pick.
+                "requestId": request_id,
             }),
         );
     }
@@ -1227,6 +1638,259 @@ impl Drop for RespawnGuard {
 // any child processes inherit the correct environment. This must happen in the
 // sync entry point — `std::env::set_var` is only safe before tokio spawns
 // worker threads (Rust 2024 edition safety requirement).
+
+fn inactivity_expired(
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    turn_in_flight: bool,
+) -> bool {
+    !bound.is_zero() && !turn_in_flight && now.duration_since(last_activity) >= bound
+}
+
+/// Whether a woken lazy pool may be torn back down to the empty-slot state.
+///
+/// True only when the pool is ready, the idle bound has elapsed with no
+/// dispatched turn or heartbeat in flight and no in-flight prompt tasks, no
+/// work is queued, and no wake/respawn task is running. The queue and task
+/// gates make teardown race-safe with enqueue/wake: an event that landed in
+/// the queue (or a wake/respawn already in flight) blocks this decision, so a
+/// queued batch is never stranded — the caller's next loop iteration will
+/// dispatch or wake it instead.
+#[allow(clippy::too_many_arguments)]
+fn idle_pool_sleep_due(
+    pool_ready: bool,
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    turn_in_flight: bool,
+    prompt_tasks_in_flight: bool,
+    work_queued: bool,
+    wake_or_respawn_in_flight: bool,
+) -> bool {
+    pool_ready
+        && !work_queued
+        && !prompt_tasks_in_flight
+        && !wake_or_respawn_in_flight
+        && inactivity_expired(last_activity, now, bound, turn_in_flight)
+}
+
+#[cfg(test)]
+mod inactivity_tests {
+    use super::*;
+
+    #[test]
+    fn zero_disables_expiry_and_in_flight_turns_defer_it() {
+        let started = tokio::time::Instant::now();
+        let after_bound = started + Duration::from_secs(61);
+
+        assert!(!inactivity_expired(
+            started,
+            after_bound,
+            Duration::ZERO,
+            false
+        ));
+        assert!(!inactivity_expired(
+            started,
+            after_bound,
+            Duration::from_secs(60),
+            true
+        ));
+        assert!(inactivity_expired(
+            started,
+            after_bound,
+            Duration::from_secs(60),
+            false
+        ));
+    }
+
+    #[test]
+    fn dispatched_activity_restarts_the_inactivity_bound() {
+        let started = tokio::time::Instant::now();
+        let dispatched = started + Duration::from_secs(50);
+        let checked = started + Duration::from_secs(61);
+
+        assert!(!inactivity_expired(
+            dispatched,
+            checked,
+            Duration::from_secs(60),
+            false
+        ));
+    }
+}
+
+#[cfg(test)]
+mod idle_pool_sleep_tests {
+    use super::*;
+
+    // The all-clear baseline: pool ready, bound elapsed, nothing busy or
+    // queued. Every negative case below flips exactly one gate off this.
+    fn ready_after_bound() -> (tokio::time::Instant, tokio::time::Instant, Duration) {
+        let started = tokio::time::Instant::now();
+        (
+            started,
+            started + Duration::from_secs(61),
+            Duration::from_secs(60),
+        )
+    }
+
+    #[test]
+    fn sleeps_when_ready_idle_and_quiet() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn zero_bound_never_sleeps() {
+        let (last, now, _) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            Duration::ZERO,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn not_ready_never_sleeps() {
+        // A still-sleeping (or waking) pool must not "re-sleep".
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            false, last, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn active_turn_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, true, false, false, false
+        ));
+    }
+
+    #[test]
+    fn in_flight_prompt_task_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, true, false, false
+        ));
+    }
+
+    #[test]
+    fn queued_work_at_boundary_defers_sleep() {
+        // Enqueue-at-teardown protection: a batch sitting in the queue blocks
+        // teardown so it is never stranded — the loop dispatches it instead.
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, true, false
+        ));
+    }
+
+    #[test]
+    fn wake_or_respawn_in_flight_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn recent_activity_defers_sleep() {
+        // Activity 50s ago under a 60s bound: not yet idle.
+        let started = tokio::time::Instant::now();
+        let recent = started + Duration::from_secs(50);
+        let now = started + Duration::from_secs(59);
+        assert!(!idle_pool_sleep_due(
+            true,
+            recent,
+            now,
+            Duration::from_secs(60),
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    fn slot(respawn_in_flight: bool) -> SlotCircuit {
+        SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight,
+        }
+    }
+
+    // The call-site signal for the `wake_or_respawn_in_flight` gate is
+    // `any_respawn_in_flight(&crash_history)`, NOT `!respawn_tasks.is_empty()`.
+    // Regression for the PR #5682 review blocker: completed respawn tasks are
+    // never joined from the `respawn_tasks` JoinSet (their payloads arrive
+    // out-of-band via `respawn_rx`), so `!is_empty()` stays true forever after
+    // the first refill/crash recovery and the pool could never re-sleep. The
+    // authoritative signal clears per-slot when the payload is received.
+    #[test]
+    fn respawn_in_flight_signal_gates_then_clears_for_sleep() {
+        let (last, now, bound) = ready_after_bound();
+
+        // A respawn in flight for any slot defers sleep.
+        let busy = [slot(false), slot(true), slot(false)];
+        assert!(any_respawn_in_flight(&busy));
+        assert!(!idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            bound,
+            false,
+            false,
+            false,
+            any_respawn_in_flight(&busy),
+        ));
+
+        // Once the respawn completes (payload received → flag cleared), the
+        // signal goes false and the otherwise-quiet pool becomes sleep-eligible
+        // — even though a naive `!JoinSet.is_empty()` would still be stuck true.
+        let quiet = [slot(false), slot(false), slot(false)];
+        assert!(!any_respawn_in_flight(&quiet));
+        assert!(idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            bound,
+            false,
+            false,
+            false,
+            any_respawn_in_flight(&quiet),
+        ));
+    }
+
+    // The reaper (`respawn_tasks.join_next().now_or_never()` loop) must drain
+    // completed handles so the JoinSet does not grow without bound and so
+    // `!respawn_tasks.is_empty()` cannot become a permanent busy bit if anyone
+    // ever reintroduces it as the gate signal.
+    #[tokio::test]
+    async fn completed_respawn_tasks_are_reaped_from_the_joinset() {
+        let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        respawn_tasks.spawn(async {});
+        respawn_tasks.spawn(async {});
+        // Let both tasks run to completion.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // The reaper drains finished handles non-blockingly.
+        while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
+
+        assert!(
+            respawn_tasks.is_empty(),
+            "completed respawn tasks must be reaped so the set does not wedge \
+             the idle-sleep gate or grow unbounded"
+        );
+    }
+}
 
 pub fn run() -> Result<()> {
     config::propagate_legacy_env_vars();
@@ -1525,6 +2189,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1543,10 +2208,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -1600,6 +2262,42 @@ async fn tokio_main() -> Result<()> {
     };
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Independent of pool readiness: a never-mentioned lazy agent must still
+    // self-terminate. The watch interval is capped so small configured bounds
+    // remain reasonably precise without waking long-lived agents frequently.
+    let inactivity_bound = Duration::from_secs(config.exit_after_inactivity_secs);
+    let mut last_activity = tokio::time::Instant::now();
+    let mut inactivity_reaper = if inactivity_bound.is_zero() {
+        None
+    } else {
+        let interval = inactivity_bound.min(Duration::from_secs(30));
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + interval,
+            interval,
+        ))
+    };
+
+    // Idle pool re-sleep: tear a woken lazy pool back down to the empty-slot
+    // state after `idle_pool_sleep_bound` of quiet, releasing worker
+    // subprocesses. The next accepted event re-wakes it through the same lazy
+    // path. Only meaningful under `lazy_pool`; the tick arm additionally gates
+    // on `pool_ready`, so a still-sleeping pool never re-sleeps. Reuses the
+    // `last_activity` clock the dispatch path already maintains.
+    let idle_pool_sleep_bound = if config.lazy_pool {
+        Duration::from_secs(config.idle_pool_sleep_secs)
+    } else {
+        Duration::ZERO
+    };
+    let mut idle_pool_sleep_reaper = if idle_pool_sleep_bound.is_zero() {
+        None
+    } else {
+        let interval = idle_pool_sleep_bound.min(Duration::from_secs(30));
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + interval,
+            interval,
+        ))
+    };
 
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
@@ -1774,7 +2472,9 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -1792,6 +2492,9 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        desired_model_request_id: None,
+                        desired_model_pending_ack: false,
+                        startup_effort: config.effort_level.clone(),
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
@@ -1806,11 +2509,24 @@ async fn tokio_main() -> Result<()> {
                 }
             }
         }
+        // Reap completed respawn handles from the JoinSet. Payloads are
+        // delivered out-of-band through `respawn_rx` (drained above), so the
+        // JoinSet is never joined by the normal flow — Tokio retains finished
+        // tasks until `join_next`, so without this the set grows on every
+        // refill/crash recovery and `!respawn_tasks.is_empty()` would stay true
+        // forever. Non-blocking (`now_or_never`), same pattern as
+        // `drain_ready_join_results` for `pool.join_set`. The authoritative
+        // in-flight signal is `any_respawn_in_flight(&crash_history)` (each
+        // slot's `respawn_in_flight` is cleared when its payload is received),
+        // not JoinSet occupancy.
+        while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
         // Flush requeued events that were waiting for a live agent. Without
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+            for (channel_id, thread_tags) in
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+            {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -1888,7 +2604,14 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(
+                                    &config.keys,
+                                    event,
+                                    &mut pool,
+                                    observer.as_ref(),
+                                    owner_hex,
+                                    relay.event_publisher(),
+                                );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -2258,7 +2981,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -2276,6 +2999,77 @@ async fn tokio_main() -> Result<()> {
                     None
                 }
                 _ = async {
+                    match inactivity_reaper.as_mut() {
+                        Some(timer) => timer.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx;
+                    if inactivity_expired(
+                        last_activity,
+                        tokio::time::Instant::now(),
+                        inactivity_bound,
+                        queue.has_in_flight() || heartbeat_in_flight,
+                    ) {
+                        tracing::info!(
+                            inactivity_seconds = config.exit_after_inactivity_secs,
+                            "inactivity bound reached — exiting gracefully"
+                        );
+                        let _ = shutdown_tx.send(());
+                    }
+                    None
+                }
+                _ = async {
+                    match idle_pool_sleep_reaper.as_mut() {
+                        Some(timer) => timer.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    // A wake in flight (pool not yet ready) is covered by the
+                    // pool_ready gate; respawn tasks and in-flight prompt tasks
+                    // are the remaining "busy" signals. Never sleep mid-work:
+                    // `has_undispatched_work()` (not `has_flushable_work()`)
+                    // keeps `work_queued` true for a retry-throttled batch too,
+                    // so a failed turn awaiting backoff is never stranded — the
+                    // next iteration dispatches or re-wakes it.
+                    if idle_pool_sleep_due(
+                        pool_ready,
+                        last_activity,
+                        tokio::time::Instant::now(),
+                        idle_pool_sleep_bound,
+                        queue.has_in_flight() || heartbeat_in_flight,
+                        !pool.join_set.is_empty(),
+                        queue.has_undispatched_work(),
+                        !wake_tasks.is_empty()
+                            || any_respawn_in_flight(&crash_history),
+                    ) {
+                        tracing::info!(
+                            idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
+                            "idle pool sleep bound reached — tearing pool back to lazy state"
+                        );
+                        shutdown_agent_pool(&mut pool).await;
+                        // Return to the exact pre-wake lazy state: empty slots,
+                        // Listening lifecycle. The top-of-loop wake path re-wakes
+                        // on the next accepted event. No second lifecycle.
+                        pool = AgentPool::from_slots(
+                            (0..config.agents).map(|_| None).collect(),
+                        );
+                        pool_ready = false;
+                        pool_lifecycle = PoolLifecycle::listening();
+                        last_activity = tokio::time::Instant::now();
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "listening",
+                            None,
+                        );
+                    }
+                    None
+                }
+                _ = async {
                     match heartbeat.as_mut() {
                         Some(hb) => hb.tick().await,
                         None => std::future::pending().await,
@@ -2287,7 +3081,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -2385,7 +3179,9 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2408,7 +3204,9 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2493,7 +3291,7 @@ async fn tokio_main() -> Result<()> {
                 //     treat as PromptCompletedNeutral to avoid leaking
                 //     the withheld event in `withheld_native_steer`.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
-                    Ok(pool::SteerAck::Success) => (false, true, false),
+                    Ok(pool::SteerAck::Success { .. }) => (false, true, false),
                     // -32601 = method_not_found: agent does not implement the
                     // steer extension. Fire cancel+merge so the message still
                     // reaches the agent.
@@ -2526,8 +3324,19 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
-                if matches!(ack, Ok(pool::SteerAck::Success)) {
+                if let Ok(pool::SteerAck::Success { session_id }) = &ack {
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
+                    if !pool.record_successful_steer(
+                        channel_id,
+                        event_id.clone(),
+                        session_id.clone(),
+                    ) {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            event_id = %event_id,
+                            "successful steer lost its in-flight delivery ledger"
+                        );
+                    }
                 }
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
@@ -2550,7 +3359,9 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2577,7 +3388,7 @@ async fn tokio_main() -> Result<()> {
                             None,
                         );
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -2911,6 +3722,7 @@ fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
+    last_activity: &mut tokio::time::Instant,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -2987,9 +3799,11 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
+        *last_activity = tokio::time::Instant::now();
     }
     tracing::debug!(
         dispatched = dispatched_channels.len(),
@@ -3067,9 +3881,30 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
+    let successful_steer_deliveries = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == agent_index)
+        .map(|meta| meta.successful_steer_deliveries.clone())
+        .unwrap_or_default();
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    if let PromptSource::Channel(channel_id) = &result.source {
+        // The task may have invalidated this session before returning. Never
+        // resurrect delivery state for a dead session; its replacement must
+        // receive fresh standing context and history.
+        if let Some(live_session_id) = result.agent.state.sessions.get(channel_id).cloned() {
+            let event_ids = successful_steer_deliveries
+                .into_iter()
+                .filter(|delivery| delivery.session_id == live_session_id)
+                .map(|delivery| delivery.event_id);
+            result
+                .agent
+                .state
+                .mark_channel_delivery_success(*channel_id, false, event_ids);
+        }
+    }
 
     // The hard-timeout death_message (below) must describe the batch's
     // *actual* fate, not just the `recently_active` eligibility flag — a
@@ -3600,6 +4435,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            successful_steer_deliveries: HashSet::new(),
         },
     );
     *heartbeat_in_flight = true;
@@ -3627,8 +4463,24 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_repo_context_and_learning_loop() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("read its root `AGENTS.md`"));
+        assert!(prompt.contains("path-local `AGENTS.md`"));
+        assert!(
+            prompt.contains("product, architecture, and vision documents as design constraints")
+        );
+        assert!(prompt.contains("CI and live workflow evidence answer different questions"));
+        assert!(prompt.contains("record the invariant in the same session"));
+        assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("use the person's **exact display name as shown in Buzz**"));
+        assert!(prompt.contains("Do not expand a short display name, infer a surname"));
+        assert!(prompt.contains("Preserve it exactly; do not infer, expand, or look up a surname"));
         assert!(prompt.contains("--mention <hex-or-npub>"));
         assert!(prompt.contains("every presentation-only name that should notify"));
         assert!(
@@ -3758,6 +4610,7 @@ struct PoolStartup {
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
     model: Option<String>,
+    effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
 
@@ -3770,6 +4623,7 @@ impl PoolStartup {
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
+            effort_level: config.effort_level.clone(),
             observer,
         }
     }
@@ -3837,6 +4691,9 @@ async fn initialize_agent_pool(
                             model_capabilities: None,
                             desired_model: startup.model.clone(),
                             model_overridden: false,
+                            desired_model_request_id: None,
+                            desired_model_pending_ack: false,
+                            startup_effort: startup.effort_level.clone(),
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
@@ -4044,10 +4901,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
+    let cwd = current_working_directory()?;
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
@@ -4242,17 +5096,23 @@ mod heartbeat_base_prompt_tests {
     // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
     // the second half of the round-2 regression (the first being initial_message).
 
+    fn heartbeat_standing() -> queue::StandingContext<'static> {
+        queue::StandingContext {
+            base_prompt: Some("you are a helpful agent"),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_heartbeat_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
         // with the [Base] section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
             "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
         );
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
     }
 
     #[test]
@@ -4260,7 +5120,7 @@ mod heartbeat_base_prompt_tests {
         // protocol_version 2 gets base_prompt via session/new; the heartbeat
         // prompt is sent verbatim.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_standing_for_legacy(2, &heartbeat_standing(), prompt);
         assert_eq!(composed, prompt);
     }
 }
@@ -4371,6 +5231,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
 
@@ -4390,6 +5251,59 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+
+    #[test]
+    fn project_owner_control_signs_only_addressable_project_events() {
+        let keys = Keys::generate();
+        let events = build_project_owner_announcement_events(
+            vec![
+                ProjectOwnerAnnouncementTemplate {
+                    kind: 30_621,
+                    content: String::new(),
+                    created_at: Some(1),
+                    tags: vec![vec!["d".to_string(), "project".to_string()]],
+                },
+                ProjectOwnerAnnouncementTemplate {
+                    kind: 30_617,
+                    content: String::new(),
+                    created_at: Some(1),
+                    tags: vec![vec!["d".to_string(), "repository".to_string()]],
+                },
+            ],
+            &keys,
+        )
+        .expect("valid project events");
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.pubkey == keys.public_key()));
+        assert!(events.iter().all(|event| event.verify().is_ok()));
+    }
+
+    #[test]
+    fn project_owner_control_rejects_arbitrary_or_unaddressed_events() {
+        let keys = Keys::generate();
+        let arbitrary = build_project_owner_announcement_events(
+            vec![ProjectOwnerAnnouncementTemplate {
+                kind: 1,
+                content: String::new(),
+                created_at: None,
+                tags: vec![vec!["d".to_string(), "project".to_string()]],
+            }],
+            &keys,
+        );
+        assert!(arbitrary.is_err());
+
+        let unaddressed = build_project_owner_announcement_events(
+            vec![ProjectOwnerAnnouncementTemplate {
+                kind: 30_621,
+                content: String::new(),
+                created_at: None,
+                tags: vec![],
+            }],
+            &keys,
+        );
+        assert!(unaddressed.is_err());
     }
 }
 
@@ -4658,6 +5572,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "dm".into(),
                     channel_type: "dm".into(),
+                    description: None,
                 },
             ),
             (
@@ -4665,6 +5580,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "stream".into(),
                     channel_type: "stream".into(),
+                    description: None,
                 },
             ),
         ]);
@@ -4681,6 +5597,7 @@ mod author_gate_tests {
             relay::ChannelInfo {
                 name: "unknown".into(),
                 channel_type: "unknown".into(),
+                description: None,
             },
         )]);
         assert!(
@@ -4838,12 +5755,21 @@ mod observer_snapshot_race_tests {
 
         // The run loop has exited, dropping the publisher; drain the forwarded
         // events until the channel closes (deterministic — no try_recv race
-        // with the test_pair forwarding task).
+        // with the test_pair forwarding task). With per-tick batching the three
+        // events arrive inside batch envelopes (or unwrapped when a drain held
+        // exactly one event); unwrap both shapes.
         let mut markers = Vec::new();
         while let Some(event) = published_rx.recv().await {
             let payload: serde_json::Value =
                 decrypt_observer_payload(&owner_keys, &event).expect("decrypt published frame");
-            markers.push(payload["payload"]["marker"].as_str().unwrap().to_string());
+            match payload["payload"]["events"].as_array() {
+                Some(inner) => markers.extend(
+                    inner
+                        .iter()
+                        .map(|e| e["payload"]["marker"].as_str().unwrap().to_string()),
+                ),
+                None => markers.push(payload["payload"]["marker"].as_str().unwrap().to_string()),
+            }
         }
         assert_eq!(
             markers,
@@ -4854,36 +5780,865 @@ mod observer_snapshot_race_tests {
 }
 
 #[cfg(test)]
-mod observer_publish_pacer_tests {
+mod observer_publish_queue_tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
-    async fn starts_without_a_burst_and_spaces_frames() {
-        let started = tokio::time::Instant::now();
-        let mut pacer = ObserverPublishPacer::new();
-
-        pacer.wait().await;
-        let first = tokio::time::Instant::now();
-        pacer.wait().await;
-        let second = tokio::time::Instant::now();
-
-        assert_eq!(first.duration_since(started), OBSERVER_PUBLISH_INTERVAL);
-        assert_eq!(second.duration_since(first), OBSERVER_PUBLISH_INTERVAL);
+    fn event(seq: u64, kind: &str, channel: Option<&str>) -> observer::ObserverEvent {
+        observer::ObserverEvent {
+            seq,
+            timestamp: format!("2026-04-29T04:00:{:02}Z", seq.min(59)),
+            kind: kind.to_string(),
+            agent_index: Some(0),
+            channel_id: channel.map(ToOwned::to_owned),
+            session_id: Some("session-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            started_at: None,
+            payload: serde_json::json!({ "seq": seq }),
+        }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn limits_frames_in_each_rolling_minute() {
-        let mut pacer = ObserverPublishPacer::new();
-        pacer.wait().await;
-        let first = tokio::time::Instant::now();
-        for _ in 1..OBSERVER_PUBLISH_LIMIT_PER_MINUTE {
-            pacer.wait().await;
+    fn queue_of(events: Vec<observer::ObserverEvent>) -> ObserverPublishQueue {
+        let mut queue = ObserverPublishQueue::default();
+        for event in events {
+            queue.ingest(event);
+        }
+        queue
+    }
+
+    /// Collect every frame the queue will produce, one publish slot at a time.
+    fn drain_frames(queue: &mut ObserverPublishQueue) -> Vec<observer::ObserverEvent> {
+        let mut frames = Vec::new();
+        while !queue.is_empty() {
+            frames.push(queue.next_frame().expect("queue not empty"));
+        }
+        frames
+    }
+
+    /// Inner seqs of a frame, whether it is an envelope or an unwrapped
+    /// singleton.
+    fn frame_seqs(frame: &observer::ObserverEvent) -> Vec<u64> {
+        match frame.payload.get("events").and_then(|v| v.as_array()) {
+            Some(inner) => inner.iter().map(|e| e["seq"].as_u64().unwrap()).collect(),
+            None => vec![frame.seq],
+        }
+    }
+
+    /// Retained bytes computed by WALKING the entries, independently of the
+    /// queue's own accumulator. Cap regressions must assert on this, not on
+    /// `total_pending_bytes()` — asserting the counter against itself passed
+    /// while the process retained ~2x the budget (Sami/Max round 3: each
+    /// pending coalescer entry holds the first chunk's text twice, in the
+    /// serialized skeleton AND the extracted `text` copy).
+    fn walked_retained_bytes(queue: &ObserverPublishQueue) -> usize {
+        let fifo: usize = queue
+            .events
+            .iter()
+            .map(|(_, _, event)| serialized_len(event))
+            .sum();
+        let coalescer: usize = queue
+            .coalescer
+            .pending
+            .iter()
+            .map(|pending| serialized_len(&pending.event) + pending.text.len())
+            .sum();
+        fifo + coalescer
+    }
+
+    /// The walker above is itself an instrument, and every cap test asks it
+    /// only for `<= CAP` — a blinded walker (missing an arm, or returning 0)
+    /// would satisfy all of them while hiding exactly the 2x overshoot it was
+    /// added to catch (Sami round 5, M17-M20). Pin it two-sided: it must SEE
+    /// the double retention, and it must agree with the accumulator EXACTLY
+    /// while both stores are non-empty — neither may drift.
+    #[test]
+    fn walked_retained_bytes_agrees_with_the_accumulator_exactly() {
+        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            e
         }
 
-        pacer.wait().await;
-        let ninety_first = tokio::time::Instant::now();
+        let text = "w".repeat(7_000);
+        let mut queue = ObserverPublishQueue::default();
+        // One pending chunk: its text lives in the serialized skeleton AND
+        // the extracted copy, so a walker blind to either arm reads short.
+        queue.ingest(chunk(1, "message-a", &text));
+        assert!(
+            walked_retained_bytes(&queue) >= 2 * text.len(),
+            "the walker must SEE the first chunk's text twice \
+             (skeleton + extracted copy), got {}",
+            walked_retained_bytes(&queue)
+        );
 
-        assert_eq!(ninety_first.duration_since(first), Duration::from_secs(60));
+        // Populate BOTH stores: the non-chunk event flushes message-a into
+        // the FIFO and queues itself; fresh pending keys (plus a same-key
+        // append) rebuild the coalescer side.
+        queue.ingest(event(2, "tool_call", Some("chan-a")));
+        queue.ingest(chunk(3, "message-b", &text));
+        queue.ingest(chunk(4, "message-b", &text));
+        queue.ingest(chunk(5, "message-c", &text));
+        assert!(
+            !queue.events.is_empty() && !queue.coalescer.pending.is_empty(),
+            "both arms must be non-empty for the agreement check to bind"
+        );
+        assert_eq!(
+            queue.total_pending_bytes(),
+            walked_retained_bytes(&queue),
+            "accumulator and entry-walk must agree exactly: neither may drift"
+        );
+    }
+
+    /// Two or more pending events for one channel ship as a single batch
+    /// envelope whose payload carries every inner event in arrival order.
+    #[test]
+    fn multiple_events_ship_as_one_envelope_in_order() {
+        let mut queue = queue_of(vec![
+            event(1, "turn_started", Some("chan-a")),
+            event(2, "acp_read", Some("chan-a")),
+            event(3, "acp_write", Some("chan-a")),
+        ]);
+
+        let frame = queue.next_frame().expect("one frame");
+        assert!(queue.is_empty(), "one channel, one publish slot");
+        assert_eq!(frame.kind, OBSERVER_BATCH_KIND);
+        assert_eq!(frame.seq, 3, "envelope mirrors the last inner event");
+        assert_eq!(frame_seqs(&frame), [1, 2, 3], "arrival order preserved");
+        let inner = frame.payload["events"].as_array().expect("events array");
+        assert_eq!(inner[1]["kind"], "acp_read", "inner events keep their kind");
+    }
+
+    /// A single pending event is published unwrapped — no envelope, so
+    /// consumers that predate batching still understand quiet periods.
+    #[test]
+    fn a_single_event_stays_unwrapped() {
+        let mut queue = queue_of(vec![event(7, "turn_started", Some("chan-a"))]);
+        let frame = queue.next_frame().expect("one frame");
+        assert!(queue.is_empty());
+        assert_eq!(frame.kind, "turn_started");
+        assert_eq!(frame.seq, 7);
+    }
+
+    /// An empty queue yields no frame — a tick with nothing pending must not
+    /// publish anything.
+    #[test]
+    fn empty_queue_yields_no_frame() {
+        let mut queue = ObserverPublishQueue::default();
+        assert!(queue.next_frame().is_none());
+        assert!(queue.is_empty());
+    }
+
+    /// Frames never mix channels, and each channel's events keep their FIFO
+    /// order. Gathering is QUEUE-WIDE: the front event's channel collects its
+    /// events from anywhere in the queue (that is what keeps the drain rate
+    /// in bytes per slot under interleaving), so cross-channel frame order
+    /// MAY differ from arrival order — but a null-channel event is a barrier
+    /// nothing gathers across.
+    #[test]
+    fn frames_never_mix_channels_and_gather_queue_wide() {
+        let mut queue = queue_of(vec![
+            event(1, "acp_read", Some("chan-a")),
+            event(2, "acp_write", Some("chan-a")),
+            event(3, "acp_read", Some("chan-b")),
+            event(4, "acp_read", Some("chan-a")),
+            event(5, "acp_read", None),
+        ]);
+
+        let frames = drain_frames(&mut queue);
+        assert_eq!(
+            frames.len(),
+            3,
+            "gathered: [1,2,4]@a, [3]@b, [5]@None — one frame each"
+        );
+        for frame in &frames {
+            let channels: HashSet<Option<String>> = match frame.payload.get("events") {
+                Some(serde_json::Value::Array(inner)) => inner
+                    .iter()
+                    .map(|e| e["channelId"].as_str().map(ToOwned::to_owned))
+                    .collect(),
+                _ => std::iter::once(frame.channel_id.clone()).collect(),
+            };
+            assert_eq!(channels.len(), 1, "a frame never mixes channels");
+        }
+        assert_eq!(
+            frame_seqs(&frames[0]),
+            [1, 2, 4],
+            "chan-a gathers queue-wide, FIFO within the channel"
+        );
+        assert_eq!(frames[0].channel_id.as_deref(), Some("chan-a"));
+        assert_eq!(frames[1].kind, "acp_read", "singleton stays unwrapped");
+        assert_eq!(frames[1].channel_id.as_deref(), Some("chan-b"));
+        assert_eq!(frames[2].channel_id, None);
+    }
+
+    /// A NULL-channel event is a barrier: channel events queued BEHIND it
+    /// must not gather into a frame ahead of it, so causally-global events
+    /// (`agent_panic`-class) keep their exact order against every channel.
+    /// The null event itself ships only its contiguous front run.
+    #[test]
+    fn null_channel_events_are_gather_barriers() {
+        let mut queue = queue_of(vec![
+            event(1, "acp_read", Some("chan-a")),
+            event(2, "acp_read", Some("chan-b")),
+            event(3, "agent_panic", None),
+            event(4, "acp_write", Some("chan-a")),
+        ]);
+
+        let frames = drain_frames(&mut queue);
+        let published: Vec<Vec<u64>> = frames.iter().map(frame_seqs).collect();
+        assert_eq!(
+            published,
+            [vec![1], vec![2], vec![3], vec![4]],
+            "seq 4 must not gather past the null barrier into frame 1"
+        );
+    }
+
+    /// The drain-rate regression Sami measured: with two channels strictly
+    /// alternating, a front-run packer degrades to ONE event per slot
+    /// (~275 B/s regardless of the 64KB frame budget). Queue-wide gathering
+    /// must drain an interleaved backlog in ~ceil(events / per-frame-fit)
+    /// slots per channel, not one slot per event.
+    #[test]
+    fn interleaved_channels_drain_at_bytes_per_slot_not_events_per_slot() {
+        let mut events = Vec::new();
+        for i in 0..100u64 {
+            events.push(event(2 * i + 1, "acp_read", Some("chan-a")));
+            events.push(event(2 * i + 2, "acp_read", Some("chan-b")));
+        }
+        let mut queue = queue_of(events);
+
+        let frames = drain_frames(&mut queue);
+        assert!(
+            frames.len() <= 4,
+            "200 tiny alternating events must gather into a few full frames, \
+             got {} (front-run packing would need 200 slots)",
+            frames.len()
+        );
+        for frame in &frames {
+            assert!(serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN);
+        }
+        // Within each channel, FIFO order survives the gather.
+        let mut seqs_a = Vec::new();
+        let mut seqs_b = Vec::new();
+        for frame in &frames {
+            match frame.channel_id.as_deref() {
+                Some("chan-a") => seqs_a.extend(frame_seqs(frame)),
+                Some("chan-b") => seqs_b.extend(frame_seqs(frame)),
+                other => panic!("unexpected channel {other:?}"),
+            }
+        }
+        assert!(seqs_a.windows(2).all(|w| w[0] < w[1]), "chan-a FIFO");
+        assert!(seqs_b.windows(2).all(|w| w[0] < w[1]), "chan-b FIFO");
+        assert_eq!(seqs_a.len() + seqs_b.len(), 200, "nothing lost");
+    }
+
+    /// A same-channel backlog that cannot fit one 64KB frame splits across
+    /// SUCCESSIVE publish slots — never multiple frames from one slot — with
+    /// every frame under the cap and no event lost or reordered.
+    #[test]
+    fn oversized_backlogs_split_across_publish_slots_under_the_cap() {
+        let big_text = "x".repeat(30_000);
+        let mut queue = queue_of(
+            (1..=6)
+                .map(|seq| {
+                    let mut e = event(seq, "acp_read", Some("chan-a"));
+                    e.payload = serde_json::json!({ "seq": seq, "text": big_text });
+                    e
+                })
+                .collect(),
+        );
+
+        let frames = drain_frames(&mut queue);
+        assert!(
+            frames.len() > 1,
+            "six 30KB events cannot fit one 64KB frame"
+        );
+        let mut seen = Vec::new();
+        for frame in &frames {
+            assert!(
+                serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN,
+                "every emitted frame must fit the plaintext cap"
+            );
+            seen.extend(frame_seqs(frame));
+        }
+        assert_eq!(
+            seen,
+            [1, 2, 3, 4, 5, 6],
+            "no event lost or reordered by splitting"
+        );
+    }
+
+    /// The queue preserves the coalescer's ordering rule: a non-chunk event
+    /// force-flushes pending chunk text ahead of itself, so merged chunks can
+    /// never leapfrog a tool call that arrived after them.
+    #[test]
+    fn non_chunk_events_flush_pending_chunks_ahead_of_themselves() {
+        fn chunk(seq: u64, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "params": { "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": "m1",
+                    "content": { "text": text },
+                }}
+            });
+            e
+        }
+
+        let mut queue = ObserverPublishQueue::default();
+        queue.ingest(chunk(1, "hello "));
+        queue.ingest(chunk(2, "world"));
+        queue.ingest(event(3, "tool_call", Some("chan-a")));
+
+        let frame = queue.next_frame().expect("one frame");
+        assert!(queue.is_empty());
+        let inner = frame.payload["events"].as_array().expect("batch of 2");
+        assert_eq!(inner.len(), 2, "two chunks coalesce into one event");
+        assert_eq!(
+            inner[0]["payload"]["params"]["update"]["content"]["text"], "hello world",
+            "chunk text merged before the tool call"
+        );
+        assert_eq!(inner[1]["kind"], "tool_call");
+        assert!(inner[0]["seq"].as_u64() < inner[1]["seq"].as_u64());
+    }
+
+    /// Chunks still pending inside the coalescer (no non-chunk flushed them)
+    /// are picked up by the publish slot itself, not stranded.
+    #[test]
+    fn a_publish_slot_flushes_pending_coalesced_chunks() {
+        let mut e = event(1, "acp_read", Some("chan-a"));
+        e.payload = serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "messageId": "m1",
+                "content": { "text": "buffered" },
+            }}
+        });
+        let mut queue = ObserverPublishQueue::default();
+        queue.ingest(e);
+        assert!(!queue.is_empty(), "pending chunk counts as queued work");
+
+        let frame = queue.next_frame().expect("chunk must ship");
+        assert!(queue.is_empty());
+        assert_eq!(
+            frame.payload["params"]["update"]["content"]["text"],
+            "buffered"
+        );
+    }
+
+    /// Sami's ceiling assertion: when sustained input outruns the one-frame
+    /// drain budget for longer than the queue's byte budget, the OLDEST events
+    /// drop with accounting — never silently — and everything that survives
+    /// publishes in order with nothing else lost.
+    #[test]
+    fn over_budget_floods_drop_oldest_with_accounting() {
+        let big_text = "y".repeat(10_000);
+        let total = 500usize; // ~5MB of ~10KB events > 4MiB budget
+        let mut queue = ObserverPublishQueue::default();
+        for seq in 1..=total as u64 {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({ "seq": seq, "text": big_text });
+            queue.ingest(e);
+        }
+
+        assert!(
+            queue.dropped_events > 0,
+            "a 5MB backlog must overflow the 4MiB budget"
+        );
+        assert!(
+            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget (entry-walked), got {}",
+            walked_retained_bytes(&queue)
+        );
+
+        let frames = drain_frames(&mut queue);
+        let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
+        let expected: Vec<u64> = (queue.dropped_events + 1..=total as u64).collect();
+        assert_eq!(
+            published, expected,
+            "exactly the oldest `dropped_events` events are missing; the rest \
+             publish in order"
+        );
+        assert_eq!(
+            published.len() as u64 + queue.dropped_events,
+            total as u64,
+            "accounting: published + dropped == ingested"
+        );
+    }
+
+    /// Max's coalescer-bypass regression: a flood of chunks with DISTINCT
+    /// messageIds never flushes on its own, so every chunk sits in the
+    /// coalescer's pending buffer. TRUE retained bytes — walked from the
+    /// entries, never the queue's own accumulator — MUST respect the byte
+    /// budget with event-level drop accounting. Pre-fix this retained ~25MB
+    /// against the 4 MiB cap with `pending_bytes == 0` and zero drops; the
+    /// round-3 refinement (Sami/Max) caught the accumulator itself reading
+    /// under cap while true retention was 1.99x over.
+    #[test]
+    fn distinct_key_chunk_floods_are_bounded_by_the_byte_budget() {
+        let big_text = "z".repeat(50_000);
+        let total = 500u64; // ~25MB pending chunk text vs a 4MiB budget
+        let mut queue = ObserverPublishQueue::default();
+        for seq in 1..=total {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": format!("message-{seq}"),
+                        "content": { "type": "text", "text": big_text },
+                    },
+                },
+            });
+            queue.ingest(e);
+        }
+
+        let walked = walked_retained_bytes(&queue);
+        assert!(
+            walked <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "TRUE retained bytes (walked from entries) must respect the cap, \
+             got {walked}"
+        );
+        assert!(
+            queue.total_pending_bytes() >= walked,
+            "the accumulator must never under-count true retention \
+             (accumulator {} < walked {walked})",
+            queue.total_pending_bytes()
+        );
+        assert!(
+            queue.dropped_events > 0,
+            "a ~25MB distinct-key chunk flood must record drops"
+        );
+        // Event-level accounting: everything that survives publishes, and
+        // survivors + dropped == ingested.
+        let frames = drain_frames(&mut queue);
+        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
+        assert_eq!(
+            survived + queue.dropped_events,
+            total,
+            "accounting: published + dropped == ingested"
+        );
+        // The survivors are the NEWEST events (drop-oldest).
+        let last_frame_seqs = frame_seqs(frames.last().expect("frames"));
+        assert_eq!(*last_frame_seqs.last().expect("seqs"), total);
+    }
+
+    /// Max's merged-chunk accounting regression: one coalescer entry can
+    /// represent MANY generated observer events (same-messageId chunks merge
+    /// in place), so evicting it must charge every merged source event to
+    /// `dropped_events`, not 1 per retained entry. Pre-fix, evicting an entry
+    /// that merged 50 chunks recorded `dropped_events == 1` and 49 generated
+    /// events vanished from the accounting.
+    #[test]
+    fn evicting_a_merged_chunk_entry_accounts_every_source_event() {
+        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            e
+        }
+
+        let mut queue = ObserverPublishQueue::default();
+        // 50 × 1KB chunks under ONE messageId merge into a single pending
+        // coalescer entry — the oldest item anywhere in the queue.
+        let merged_text = "m".repeat(1_000);
+        let merged_sources = 50u64;
+        for seq in 1..=merged_sources {
+            queue.ingest(chunk(seq, "message-merged", &merged_text));
+        }
+        // Flood with distinct-key 50KB chunks until the byte budget evicts
+        // the oldest entries — the merged entry goes first.
+        let flood_text = "f".repeat(50_000);
+        let flood = 100u64;
+        for seq in 1..=flood {
+            queue.ingest(chunk(
+                merged_sources + seq,
+                &format!("message-{seq}"),
+                &flood_text,
+            ));
+        }
+
+        assert!(
+            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget (entry-walked), got {}",
+            walked_retained_bytes(&queue)
+        );
+        let frames = drain_frames(&mut queue);
+        assert!(
+            !frames
+                .iter()
+                .flat_map(frame_seqs)
+                .any(|seq| seq <= merged_sources),
+            "the merged entry (globally oldest) must have been evicted"
+        );
+        // Every survivor is an unmerged distinct-key chunk (1 source each),
+        // so source-event accounting must close exactly: the merged entry's
+        // eviction charges all 50 sources.
+        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
+        assert_eq!(
+            survived + queue.dropped_events,
+            merged_sources + flood,
+            "accounting: published sources + dropped sources == ingested"
+        );
+    }
+
+    /// Sami's M13 / Max's forced-flush probe: the OTHER eviction arm. A
+    /// merged entry FLUSHED into the publish FIFO (by a non-chunk event) must
+    /// still charge every absorbed source on eviction — the FIFO stores the
+    /// per-entry count precisely so the ledger survives flush. The
+    /// coalescer-side regression above never exercises this arm; mutating the
+    /// FIFO eviction to `dropped += 1` survived all 687 tests until this one.
+    #[test]
+    fn evicting_a_flushed_merged_entry_from_the_fifo_accounts_every_source_event() {
+        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            e
+        }
+
+        let mut queue = ObserverPublishQueue::default();
+        // 50 × 1KB chunks merge under one messageId in the coalescer…
+        let merged_text = "m".repeat(1_000);
+        let merged_sources = 50u64;
+        for seq in 1..=merged_sources {
+            queue.ingest(chunk(seq, "message-merged", &merged_text));
+        }
+        // …then a non-chunk event force-flushes the merged entry into the
+        // publish FIFO. From here eviction happens on the FIFO arm.
+        queue.ingest(event(merged_sources + 1, "tool_call", Some("chan-a")));
+        assert!(
+            queue.coalescer.pending.is_empty(),
+            "the non-chunk event must have flushed the merged entry"
+        );
+        assert_eq!(
+            queue.events.front().expect("flushed entry queued").1,
+            merged_sources,
+            "the FIFO front must carry the merged source count"
+        );
+
+        // Distinct-key flood forces byte-budget eviction of the FIFO front.
+        let flood_text = "f".repeat(50_000);
+        let flood = 100u64;
+        for seq in 1..=flood {
+            queue.ingest(chunk(
+                merged_sources + 1 + seq,
+                &format!("message-{seq}"),
+                &flood_text,
+            ));
+        }
+
+        assert!(
+            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget (entry-walked), got {}",
+            walked_retained_bytes(&queue)
+        );
+        let frames = drain_frames(&mut queue);
+        assert!(
+            !frames
+                .iter()
+                .flat_map(frame_seqs)
+                .any(|seq| seq <= merged_sources),
+            "the flushed merged entry (globally oldest) must have been evicted"
+        );
+        // Ledger in source units: survivors are unmerged (1 source each), the
+        // evicted merged FIFO entry must charge all 50 sources.
+        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
+        let ingested = merged_sources + 1 + flood;
+        assert_eq!(
+            survived + queue.dropped_events,
+            ingested,
+            "accounting: published sources + dropped sources == ingested"
+        );
+    }
+
+    /// Under the byte budget the queue is lossless: every ingested event
+    /// publishes exactly once.
+    #[test]
+    fn under_budget_backlogs_are_lossless() {
+        let mut queue = queue_of(
+            (1..=200)
+                .map(|seq| event(seq, "acp_read", Some("chan-a")))
+                .collect(),
+        );
+        let frames = drain_frames(&mut queue);
+        let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
+        assert_eq!(published, (1..=200).collect::<Vec<u64>>());
+        assert_eq!(queue.dropped_events, 0);
+    }
+}
+
+#[cfg(test)]
+mod observer_publish_cadence_tests {
+    use super::*;
+    use nostr::Keys;
+
+    /// Let every spawned task (publisher loop, test_pair forwarder) run to
+    /// quiescence WITHOUT advancing paused time. `yield_now` keeps this task
+    /// runnable, so tokio's auto-advance never fires here — time only moves
+    /// when the test says so.
+    async fn settle() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn recv_all(rx: &mut tokio::sync::mpsc::Receiver<nostr::Event>) -> Vec<nostr::Event> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn count_inner(owner: &Keys, event: &nostr::Event) -> usize {
+        let payload: serde_json::Value =
+            decrypt_observer_payload(owner, event).expect("decrypt frame");
+        match payload["payload"]["events"].as_array() {
+            Some(inner) => inner.len(),
+            None => 1,
+        }
+    }
+
+    fn emit_on(observer: &observer::ObserverHandle, channel: Option<uuid::Uuid>, marker: &str) {
+        observer.emit(
+            "test_event",
+            None,
+            &observer::context_for(channel, None, None),
+            serde_json::json!({ "marker": marker }),
+        );
+    }
+
+    /// THE regression Max demanded: with a backlog needing multiple frames
+    /// (two channels — a frame never mixes channels, so the backlog takes two
+    /// publish slots), no frame publishes before its tick. Startup publishes
+    /// NOTHING at t=0 (Sami's Finding 1: a full replay buffer must not burst
+    /// on reconnect), frame 1 arrives at +1s, frame 2 no earlier than +2s.
+    #[tokio::test(start_paused = true)]
+    async fn one_frame_per_second_and_no_startup_burst() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        // Interleave channels so the backlog cannot fit one frame: each run
+        // boundary forces a new publish slot.
+        let chan_a = uuid::Uuid::new_v4();
+        let chan_b = uuid::Uuid::new_v4();
+        emit_on(&observer, Some(chan_a), "a1");
+        emit_on(&observer, Some(chan_b), "b1");
+        emit_on(&observer, Some(chan_a), "a2");
+
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.len(), 3, "all three preloaded in the snapshot");
+
+        let task = tokio::spawn(run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+
+        // t=0: nothing may publish, no matter how full the snapshot was.
+        settle().await;
+        assert_eq!(
+            recv_all(&mut published_rx).len(),
+            0,
+            "startup must not burst at t=0"
+        );
+
+        // t=0.999s: still nothing.
+        tokio::time::advance(Duration::from_millis(999)).await;
+        settle().await;
+        assert_eq!(
+            recv_all(&mut published_rx).len(),
+            0,
+            "no frame may publish before the first tick"
+        );
+
+        // t=1s: exactly ONE frame — chan-a gathered queue-wide, so a1 AND a2
+        // ride the first slot together.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        let frames = recv_all(&mut published_rx);
+        assert_eq!(frames.len(), 1, "tick 1 publishes exactly one frame");
+        assert_eq!(count_inner(&owner_keys, &frames[0]), 2, "a1 + a2 gathered");
+
+        // t=1.5s: between ticks, nothing.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        settle().await;
+        assert_eq!(
+            recv_all(&mut published_rx).len(),
+            0,
+            "frame 2 must wait for tick 2"
+        );
+
+        // t=2s: the chan-b frame drains on its own tick.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        settle().await;
+        assert_eq!(recv_all(&mut published_rx).len(), 1, "tick 2: one frame");
+
+        // Backlog drained; a quiet tick publishes nothing.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(recv_all(&mut published_rx).len(), 0, "quiet tick is quiet");
+
+        task.abort();
+    }
+
+    /// Shutdown is NOT a burst bypass: when the producer closes with a
+    /// backlog, the remaining frames still publish one per tick, and the loop
+    /// exits only after the queue is empty — paced, lossless, in order.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drain_is_paced_and_lossless() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        let chan_a = uuid::Uuid::new_v4();
+        let chan_b = uuid::Uuid::new_v4();
+        emit_on(&observer, Some(chan_a), "a1");
+        emit_on(&observer, Some(chan_b), "b1");
+        emit_on(&observer, Some(chan_a), "a2");
+
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        // Close the broadcast channel immediately: the entire drain happens
+        // in "shutdown" mode.
+        drop(observer);
+
+        let task = tokio::spawn(run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+
+        settle().await;
+        assert_eq!(
+            recv_all(&mut published_rx).len(),
+            0,
+            "shutdown drain must not burst at t=0"
+        );
+
+        let mut markers = Vec::new();
+        for tick in 1..=2 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settle().await;
+            let frames = recv_all(&mut published_rx);
+            assert_eq!(frames.len(), 1, "shutdown tick {tick}: exactly one frame");
+            let payload: serde_json::Value =
+                decrypt_observer_payload(&owner_keys, &frames[0]).expect("decrypt");
+            match payload["payload"]["events"].as_array() {
+                Some(inner) => markers.extend(
+                    inner
+                        .iter()
+                        .map(|e| e["payload"]["marker"].as_str().unwrap().to_string()),
+                ),
+                None => markers.push(payload["payload"]["marker"].as_str().unwrap().to_string()),
+            }
+        }
+        // Gather-packing: chan-a (a1+a2) ships tick 1, chan-b tick 2.
+        assert_eq!(markers, ["a1", "a2", "b1"], "paced drain loses nothing");
+
+        // Queue empty + closed: the loop must have exited on its own.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert!(task.is_finished(), "publisher exits after paced drain");
+    }
+
+    /// Pins `MissedTickBehavior::Skip` (Sami's M6 mutant): when the publisher
+    /// misses ticks — relay backpressure can stall the tick arm past several
+    /// deadlines, since `publish_event` awaits a bounded mpsc — the interval
+    /// must fire ONE catch-up tick and realign, not fire once per missed
+    /// deadline. With `Burst`, a 10s stall against a multi-frame backlog
+    /// would replay all 10 missed ticks back-to-back: an unpaced burst that
+    /// bypasses exactly what the pacer exists to prevent.
+    #[tokio::test(start_paused = true)]
+    async fn missed_ticks_skip_instead_of_bursting() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        // Three channels => three frames pending (a frame never mixes
+        // channels), so a bursting interval would have work for every
+        // spurious catch-up tick.
+        for chan in 0..3 {
+            emit_on(&observer, Some(uuid::Uuid::new_v4()), &format!("c{chan}"));
+        }
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+
+        let task = tokio::spawn(run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+        settle().await;
+
+        // Jump 10 seconds in ONE advance — the loop was never polled in
+        // between, exactly like a stall across 10 deadlines.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        settle().await;
+        assert_eq!(
+            recv_all(&mut published_rx).len(),
+            1,
+            "Skip: one catch-up frame after a stall — Burst would publish \
+             one per missed deadline"
+        );
+
+        // The interval realigned: the remaining backlog stays paced.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(recv_all(&mut published_rx).len(), 1, "paced after realign");
+
+        task.abort();
     }
 }
 
@@ -4957,9 +6712,14 @@ mod observer_chunk_coalescer_tests {
 
         let events = coalescer.ingest(non_chunk_event(3));
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].seq, 2);
-        assert_eq!(chunk_text(&events[0]), "hello world");
-        assert_eq!(events[1].kind, "turn_started");
+        assert_eq!(events[0].1.seq, 2);
+        assert_eq!(chunk_text(&events[0].1), "hello world");
+        assert_eq!(
+            events[0].0, 2,
+            "a merged entry reports every source chunk it absorbed"
+        );
+        assert_eq!(events[1].1.kind, "turn_started");
+        assert_eq!(events[1].0, 1);
     }
 
     #[test]
@@ -4980,8 +6740,8 @@ mod observer_chunk_coalescer_tests {
 
         let events = coalescer.flush();
         assert_eq!(events.len(), 2);
-        assert_eq!(chunk_text(&events[0]), "answer");
-        assert_eq!(chunk_text(&events[1]), "thinking");
+        assert_eq!(chunk_text(&events[0].1), "answer");
+        assert_eq!(chunk_text(&events[1].1), "thinking");
     }
 }
 
@@ -5023,6 +6783,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -5031,7 +6792,9 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -5244,6 +7007,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -5252,7 +7016,9 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -5288,12 +7054,272 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
+        let channel_id = Uuid::new_v4();
+        let steer_event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: steer_event_id.into(),
+                        session_id: "live-session".into(),
+                    },
+                ]),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .contains(steer_event_id));
+    }
+
+    #[tokio::test]
+    async fn in_flight_stale_native_steer_ack_cannot_update_replacement_session() {
+        let channel_id = Uuid::new_v4();
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "replacement-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: "stale-event".into(),
+                        session_id: "old-session".into(),
+                    },
+                ]),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_native_steer_ack_after_task_return_updates_matching_live_session() {
+        let channel_id = Uuid::new_v4();
+        let steer_event_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        assert!(pool.record_successful_steer(
+            channel_id,
+            steer_event_id.into(),
+            "live-session".into(),
+        ));
+        let returned = pool.agents_mut()[0].as_ref().expect("idle returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .contains(steer_event_id));
+    }
+
+    #[tokio::test]
+    async fn late_native_steer_ack_cannot_update_replacement_session() {
+        let channel_id = Uuid::new_v4();
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "replacement-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        assert!(!pool.record_successful_steer(
+            channel_id,
+            "stale-event".into(),
+            "old-session".into(),
+        ));
+        let returned = pool.agents_mut()[0].as_ref().expect("replacement agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidated_session_does_not_resurrect_successful_steer_delivery_state() {
+        let channel_id = Uuid::new_v4();
+        let agent = dummy_agent(0).await;
+        // No live session: simulates the prompt task invalidating before return.
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: "stale-event".into(),
+                        session_id: "invalidated-session".into(),
+                    },
+                ]),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(!returned.state.deliveries.contains_key(&channel_id));
     }
 
     /// Drive one error outcome through `handle_prompt_result` and return how
@@ -5316,6 +7342,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
 
@@ -5392,6 +7419,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         started_rx.await.unwrap();
@@ -5484,6 +7512,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -5575,6 +7604,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -5680,6 +7710,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -5756,6 +7787,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -5850,6 +7882,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let config = test_config();
@@ -5966,6 +7999,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6105,6 +8139,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6293,6 +8328,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6378,6 +8414,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6509,7 +8546,7 @@ mod observer_payload_trim_tests {
         // to 1).
         let sections = [
             "[Base]\nyou are a helpful agent".to_string(),
-            "[System]\npersona text".to_string(),
+            "[Agent Instructions]\npersona text".to_string(),
             "[Agent Memory — core]\nremember this".to_string(),
             "[Context]\nScope: thread".to_string(),
             // The triggering event body, oversized on its own.
@@ -6546,7 +8583,7 @@ mod observer_payload_trim_tests {
         let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
         for header in [
             "[Base]",
-            "[System]",
+            "[Agent Instructions]",
             "[Agent Memory — core]",
             "[Context]",
             "[Buzz event: @mention]",

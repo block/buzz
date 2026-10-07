@@ -201,6 +201,45 @@ test("parseSystemPromptSections splits both prompts into Base and System", () =>
   ]);
 });
 
+test("parseSystemPromptSections splits current Base and Agent Instructions framing", () => {
+  const framed =
+    "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: /workspace\n\n[Agent Instructions]\npersona text";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    { title: "Workspace", body: "Current working directory: /workspace" },
+    { title: "Agent Instructions", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections preserves a Windows workspace path", () => {
+  const framed =
+    "[Base]\nbase text\n\n[Workspace]\nCurrent working directory: C:\\Users\\me\\buzz\n\n[Agent Instructions]\npersona text";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    {
+      title: "Workspace",
+      body: "Current working directory: C:\\Users\\me\\buzz",
+    },
+    { title: "Agent Instructions", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections preserves the former Workspace-before-Base framing", () => {
+  const framed =
+    "[Workspace]\nYour absolute working directory is `/workspace`.\n\n[Base]\nbase text\n\n[System]\npersona text";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "Workspace",
+      body: "Your absolute working directory is `/workspace`.",
+    },
+    { title: "Base", body: "base text" },
+    { title: "System", body: "persona text" },
+  ]);
+});
+
 test("parseSystemPromptSections yields one Base section for a base-only frame", () => {
   const sections = parseSystemPromptSections("[Base]\nbase text");
   assert.deepEqual(sections, [{ title: "Base", body: "base text" }]);
@@ -209,6 +248,15 @@ test("parseSystemPromptSections yields one Base section for a base-only frame", 
 test("parseSystemPromptSections yields one System section for a persona-only frame", () => {
   const sections = parseSystemPromptSections("[System]\npersona text");
   assert.deepEqual(sections, [{ title: "System", body: "persona text" }]);
+});
+
+test("parseSystemPromptSections yields Agent Instructions for a current persona-only frame", () => {
+  const sections = parseSystemPromptSections(
+    "[Agent Instructions]\npersona text",
+  );
+  assert.deepEqual(sections, [
+    { title: "Agent Instructions", body: "persona text" },
+  ]);
 });
 
 test("parseSystemPromptSections keeps embedded bracket lines literal in bodies", () => {
@@ -323,18 +371,15 @@ test("parseSystemPromptSections keeps exact core header literal when only a sing
   ]);
 });
 
-test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core harness shape", () => {
-  // The real Buzz harness emits [Workspace] content before [Base]. The parser
-  // folds [Workspace] into the Base section (existing unchanged behavior);
-  // core is extracted as a distinct "Core Memory" section last.
+test("parseSystemPromptSections pins the current Base+Workspace+Agent Instructions+Core harness shape", () => {
   const framed = [
-    "[Workspace]",
-    "You are operating inside the Buzz platform.",
-    "",
     "[Base]",
     "You are an assistant.",
     "",
-    "[System]",
+    "[Workspace]",
+    "Current working directory: /workspace",
+    "",
+    "[Agent Instructions]",
     "Custom persona instructions.",
     "",
     "[Agent Memory — core]",
@@ -344,11 +389,9 @@ test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core ha
   ].join("\n");
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
-    {
-      title: "Base",
-      body: "[Workspace]\nYou are operating inside the Buzz platform.\n\n[Base]\nYou are an assistant.",
-    },
-    { title: "System", body: "Custom persona instructions." },
+    { title: "Base", body: "You are an assistant." },
+    { title: "Workspace", body: "Current working directory: /workspace" },
+    { title: "Agent Instructions", body: "Custom persona instructions." },
     {
       title: "Core Memory",
       body: "I am Duncan.\n## Lessons Learned\nAlways tag on handoff.",

@@ -1,8 +1,8 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../channels_provider.dart';
-import '../read_state/read_state_provider.dart';
-import '../read_state/read_state_format.dart';
+import '../../../shared/read_state/read_state_provider.dart';
+import '../../../shared/read_state/read_state_format.dart';
 import 'observed_unread_event.dart';
 
 class UnreadBadgeState {

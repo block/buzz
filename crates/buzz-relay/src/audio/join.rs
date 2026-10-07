@@ -47,7 +47,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::mesh::spawn_remote_peer_sink;
@@ -831,6 +831,11 @@ pub enum HuddleControlMsg {
         /// Owner-allocated 0..=254 index; the sole allocator is the owner, so
         /// indices never collide across pods.
         peer_index: u8,
+        /// Owner-assigned occupancy epoch for `peer_index`. The non-owner pod
+        /// stamps this on protocol v3 media datagrams so the frame carries the
+        /// same `[peer_index][epoch]` identity a same-pod speaker's frame would
+        /// (see [`RosterEntry::epoch`]).
+        epoch: u8,
         /// Complete authoritative roster after this admission. This is in the
         /// registration reply so no media/client identity can precede it.
         roster: RosterSnapshot,
@@ -880,6 +885,9 @@ pub struct RosterEntry {
     pub pubkey: String,
     /// Owner-assigned media routing index.
     pub peer_index: u8,
+    /// Occupancy epoch for `peer_index`, bumped each time the index is reused
+    /// by a new pubkey so stale in-flight media frames can be fenced.
+    pub epoch: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -896,6 +904,7 @@ impl From<RosterPeer> for RosterEntry {
         Self {
             pubkey: peer.pubkey,
             peer_index: peer.peer_index,
+            epoch: peer.epoch,
         }
     }
 }
@@ -1292,17 +1301,8 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                             self.rooms
                                 .get(CommunityId::from_uuid(community_id), session_id)
                         }) {
-                            let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
-                            room.remove_peer(peer_id);
-                            if let Some(peer_index) = peer_index {
-                                room.broadcast_control(
-                                    serde_json::json!({
-                                        "type": "left",
-                                        "pubkey": pubkey,
-                                        "peer_index": peer_index,
-                                    })
-                                    .to_string(),
-                                );
+                            if let Some(delta) = room.remove_peer(peer_id) {
+                                broadcast_peer_left(&room, delta, session_id);
                             }
                         }
                     }
@@ -1351,18 +1351,9 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             self.rooms
                 .get(CommunityId::from_uuid(community_id), session_id)
         }) {
-            for (pubkey, peer_id) in registered {
-                let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
-                room.remove_peer(peer_id);
-                if let Some(peer_index) = peer_index {
-                    room.broadcast_control(
-                        serde_json::json!({
-                            "type": "left",
-                            "pubkey": pubkey,
-                            "peer_index": peer_index,
-                        })
-                        .to_string(),
-                    );
+            for (_pubkey, peer_id) in registered {
+                if let Some(delta) = room.remove_peer(peer_id) {
+                    broadcast_peer_left(&room, delta, session_id);
                 }
             }
         }
@@ -1381,7 +1372,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         registered: &mut std::collections::HashMap<String, Uuid>,
     ) -> HuddleControlMsg {
         match room.add_peer(pubkey.to_string(), protocol_version) {
-            Ok((peer_id, peer_index, audio_rx, _peer_ctrl_rx)) => {
+            Ok((peer_id, peer_index, epoch, audio_rx, _peer_ctrl_rx, roster_revision)) => {
                 registered.insert(pubkey.to_string(), peer_id);
                 // The owner's Room fans out to this remote peer's `audio_tx`;
                 // the sink drains `audio_rx` and ships each frame as a datagram
@@ -1389,15 +1380,18 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 spawn_remote_peer_sink(Arc::clone(&self.transport), from, fenced, audio_rx);
                 let joined = serde_json::json!({
                     "type": "joined",
+                    "revision": roster_revision,
                     "pubkey": pubkey,
                     "peer_index": peer_index,
-                    "peers": [{"pubkey": pubkey, "peer_index": peer_index}],
+                    "epoch": epoch,
+                    "peers": [{"pubkey": pubkey, "peer_index": peer_index, "epoch": epoch}],
                 })
                 .to_string();
                 room.broadcast_control(joined);
                 HuddleControlMsg::PeerRegistered {
                     pubkey: pubkey.to_string(),
                     peer_index,
+                    epoch,
                     roster: roster_snapshot(&room),
                 }
             }
@@ -1407,6 +1401,34 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             },
         }
     }
+}
+
+fn broadcast_peer_left(room: &Room, delta: RoomRosterDelta, session_id: Uuid) {
+    let Some(left) = peer_left_control(delta, session_id) else {
+        return;
+    };
+    room.broadcast_control(left);
+}
+
+fn peer_left_control(delta: RoomRosterDelta, session_id: Uuid) -> Option<String> {
+    let Some(left) = delta.left else {
+        warn!(
+            %session_id,
+            revision = delta.revision,
+            "mesh audio peer removal delta did not include the removed peer"
+        );
+        return None;
+    };
+    Some(
+        serde_json::json!({
+            "type": "left",
+            "revision": delta.revision,
+            "pubkey": left.pubkey,
+            "peer_index": left.peer_index,
+            "epoch": left.epoch,
+        })
+        .to_string(),
+    )
 }
 
 fn roster_snapshot(room: &Room) -> RosterSnapshot {
@@ -1471,6 +1493,13 @@ pub struct RemoteHuddleSession {
     /// The owner-allocated peer index this client occupies in the owner's room.
     /// Stamped on every media datagram so the owner attributes frames correctly.
     peer_index: u8,
+    /// The owner-assigned occupancy epoch for `peer_index`. Stamped alongside
+    /// `peer_index` on protocol v3 media datagrams so owner-side fan-out
+    /// produces the same `[peer_index][epoch]` prefix as a same-pod speaker.
+    epoch: u8,
+    /// The protocol version negotiated for this client. Cross-pod framing must
+    /// preserve the released v1/v2 one-byte prefix and add `epoch` only for v3.
+    protocol_version: u8,
     /// Latest complete authoritative owner roster.
     roster: RosterSnapshot,
     /// Fenced header for this session's owner epoch; every datagram carries it.
@@ -1544,7 +1573,7 @@ pub async fn read_owner_control(
                     let json = serde_json::json!({
                         "type": "roster", "revision": revision,
                         "peers": peers.into_iter().map(|p| serde_json::json!({
-                            "pubkey": p.pubkey, "peer_index": p.peer_index,
+                            "pubkey": p.pubkey, "peer_index": p.peer_index, "epoch": p.epoch,
                         })).collect::<Vec<_>>()
                     })
                     .to_string();
@@ -1565,13 +1594,13 @@ pub async fn read_owner_control(
                     let json = if let Some(peer) = joined {
                         serde_json::json!({
                             "type": "joined", "revision": revision,
-                            "pubkey": peer.pubkey, "peer_index": peer.peer_index,
-                            "peers": [{"pubkey": peer.pubkey, "peer_index": peer.peer_index}],
+                            "pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch,
+                            "peers": [{"pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch}],
                         })
                     } else if let Some(peer) = left {
                         serde_json::json!({
                             "type": "left", "revision": revision,
-                            "pubkey": peer.pubkey, "peer_index": peer.peer_index,
+                            "pubkey": peer.pubkey, "peer_index": peer.peer_index, "epoch": peer.epoch,
                         })
                     } else {
                         continue;
@@ -1696,10 +1725,15 @@ pub async fn dial_remote_owner(
     match stream.recv_frame().await? {
         Some(MeshStreamFrame::Data { payload, .. }) => match decode_control(&payload)? {
             HuddleControlMsg::PeerRegistered {
-                peer_index, roster, ..
+                peer_index,
+                epoch,
+                roster,
+                ..
             } => Ok((
                 RemoteHuddleSession {
                     peer_index,
+                    epoch,
+                    protocol_version,
                     roster,
                     fenced,
                     owner,
@@ -1733,6 +1767,14 @@ impl RemoteHuddleSession {
         self.peer_index
     }
 
+    /// The owner-assigned occupancy epoch for this client's index. Reported to
+    /// the client alongside `peer_index` so its self-entry matches the owner's
+    /// authoritative roster (the local ingress mirror's own epoch is inert —
+    /// the mirror never fans out via `broadcast_frame`).
+    pub fn epoch(&self) -> u8 {
+        self.epoch
+    }
+
     /// Complete authoritative roster returned atomically with registration.
     pub fn roster(&self) -> &RosterSnapshot {
         &self.roster
@@ -1753,7 +1795,14 @@ impl RemoteHuddleSession {
     /// with the owner-assigned index. Drop-on-error: realtime audio never blocks
     /// on a slow or gone link (the same discipline as local fan-out).
     pub fn forward_media(&mut self, client_frame: &[u8]) {
-        let dgram = media_datagram(self.peer_index, self.fenced, self.seq, client_frame);
+        let dgram = media_datagram(
+            self.peer_index,
+            self.epoch,
+            self.protocol_version,
+            self.fenced,
+            self.seq,
+            client_frame,
+        );
         self.seq = self.seq.wrapping_add(1);
         if let Err(e) = self.transport.send_datagram(self.owner, dgram) {
             debug!(owner = %self.owner, "huddle media datagram to owner failed: {e}");
@@ -1785,17 +1834,27 @@ pub async fn send_clean_close(stream: &mut MeshStream, fenced: FencedHeader, pub
 }
 
 /// Build the media datagram a non-owner ships to the owner for one client
-/// frame: `[owner_peer_index][client frame]`, stamped with the session fence
-/// and sequence. Pure so the framing is unit-testable without a live transport
-/// or stream.
+/// frame, stamped with the session fence and sequence. Protocol v1/v2 retain
+/// their released `[owner_peer_index][client frame]` framing; v3 adds the
+/// owner-assigned epoch: `[owner_peer_index][epoch][client frame]`. Both are
+/// byte-identical to [`super::room::Room::broadcast_frame`]. The owner-side
+/// [`super::mesh::MeshAudioRouter::on_media_datagram`] splits off `peer_index`
+/// and re-prefixes the opaque remainder. Pure so framing is unit-testable
+/// without a live transport or stream.
 fn media_datagram(
     peer_index: u8,
+    epoch: u8,
+    protocol_version: u8,
     fenced: FencedHeader,
     seq: u64,
     client_frame: &[u8],
 ) -> MeshDatagram {
-    let mut payload = Vec::with_capacity(1 + client_frame.len());
+    let prefix_len = if protocol_version >= 3 { 2 } else { 1 };
+    let mut payload = Vec::with_capacity(prefix_len + client_frame.len());
     payload.push(peer_index);
+    if protocol_version >= 3 {
+        payload.push(epoch);
+    }
     payload.extend_from_slice(client_frame);
     MeshDatagram {
         fenced,
@@ -1815,6 +1874,21 @@ mod tests {
 
     fn community() -> CommunityId {
         CommunityId::from_uuid(Uuid::from_u128(0xC0FFEE))
+    }
+
+    #[test]
+    fn missing_peer_in_removal_delta_is_non_fatal() {
+        assert_eq!(
+            peer_left_control(
+                RoomRosterDelta {
+                    revision: 7,
+                    joined: None,
+                    left: None,
+                },
+                Uuid::from_u128(42),
+            ),
+            None,
+        );
     }
 
     /// Scripted directory: `owner_of` returns a queued lookup, `acquire`
@@ -2037,11 +2111,13 @@ mod tests {
             HuddleControlMsg::PeerRegistered {
                 pubkey: "abc123".into(),
                 peer_index: 42,
+                epoch: 0,
                 roster: RosterSnapshot {
                     revision: 1,
                     peers: vec![RosterEntry {
                         pubkey: "abc123".into(),
                         peer_index: 42,
+                        epoch: 0,
                     }],
                 },
             },
@@ -2051,6 +2127,7 @@ mod tests {
                 left: Some(RosterEntry {
                     pubkey: "abc123".into(),
                     peer_index: 42,
+                    epoch: 0,
                 }),
             },
             HuddleControlMsg::RosterResync,
@@ -2133,6 +2210,7 @@ mod tests {
                     joined: Some(RosterEntry {
                         pubkey: "bob".into(),
                         peer_index: 7,
+                        epoch: 0,
                     }),
                     left: None,
                 })
@@ -2162,6 +2240,7 @@ mod tests {
                     peers: vec![RosterEntry {
                         pubkey: "bob".into(),
                         peer_index: 7,
+                        epoch: 0,
                     }],
                 })
                 .unwrap(),
@@ -2277,7 +2356,7 @@ mod tests {
         let fenced = fenced_owned_by(owner_rt, session_id);
         let rooms = Arc::new(AudioRoomManager::new());
         let room = rooms.get_or_create(community(), session_id);
-        let (_local_id, _local_index, _audio_rx, mut local_ctrl_rx) =
+        let (_local_id, _local_index, _epoch, _audio_rx, mut local_ctrl_rx, _revision) =
             room.add_peer("owner-local".into(), 2).unwrap();
         // Discard the local peer's own roster delta; this assertion targets the
         // websocket-compatible control fanout below.
@@ -2913,21 +2992,29 @@ mod tests {
     }
 
     #[test]
-    fn media_datagram_tags_owner_index_and_stamps_fence() {
+    fn media_datagram_preserves_versioned_prefix_and_stamps_fence() {
         let fenced = FencedHeader {
             session_id: Uuid::new_v4(),
             generation: 9,
             owner_runtime_id: rt(2),
         };
-        // Owner-assigned index is the first payload byte; client bytes follow.
-        let d0 = media_datagram(42, fenced, 0, &[0xDE, 0xAD]);
-        assert_eq!(d0.payload, vec![42, 0xDE, 0xAD]);
-        assert_eq!(d0.fenced, fenced);
-        assert_eq!(d0.seq, 0);
-        // Empty client frame still carries the index byte (owner tolerates it).
-        let d1 = media_datagram(7, fenced, 3, &[]);
-        assert_eq!(d1.payload, vec![7]);
-        assert_eq!(d1.seq, 3);
+        let client_frame = [0xDE, 0xAD];
+
+        for protocol_version in [1, 2] {
+            let legacy = media_datagram(42, 3, protocol_version, fenced, 0, &client_frame);
+            assert_eq!(legacy.payload, vec![42, 0xDE, 0xAD]);
+            assert_eq!(legacy.fenced, fenced);
+            assert_eq!(legacy.seq, 0);
+        }
+
+        let v3 = media_datagram(42, 3, 3, fenced, 1, &client_frame);
+        assert_eq!(v3.payload, vec![42, 3, 0xDE, 0xAD]);
+        assert_eq!(v3.fenced, fenced);
+        assert_eq!(v3.seq, 1);
+
+        // Empty frames still carry exactly the negotiated prefix.
+        assert_eq!(media_datagram(7, 9, 2, fenced, 2, &[]).payload, vec![7]);
+        assert_eq!(media_datagram(7, 9, 3, fenced, 3, &[]).payload, vec![7, 9]);
     }
 
     // ── Non-owner teardown reader: wire signal → HuddleTeardownCause ──────────

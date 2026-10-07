@@ -27,18 +27,41 @@ const keyboardDismissDragThreshold = 48.0;
 /// `WindowInsetsAnimationController`).
 class KeyboardDismissOnDrag extends HookWidget {
   final Widget child;
+  final VoidCallback? onUserScrollStart;
 
-  const KeyboardDismissOnDrag({super.key, required this.child});
+  /// Called after a drag-originated scroll ends, not after programmatic scrolls.
+  final VoidCallback? onUserScrollEnd;
+
+  const KeyboardDismissOnDrag({
+    super.key,
+    this.onUserScrollStart,
+    this.onUserScrollEnd,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
     // A ref, not state: accumulating travel must never trigger a rebuild of
     // the message list this wraps.
     final downwardTravel = useRef(0.0);
+    final userScrollInProgress = useRef(false);
 
     bool handle(ScrollNotification notification) {
-      if (notification is ScrollStartNotification ||
-          notification is ScrollEndNotification) {
+      // This wrapper owns the directly wrapped message list. Notifications from
+      // scrollables inside a message (code blocks, media, reactions, and any
+      // future vertical descendants) bubble through here at a greater depth and
+      // must not affect the primary list's drag lifecycle or dismissal state.
+      if (notification.depth != 0) return false;
+
+      if (notification is ScrollStartNotification) {
+        userScrollInProgress.value = notification.dragDetails != null;
+        if (userScrollInProgress.value) onUserScrollStart?.call();
+        downwardTravel.value = 0;
+        return false;
+      }
+      if (notification is ScrollEndNotification) {
+        if (userScrollInProgress.value) onUserScrollEnd?.call();
+        userScrollInProgress.value = false;
         downwardTravel.value = 0;
         return false;
       }

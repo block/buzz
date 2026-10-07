@@ -3,7 +3,6 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
@@ -26,6 +25,10 @@ export default defineConfig(async () => ({
     alias: {
       "@": "/src",
       "@features-manifest": path.resolve(__dirname, "../preview-features.json"),
+      "@model-capabilities-manifest": path.resolve(
+        __dirname,
+        "../scripts/model-capabilities.json",
+      ),
     },
   },
 

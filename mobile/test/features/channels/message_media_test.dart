@@ -12,7 +12,7 @@ void main() {
       expect(classifyMediaUrl('https://example.com/media/clip.webm'), isNull);
     });
 
-    test('does not treat non-mp4 video mimetypes as video UI', () {
+    test('uses explicit video mimetypes for the video UI', () {
       expect(
         classifyMediaUrl(
           'https://example.com/media/clip.mov',
@@ -21,7 +21,7 @@ void main() {
             mimeType: 'video/quicktime',
           ),
         ),
-        isNull,
+        MessageMediaKind.video,
       );
       expect(
         classifyMediaUrl(

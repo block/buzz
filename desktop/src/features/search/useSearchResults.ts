@@ -10,7 +10,16 @@ import {
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
-import { useSearchMessagesQuery } from "@/features/search/hooks";
+import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
+import {
+  mergeOpenChannelDirectory,
+  useOpenChannelDirectoryQuery,
+} from "@/features/channels/openChannelDirectory";
+import {
+  getMinimumSearchQueryLength,
+  MIN_SEARCH_QUERY_LENGTH,
+  useSearchMessagesQuery,
+} from "@/features/search/hooks";
 import {
   isChannelUuid,
   isHexPubkey,
@@ -22,8 +31,6 @@ import {
 import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-
-export const MIN_SEARCH_QUERY_LENGTH = 2;
 
 function formatUserResultName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || user.pubkey;
@@ -94,45 +101,63 @@ function resolveAuthorFromOperator(
 
 export function useSearchResults({
   channelLabels,
-  channels,
+  channels: memberChannels,
   enabled,
   limit = 12,
+  scopeChannelId,
 }: {
   channelLabels?: Record<string, string>;
   channels: Channel[];
   enabled: boolean;
   limit?: number;
+  scopeChannelId?: string | null;
 }) {
   const [query, setQuery] = React.useState("");
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const parsedQuery = React.useMemo(
+    () => parseSearchOperators(debouncedQuery),
+    [debouncedQuery],
+  );
+  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
+  const hasSearchQuery =
+    debouncedQuery.trim().length >= minimumQueryLength ||
+    parsedQuery.since !== null ||
+    parsedQuery.until !== null ||
+    parsedQuery.from !== null ||
+    parsedQuery.in !== null;
+  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+
+  // Global search surfaces non-member open channels, but only after a query
+  // needs search-backed results. Opening Cmd-K with an empty query must keep
+  // its suggestions local and avoid the all-open discovery scan. Scoped search
+  // (channelId set) needs no directory.
+  const openDirectoryQuery = useOpenChannelDirectoryQuery({
+    enabled: searchBackedQueriesEnabled && !scopeChannelId,
+  });
+  const channels = React.useMemo(
+    () => mergeOpenChannelDirectory(memberChannels, openDirectoryQuery.data),
+    [memberChannels, openDirectoryQuery.data],
+  );
 
   const channelLookup = React.useMemo(
     () => new Map(channels.map((channel) => [channel.id, channel])),
     [channels],
   );
 
-  const parsedQuery = React.useMemo(
-    () => parseSearchOperators(debouncedQuery),
-    [debouncedQuery],
-  );
-
-  const channelResolution = React.useMemo(
-    () => resolveChannelIdFromOperator(parsedQuery.in, channels, channelLabels),
-    [parsedQuery.in, channels, channelLabels],
+  const channelResolution = React.useMemo<OperatorResolveResult<string>>(
+    () =>
+      scopeChannelId
+        ? { status: "resolved", value: scopeChannelId }
+        : resolveChannelIdFromOperator(parsedQuery.in, channels, channelLabels),
+    [parsedQuery.in, channels, channelLabels, scopeChannelId],
   );
 
   const ftsQuery = parsedQuery.text;
 
-  const hasSearchQuery =
-    debouncedQuery.trim().length >= MIN_SEARCH_QUERY_LENGTH ||
-    parsedQuery.since !== null ||
-    parsedQuery.until !== null ||
-    parsedQuery.from !== null ||
-    parsedQuery.in !== null;
-
-  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+  const needsAuthorResolution = Boolean(parsedQuery.from);
+  const entitySearchEnabled = searchBackedQueriesEnabled && !scopeChannelId;
 
   const fromHandleForLookup =
     parsedQuery.from && !isHexPubkey(parsedQuery.from)
@@ -140,10 +165,12 @@ export function useSearchResults({
       : "";
 
   const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: searchBackedQueriesEnabled,
+    enabled:
+      searchBackedQueriesEnabled && (!scopeChannelId || needsAuthorResolution),
   });
   const relayAgentsQuery = useRelayAgentsQuery({
-    enabled: searchBackedQueriesEnabled,
+    enabled:
+      searchBackedQueriesEnabled && (!scopeChannelId || needsAuthorResolution),
   });
   // Resolve `from:@name` against people, not only agents.
   const fromUserSearchQuery = useUserSearchQuery(fromHandleForLookup, {
@@ -151,8 +178,13 @@ export function useSearchResults({
     limit,
   });
   const userSearchQuery = useUserSearchQuery(ftsQuery, {
-    enabled: searchBackedQueriesEnabled,
+    enabled: entitySearchEnabled,
     limit,
+  });
+  const fuzzyUserCandidatesQuery = useUserSearchQuery("", {
+    allowEmpty: true,
+    enabled: entitySearchEnabled && ftsQuery.length >= 4,
+    limit: 100,
   });
 
   const authorCandidateSeed = React.useMemo(() => {
@@ -208,7 +240,7 @@ export function useSearchResults({
       enabled &&
       !hasUnresolvedOperator &&
       !waitingOnFromResolution &&
-      ftsQuery.length >= MIN_SEARCH_QUERY_LENGTH,
+      ftsQuery.length >= minimumQueryLength,
     limit,
     channelId:
       channelResolution.status === "resolved"
@@ -221,6 +253,7 @@ export function useSearchResults({
     since: parsedQuery.since,
     until: parsedQuery.until,
     unresolvedOperator: hasUnresolvedOperator,
+    minimumQueryLength,
   });
 
   const messageResults = React.useMemo(() => {
@@ -230,42 +263,42 @@ export function useSearchResults({
     return dedupeSearchHits(searchQuery.data?.hits ?? []);
   }, [hasUnresolvedOperator, searchQuery.data?.hits]);
   const channelResults = React.useMemo(() => {
-    if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (scopeChannelId || ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
     }
 
     const normalizedQuery = ftsQuery.toLowerCase();
 
     return channels
-      .filter(
-        (channel) =>
-          (channel.archivedAt
-            ? channel.isMember
-            : channel.visibility === "open" || channel.isMember) &&
-          [
-            channel.name,
-            channel.description,
-            channelLabels?.[channel.id] ?? "",
-          ].some((value) => value.toLowerCase().includes(normalizedQuery)),
-      )
-      .sort((a, b) => {
-        const aDisplayName = channelLabels?.[a.id]?.trim() || a.name;
-        const bDisplayName = channelLabels?.[b.id]?.trim() || b.name;
-        const aNameMatches = aDisplayName
-          .toLowerCase()
-          .includes(normalizedQuery);
-        const bNameMatches = bDisplayName
-          .toLowerCase()
-          .includes(normalizedQuery);
+      .flatMap((channel) => {
+        const isVisible = channel.archivedAt
+          ? channel.isMember
+          : channel.visibility === "open" || channel.isMember;
+        if (!isVisible) return [];
 
-        if (aNameMatches !== bNameMatches) {
-          return aNameMatches ? -1 : 1;
-        }
+        const displayName = channelLabels?.[channel.id]?.trim() || channel.name;
+        const displayScore = scoreChannelMatch(
+          { name: displayName, description: channel.description },
+          normalizedQuery,
+        );
+        const rawNameScore = scoreChannelMatch(
+          { name: channel.name, description: "" },
+          normalizedQuery,
+        );
+        const scores = [displayScore, rawNameScore].filter(
+          (score): score is number => score !== null,
+        );
+        if (scores.length === 0) return [];
 
-        return aDisplayName.localeCompare(bDisplayName);
+        return [{ channel, displayName, score: Math.min(...scores) }];
       })
-      .slice(0, 5);
-  }, [channelLabels, channels, ftsQuery]);
+      .sort(
+        (a, b) =>
+          a.score - b.score || a.displayName.localeCompare(b.displayName),
+      )
+      .slice(0, 5)
+      .map(({ channel }) => channel);
+  }, [channelLabels, channels, ftsQuery, scopeChannelId]);
   const managedAgentPubkeys = React.useMemo(
     () =>
       new Set(
@@ -296,20 +329,11 @@ export function useSearchResults({
     return pubkeys;
   }, [managedAgentPubkeys, relayAgentsQuery.data]);
   const userResults = React.useMemo<UserSearchResult[]>(() => {
-    if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (scopeChannelId || ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
     }
 
-    const normalizedQuery = ftsQuery.toLowerCase();
     const candidatesByPubkey = new Map<string, UserSearchResult>();
-
-    const matchesQuery = (candidate: UserSearchResult) =>
-      [
-        candidate.displayName ?? "",
-        candidate.nip05Handle ?? "",
-        candidate.isAgent ? "agent" : "",
-        normalizePubkey(candidate.pubkey),
-      ].some((value) => value.toLowerCase().includes(normalizedQuery));
 
     const addCandidate = (candidate: UserSearchResult) => {
       const pubkey = normalizePubkey(candidate.pubkey);
@@ -354,6 +378,10 @@ export function useSearchResults({
       addCandidate(user);
     }
 
+    for (const user of fuzzyUserCandidatesQuery.data ?? []) {
+      addCandidate(user);
+    }
+
     for (const agent of relayAgentsQuery.data ?? []) {
       if (agent.respondTo !== "anyone") {
         continue;
@@ -368,9 +396,7 @@ export function useSearchResults({
         isAgent: true,
       };
 
-      if (matchesQuery(candidate)) {
-        addCandidate(candidate);
-      }
+      addCandidate(candidate);
     }
 
     for (const agent of managedAgentsQuery.data ?? []) {
@@ -383,9 +409,7 @@ export function useSearchResults({
         isAgent: true,
       };
 
-      if (matchesQuery(candidate)) {
-        addCandidate(candidate);
-      }
+      addCandidate(candidate);
     }
 
     return rankUserCandidatesBySearch({
@@ -396,6 +420,7 @@ export function useSearchResults({
     });
   }, [
     eligibleAgentPubkeys,
+    fuzzyUserCandidatesQuery.data,
     ftsQuery,
     isArchivedDiscovery,
     limit,
@@ -403,6 +428,7 @@ export function useSearchResults({
     managedAgentsQuery.data,
     relayAgentPubkeys,
     relayAgentsQuery.data,
+    scopeChannelId,
     userSearchQuery.data,
   ]);
 
@@ -433,7 +459,7 @@ export function useSearchResults({
 
   React.useEffect(() => {
     const trimmed = query.trim();
-    if (trimmed.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (trimmed.length < minimumQueryLength) {
       setDebouncedQuery("");
       return;
     }
@@ -445,7 +471,7 @@ export function useSearchResults({
     return () => {
       window.clearTimeout(timeout);
     };
-  }, [query]);
+  }, [minimumQueryLength, query]);
 
   React.useEffect(() => {
     if (!enabled) {
@@ -480,6 +506,7 @@ export function useSearchResults({
     setQuery,
     setSelectedIndex,
     userResults,
+    fuzzyUserCandidatesQuery,
     userSearchQuery,
   };
 }

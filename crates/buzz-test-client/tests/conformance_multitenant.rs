@@ -2612,17 +2612,27 @@ mod pubsub_presence_typing {
 mod media_blossom {
     use super::*;
 
-    /// Obligation: public blob `GET/HEAD /media/{sha256.ext}` stays
-    /// unauthenticated (N=1 compat, shared CAS bytes). The community boundary is
-    /// the metadata/descriptor/upload-auth/quota/audit layer: B's private upload
-    /// metadata/errors must not be observable from A, even when the blob bytes
-    /// are deduplicated and shared.
+    /// Obligation: blob `GET/HEAD /media/{sha256.ext}` requires Blossom read auth
+    /// scoped to the serving host or the blob hash, and the request is bound to the
+    /// tenant resolved from the request headers. A bare read is rejected before any
+    /// storage lookup, so the endpoint does not leak blob existence.
+    ///
+    /// CAS bytes are still deduplicated across communities, so the boundary is not
+    /// the bytes: it is the metadata/descriptor/upload-auth/quota/audit layer plus
+    /// the per-tenant read binding. B's private upload metadata and errors must not
+    /// be observable from A even when the underlying blob is shared.
+    ///
+    /// Known limitation, deferred: relay membership plus knowledge of a hash is
+    /// sufficient to read a blob. Read auth binds host and tenant, not the channel
+    /// ACL of the message the blob was attached to.
     #[tokio::test]
     #[ignore]
     async fn media_metadata_boundary_holds_while_blob_bytes_shared() {
         pending_lane(
             "buzz-media",
-            "shared SHA bytes OK; A cannot read B's upload metadata/quota/audit; errors generic",
+            "reads require host/hash-scoped Blossom auth and bind to the header tenant; \
+             bare reads 401 before storage; shared SHA bytes OK; A cannot read B's upload \
+             metadata/quota/audit; errors generic",
         );
     }
 }

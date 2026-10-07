@@ -17,8 +17,6 @@ final class NativeAttachmentPopoverViewController:
     case camera
   }
 
-  private typealias ContentPreparation = (@escaping () -> Void) -> Void
-
   private let channel: FlutterMethodChannel
   private let expandedWidth: CGFloat
   private let maximumMenuHeight: CGFloat
@@ -85,17 +83,29 @@ final class NativeAttachmentPopoverViewController:
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = .clear
-    view.layer.cornerRadius = 22
+    view.layer.cornerRadius = NativeAttachmentPopoverStyle.cornerRadius
     view.layer.cornerCurve = .continuous
-    view.clipsToBounds = true
+    view.layer.borderColor = UIColor.black.withAlphaComponent(0.04).cgColor
+    view.layer.borderWidth = NativeAttachmentPopoverStyle.borderWidth
+    view.layer.shadowColor = UIColor.black.cgColor
+    view.layer.shadowOpacity = NativeAttachmentPopoverStyle.shadowOpacity
+    view.layer.shadowRadius = NativeAttachmentPopoverStyle.shadowRadius
+    view.layer.shadowOffset = NativeAttachmentPopoverStyle.shadowOffset
+    view.clipsToBounds = false
 
     let glassEffect = UIGlassEffect(style: .regular)
     glassEffect.isInteractive = true
     let glassView = UIVisualEffectView(effect: glassEffect)
     glassView.translatesAutoresizingMaskIntoConstraints = false
+    glassView.layer.cornerRadius = NativeAttachmentPopoverStyle.cornerRadius
+    glassView.layer.cornerCurve = .continuous
+    glassView.clipsToBounds = true
     view.addSubview(glassView)
 
     contentHost.translatesAutoresizingMaskIntoConstraints = false
+    contentHost.layer.cornerRadius = NativeAttachmentPopoverStyle.cornerRadius
+    contentHost.layer.cornerCurve = .continuous
+    contentHost.clipsToBounds = true
     view.addSubview(contentHost)
     NSLayoutConstraint.activate([
       glassView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -114,6 +124,11 @@ final class NativeAttachmentPopoverViewController:
 
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
+    view.layer.shadowPath =
+      UIBezierPath(
+        roundedRect: view.bounds,
+        cornerRadius: NativeAttachmentPopoverStyle.cornerRadius
+      ).cgPath
     cameraPreviewLayer?.frame = cameraPreviewView?.bounds ?? .zero
   }
 
@@ -198,21 +213,21 @@ final class NativeAttachmentPopoverViewController:
       makeNativeAttachmentMenuButton(
         title: "Camera",
         symbol: "camera",
-        action: UIAction { [weak self] _ in self?.showCamera() }
+        action: { [weak self] in self?.showCamera() }
       )
     )
     stack.addArrangedSubview(
       makeNativeAttachmentMenuButton(
         title: "Photos",
         symbol: "photo.on.rectangle.angled",
-        action: UIAction { [weak self] _ in self?.showPhotos() }
+        action: { [weak self] in self?.showPhotos() }
       )
     )
     stack.addArrangedSubview(
       makeNativeAttachmentMenuButton(
         title: "Video",
         symbol: "video",
-        action: UIAction { [weak self] _ in
+        action: { [weak self] in
           self?.finish(method: "pickVideo")
         }
       )
@@ -221,7 +236,7 @@ final class NativeAttachmentPopoverViewController:
       makeNativeAttachmentMenuButton(
         title: "Files",
         symbol: "doc",
-        action: UIAction { [weak self] _ in
+        action: { [weak self] in
           self?.finish(method: "pickFiles")
         }
       )
@@ -280,14 +295,14 @@ final class NativeAttachmentPopoverViewController:
       title: nil,
       symbol: "chevron.left",
       accessibilityLabel: "Back to attachment options",
-      action: UIAction { [weak self] _ in self?.showMenu() }
+      action: { [weak self] in self?.showMenu() }
     )
     let actionButton = makeGlassControl(
       title: "All Photos",
       symbol: nil,
       accessibilityLabel: "All Photos",
       prominent: true,
-      action: UIAction { [weak self] _ in self?.performPhotoAction() }
+      action: { [weak self] in self?.performPhotoAction() }
     )
     photoActionButton = actionButton
     addBottomControls(
@@ -296,27 +311,7 @@ final class NativeAttachmentPopoverViewController:
       trailing: actionButton
     )
 
-    transition(
-      to: .photos,
-      content: container,
-      preparation: { [weak picker] reveal in
-        guard let picker else {
-          reveal()
-          return
-        }
-        // PHPicker ignores scale changes while its remote grid is still
-        // adapting to the compact menu bounds. Give it one main-loop turn at
-        // the final popover size, apply the scale offscreen, then reveal it.
-        DispatchQueue.main.async {
-          picker.view.layoutIfNeeded()
-          EmbeddedPhotoPickerLayout.applyPreferredScale {
-            picker.zoomIn()
-            picker.view.layoutIfNeeded()
-          }
-          DispatchQueue.main.async(execute: reveal)
-        }
-      }
-    )
+    transition(to: .photos, content: container)
   }
 
   private func showCamera() {
@@ -353,7 +348,7 @@ final class NativeAttachmentPopoverViewController:
       title: nil,
       symbol: "chevron.left",
       accessibilityLabel: "Back to attachment options",
-      action: UIAction { [weak self] _ in self?.showMenu() }
+      action: { [weak self] in self?.showMenu() }
     )
     let captureButton = makeCameraCaptureButton()
     cameraCaptureButton = captureButton
@@ -415,7 +410,6 @@ final class NativeAttachmentPopoverViewController:
   private func transition(
     to nextSurface: Surface,
     content nextView: UIView,
-    preparation: ContentPreparation? = nil,
     completion: (() -> Void)? = nil
   ) {
     let previousView = visibleContentView
@@ -485,11 +479,7 @@ final class NativeAttachmentPopoverViewController:
         }
       }
 
-      if let preparation {
-        preparation(reveal)
-      } else {
-        reveal()
-      }
+      reveal()
     }
   }
 
@@ -498,7 +488,7 @@ final class NativeAttachmentPopoverViewController:
     symbol: String?,
     accessibilityLabel: String,
     prominent: Bool = false,
-    action: UIAction
+    action: @escaping () -> Void
   ) -> UIButton {
     var configuration =
       prominent
@@ -513,20 +503,37 @@ final class NativeAttachmentPopoverViewController:
     }
     configuration.imagePadding = 8
     configuration.baseForegroundColor = .white
+    configuration.titleTextAttributesTransformer =
+      UIConfigurationTextAttributesTransformer { attributes in
+        var interAttributes = attributes
+        interAttributes.font = NativeAttachmentMenuTypography.font(
+          forTextStyle: .body
+        )
+        return interAttributes
+      }
     configuration.contentInsets = NSDirectionalEdgeInsets(
       top: 11,
       leading: 15,
       bottom: 11,
       trailing: 15
     )
-    let button = UIButton(configuration: configuration, primaryAction: action)
+    let button = UIButton(
+      configuration: configuration,
+      primaryAction: UIAction { _ in
+        UISelectionFeedbackGenerator().selectionChanged()
+        action()
+      }
+    )
     button.accessibilityLabel = accessibilityLabel
     return button
   }
 
   private func makeCameraCaptureButton() -> UIButton {
     let button = UIButton(
-      primaryAction: UIAction { [weak self] _ in self?.capturePhoto() }
+      primaryAction: UIAction { [weak self] _ in
+        UISelectionFeedbackGenerator().selectionChanged()
+        self?.capturePhoto()
+      }
     )
     button.accessibilityLabel = "Take photo"
     button.translatesAutoresizingMaskIntoConstraints = false

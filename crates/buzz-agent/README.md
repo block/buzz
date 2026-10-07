@@ -153,7 +153,8 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `BUZZ_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
 | `BUZZ_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
-| `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `32768` | Per LLM call. Headroom for large tool-call inputs (e.g. file writes via heredoc); Sonnet 4 / Opus 4 cap at 64K. |
+| `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `65536` | Desired per-call ceiling. Set this at or below the served model's output limit for each agent deployment. Proactive handoff is independently based on 90% of `BUZZ_AGENT_MAX_CONTEXT_TOKENS`. |
+| `BUZZ_AGENT_MAX_TOKEN_RECOVERIES` | `3` | Retries after a successful response is truncated at the output-token limit. `0` disables recovery; the finite value and `BUZZ_AGENT_MAX_ROUNDS` prevent infinite retries. |
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
 | `BUZZ_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
 | `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `240` | Max seconds with no response bytes before abandoning an LLM call (per-read inactivity, not wall-clock). |
@@ -163,6 +164,67 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_LINE_BYTES` | `4194304` | 4 MiB. Hard cap on inbound JSON-RPC frames. |
 | `BUZZ_AGENT_MAX_HISTORY_BYTES` | `1048576` | 1 MiB. Old turns are evicted past this. |
 | `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES` | `51200` | 50 KiB. Per-result cap on tool-output text; oversize is middle-elided (head + tail kept) with an inline marker. Images are exempt. |
+| `BUZZ_AGENT_REQUIRE_REPLY` | `0` (`1` on mesh) | `1` enables the [reply guard](#reply-guard) — remind the model to publish when a turn is about to end with nothing posted to Buzz. Desktop defaults it to `1` for Buzz shared-compute agents. |
+
+
+## Reply Guard
+
+Off by default, except on Buzz shared-compute (mesh) agents, where Buzz Desktop
+sets `BUZZ_AGENT_REQUIRE_REPLY=1` automatically. With it enabled, a turn that is
+about to end without any recognized attempt to post to Buzz gets a reminder that
+its assistant text is invisible to humans, and is rerolled.
+
+This exists because a Buzz agent's reasoning and tool output are not shown to
+anyone. A turn that does real work and never posts is a silent failure — the
+requester waits on a result that was produced and thrown away.
+
+Mesh agents get it by default because they run on small local models, which are
+the ones most likely to do the work and then end the turn without publishing it.
+Setting `BUZZ_AGENT_REQUIRE_REPLY=0` on the agent, persona, or global env opts a
+mesh agent back out; the default never overrides an explicit value.
+
+**Advisory, never a trap.** At most two reminders, then the turn ends whether or
+not anything was published. The guard catches accidental omission; it does not
+compel speech. The reminder text explicitly licenses silence, because the
+built-in system prompt says publishing is optional and silence is often the
+correct outcome.
+
+**Recognition contract.** A turn counts as having replied when it issues a call
+that:
+
+- resolves to a registered, non-hook tool (a hallucinated tool name is rejected
+  at preflight and never runs, so it must not disarm the guard),
+- whose qualified name ends in `__shell` — i.e. the bare tool name is exactly
+  `shell`, which is `buzz-dev-mcp`'s shell tool and any other server's, and
+- whose `command` argument contains `messages send` or `reactions add`.
+
+`messages send` also covers `messages send-diff`. Reactions count because the
+built-in prompt directs agents to react rather than post a bare
+acknowledgement, so nagging an agent that reacted would punish documented
+behavior.
+
+Detection is checked **after** the per-turn tool-call cap
+(`MAX_TOOL_CALLS_PER_TURN`) is applied: a publish-shaped call that was discarded
+never ran.
+
+**It recognizes an attempt, not a successful publish.** Only the command text is
+inspected, never the exit status. A send that fails still satisfies the guard —
+which is fine, since a failed send already returns a non-zero exit and error
+JSON to the model, louder feedback than a reminder.
+
+**Known limits**, both deliberate. A command assembled at runtime (`$CMD`) or
+buried in a wrapper script is missed, so that turn is reminded despite having
+posted. Text that merely quotes a send (`echo "buzz messages send"`) matches, so
+that turn is not reminded. Missing a real post is the expensive direction, and
+substring matching is the forgiving one there. Neither edge is pinned by a test;
+the matcher is free to improve.
+
+**Budget.** Reminders ride the existing `_Stop` gate and share
+`BUZZ_AGENT_STOP_MAX_REJECTIONS` — the outer cap on every end-turn objection.
+At the default 3 both reminders fit; at 1 only one does; at 0 the guard is off
+along with the hooks. A round carrying both a `_Stop` hook objection and a
+reminder costs one rejection and delivers both texts. This is not a new
+lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 
 
 ## Providers

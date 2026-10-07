@@ -111,6 +111,14 @@ pub async fn mint_relay_invite(
     let now = Utc::now();
     let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
+    // Mint a v2 opaque invite inside the same lifecycle gate as every other
+    // community-scoped database write. The trigger remains the final backstop,
+    // but this typed guard keeps a quiescing community from surfacing as an
+    // opaque SQLSTATE/HTTP 500 at the API boundary.
+    let mut tx = pool.begin().await?;
+    crate::deletion::DeletionStore::new(pool.clone())
+        .guard_transaction(&mut tx, community)
+        .await?;
     let row = sqlx::query(
         "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
          VALUES ($1, $2, $3, $4, $5) \
@@ -121,8 +129,9 @@ pub async fn mint_relay_invite(
     .bind(max_uses)
     .bind(expires_at)
     .bind(created_by)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     let invite_id: uuid::Uuid = row.try_get("id")?;
 
@@ -167,6 +176,7 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
          WHERE (community_id, id) IN (\
              SELECT community_id, id FROM relay_invites \
              WHERE expires_at < $1 \
+               AND community_write_allowed(community_id) \
              ORDER BY expires_at \
              LIMIT $2\
          )",
@@ -374,18 +384,51 @@ pub async fn claim_relay_invite(
 mod tests {
     use super::*;
     use crate::relay_members::is_relay_member;
+    use sha2::Digest;
     use sqlx::PgPool;
     use uuid::Uuid;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
-        PgPool::connect(&database_url)
+        PgPool::connect(&test_database_url())
             .await
             .expect("connect to test DB")
+    }
+
+    fn test_database_url() -> String {
+        std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned())
+    }
+
+    async fn create_scratch_database(prefix: &str) -> (PgPool, String, String) {
+        let admin_url = test_database_url();
+        let admin = PgPool::connect(&admin_url)
+            .await
+            .expect("connect to test database server");
+        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create scratch database");
+        let path_start = admin_url
+            .rfind('/')
+            .expect("database URL has a path segment");
+        let scratch_url = format!("{}/{}", &admin_url[..path_start], name);
+        (admin, name, scratch_url)
+    }
+
+    async fn drop_scratch_database(admin: PgPool, db: crate::Db, name: &str) {
+        db.pool.close().await;
+        drop(db);
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop scratch database");
+        admin.close().await;
     }
 
     async fn make_test_community(pool: &PgPool) -> CommunityId {
@@ -446,6 +489,95 @@ mod tests {
             let error = validate_mint_inputs(ttl, max_uses).expect_err("invalid mint contract");
             assert!(matches!(error, crate::DbError::InvalidData(_)), "{error:?}");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
+        let (admin, database_name, database_url) =
+            create_scratch_database("relay_invite_fence").await;
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url,
+            max_connections: 5,
+            min_connections: 0,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect invite deletion test DB");
+        db.migrate().await.expect("migrate invite deletion test DB");
+        let pool = db.pool.clone();
+        let store = db.deletion_store();
+        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create fenced invite community")
+            .id;
+        let request = store
+            .submit(&host, "owner", None)
+            .await
+            .expect("submit deletion request");
+        let empty_digest = hex::encode(sha2::Sha256::digest([]));
+        let inventory = crate::deletion::FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("inventory schema"),
+            storage: crate::deletion::StorageManifest {
+                version: 4,
+                prefixes: [
+                    format!("_meta/{community}/"),
+                    format!("_uploads/{community}/"),
+                    format!("repos/{community}/"),
+                ]
+                .into_iter()
+                .map(|prefix| crate::deletion::PrefixManifest {
+                    prefix,
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                })
+                .collect(),
+            },
+        };
+        store
+            .freeze_inventory(request.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "owner", None)
+            .await
+            .expect("approve deletion");
+        let claim = store
+            .claim_specific(
+                request.id,
+                "executor",
+                crate::deletion::DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("claim deletion")
+            .expect("runnable deletion");
+        store
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("begin quiescing");
+
+        let error = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect_err("quiescing must reject invite minting");
+        assert!(matches!(error, crate::error::DbError::AccessDenied(_)));
+
+        let invite_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM relay_invites WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count relay invites");
+        assert_eq!(invite_count, 0, "rejected mint must not persist an invite");
+
+        drop(store);
+        drop(pool);
+        drop_scratch_database(admin, db, &database_name).await;
     }
 
     #[tokio::test]
@@ -613,6 +745,73 @@ mod tests {
         assert_eq!(remaining, vec![recent.invite_id]);
 
         delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn retention_sweep_skips_quiescing_tenant_while_active_bystanders_progress() {
+        let (admin, database_name, database_url) =
+            create_scratch_database("relay_invite_liveness").await;
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url,
+            max_connections: 5,
+            min_connections: 0,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect invite liveness database");
+        db.migrate()
+            .await
+            .expect("migrate invite liveness database");
+        let pool = db.pool.clone();
+        let active_a = make_test_community(&pool).await;
+        let target = make_test_community(&pool).await;
+        let active_x = make_test_community(&pool).await;
+        let cutoff = Utc::now();
+        for community in [active_a, target, active_x] {
+            sqlx::query(
+                "INSERT INTO relay_invites \
+                 (community_id, token_hash, expires_at, created_by) \
+                 VALUES ($1, $2, $3, 'test')",
+            )
+            .bind(community.as_uuid())
+            .bind(sha2::Sha256::digest(community.as_uuid().as_bytes()).as_slice())
+            .bind(cutoff - chrono::Duration::seconds(1))
+            .execute(&pool)
+            .await
+            .expect("seed expired invite");
+        }
+        let mut lifecycle = pool.begin().await.expect("begin lifecycle fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(target.to_string())
+        .execute(&mut *lifecycle)
+        .await
+        .expect("authorize lifecycle fixture");
+        sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+            .bind(target.as_uuid())
+            .execute(&mut *lifecycle)
+            .await
+            .expect("quiesce target");
+        lifecycle.commit().await.expect("commit lifecycle fixture");
+
+        assert_eq!(
+            reap_expired_relay_invites(&pool, cutoff)
+                .await
+                .expect("reap active bystanders"),
+            2
+        );
+        let remaining: Vec<Uuid> =
+            sqlx::query_scalar("SELECT community_id FROM relay_invites ORDER BY community_id")
+                .fetch_all(&pool)
+                .await
+                .expect("read remaining invite attribution");
+        assert_eq!(remaining, vec![*target.as_uuid()]);
+
+        drop(pool);
+        drop_scratch_database(admin, db, &database_name).await;
     }
 
     #[tokio::test]

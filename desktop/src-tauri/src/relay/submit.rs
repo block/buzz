@@ -25,6 +25,7 @@ pub async fn submit_signed_event_at_with_keys(
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", api_base_url.trim_end_matches('/'));
     let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let response = state
@@ -74,4 +75,51 @@ pub async fn submit_event(
     let api_base_url = relay_api_base_url_with_override(state);
     let keys = state.signing_keys()?;
     submit_event_at_with_keys(builder, state, &api_base_url, &keys).await
+}
+
+/// Sign with an explicit identity, submit to an explicit HTTP API base URL,
+/// and also return the signed event's `created_at`.
+///
+/// Callers that persist a timestamp as an event cursor (e.g. the Projects
+/// conversation opener) need the signed event's own second — a
+/// post-publication clock read can land a second later and permanently
+/// exclude other events stamped in the event's real second.
+///
+/// The explicit base (rather than a re-read of the workspace override at
+/// submit time) matters for the same callers: they validated a tenant scope
+/// against the resolved base earlier in the same command, and re-resolving
+/// here would reopen the window where a workspace switch retargets the event
+/// after the check passed. The explicit `keys` close the sibling window: the
+/// relay URL and the signing keys mutate under separate locks during a
+/// workspace switch, so re-reading the keys here could sign — and NIP-98
+/// authenticate — the event as the *new* tenant's identity after the caller
+/// validated the old one. The caller passes the exact snapshot it asserted.
+pub async fn submit_event_at_created_at(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    api_base_url: &str,
+    keys: &nostr::Keys,
+) -> Result<(SubmitEventResponse, i64), String> {
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let created_at = event.created_at.as_secs() as i64;
+    let result = submit_signed_event_at_with_keys(&event, state, api_base_url, keys).await?;
+    Ok((result, created_at))
+}
+
+/// Like `submit_event_with_keys`, but also returns the signed event's
+/// `created_at` — same cursor rationale as [`submit_event_at_created_at`].
+pub async fn submit_event_with_keys_created_at(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    keys: &nostr::Keys,
+    auth_tag: Option<&str>,
+) -> Result<(SubmitEventResponse, i64), String> {
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let created_at = event.created_at.as_secs() as i64;
+    let result = super::submit_signed_event_with_keys(&event, state, keys, auth_tag).await?;
+    Ok((result, created_at))
 }

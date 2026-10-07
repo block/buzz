@@ -40,6 +40,24 @@ void main() {
       expect(themeSelectionLabel(buzzDarkThemeName, ThemeMode.system), 'Buzz');
     });
 
+    test('forces neutral rendering without changing the stored accent', () {
+      const storedAccent = '#ef4444';
+
+      expect(
+        effectiveAccentIndex(buzzThemeName, storedAccent),
+        neutralAccentIndex,
+      );
+      expect(
+        effectiveAccentIndex(buzzDarkThemeName, storedAccent),
+        neutralAccentIndex,
+      );
+      expect(
+        effectiveAccentIndex('github-light', storedAccent),
+        accentIndexForWireValue(storedAccent),
+      );
+      expect(storedAccent, '#ef4444');
+    });
+
     test('resolve across brightnesses like any other pair', () {
       final resolved = resolveSchemes(buzzThemeName, ThemeMode.system);
       expect(resolved.forcedMode, isNull);
@@ -182,6 +200,59 @@ void main() {
       final decoration = barDecoration(tester);
       expect(decoration.gradient, isNull);
       expect(decoration.color, isNotNull);
+    });
+
+    testWidgets('Buzz section labels use 80% neutral foreground', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        harness(
+          AppTheme.light(
+            topSectionGradient: buzzTopSectionGradient(
+              buzzThemeName,
+              Brightness.light,
+            ),
+          ),
+        ),
+      );
+
+      final context = tester.element(find.text('Home'));
+      expect(
+        navigationSectionForeground(context),
+        Colors.black.withValues(alpha: 0.8),
+      );
+    });
+
+    testWidgets('navigation roles inherit non-Buzz theme tokens', (
+      tester,
+    ) async {
+      const primaryForeground = Color(0xFF123456);
+      const secondaryForeground = Color(0xFF789ABC);
+      const searchSurface = Color(0xFFDEF012);
+      final theme = ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.purple).copyWith(
+          onSurface: primaryForeground,
+          onSurfaceVariant: secondaryForeground,
+          surfaceContainerHighest: searchSurface,
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: const Scaffold(body: SizedBox()),
+        ),
+      );
+
+      final context = tester.element(find.byType(SizedBox));
+      expect(navigationPrimaryForeground(context), primaryForeground);
+      expect(navigationSecondaryForeground(context), secondaryForeground);
+      expect(navigationSectionForeground(context), secondaryForeground);
+      expect(navigationSearchSurface(context), searchSurface);
+      expect(
+        navigationDivider(context, 0.15),
+        primaryForeground.withValues(alpha: 0.15),
+      );
     });
   });
 

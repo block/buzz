@@ -11,13 +11,15 @@ const MENU_ITEM_CLASS =
   "flex min-h-9 w-full items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:text-foreground focus-visible:ring-1 focus-visible:ring-ring [&_svg]:size-4 [&_svg]:shrink-0";
 
 export function ProjectsCreateMenu({
+  compact = false,
   onCreateIssue,
+  onCreateProject,
   onCreatePullRequest,
-  onCreateRepository,
 }: {
+  compact?: boolean;
   onCreateIssue: () => void;
+  onCreateProject: () => void;
   onCreatePullRequest: () => void;
-  onCreateRepository: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const containerRef = React.useRef<HTMLElement>(null);
@@ -50,7 +52,7 @@ export function ProjectsCreateMenu({
   return (
     <nav
       aria-label="Create project item"
-      className="relative shrink-0 pl-4"
+      className="relative shrink-0"
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setOpen(false);
@@ -70,12 +72,16 @@ export function ProjectsCreateMenu({
         aria-expanded={open}
         aria-haspopup="menu"
         aria-label="Create"
-        className="h-8 w-8 rounded-full"
+        className={
+          compact
+            ? "h-6 w-6 shrink-0 rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            : "h-8 w-8 rounded-full"
+        }
         data-testid="projects-create-menu"
         onClick={() => setOpen(true)}
         size="icon"
         type="button"
-        variant="default"
+        variant={compact ? "ghost" : "default"}
       >
         <Plus className="h-4 w-4" />
       </Button>
@@ -88,12 +94,12 @@ export function ProjectsCreateMenu({
           >
             <button
               className={MENU_ITEM_CLASS}
-              onClick={() => select(onCreateRepository)}
+              onClick={() => select(onCreateProject)}
               role="menuitem"
               type="button"
             >
               <FolderGit2 />
-              Repository
+              Project
             </button>
             <button
               className={MENU_ITEM_CLASS}
@@ -102,7 +108,7 @@ export function ProjectsCreateMenu({
               type="button"
             >
               <CircleDot />
-              Issue
+              Task
             </button>
             <button
               className={MENU_ITEM_CLASS}
@@ -111,7 +117,7 @@ export function ProjectsCreateMenu({
               type="button"
             >
               <GitPullRequest />
-              Pull Request
+              Review
             </button>
           </div>
         </div>

@@ -185,12 +185,12 @@ export type TimelineBodySurface = "skeleton" | "empty" | "list";
 
 export function selectTimelineBodySurface({
   deferredCount,
-  hasPersistentIntro = false,
+  preserveSettledEmptyIntro = false,
   isLoading,
   liveCount,
 }: {
   deferredCount: number;
-  hasPersistentIntro?: boolean;
+  preserveSettledEmptyIntro?: boolean;
   isLoading: boolean;
   liveCount: number;
 }): TimelineBodySurface {
@@ -200,10 +200,11 @@ export function selectTimelineBodySurface({
 
   const renderState = selectDeferredListRenderState(deferredCount, liveCount);
   if (renderState === "pending") {
-    // A channel/DM intro is already meaningful stable content. Preserve it
-    // while React's deferred snapshot catches up to the first live message;
-    // replacing it with a skeleton makes an append look like a page reload.
-    return hasPersistentIntro ? "empty" : "skeleton";
+    // Preserve a channel/DM intro across a new append only when this channel
+    // already committed an authoritative empty timeline. On first load, the
+    // live query can resolve before React's deferred rows commit; painting the
+    // intro in that gap flashes empty-channel actions over incoming messages.
+    return preserveSettledEmptyIntro ? "empty" : "skeleton";
   }
   return renderState;
 }

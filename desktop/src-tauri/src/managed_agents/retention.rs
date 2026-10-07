@@ -261,21 +261,32 @@ pub enum InboundOutcome {
 ///   pending row intact so the flush republishes and the relay resolves
 ///   last-writer-wins. (A re-received echo at equal time is also a no-op.)
 /// - Inbound older: skip — nothing to change.
-pub fn retain_inbound_event(
+///
+/// Decide whether an inbound event is newer than the retained coordinate without
+/// mutating retention. Callers that must update another durable store first use
+/// this preflight, apply that store change, and only then commit with
+/// [`retain_inbound_event`].
+pub fn inbound_event_outcome(
     conn: &Connection,
     event: &RetainedEvent,
 ) -> Result<InboundOutcome, String> {
     let existing = get_retained_event(conn, event.kind, &event.pubkey, &event.d_tag)?;
-
-    let apply = match &existing {
-        None => true,
-        Some(row) if event.created_at > row.created_at => true,
+    Ok(match existing {
+        None => InboundOutcome::Applied,
+        Some(row) if event.created_at > row.created_at => InboundOutcome::Applied,
         // Equal or older: skip. Equal time may collide with a pending local
         // edit, so we never clear its `pending_sync`; older is stale.
-        Some(_) => false,
-    };
+        Some(_) => InboundOutcome::Skipped,
+    })
+}
 
-    if !apply {
+pub fn retain_inbound_event(
+    conn: &Connection,
+    event: &RetainedEvent,
+) -> Result<InboundOutcome, String> {
+    let outcome = inbound_event_outcome(conn, event)?;
+
+    if outcome == InboundOutcome::Skipped {
         return Ok(InboundOutcome::Skipped);
     }
 
@@ -551,6 +562,37 @@ mod tests {
             raw_event: r#"{"id":"..."}"#.to_string(),
             pending_sync: true,
         }
+    }
+
+    #[test]
+    fn inbound_preflight_does_not_consume_event_before_commit() {
+        let conn = test_db();
+        let mut inbound = sample_event();
+        inbound.pending_sync = false;
+
+        assert_eq!(
+            inbound_event_outcome(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+        assert!(
+            get_retained_event(&conn, inbound.kind, &inbound.pubkey, &inbound.d_tag)
+                .unwrap()
+                .is_none()
+        );
+        // A failed store/runtime apply can replay the same head because the
+        // preflight did not advance retention.
+        assert_eq!(
+            inbound_event_outcome(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+        assert_eq!(
+            retain_inbound_event(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+        assert_eq!(
+            inbound_event_outcome(&conn, &inbound).unwrap(),
+            InboundOutcome::Skipped
+        );
     }
 
     #[test]

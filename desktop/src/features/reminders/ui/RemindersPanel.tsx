@@ -3,7 +3,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useChannelReferences } from "@/features/channels/openChannelDirectory";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   resolveUserLabel,
@@ -42,8 +42,15 @@ export type ReminderSource = {
 export function useReminderSources(reminders: readonly Reminder[]) {
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
-  const channelsQuery = useChannelsQuery();
-  const channels = channelsQuery.data;
+  const channelIds = React.useMemo(
+    () =>
+      reminders.flatMap((reminder) => {
+        const target = reminder.content.target;
+        return hasNavigableTarget(target) ? [target.channelId] : [];
+      }),
+    [reminders],
+  );
+  const { channelsById } = useChannelReferences(channelIds);
   const authorPubkeys = React.useMemo(
     () =>
       reminders
@@ -56,9 +63,6 @@ export function useReminderSources(reminders: readonly Reminder[]) {
     usersBatchQuery.data?.profiles;
 
   return React.useMemo(() => {
-    const channelsById = new Map(
-      (channels ?? []).map((channel) => [channel.id, channel]),
-    );
     const map = new Map<string, ReminderSource>();
     for (const reminder of reminders) {
       const target = reminder.content.target;
@@ -79,7 +83,7 @@ export function useReminderSources(reminders: readonly Reminder[]) {
       });
     }
     return map;
-  }, [channels, currentPubkey, profiles, reminders]);
+  }, [channelsById, currentPubkey, profiles, reminders]);
 }
 
 function formatRelativeTime(timestamp: number): string {

@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-async fn enforce_http_admission(
+pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
@@ -654,12 +654,13 @@ pub async fn submit_event(
         submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
 
     match &outcome {
-        SubmitOutcome::Ok { accepted, .. } => {
+        SubmitOutcome::Ok { accepted, kind, .. } => {
             tracing::info!(
                 pubkey = %pubkey_hex,
                 route = "/events",
                 status = 200u16,
                 accepted,
+                kind,
                 "HTTP bridge request"
             );
         }
@@ -713,6 +714,7 @@ enum SubmitOutcome {
     /// Ingest pipeline ran and returned a result (accepted or not).
     Ok {
         accepted: bool,
+        kind: u32,
         response: Json<Value>,
     },
     /// JSON parse failure before ingest — log category/line/column, not msg.
@@ -843,6 +845,7 @@ async fn submit_event_authed(
             }));
             SubmitOutcome::Ok {
                 accepted: result.accepted,
+                kind: kind_u32,
                 response,
             }
         }
@@ -978,6 +981,8 @@ async fn query_events_authed(
         .map(|v| serde_json::from_value(v.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
@@ -1002,10 +1007,18 @@ async fn query_events_authed(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1231,15 +1244,16 @@ async fn query_events_authed(
             tenant.community(),
         )
         .await;
-        crate::handlers::req::apply_access_scope_to_query(
+        crate::handlers::req::apply_channel_scope_to_query(
             &mut query,
+            filter,
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
-        // Persona visibility pushdown: must mirror WS REQ so that a page of newer
-        // private personas does not starve older shared ones off the candidate page.
-        if crate::handlers::req::filter_can_match_persona_shared_kinds(filter) {
-            query.persona_reader = Some(pubkey_bytes.clone());
+        // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
+        // newer private events does not starve older shared ones off the page.
+        if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
+            query.shared_gated_reader = Some(pubkey_bytes.clone());
         }
 
         match extract_before_id(raw) {
@@ -1319,6 +1333,39 @@ async fn query_events_authed(
     }
 
     Ok(Json(Value::Array(events)))
+}
+
+async fn repair_requested_channel_access(
+    state: &AppState,
+    tenant: &TenantContext,
+    filters: &[nostr::Filter],
+    pubkey_bytes: &[u8],
+    accessible_channels: &mut Vec<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    for filter in filters {
+        let Some(requested) =
+            crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+        else {
+            continue;
+        };
+        for channel_id in requested {
+            if accessible_channels.contains(&channel_id) {
+                continue;
+            }
+            let is_member = state
+                .db
+                .is_member(tenant.community(), channel_id, pubkey_bytes)
+                .await
+                .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
+            crate::handlers::req::resolve_request_local_access(
+                accessible_channels,
+                channel_id,
+                true,
+                Some(is_member),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -1412,6 +1459,8 @@ async fn count_events_authed(
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1435,10 +1484,18 @@ async fn count_events_authed(
     }
 
     // Get channels this user can access.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     let mut total: u64 = 0;
     for filter in &filters {
@@ -1453,16 +1510,26 @@ async fn count_events_authed(
                     filter,
                     &authed_pubkey_hex,
                 );
-        // Force per-event fallback for filters that can match kind:30175 —
-        // the fast SQL count_events() path has no per-event gate and would
-        // over-count foreign unshared persona events (existence leak).
-        let needs_persona_filtering =
-            crate::handlers::req::filter_can_match_persona_shared_kinds(filter);
+        // Force per-event fallback for filters that can match a shared-gated
+        // kind — the fast SQL count_events() path has no per-event gate and
+        // would over-count foreign unshared events (existence leak).
+        let needs_shared_gate_filtering =
+            crate::handlers::req::filter_can_match_shared_gated_kinds(filter);
 
         // If filter targets a specific channel, verify access.
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            if !accessible_channels.contains(&ch_id) {
-                continue; // Skip filters targeting inaccessible channels.
+        if crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+            .is_some()
+        {
+            let ch_id = extract_channel_from_filter(filter);
+            let requested = crate::handlers::req::extract_channel_ids_from_filters(
+                std::slice::from_ref(filter),
+            )
+            .unwrap_or_default();
+            if !requested
+                .iter()
+                .any(|channel_id| accessible_channels.contains(channel_id))
+            {
+                continue;
             }
             // Channel is accessible — count with pushability check.
             let mut query = crate::handlers::req::build_event_query_from_filter(
@@ -1472,10 +1539,16 @@ async fn count_events_authed(
                 tenant.community(),
             )
             .await;
-            // Persona visibility pushdown: same as REQ and /query paths, so the
-            // fallback's query_events call doesn't over-fetch private persona rows.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            crate::handlers::req::apply_channel_scope_to_query(
+                &mut query,
+                filter,
+                ch_id,
+                &accessible_channels,
+            );
+            // Shared-gated visibility pushdown: same as REQ and /query paths, so
+            // the fallback's query_events call doesn't over-fetch private rows.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
@@ -1486,7 +1559,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
@@ -1541,10 +1614,10 @@ async fn count_events_authed(
             )
             .await;
             query.channel_ids = Some(accessible_channels.to_vec());
-            // Persona visibility pushdown: pre-filter before ORDER/LIMIT on the
-            // fallback query_events path.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: pre-filter before ORDER/LIMIT on
+            // the fallback query_events path.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
@@ -1556,7 +1629,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 query.limit = None;
                 match state.db.count_events_routed("bridge_count", &query).await {
@@ -1935,7 +2008,10 @@ pub async fn workflow_webhook(
                         buzz_db::workflow::RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {
@@ -3040,6 +3116,27 @@ mod tests {
         // Can't size a page without a limit.
         let raw = serde_json::json!({ "kinds": [0], "page": 2 });
         assert_eq!(extract_page_offset(&raw, None), None);
+    }
+
+    /// Offsets are sized from the *clamped* limit the DB will honor, not from
+    /// what the client asked for. `filter_to_query_params` clamps an absent or
+    /// over-ceiling `limit` to `DEFAULT_MAX_PAGE_LIMIT` (guarded in
+    /// `handlers::req::tests::req_filter_limit_clamps_to_advertised_nip11_max_limit`)
+    /// and that clamped value is what arrives here — so page N starts exactly
+    /// N-1 full pages in. Sizing from an unclamped limit would step past rows
+    /// the previous page never returned.
+    #[test]
+    fn extract_page_offset_sizes_pages_from_clamped_limit() {
+        let clamped = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
+
+        assert_eq!(
+            extract_page_offset(&serde_json::json!({ "page": 2 }), Some(clamped)),
+            Some(clamped)
+        );
+        assert_eq!(
+            extract_page_offset(&serde_json::json!({ "page": 3 }), Some(clamped)),
+            Some(clamped * 2)
+        );
     }
 
     #[test]

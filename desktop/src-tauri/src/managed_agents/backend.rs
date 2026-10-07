@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -7,6 +8,61 @@ const STDERR_CAP: usize = 65536;
 /// Provider responses should be small JSON objects. Cap stdout to prevent a
 /// buggy or malicious provider from OOM-ing the desktop process.
 const STDOUT_CAP: usize = 1_048_576; // 1 MB
+const PROVIDER_PROTOCOL_VERSION: u64 = 1;
+
+fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
+    let object = info
+        .as_object()
+        .ok_or_else(|| "provider info response must be a JSON object".to_string())?;
+    let actual_version = object
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64);
+    if actual_version != Some(PROVIDER_PROTOCOL_VERSION) {
+        return Err(match actual_version {
+            Some(version) => format!(
+                "unsupported provider protocol version {version}; desktop requires {PROVIDER_PROTOCOL_VERSION}"
+            ),
+            None => "provider info response missing integer protocol_version".to_string(),
+        });
+    }
+    if object.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        return Err("provider info response must contain ok: true".to_string());
+    }
+    for field in ["name", "version", "description"] {
+        if object
+            .get(field)
+            .is_none_or(|value| value.as_str().is_none_or(str::is_empty))
+        {
+            return Err(format!(
+                "provider info response missing non-empty string {field}"
+            ));
+        }
+    }
+    if !object
+        .get("config_schema")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("provider info response missing object config_schema".to_string());
+    }
+
+    const FIELDS: &[&str] = &[
+        "ok",
+        "name",
+        "version",
+        "protocol_version",
+        "description",
+        "config_schema",
+    ];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        return Err(format!(
+            "provider info response contains unknown field {field}"
+        ));
+    }
+    Ok(())
+}
 
 /// Invoke a provider binary: write JSON to stdin, read JSON from stdout.
 ///
@@ -286,7 +342,7 @@ fn redact_secrets(s: &str) -> String {
 /// (would match every short token in normal log output). Entries are
 /// applied in decreasing length order so superstrings get scrubbed before
 /// substrings — protects against partial overlap leaks.
-fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
+pub(crate) fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     let mut result = s.to_string();
 
     // Extras: longest first to avoid partial-overlap leaks. We use
@@ -305,9 +361,23 @@ fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
 
     // Then prefix-based scrubbing. This loop *can* re-scan because each
     // replacement shortens the buffer past the matched prefix — the
-    // replacement marker `[REDACTED]` does not contain `nsec1` or
-    // `sprt_tok_`, so progress is guaranteed.
-    for prefix in &["nsec1", "sprt_tok_"] {
+    // replacement marker `[REDACTED]` contains none of these prefixes, so
+    // progress is guaranteed. Any prefix added here must preserve that.
+    //
+    // GitHub tokens are recognised by shape as well as by variable name: a
+    // token reaches output from outside our environment too — embedded in a
+    // git remote URL an installer echoes, say — where no name-based rule can
+    // see it.
+    for prefix in &[
+        "nsec1",
+        "sprt_tok_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+    ] {
         while let Some(pos) = result.find(prefix) {
             let end = result[pos..]
                 .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
@@ -319,23 +389,29 @@ fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     result
 }
 
-/// Collect string values from `request["agent"]["env_vars"]` (if present)
-/// to feed into [`redact_secrets_with`]. Returns an empty Vec if the
-/// request shape doesn't match, which is fine — falls back to the default
-/// prefix-based scrubbing.
+/// Collect string values from every environment map a deploy request can
+/// carry. Providers may echo any of these values in diagnostics, including
+/// definition/baked values that exist only in the resolved launch block.
 fn env_secrets_from_request(request: &serde_json::Value) -> Vec<String> {
-    request
-        .get("agent")
-        .and_then(|a| a.get("env_vars"))
-        .and_then(|e| e.as_object())
-        .map(|obj| {
-            obj.values()
-                .filter_map(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
+    let agent = request.get("agent");
+    let maps = [
+        agent.and_then(|value| value.get("env_vars")),
+        agent
+            .and_then(|value| value.get("launch"))
+            .and_then(|value| value.get("env")),
+        agent
+            .and_then(|value| value.get("launch"))
+            .and_then(|value| value.get("policy_env")),
+    ];
+
+    maps.into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|map| map.values())
+        .filter_map(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Public-in-crate helper: redact every non-empty value from `env` (plus
@@ -354,22 +430,102 @@ pub(crate) fn redact_env_values_in(
     redact_secrets_with(s, &values)
 }
 
-/// Deploy an agent via provider binary. Returns the provider-assigned agent_id.
-///
-/// `request_id` is included for provider-side logging/correlation but is not
-/// validated in the response — the stdin→stdout exchange is 1:1 per process.
+/// Copy a resolved provider into a private staging directory while hashing
+/// exactly the bytes copied. The staged file becomes non-writable before either
+/// invocation, closing the path replacement and in-place rewrite races.
+fn stage_provider(
+    binary: &Path,
+) -> Result<(tempfile::TempDir, PathBuf, String, std::fs::File), String> {
+    let directory = tempfile::Builder::new()
+        .prefix("buzz-provider-")
+        .tempdir()
+        .map_err(|error| format!("failed to create provider staging directory: {error}"))?;
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let staged_path = directory.path().join(format!("provider{suffix}"));
+    let mut source = std::fs::File::open(binary)
+        .map_err(|error| format!("failed to open provider for staging: {error}"))?;
+    let mut staged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_path)
+        .map_err(|error| format!("failed to create staged provider: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to read provider for staging: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        staged
+            .write_all(&buffer[..count])
+            .map_err(|error| format!("failed to write staged provider: {error}"))?;
+        hasher.update(&buffer[..count]);
+    }
+    staged
+        .sync_all()
+        .map_err(|error| format!("failed to sync staged provider: {error}"))?;
+
+    let mut permissions = staged
+        .metadata()
+        .map_err(|error| format!("failed to inspect staged provider: {error}"))?
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o500);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&staged_path, permissions)
+        .map_err(|error| format!("failed to protect staged provider: {error}"))?;
+    drop(staged);
+
+    #[cfg(windows)]
+    let execution_guard = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            // Permit CreateProcess to read the image while denying replacement,
+            // writes, and deletion until both invocations finish.
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(&staged_path)
+    };
+    #[cfg(not(windows))]
+    let execution_guard = std::fs::File::open(&staged_path);
+    let execution_guard = execution_guard
+        .map_err(|error| format!("failed to lock staged provider for execution: {error}"))?;
+    Ok((
+        directory,
+        staged_path,
+        hex::encode(hasher.finalize()),
+        execution_guard,
+    ))
+}
+
+/// Deploy through one immutable staged copy: negotiate protocol v1 before the
+/// secret-bearing request, then invoke deploy on those exact same bytes.
 pub fn provider_deploy(
     binary: &Path,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
 ) -> Result<String, String> {
+    let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
+    let info_request = serde_json::json!({
+        "op": "info",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+    });
+    let info = invoke_provider(&staged, &info_request, Duration::from_secs(10))?;
+    validate_provider_info(&info)?;
+
     let request = serde_json::json!({
         "op": "deploy",
         "request_id": uuid::Uuid::new_v4().to_string(),
         "agent": agent,
         "provider_config": provider_config,
     });
-    let resp = invoke_provider(binary, &request, Duration::from_secs(600))?;
+    let resp = invoke_provider(&staged, &request, Duration::from_secs(600))?;
     resp["agent_id"]
         .as_str()
         .map(String::from)
@@ -407,6 +563,24 @@ pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// Derive a provider id from the filename Tauri stages at runtime. Tauri
+/// removes its target-triple suffix while copying an external binary, but on
+/// Windows leaves the executable/script extension, which is not part of the
+/// provider id.
+fn provider_id_from_filename(name: &str) -> Option<&str> {
+    let raw = name.strip_prefix("buzz-backend-")?;
+    let id = [".exe", ".bat", ".cmd"]
+        .into_iter()
+        .find_map(|extension| {
+            raw.get(raw.len().saturating_sub(extension.len())..)
+                .filter(|suffix| suffix.eq_ignore_ascii_case(extension))
+                .map(|_| &raw[..raw.len() - extension.len()])
+        })
+        .unwrap_or(raw);
+
+    (!id.is_empty()).then_some(id)
 }
 
 /// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.
@@ -450,10 +624,12 @@ pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(id) = name.strip_prefix(prefix) {
-                if !id.is_empty() && !seen.contains(&name) && is_executable(&entry.path()) {
-                    seen.insert(name.clone());
-                    results.push((id.to_string(), entry.path()));
+            if name.starts_with(prefix) {
+                if let Some(id) = provider_id_from_filename(&name) {
+                    if !seen.contains(&name) && is_executable(&entry.path()) {
+                        seen.insert(name.clone());
+                        results.push((id.to_string(), entry.path()));
+                    }
                 }
             }
         }
@@ -524,180 +700,5 @@ pub struct BackendProviderInfo {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redact_secrets_replaces_nsec() {
-        let s = "key=nsec1abc123def456 other";
-        let r = redact_secrets(s);
-        assert!(r.contains("[REDACTED]"));
-        assert!(!r.contains("nsec1abc123def456"));
-    }
-
-    #[test]
-    fn redact_secrets_replaces_token() {
-        let s = r#"{"token":"sprt_tok_xyz789"}"#;
-        let r = redact_secrets(s);
-        assert!(r.contains("[REDACTED]"));
-        assert!(!r.contains("sprt_tok_xyz789"));
-    }
-
-    #[test]
-    fn redact_secrets_with_extras_scrubs_user_env_values() {
-        // If a provider echoes back a user-supplied API key in its error
-        // output, the desktop must not surface that secret unredacted via
-        // `last_error`. We scrub the literal values that came from the
-        // request's `agent.env_vars`.
-        let secret = "sk-ant-api03-abc123def456";
-        let stderr = format!("auth failed with key {secret} on host api.anthropic.com");
-        let r = redact_secrets_with(&stderr, &[secret]);
-        assert!(r.contains("[REDACTED]"));
-        assert!(!r.contains(secret));
-    }
-
-    #[test]
-    fn redact_secrets_with_extras_skips_short_values() {
-        // Don't scrub values shorter than 4 chars — too noisy.
-        let r = redact_secrets_with("error code: 42", &["42"]);
-        assert!(r.contains("42"));
-    }
-
-    #[test]
-    fn redact_secrets_with_extras_terminates_when_value_substring_of_marker() {
-        // Regression: an earlier impl used `while let Some(pos) = find(value)`
-        // which never terminates if the user's env value is a substring of
-        // the replacement marker `[REDACTED]` — each replacement
-        // reintroduces the same text. Now uses `str::replace` (single-pass).
-        for value in ["REDACTED", "EDACTE", "REDA", "ACTED"] {
-            let r = redact_secrets_with(&format!("leak={value}"), &[value]);
-            assert!(r.contains("[REDACTED]"));
-        }
-    }
-
-    #[test]
-    fn redact_secrets_with_extras_handles_overlapping_secrets() {
-        // Longer entries get scrubbed first so the substring "abc12" isn't
-        // matched before "abc123" is consumed.
-        let s = "key1=abc123 key2=abc12";
-        let r = redact_secrets_with(s, &["abc12", "abc123"]);
-        assert!(!r.contains("abc123"));
-        assert!(!r.contains("abc12 "));
-    }
-
-    #[test]
-    fn env_secrets_from_request_extracts_string_values() {
-        let req = serde_json::json!({
-            "op": "deploy",
-            "agent": {
-                "env_vars": {
-                    "ANTHROPIC_API_KEY": "sk-ant-test",
-                    "EMPTY": "",
-                    "NUMERIC": 42,
-                },
-            },
-        });
-        let secrets = env_secrets_from_request(&req);
-        assert!(secrets.iter().any(|v| v == "sk-ant-test"));
-        // Empty and non-string values are filtered out.
-        assert_eq!(secrets.len(), 1);
-    }
-
-    #[test]
-    fn env_secrets_from_request_handles_missing_shape() {
-        assert!(env_secrets_from_request(&serde_json::json!({})).is_empty());
-        assert!(env_secrets_from_request(&serde_json::json!({"agent": {}})).is_empty());
-        assert!(
-            env_secrets_from_request(&serde_json::json!({"agent": {"env_vars": null}})).is_empty()
-        );
-    }
-
-    #[test]
-    fn redact_env_values_in_scrubs_map_values() {
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-ant-real".to_string());
-        env.insert("EMPTY".to_string(), String::new());
-        let stderr = "auth=sk-ant-real failed; other context";
-        let r = redact_env_values_in(stderr, &env);
-        assert!(!r.contains("sk-ant-real"));
-        assert!(r.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn validate_provider_config_rejects_secret_key() {
-        let cfg = serde_json::json!({"api_key": "val"});
-        assert!(validate_provider_config(&cfg).is_err());
-    }
-
-    #[test]
-    fn validate_provider_config_rejects_nested() {
-        let cfg = serde_json::json!({"region": {"us": "east"}});
-        assert!(validate_provider_config(&cfg).is_err());
-    }
-
-    #[test]
-    fn validate_provider_config_accepts_scalars() {
-        let cfg = serde_json::json!({"region": "us-east-1", "tier": "standard"});
-        assert!(validate_provider_config(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_provider_config_allows_key_as_substring() {
-        // "keyboard", "monkey" contain "key" as substring but not as a word segment.
-        let cfg = serde_json::json!({"keyboard_layout": "us", "monkey_wrench": "tight"});
-        assert!(validate_provider_config(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_provider_config_rejects_camel_case_secrets() {
-        assert!(validate_provider_config(&serde_json::json!({"apiKey": "val"})).is_err());
-        assert!(validate_provider_config(&serde_json::json!({"accessToken": "val"})).is_err());
-        assert!(validate_provider_config(&serde_json::json!({"clientSecret": "val"})).is_err());
-        // ALL-CAPS variants
-        assert!(validate_provider_config(&serde_json::json!({"apiKEY": "val"})).is_err());
-        assert!(validate_provider_config(&serde_json::json!({"accessTOKEN": "val"})).is_err());
-    }
-
-    #[test]
-    fn split_config_key_handles_all_styles() {
-        assert_eq!(split_config_key("apiKey"), vec!["api", "key"]);
-        assert_eq!(split_config_key("access_token"), vec!["access", "token"]);
-        assert_eq!(split_config_key("keyboard"), vec!["keyboard"]);
-        assert_eq!(split_config_key("client-secret"), vec!["client", "secret"]);
-        // Acronym runs stay together
-        assert_eq!(split_config_key("APIKey"), vec!["api", "key"]);
-        assert_eq!(split_config_key("apiKEY"), vec!["api", "key"]);
-        assert_eq!(split_config_key("accessTOKEN"), vec!["access", "token"]);
-        assert_eq!(split_config_key("MyAPIKey"), vec!["my", "api", "key"]);
-    }
-
-    #[test]
-    fn resolve_provider_binary_rejects_invalid_ids() {
-        // Path traversal
-        assert!(resolve_provider_binary("../evil").is_err());
-        // Empty
-        assert!(resolve_provider_binary("").is_err());
-        // Uppercase
-        assert!(resolve_provider_binary("MyProvider").is_err());
-        // Spaces
-        assert!(resolve_provider_binary("my provider").is_err());
-        // Shell metacharacters
-        assert!(resolve_provider_binary("foo;rm -rf /").is_err());
-        // Valid format but not on PATH — should fail with "not found"
-        assert!(resolve_provider_binary("nonexistent-test-id-12345").is_err());
-    }
-
-    #[test]
-    fn resolve_provider_binary_accepts_valid_id_format() {
-        // Valid ID format should pass validation. If the binary happens to
-        // exist on PATH, Ok is returned; otherwise Err contains "not found"
-        // (not "invalid provider ID"). Either outcome proves validation passed.
-        match resolve_provider_binary("zzz-nonexistent-test-provider") {
-            Ok(_) => {} // unlikely but fine — binary exists
-            Err(e) => assert!(
-                e.contains("not found"),
-                "expected 'not found' error, got: {e}"
-            ),
-        }
-    }
-}
+#[path = "backend_tests.rs"]
+mod tests;

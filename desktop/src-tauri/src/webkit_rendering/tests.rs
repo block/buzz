@@ -44,13 +44,13 @@ fn applied(plan: &Plan) -> Option<&[&str]> {
 // ── Detection ───────────────────────────────────────────────────────────────
 
 #[test]
-fn test_nvidia_gpu_disables_the_dmabuf_renderer() {
+fn test_nvidia_gpu_forces_shared_memory_dmabuf_transport() {
     let drm = drm(&["0x10de"]);
     let plan = plan(NO_ARGS, &env_from(&[]), drm.path());
 
     assert_eq!(
         applied(&plan),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&["WEBKIT_DMABUF_RENDERER_FORCE_SHM"][..])
     );
     let Plan::Apply { why, .. } = &plan else {
         unreachable!()
@@ -66,7 +66,7 @@ fn test_an_nvidia_gpu_alongside_another_vendor_still_counts() {
 
     assert_eq!(
         applied(&plan(NO_ARGS, &env_from(&[]), drm.path())),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&["WEBKIT_DMABUF_RENDERER_FORCE_SHM"][..])
     );
 }
 
@@ -76,12 +76,12 @@ fn test_the_vendor_id_match_ignores_case() {
 
     assert_eq!(
         applied(&plan(NO_ARGS, &env_from(&[]), drm.path())),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&["WEBKIT_DMABUF_RENDERER_FORCE_SHM"][..])
     );
 }
 
 #[test]
-fn test_an_appimage_launch_disables_the_dmabuf_renderer() {
+fn test_an_appimage_launch_forces_shared_memory_dmabuf_transport() {
     // No NVIDIA GPU: the AppImage signal has to carry this on its own, which is
     // #2338's reporter (Intel Mesa under the AppRun's pinned XWayland backend).
     let drm = drm(&["0x8086"]);
@@ -90,7 +90,7 @@ fn test_an_appimage_launch_disables_the_dmabuf_renderer() {
 
     assert_eq!(
         applied(&plan),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&["WEBKIT_DMABUF_RENDERER_FORCE_SHM"][..])
     );
     let Plan::Apply { why, .. } = &plan else {
         unreachable!()
@@ -133,7 +133,7 @@ fn test_a_device_without_a_vendor_file_is_skipped_not_fatal() {
 
     assert_eq!(
         applied(&plan(NO_ARGS, &env_from(&[]), root.path())),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&["WEBKIT_DMABUF_RENDERER_FORCE_SHM"][..])
     );
 }
 
@@ -151,6 +151,34 @@ fn test_a_user_set_variable_disables_the_heuristic_wholesale() {
         panic!("a user assignment must not be overwritten: {plan:?}");
     };
     assert!(why.contains("WEBKIT_DISABLE_DMABUF_RENDERER=0"), "{why}");
+}
+
+#[test]
+fn test_a_user_set_force_shm_also_stands_the_heuristic_down() {
+    // FORCE_SHM joined OWNED in the #3654 swap; a user export must take the
+    // whole decision away, same as the older DISABLE_DMABUF takeover.
+    let drm = drm(&["0x10de"]);
+    let env = env_from(&[(FORCE_SHM, "1")]);
+    let plan = plan(NO_ARGS, &env, drm.path());
+
+    let Plan::Leave { why } = &plan else {
+        panic!("a user FORCE_SHM assignment must not be overwritten: {plan:?}");
+    };
+    assert!(why.contains("WEBKIT_DMABUF_RENDERER_FORCE_SHM=1"), "{why}");
+}
+
+#[test]
+fn test_user_set_disable_dmabuf_one_warns_about_the_crashy_var() {
+    let drm = drm(&["0x10de"]);
+    let env = env_from(&[(DISABLE_DMABUF, "1")]);
+    let plan = plan(NO_ARGS, &env, drm.path());
+
+    let Plan::Leave { why } = &plan else {
+        panic!("expected Leave: {plan:?}");
+    };
+    assert!(why.contains("WEBKIT_DISABLE_DMABUF_RENDERER=1"), "{why}");
+    assert!(why.contains("WEBKIT_DMABUF_RENDERER_FORCE_SHM"), "{why}");
+    assert!(why.contains("#3654"), "{why}");
 }
 
 #[test]
@@ -192,7 +220,7 @@ fn test_safe_rendering_applies_the_safest_set_without_any_hardware_signal() {
         applied(&plan),
         Some(
             &[
-                "WEBKIT_DISABLE_DMABUF_RENDERER",
+                "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
                 "WEBKIT_DISABLE_COMPOSITING_MODE"
             ][..]
         )

@@ -328,7 +328,7 @@ impl PubSubManager {
         publisher::publish_event(&self.pool, ctx, topic, event).await
     }
 
-    /// Set presence with 60s TTL. Call on connect and every 30s heartbeat.
+    /// Set presence with 180s TTL. Call on connect and every 60s heartbeat.
     pub async fn set_presence(
         &self,
         ctx: &TenantContext,

@@ -1,0 +1,53 @@
+{
+  "op": "deploy",
+  "request_id": "req-6",
+  "agent": {
+    "agent_args": [],
+    "agent_command": "goose",
+    "auth_tag": "tag-1",
+    "env_vars": {
+      "USER_KEY": "user-value"
+    },
+    "idle_timeout_seconds": null,
+    "launch": {
+      "args": [
+        "acp"
+      ],
+      "command": "goose",
+      "env": {
+        "GOOSE_MODEL": "gpt-5",
+        "GOOSE_PROVIDER": "openai",
+        "USER_KEY": "user-value"
+      },
+      "owner_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "policy_env": {
+        "BUZZ_ACP_AGENTS": "10",
+        "BUZZ_ACP_DISPLAY_NAME": "worker",
+        "BUZZ_ACP_LAZY_POOL": "true",
+        "BUZZ_ACP_MODEL": "gpt-5",
+        "BUZZ_ACP_RELAY_OBSERVER": "true",
+        "BUZZ_ACP_SESSION_TITLE": "worker",
+        "GOOSE_MODE": "auto"
+      }
+    },
+    "max_turn_duration_seconds": null,
+    "model": "gpt-5",
+    "name": "worker",
+    "parallelism": 10,
+    "private_key_nsec": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+    "provider": "openai",
+    "relay_url": "wss://relay.example",
+    "respond_to": "allowlist",
+    "respond_to_allowlist": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "system_prompt": null,
+    "turn_timeout_seconds": 300
+  },
+  "provider_config": {
+    "namespace": "buzz-agents-test",
+    "image": "ghcr.io/block/buzz-sprig@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inactivity_seconds": 3600
+  }
+}

@@ -18,8 +18,9 @@ class ThemePickerPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mode = ref.watch(themeProvider);
-    final selectedScheme = ref.watch(schemeProvider);
+    final preference = ref.watch(communityThemeProvider);
+    final mode = preference.mode;
+    final selectedScheme = preference.theme;
     final searchQuery = useState('');
     final searchController = useTextEditingController();
     final scrollController = useScrollController();
@@ -112,8 +113,8 @@ class ThemePickerPage extends HookConsumerWidget {
                         label: labelFor(theme),
                         selected: isSelected(theme),
                         onTap: () => ref
-                            .read(schemeProvider.notifier)
-                            .setScheme(theme.name),
+                            .read(communityThemeProvider.notifier)
+                            .setTheme(theme.name),
                       );
                     },
                   ),

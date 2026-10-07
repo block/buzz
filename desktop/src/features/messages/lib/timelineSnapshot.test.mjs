@@ -420,11 +420,26 @@ test("timeline-body-surface: loading and deferred-pending both paint the single 
   );
 });
 
-test("timeline-body-surface: first deferred message preserves a persistent channel intro", () => {
+test("timeline-body-surface: first authoritative rows wait for deferred paint", () => {
+  // A newly selected populated channel has already resolved live rows, but the
+  // deferred snapshot is still empty. It has never committed a settled empty
+  // surface, so showing its intro here would flash Create agent / Add people.
   assert.equal(
     selectTimelineBodySurface({
       deferredCount: 0,
-      hasPersistentIntro: true,
+      preserveSettledEmptyIntro: false,
+      isLoading: false,
+      liveCount: 1,
+    }),
+    "skeleton",
+  );
+});
+
+test("timeline-body-surface: append preserves a previously settled empty intro", () => {
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 0,
+      preserveSettledEmptyIntro: true,
       isLoading: false,
       liveCount: 1,
     }),

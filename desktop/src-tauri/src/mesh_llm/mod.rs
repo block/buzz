@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 mod coordinator;
-pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once};
+pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once_at};
 pub use coordinator::{start_coordinator, MeshCoordinator, KIND_BUZZ_MESH_MEMBER_STATUS};
 
 mod discovery;
@@ -14,6 +14,7 @@ pub(crate) use discovery::{
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
 
 mod catalog;
+pub(crate) use catalog::canonical_curated_model_id;
 pub use catalog::{model_catalog, MeshModelCatalog};
 
 mod identity;
@@ -200,6 +201,11 @@ pub struct StartMeshNodeRequest {
     /// accepted from the frontend and contains no relay address.
     #[serde(default, skip_deserializing)]
     pub mesh_name: Option<String>,
+    /// Relay this runtime's community membership and discovery are bound to.
+    /// Injected by the backend when sharing starts and retained across UI
+    /// workspace switches; moving a share requires an explicit stop/start.
+    #[serde(default, skip_deserializing)]
+    pub relay_url: Option<String>,
     /// Mesh owner ids admitted to this node (the member roster from
     /// member-signed discovery notes). `None` = caller did not resolve a roster
     /// (tests, direct invocations): the node runs without allowlist
@@ -308,17 +314,20 @@ pub const MESH_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// before the node starts. Without this the download happens *inside*
 /// `serve::start()` where the UI can only show a frozen "starting…" state.
 /// Already-installed models return immediately from the cache scan.
-async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
-    let model_owned = model.to_string();
-    let installed = tokio::task::spawn_blocking(move || {
+async fn model_is_installed(model: &str) -> bool {
+    let model_owned = model.replace("@main", "");
+    tokio::task::spawn_blocking(move || {
         let cache = mesh_llm_node::models::default_huggingface_cache_dir();
         mesh_llm_node::models::scan_installed_models(cache)
             .iter()
-            .any(|m| m.model_ref.contains(&model_owned))
+            .any(|m| m.model_ref.replace("@main", "").contains(&model_owned))
     })
     .await
-    .unwrap_or(false);
-    if installed {
+    .unwrap_or(false)
+}
+
+async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
+    if model_is_installed(model).await {
         return Ok(());
     }
     mesh_llm_host_runtime::models::download_model_ref_with_progress_details(model, true)

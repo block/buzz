@@ -19,6 +19,18 @@ never maintains a rival copy of this table. Setup guidance follows the same
 rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected
 to the UI rather than inferred from a runtime ID in a component.
 
+**Second metadata source: command-keyed execution policy.**
+`harness_max_parallelism` (`managed_agents/parallelism.rs`) maps the harness's
+static command string to a spawn-time cap (`OPENCLAW_MAX_PARALLELISM = 5` for
+OpenClaw). This cap is not a `KnownAcpRuntime` field because it applies to
+preset harnesses (like OpenClaw) that are not in the builtin catalog. It is
+projected onto `AcpRuntimeCatalogEntry.max_parallelism` by all four
+catalog-producing constructors (builtin discovery, preset catalog, custom
+discovery, custom-save response) using the **static definition command**, not
+the resolved `entry.command` (which may be `null` for unavailable entries).
+The frontend reads `maxParallelism` from the catalog entry and never keeps a
+separate constant.
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
@@ -67,11 +79,17 @@ with a TypeScript lookup table or an id comparison in a component.
 7. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
-   sole onboarding surface that chooses and persists `preferred_runtime`, and
-   its Finish gate consumes the shared renderer's `onValidityChange` signal —
-   a harness selection alone does not complete onboarding when the harness
+   sole onboarding surface that chooses `preferred_runtime`. Its complete draft
+   lives in machine-onboarding session state, so Back performs no write and
+   restores even incomplete edits when the user returns. Skip abandons that
+   draft and advances with zero config writes. Next is the only persistence
+   boundary: it consumes the shared renderer's `onValidityChange` signal,
+   disables editing while awaiting `set_global_agent_config`, advances only on
+   success, and leaves the draft in place with a retryable inline error on
+   failure. A harness selection alone does not enable Next when the harness
    requires provider/model/credential config (e.g. buzz-agent with no
-   provider). Baked build env and runtime-file config satisfy the gate.
+   provider). Baked build env and runtime-file config satisfy the gate. Drafts
+   intentionally do not survive an app restart.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty
@@ -95,13 +113,16 @@ with a TypeScript lookup table or an id comparison in a component.
    Once the Advanced toggle is visible, its expanded state is exclusively
    user-controlled: provider, harness, and required-env changes must never
    open it automatically in defaults, create, or edit flows. In Create mode,
-   the defaults summary follows preferred-harness changes saved while the
-   dialog is open, and its configured state includes required credentials as
-   well as provider/model values. If no available harness can resolve, Create
-   starts in Customize and lets unavailable catalog entries be selected only
-   to expose their setup guidance; submission remains blocked.
-   Advanced-only required credentials mark the collapsed Advanced toggle
-   without opening it in Global Defaults and Edit, and block incomplete saves.
+   `Run on` belongs in Advanced directly after **Who can send instructions**;
+   keep it out of the basic create fields. The defaults summary follows
+   preferred-harness changes saved while the dialog is open, and its configured
+   state includes required credentials as well as provider/model values. If no
+   available harness can resolve, Create starts in Customize and lets unavailable
+   catalog entries be selected only to expose their setup guidance; submission
+   remains blocked.
+   Advanced-only required credentials and incomplete remote **Run on** setup
+   mark the collapsed Advanced toggle without opening it, and block incomplete
+   saves.
    Runtime-file credentials satisfy Global Defaults just as they do Create and
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
@@ -139,14 +160,95 @@ with a TypeScript lookup table or an id comparison in a component.
    computer, including files, accounts, and connected tools"; remote names "the
    server it runs on, including any accounts and tools available there" —
    deliberately *not* the owner's files, which aren't theirs to describe on a
-   host they don't own. **An unknown location falls back to the local wording —
-   never hedge with "computer or server".** A remote host requires an
+   host they don't own. **For a persona-linked deployed agent, the profile Edit
+   dialog seeds access from the exact clicked instance and saves access through
+   `update_managed_agent`; persona behavior remains the definition default, but
+   must never bypass the instance command's stop, persist, publish, and restart
+   boundary.** An unknown location falls back to the local wording — never hedge
+   with "computer or server". A remote host requires an
    installed `buzz-backend-*` provider, and without one `WhereToRunSection`
    never renders, so "server" would name a concept the owner has never been
    shown; when it *is* remote they picked that host from the selector
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
-   copy.
+   copy. **The owner-only-access build capability is backend-independent.** When
+   `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
+   locked to owner-only, including provider-backed agents. A provider backend
+   does not prove remote execution and must never create a policy carve-out.
+12. **Shared instructions must be reviewable byte-for-byte.** Agent definitions
+   execute their `system_prompt` verbatim, so catalog and snapshot review
+   surfaces render the literal prompt, never the chat Markdown projection
+   (which can conceal spoilers, link destinations, and image sources). Reject
+   Unicode default-ignorable, bidirectional-formatting, and non-layout control
+   characters at both the untrusted catalog parser and the Rust persistence /
+   import boundary. Do not silently strip them: rejection keeps the reviewed
+   string identical to the executed string. New sharing paths must reuse the
+   same validation before they persist or activate a definition.
+13. **Profile runtime sections render only reported agent data.** Missing
+   runtime, model, status, command, MCP, advanced, or diagnostics values stay
+   absent in every build mode. Do not fill profile or agent-panel gaps with
+   development/staging examples, preview controls, or synthetic configuration;
+   those values can be mistaken for the viewed agent's real configuration.
+   Configuration rows show the effective value regardless of whether it came
+   from an explicit choice, global default, config file, or runtime override.
+   Do not add provenance lines, shadowed/struck-through values, pre-start
+   placeholders, or whole-section dimming; use an em dash for an unknown value.
+   Info, activity, agent-configuration, and model-setting rows use the same bare
+   16px leading-icon treatment as agent management actions. Keep semantic icons
+   visible in profile variants and do not wrap them in background shapes. An
+   owned agent profile is entry-point invariant: opening the same deployed
+   agent from Agents, a DM, or a channel must expose the same actions, tabs,
+   fields, and profile-wide activity selection. Caller context may control the
+   panel shell or return navigation, but must not filter or replace profile
+   content.
+14. **Thinking effort has two surfaces: a local-only WRITE control and a
+   read-only two-facts DISPLAY.** The write control is `EffortPickerField`
+   (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
+   `AgentInstanceEditDialog` beside the Model block. It is direct-write, not
+   part of the frozen `UpdateManagedAgentInput` shape: each selection calls
+   `persistAgentEffortLevel` and invalidates the config-surface query, mirroring
+   the `setManagedAgentAutoRestart` standalone-setter precedent. Its gating and
+   option compute live in the pure helper `ui/effortPicker.ts`
+   (`effortPickerState`): the picker renders only when
+   `agent.backend.type === "local"` **AND** a `thought_level` `effortConfigId`
+   has been discovered from the running session (absent pre-first-session and
+   for runtimes/models without effort support). Local-only is load-bearing, not
+   cosmetic — the Rust command rejects non-local backends because remote effort
+   is set at deploy time via `policy_env`. Because it reads its inputs from the
+   config surface the dialog already fetches (`useAgentConfigSurface`) and owns
+   its own mutation, it does **not** thread new props through the over-1000-line
+   dialog (see rule 11): keep effort state inside the section component, never
+   as dialog-level props. The read-only display is the `thinkingEffort`
+   normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
+   already shows both facts — `field.value` (canonical, the effort the next
+   spawn will launch with) and, when a running ACP session differs,
+   `field.overriddenValue` struck through (the live session's current effort).
+   No component owns "configured vs current" logic; the reader's canonical tier
+   ordering feeds both facts. Do not add a second effort write path or restate
+   the two-facts logic in a component.
+
+   **Cut invariant — live mid-conversation effort machinery was deliberately
+   removed.** Effort is spawn-scoped only: the worker holds one `startup_effort`
+   read from `BUZZ_ACP_EFFORT_LEVEL` and applies it once at session creation
+   (`apply_startup_effort` in `buzz-acp/src/pool.rs`); there is no pool-level
+   effort authority, no live effort switching, and no effort-ack frame. Do not
+   reintroduce a live effort-switch RPC, a pool effort field, or a
+   mid-conversation effort control without a plan ruling. The archived live-effort
+   machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
+
+12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
+    The compiled owner-only capability applies when Desktop starts or deploys a
+    managed agent. Independently operated relay agents with NIP-OA ownership
+    remain eligible in every build when their verified owner's signed
+    `respond_to` policy admits the viewer and relay membership includes the
+    target channel. Marked builds require that verified owner coordinate but do
+    not require it to equal the viewer; OSS builds retain compatibility with
+    self-authored legacy directory records. Keep native discovery and send-time
+    revalidation fail closed on invalid ownership or managed policy evidence,
+    and on missing membership or directory evidence; do not add a cross-owner
+    clamp to either mention path. Local `agents-data-changed` events
+    refresh only local persona/team/managed-agent caches; they must never
+    invalidate the remote relay directory.
 
 ## The tests that enforce this
 
@@ -167,12 +269,29 @@ with a TypeScript lookup table or an id comparison in a component.
 - `lib/agentAccessWarning.test.mjs` — every mode × run-location copy variant
   plus both resolvers, including unknown-reads-as-local and
   blank-`runOn`-is-not-a-provider.
+- `lib/personaCatalogRelay.test.mjs` and
+  `ui/personaCatalogOwnerLabel.test.mjs` — reject invisible definition text
+  and keep Markdown concealment syntax literal in the review surface.
+- `../profile/ui/UserProfileRuntimeContent.test.mjs` — profile runtime panels
+  cannot reintroduce build-mode previews or synthetic fallback controls.
+- `desktop/tests/e2e/profile.spec.ts` — the owned-agent parity flow compares
+  every profile tab when opened from Agents and from the agent's DM.
+- `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows
+  show only effective values, with an em dash for unknown values.
+- `ui/effortPicker.test.mjs` — `effortPickerState` gating (local + discovered
+  `effortConfigId` renders; provider backend or missing configId hides) and
+  option/preselect compute, plus `effortSelectionToPersistedValue` sentinel →
+  null. This is where the v4 provider regression is pinned: the write control
+  must never render for a provider backend.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
-  acceptance coverage for readiness, failure states, defaults, navigation,
-  successful-empty vs failed optional-model discovery, and persistence races.
+  acceptance coverage for readiness, failure states, defaults, session-draft
+  restoration, zero-write Skip, Next save failure/retry, navigation, and
+  successful-empty vs failed optional-model discovery.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- Rust: `definition_validation` and inbound persona tests pin the shared
+  Unicode/control-character policy at local, import, publish, and sync gates.
 
 ## Keep this file true
 
