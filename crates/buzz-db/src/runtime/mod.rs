@@ -13,7 +13,7 @@ use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder};
+use sqlx::{Acquire, PgPool, QueryBuilder};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -219,6 +219,10 @@ pub struct Db {
     /// bounded-stale read semantics are a product decision, not an
     /// invariant, so the gate ships off.
     pub(crate) replica_read_max_age: Option<Duration>,
+    /// Replica freshness budget used only by the leader's fleet telemetry
+    /// queries. This is independent of serving-read rollout policy: telemetry
+    /// may be stale or skipped, but it must never fall back to the writer.
+    pub(crate) usage_metrics_replica_max_age: Option<Duration>,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -598,6 +602,10 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Replica freshness budget for usage telemetry, in milliseconds
+    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). `0` disables fleet database
+    /// telemetry. This does not enable replica routing for serving reads.
+    pub usage_metrics_replica_max_age_ms: u64,
     /// Session `lock_timeout` in milliseconds for writer connections (env
     /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
     pub lock_timeout_ms: u64,
@@ -628,6 +636,7 @@ impl Default for DbConfig {
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            usage_metrics_replica_max_age_ms: 30_000,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: 0,
@@ -690,6 +699,8 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
+        let usage_metrics_replica_max_age =
+            read_budget_from_ms(config.usage_metrics_replica_max_age_ms);
         Ok(Self {
             pool,
             max_connections: config.max_connections,
@@ -697,6 +708,7 @@ impl Db {
             read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
+            usage_metrics_replica_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
     }
@@ -931,6 +943,7 @@ impl Db {
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            usage_metrics_replica_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -950,6 +963,7 @@ impl Db {
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            usage_metrics_replica_max_age: Some(replica_fence::FENCE_STALENESS),
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1055,20 +1069,24 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn = match observability::acquire_reader_with_legacy_metrics(read_pool, operation)
-            .await
-        {
-            Ok(conn) => conn,
-            Err(sqlx::Error::PoolTimedOut) => {
-                tracing::warn!("reader pool acquire timed out; routing to writer");
-                return Err("reader_acquire_timeout");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "reader connection acquire failed; routing to writer");
-                return Err("reader_validation_error");
-            }
-        };
+        let conn =
+            match observability::acquire_reader_with_legacy_metrics(read_pool, operation).await {
+                Ok(conn) => conn,
+                Err(sqlx::Error::PoolTimedOut) => {
+                    tracing::warn!("reader pool acquire timed out");
+                    return Err("reader_acquire_timeout");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "reader connection acquire failed");
+                    return Err("reader_validation_error");
+                }
+            };
         let mut conn = conn;
+        if operation.bounded_release() {
+            // Must precede the first post-acquire await: a caller deadline
+            // can drop this checkout at any of them.
+            conn.close_on_drop();
+        }
         let aurora = self.reader_aurora_capability_on(&mut conn).await;
         let mut tx = match sqlx::Transaction::begin(
             conn,
@@ -1103,11 +1121,11 @@ impl Db {
             // between samples entirely, so absence of elevated active is
             // NOT evidence of a cold connect.
             Err(sqlx::Error::PoolTimedOut) => {
-                tracing::warn!("reader pool acquire timed out; routing to writer");
+                tracing::warn!("reader pool acquire timed out");
                 return Err("reader_acquire_timeout");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "reader transaction begin failed; routing to writer");
+                tracing::warn!(error = %e, "reader transaction begin failed");
                 return Err("reader_validation_error");
             }
         };
@@ -1115,7 +1133,7 @@ impl Db {
             Ok(Some(observation)) => observation,
             Ok(None) => return Err("reader_validation_error"),
             Err(e) => {
-                tracing::warn!(error = %e, "heartbeat observation failed; routing to writer");
+                tracing::warn!(error = %e, "heartbeat observation failed");
                 return Err("reader_validation_error");
             }
         };
@@ -1348,13 +1366,57 @@ impl Db {
             None,
         )
         .await?;
-        tx.commit().await?;
         if result.1 {
-            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            // Index mentions in the event's own transaction so a concurrent
+            // deletion cannot strand an orphan row. A savepoint keeps the
+            // existing best-effort contract: an indexing failure never rejects
+            // an otherwise valid event.
+            let mut savepoint = tx.begin().await?;
+            match insert_mentions_in_transaction(&mut savepoint, community_id, event, channel_id)
+                .await
+            {
+                Ok(()) => savepoint.commit().await?,
+                Err(e) => {
+                    savepoint.rollback().await?;
+                    tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+                }
             }
         }
+        tx.commit().await?;
         Ok(result)
+    }
+
+    /// Route a usage-telemetry query only to a proved, sufficiently fresh
+    /// reader. Unlike serving reads, an unavailable reader is recorded as
+    /// skipped and never represented as or executed on the writer.
+    pub(crate) async fn route_usage_read(
+        &self,
+        path: &'static str,
+    ) -> Option<(sqlx::Transaction<'static, sqlx::Postgres>, &'static str)> {
+        let skip = |reason| {
+            Self::record_route(path, "skipped", reason);
+            None
+        };
+        let Some(read_pool) = &self.read_pool else {
+            return skip("disabled");
+        };
+        let Some(budget) = self.usage_metrics_replica_max_age else {
+            return skip("disabled");
+        };
+        let Some(newest) = self.fence.newest() else {
+            return skip("uninitialized");
+        };
+        if newest.committed_at.elapsed() > budget {
+            return skip("stale");
+        }
+        match self
+            .proved_reader(read_pool, observability::ReaderOperation::Maintenance)
+            .await
+        {
+            Ok((tx, entry)) if entry.committed_at.elapsed() <= budget => Some((tx, "fresh")),
+            Ok((_tx, _entry)) => skip("stale"),
+            Err(reason) => skip(reason),
+        }
     }
 
     /// Shared route decision for one read: evaluate the predicate against a

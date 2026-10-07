@@ -148,7 +148,7 @@ pub(crate) async fn recover_one(state: &Arc<AppState>, claim: StrandedActionClai
         // Non-kick actions: always re-derive from the report.
         // Pre-migration kick rows: re-derive so the convergence gate can use the
         // result as a legacy-context fallback (see report_resolution.rs).
-        let report = match state.db.admin_get_report(report_id).await {
+        let report = match state.db.admin_get_report_for_enforcement(report_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 warn!(action_id = %action_id, "Action recovery: report not found");

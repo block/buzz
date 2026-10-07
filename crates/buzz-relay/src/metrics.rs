@@ -297,6 +297,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     describe_community_admission_metrics();
     describe_db_pool_metrics();
     describe_auth_metrics();
+    crate::startup_steps::describe_metrics();
     initialize_auth_metric_series();
     tokio::spawn(exporter);
     Ok(())

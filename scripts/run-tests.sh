@@ -203,6 +203,19 @@ run_unit_tests() {
   run_test_step "buzz-relay NIP-FI shadow session tests" \
     cargo test -p buzz-relay --lib nip_fi_shadow_session::tests:: -- --nocapture
 
+  run_test_step "buzz-relay startup step tests" \
+    cargo test -p buzz-relay --lib startup_steps::tests:: -- --nocapture
+
+  # telemetry and config tests mutate process env. libtest runs one process
+  # with many threads (nextest, used by `just test-unit`, isolates each test),
+  # so run them single-threaded here. `--skip` keeps the substring filter
+  # `config::tests::` from also selecting nip_fi_config, which runs above.
+  run_test_step "buzz-relay telemetry tests" \
+    cargo test -p buzz-relay --lib telemetry::tests:: -- --test-threads=1 --nocapture
+
+  run_test_step "buzz-relay config tests" \
+    cargo test -p buzz-relay --lib config::tests:: -- --skip nip_fi_config:: --test-threads=1 --nocapture
+
   # Mirror the NIP-FI (S3) stanza from `just test-unit`: module filters, then
   # each exact name. Keep this list in step with that stanza's `test(=...)`s.
   run_test_step "buzz-relay NIP-FI config tests" \
@@ -304,6 +317,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
+
+  run_test_step "buzz-relay boot lifecycle tests" \
+    cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

@@ -148,6 +148,30 @@ These phases intentionally do not emit metrics. Most run before the Prometheus
 exporter exists, and one uniform log-only contract preserves every phase's real
 event time and failure without assigning an eventual scrape time to earlier work.
 
+Startup work **after** `metrics_bind` (database connect through public listener
+bind) runs with a live recorder, so each step logs `Startup phase started` and
+`Startup phase finished` (`phase`, `elapsed_ms`, and `status` =
+`succeeded`/`degraded`/`failed`, the same values lifecycle records use) and sets
+two gauges labelled `phase`:
+
+- `buzz_startup_phase_current` is `1` while the step runs and `0` once it ends.
+  A pod that has not opened its health port shows the step it is stuck on.
+- `buzz_startup_phase_seconds` is the finished step's duration.
+
+`degraded` means the step hit a non-fatal error and startup continued — for
+example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
+not warm. `failed` means startup aborted inside the step.
+
+These are gauges, not counters, because each value is written once per boot
+and a monotonic-counter scrape drops a series' first sample. Each is written
+once, so it ages out after the gauge idle timeout: the `idle_timeout_secs`
+field of the `Prometheus metrics exporter started` log (2700 s with default
+intervals). A step that runs longer than that timeout loses its `_current`
+series, so a pod stuck that long shows no current step. The `phase` values are
+the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
+they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
+also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
+
 ### Readiness contract
 
 **`/_readiness` reports local process lifecycle only.** It performs no
@@ -281,7 +305,7 @@ maximum gauges when diagnosing total capacity pressure.
 Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
 `bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
 `authorization`, `subscription_history`, `event_write`, and `maintenance`.
-Only the following eleven pairs are valid:
+Only the following twelve pairs are valid:
 
 ```text
 writer/bootstrap                 reader/bootstrap
@@ -291,12 +315,12 @@ writer/authentication
 writer/authorization             reader/authorization
 writer/subscription_history      reader/subscription_history
 writer/event_write
-writer/maintenance
+writer/maintenance               reader/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 198
-raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 216
+raw Prometheus series per pod: `12 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
