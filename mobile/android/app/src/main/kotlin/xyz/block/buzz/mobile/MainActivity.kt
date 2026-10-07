@@ -130,9 +130,11 @@ class MainActivity : FlutterFragmentActivity() {
     private var ageSignalChannel: MethodChannel? = null
     private val ageSignalRequest = AgeSignalRequest()
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
+    private var hapticsPlugin: HapticsPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        hapticsPlugin = HapticsPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
 
         huddleMediaPlugin = HuddleMediaPlugin(
             this,
@@ -202,6 +204,8 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        hapticsPlugin?.dispose()
+        hapticsPlugin = null
         ageSignalRequest.retire()
         huddleMediaPlugin?.dispose()
         huddleMediaPlugin = null

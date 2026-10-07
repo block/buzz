@@ -386,23 +386,46 @@ pub struct CommunityHost {
     pub host: String,
 }
 
-/// Fetch all community id → host mappings in one query.
+/// Fetch every community id → host mapping in one query, including archived,
+/// deleting, and tombstoned communities.
+///
+/// Usage metrics label per-community series and attribute storage with this
+/// map, so it must cover the same rows as the unfiltered usage count queries.
 pub async fn community_hosts(pool: &PgPool) -> Result<Vec<CommunityHost>> {
-    community_hosts_with_operation(pool, observability::WriterOperation::Maintenance).await
+    let mut connection =
+        observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
+    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT id, host FROM communities")
+        .fetch_all(&mut *connection)
+        .await?;
+    Ok(into_community_hosts(rows))
 }
 
-async fn community_hosts_with_operation(
+/// Fetch the id → host mapping for every active community in one query.
+///
+/// Archived communities are unreachable through host resolution, and
+/// communities anywhere in the deletion lifecycle (`quiescing`, `fenced`,
+/// `tombstone`) have their writes DB-fenced, so background workers that write
+/// per community must skip them. Tombstone rows stay in place for retention.
+async fn active_community_hosts(
     pool: &PgPool,
     operation: observability::WriterOperation,
 ) -> Result<Vec<CommunityHost>> {
     let mut connection = observability::acquire_writer(pool, operation).await?;
-    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT id, host FROM communities")
-        .fetch_all(&mut *connection)
-        .await?;
-    Ok(rows
-        .into_iter()
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, host FROM communities \
+         WHERE archived_at IS NULL \
+           AND deleted_at IS NULL \
+           AND deletion_state = 'active'",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(into_community_hosts(rows))
+}
+
+fn into_community_hosts(rows: Vec<(Uuid, String)>) -> Vec<CommunityHost> {
+    rows.into_iter()
         .map(|(id, host)| CommunityHost { id, host })
-        .collect())
+        .collect()
 }
 
 impl Db {
@@ -497,16 +520,22 @@ impl Db {
         active_channel_counts(&self.pool, interval_sql).await
     }
 
-    /// Return all community id → host mappings.
+    /// Return all community id → host mappings, for usage-metrics labels.
     #[datastore_span(name = "usage_community_hosts", system = "postgresql")]
     pub async fn usage_community_hosts(&self) -> Result<Vec<CommunityHost>> {
         community_hosts(&self.pool).await
     }
 
-    /// Return community host mappings during startup bootstrap work.
+    /// Return active community host mappings for background maintenance writers.
+    #[datastore_span(name = "active_community_hosts", system = "postgresql")]
+    pub async fn active_community_hosts(&self) -> Result<Vec<CommunityHost>> {
+        active_community_hosts(&self.pool, observability::WriterOperation::Maintenance).await
+    }
+
+    /// Return active community host mappings during startup bootstrap work.
     #[datastore_span(name = "bootstrap_community_hosts", system = "postgresql")]
     pub async fn bootstrap_community_hosts(&self) -> Result<Vec<CommunityHost>> {
-        community_hosts_with_operation(&self.pool, observability::WriterOperation::Bootstrap).await
+        active_community_hosts(&self.pool, observability::WriterOperation::Bootstrap).await
     }
 }
 
@@ -803,6 +832,92 @@ mod postgres_tests {
         let found = hosts.iter().find(|h| h.id == id);
         assert!(found.is_some(), "inserted community not found");
         assert_eq!(found.unwrap().host, host);
+    }
+
+    /// Regression for #7558: maintenance and bootstrap enumeration return only
+    /// active communities. Archived, logically deleted (quiescing/fenced), and
+    /// tombstoned rows are skipped on every sweep, and the tombstone row itself
+    /// is left intact for retention. The usage-metrics map stays unfiltered so
+    /// its per-community labels and storage attribution keep covering every
+    /// row the unfiltered usage count queries return.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_community_hosts_excludes_archived_and_deleted_communities() {
+        let pool = get_pool().await;
+        let (active, _, active_host) = make_community(&pool).await;
+        let (archived, _, _) = make_community(&pool).await;
+        let (quiescing, _, _) = make_community(&pool).await;
+        let (fenced, _, _) = make_community(&pool).await;
+        let (tombstone, _, _) = make_community(&pool).await;
+
+        sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+            .bind(archived)
+            .execute(&pool)
+            .await
+            .expect("archive fixture");
+        crate::test_support::set_deletion_state(&pool, quiescing, "quiescing").await;
+        crate::test_support::set_deletion_state(&pool, fenced, "fenced").await;
+        crate::test_support::set_deletion_state(&pool, tombstone, "tombstone").await;
+
+        let db = Db::from_pool(pool.clone());
+        for sweep in 0..2 {
+            for (caller, hosts) in [
+                ("maintenance", db.active_community_hosts().await),
+                ("bootstrap", db.bootstrap_community_hosts().await),
+            ] {
+                let hosts = hosts.unwrap_or_else(|e| panic!("{caller} sweep {sweep}: {e}"));
+                let ids: std::collections::HashSet<Uuid> = hosts.iter().map(|h| h.id).collect();
+                assert_eq!(
+                    hosts
+                        .iter()
+                        .find(|h| h.id == active)
+                        .map(|h| h.host.as_str()),
+                    Some(active_host.as_str()),
+                    "{caller} sweep {sweep}: active community must be returned"
+                );
+                for (label, id) in [
+                    ("archived", archived),
+                    ("quiescing", quiescing),
+                    ("fenced", fenced),
+                    ("tombstone", tombstone),
+                ] {
+                    assert!(
+                        !ids.contains(&id),
+                        "{caller} sweep {sweep}: {label} community must be excluded"
+                    );
+                }
+            }
+        }
+
+        let metrics_ids: std::collections::HashSet<Uuid> = db
+            .usage_community_hosts()
+            .await
+            .expect("usage-metrics hosts")
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        for (label, id) in [
+            ("active", active),
+            ("archived", archived),
+            ("quiescing", quiescing),
+            ("fenced", fenced),
+            ("tombstone", tombstone),
+        ] {
+            assert!(
+                metrics_ids.contains(&id),
+                "usage-metrics map must still include the {label} community"
+            );
+        }
+
+        let (state, deleted): (String, bool) = sqlx::query_as(
+            "SELECT deletion_state, deleted_at IS NOT NULL FROM communities WHERE id = $1",
+        )
+        .bind(tombstone)
+        .fetch_one(&pool)
+        .await
+        .expect("tombstone row is retained");
+        assert_eq!(state, "tombstone");
+        assert!(deleted, "tombstone keeps its deleted_at");
     }
 
     /// community_count reflects newly inserted communities.

@@ -369,6 +369,11 @@ impl Db {
         &self,
         community_id: CommunityId,
     ) -> Result<bool> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
         let row = sqlx::query(
             r#"
             SELECT thread_replies_in_channel
@@ -377,7 +382,7 @@ impl Db {
             "#,
         )
         .bind(community_id.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
 
         Ok(row
@@ -396,6 +401,11 @@ impl Db {
         community_id: CommunityId,
         enabled: bool,
     ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query(
             r#"
             UPDATE communities
@@ -405,7 +415,7 @@ impl Db {
         )
         .bind(community_id.as_uuid())
         .bind(enabled)
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
         Ok(())
     }

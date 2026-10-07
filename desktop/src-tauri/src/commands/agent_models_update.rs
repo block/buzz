@@ -118,8 +118,8 @@ pub(crate) fn stamp_record_updated_at(
 }
 
 /// Flush a retained managed-agent policy, preserving any earlier profile error.
-pub(crate) async fn flush_managed_agent_policy(
-    app: &AppHandle,
+pub(crate) async fn flush_managed_agent_policy<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     existing_error: Option<String>,
 ) -> Option<String> {

@@ -350,6 +350,86 @@ void main() {
     },
   );
 
+  testWidgets(
+    'Android reaction counts open attribution without toggling or opening message actions',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var toggles = 0;
+      var messageHolds = 0;
+      await _pumpRow(
+        tester,
+        reactions: [
+          _reaction(reactedByCurrentUser: true),
+          _reaction(emoji: _eyes),
+        ],
+        onToggle: (_) => toggles++,
+        onMessageLongPress: () => messageHolds++,
+      );
+      final pill = find.byKey(const ValueKey('reaction-pill-$_eyes'));
+      await tester.longPress(
+        find.descendant(of: pill, matching: find.text('1')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Reactions'), findsNothing);
+      expect(find.text('All 2'), findsOneWidget);
+      final controller = DefaultTabController.of(
+        tester.element(find.byType(TabBar)),
+      );
+      expect(controller.index, 2);
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('reaction-filter-all')));
+      await tester.pumpAndSettle();
+      expect(controller.index, 0);
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('reaction-filter-$_fire')));
+      await tester.pumpAndSettle();
+      expect(controller.index, 1);
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
+        findsNothing,
+      );
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
+        findsOneWidget,
+      );
+      await tester.drag(find.byType(TabBarView), const Offset(-500, 0));
+      await tester.pumpAndSettle();
+      expect(controller.index, 2);
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
+        findsNothing,
+      );
+      expect(toggles, 0);
+      expect(messageHolds, 0);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('reaction-details-sheet')),
+        findsNothing,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   group('ReactionRow', () {
     testWidgets('shows the count even at one, matching desktop', (
       tester,
@@ -452,7 +532,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text(':fire:'), findsOneWidget);
+      expect(find.byTooltip(':fire:'), findsOneWidget);
+      expect(find.byType(TabBar), findsOneWidget);
+      expect(find.text('All 1'), findsOneWidget);
       expect(find.text('Alice'), findsOneWidget);
     });
   });

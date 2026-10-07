@@ -1321,10 +1321,12 @@ dependencies = [
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
+ "buzz-core",
  "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "nostr 0.44.7",
  "parking_lot",
  "secp256k1 0.31.1",
  "serde_json",
@@ -1332,6 +1334,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
+ "zeroize",
 ]
 
 [[package]]
@@ -1343,6 +1346,7 @@ dependencies = [
  "futures-util",
  "hex",
  "nostr 0.44.7",
+ "rustls",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -1463,6 +1467,7 @@ dependencies = [
  "rand 0.10.1",
  "redis",
  "reqwest 0.13.4",
+ "ring",
  "rust-s3",
  "rustls",
  "serde",

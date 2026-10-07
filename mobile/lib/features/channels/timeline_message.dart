@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/mentions/mention_tags.dart';
 import 'channel_window.dart';
 
 enum SystemEventType {
@@ -349,6 +350,10 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
   return result;
 }
 
+/// Debug-only instrumentation for actual timeline formatting invocations.
+@visibleForTesting
+VoidCallback? debugOnFormatTimeline;
+
 /// Process a chronologically-sorted list of [NostrEvent]s into a list of
 /// [TimelineMessage]s, applying deletions, edits, reactions, and system event
 /// parsing.
@@ -359,6 +364,10 @@ List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
 }) {
+  assert(() {
+    debugOnFormatTimeline?.call();
+    return true;
+  }());
   // 1. Collect deletion targets. Both kind:5 (NIP-09) and kind:9005
   // (Buzz-native) are deletion markers; mirror desktop's behavior.
   final deletedIds = <String>{};
@@ -498,10 +507,7 @@ List<TimelineMessage> formatTimeline(
       // Include both notify (`p`) and reference-only (`mention`) tags —
       // mirrors desktop's resolveMentionNames, so names in messages sent
       // "without inviting" still render as mentions.
-      final mentions = <String>[
-        for (final tag in effectiveTags)
-          if (tag.length >= 2 && (tag[0] == 'p' || tag[0] == 'mention')) tag[1],
-      ];
+      final mentions = mentionedPubkeysFromTags(effectiveTags).toList();
 
       final threadRef = event.threadReference;
 

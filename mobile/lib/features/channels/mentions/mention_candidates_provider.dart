@@ -12,24 +12,32 @@ import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 import 'mention_candidates.dart';
 import 'mention_ranking.dart';
+import '../../../shared/mentions/mention_rules.dart';
+import '../../../shared/mentions/mention_tags.dart';
+import '../../profile/presence_cache_provider.dart';
 
-/// Debounce before a mention query hits the relay search endpoint.
-const _mentionSearchDebounce = Duration(milliseconds: 250);
+/// Typing pause before a mention query hits the relay search endpoint.
+const mentionSearchDebounce = Duration(milliseconds: 200);
 
 /// Global user search for mention autocomplete — kind:0 prefix search via
 /// the relay HTTP bridge. Mirrors desktop's `useInfiniteUserSearchQuery`
 /// feeding `useMentions` (source 4: people and agents outside the channel).
 ///
-/// Debounced: the provider waits [_mentionSearchDebounce] before querying;
+/// Debounced: the provider waits [mentionSearchDebounce] before querying;
 /// keystrokes dispose the stale family member so its request never fires.
 final mentionUserSearchProvider = FutureProvider.autoDispose
     .family<List<UserProfile>, String>((ref, query) async {
+      // The session notifier is stable across communities, and two
+      // communities can share a signing key. Watching the relay config
+      // restarts the search at a community switch, so a late result or
+      // error from the old community never reaches the new one.
+      ref.watch(relayConfigProvider);
       final trimmed = query.trim();
       if (trimmed.isEmpty) return const [];
 
       var disposed = false;
       ref.onDispose(() => disposed = true);
-      await Future<void>.delayed(_mentionSearchDebounce);
+      await Future<void>.delayed(mentionSearchDebounce);
       if (disposed) return const [];
 
       final session = ref.read(relaySessionProvider.notifier);
@@ -67,14 +75,75 @@ UserProfile _profileFromEvent(NostrEvent event) {
   );
 }
 
-/// Ranked mention candidates for a channel + query. Channel members first,
-/// then non-member relay agents the user can actually reach, then global
-/// search results; ordering matches desktop's `rankMentionCandidates`.
+/// One chooser opening: an inline `@` token or one open picker.
+typedef MentionChooserArgs = ({String channelId, String query, int opening});
+
+/// The last finished directory search for each chooser opening. A new query
+/// keeps showing its still-matching people while its own search runs.
+/// Nothing here outlives the relay session or the community, and a new
+/// opening starts empty.
+class _SettledSearches {
+  final _pages = <(String, int), List<UserProfile>>{};
+
+  List<UserProfile>? last(String channelId, int opening) =>
+      _pages[(channelId, opening)];
+
+  /// Keeps [people] as this opening's last search. A search that found no
+  /// one is not kept, so the next opening searches again.
+  void settle(String channelId, int opening, List<UserProfile> people) {
+    if (people.isEmpty) return;
+    final key = (channelId, opening);
+    _pages.remove(key);
+    _pages[key] = people;
+    if (_pages.length > 20) _pages.remove(_pages.keys.first);
+  }
+}
+
+final _settledSearchesProvider = Provider<_SettledSearches>((ref) {
+  ref.watch(relaySessionProvider.select((s) => s.status));
+  ref.watch(relayConfigProvider);
+  return _SettledSearches();
+});
+
+/// Explicit mention choices per channel, newest highest. Memory only,
+/// bounded to 100 channels and 100 keys each.
+class MentionHistoryNotifier extends Notifier<Map<String, Map<String, int>>> {
+  var _clock = 0;
+
+  @override
+  Map<String, Map<String, int>> build() {
+    ref.watch(currentPubkeyProvider);
+    return const {};
+  }
+
+  void remember(String channelId, String pubkey) {
+    final channels = {...state};
+    final keys = {...?channels.remove(channelId)};
+    keys.remove(pubkey);
+    keys[pubkey] = ++_clock;
+    while (keys.length > 100) {
+      keys.remove(keys.keys.first);
+    }
+    channels[channelId] = keys;
+    while (channels.length > 100) {
+      channels.remove(channels.keys.first);
+    }
+    state = channels;
+  }
+}
+
+final mentionHistoryProvider =
+    NotifierProvider<MentionHistoryNotifier, Map<String, Map<String, int>>>(
+      MentionHistoryNotifier.new,
+    );
+
+/// Ranked mention candidates for a channel + query, by the portable mention
+/// rules: channel members, the agents offered here, and (in streams, forums
+/// and DMs) people from a community directory search. A multi-word
+/// query that continues no known name, including the names its search
+/// found, is prose: it has no choices.
 final mentionCandidatesProvider = Provider.family
-    .autoDispose<List<MentionCandidate>, ({String channelId, String query})>((
-      ref,
-      args,
-    ) {
+    .autoDispose<List<MentionCandidate>, MentionChooserArgs>((ref, args) {
       final channelsAsync = ref.watch(channelsProvider);
       final membersAsync = ref.watch(channelMembersProvider(args.channelId));
       final sessionStatus = ref.watch(relaySessionProvider).status;
@@ -95,34 +164,73 @@ final mentionCandidatesProvider = Provider.family
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
-      final searchResults =
-          ref.watch(mentionUserSearchProvider(args.query)).asData?.value ??
-          const <UserProfile>[];
+      final channel = channels
+          .where((candidate) => candidate.id == args.channelId)
+          .firstOrNull;
+      // Archived channels take no mentions.
+      if (channel?.isArchived == true) return const [];
+      final directory = channel?.mentionsOutsidePeople ?? false;
+      final settled = ref.watch(_settledSearchesProvider);
 
       final sharedChannelIds = {
         for (final channel in channels)
           if (channel.isMember && !channel.isArchived) channel.id,
       };
 
-      final candidates = buildMentionCandidates(
-        members: members,
-        relayAgents: relayAgents,
-        sharedChannelIds: sharedChannelIds,
-        userCache: userCache,
-        ownerByAgentPubkey: owners,
-        searchResults: searchResults,
-        currentPubkey: currentPubkey,
+      List<MentionCandidate> build(List<UserProfile> searchResults) => [
+        for (final candidate in buildMentionCandidates(
+          members: members,
+          relayAgents: relayAgents,
+          sharedChannelIds: sharedChannelIds,
+          userCache: userCache,
+          ownerByAgentPubkey: owners,
+          searchResults: searchResults,
+          currentPubkey: currentPubkey,
+        ))
+          if (isMentionKey(candidate.pubkey)) candidate,
+      ];
+
+      // Admission does not gate the search: `@Mary J` can name a person
+      // outside the channel, so the search runs and admission is checked
+      // again with the people it finds (portable mention rules, section 2).
+      var candidates = build(
+        directory
+            ? settled.last(args.channelId, args.opening) ??
+                  const <UserProfile>[]
+            : const <UserProfile>[],
       );
+      if (directory) {
+        final search = ref.watch(mentionUserSearchProvider(args.query));
+        final page = search.asData?.value;
+        if (page != null) {
+          settled.settle(args.channelId, args.opening, page);
+          candidates = build(page);
+        }
+      }
+      if (!matchesMentionQuery(args.query, [
+        for (final candidate in candidates)
+          if (candidate.displayName?.trim().isNotEmpty == true)
+            candidate.displayName!.trim(),
+      ])) {
+        return const [];
+      }
 
       final names = mentionPickerNames(
         ref.watch(identityNameSourcesProvider),
         candidates,
       );
       loadIdentityNameOwners(ref, names);
-      return rankMentionCandidates([
-        for (final candidate in candidates)
-          candidate.withContextLabel(names.resolve(candidate.pubkey)?.name),
-      ], args.query);
+      final presence = ref.watch(presenceCacheProvider);
+      return rankMentionCandidates(
+        [
+          for (final candidate in candidates)
+            candidate.withContextLabel(names.resolve(candidate.pubkey)?.name),
+        ],
+        args.query,
+        viewer: currentPubkey,
+        history: ref.watch(mentionHistoryProvider)[args.channelId] ?? const {},
+        presence: (key) => presence[key] ?? 'unknown',
+      );
     });
 
 /// Picker labels compare every selectable choice, before query ranking
@@ -148,3 +256,20 @@ IdentityNames mentionPickerNames(
       candidate.pubkey: ?candidate.ownerPubkey,
   },
 );
+
+/// Whether the directory search for this chooser failed. The chooser keeps
+/// the error and a retry instead of closing (portable mention rules,
+/// section 2). Archived channels never search.
+final mentionSearchFailedProvider = Provider.family
+    .autoDispose<bool, MentionChooserArgs>((ref, args) {
+      final channel = (ref.watch(channelsProvider).asData?.value ?? const [])
+          .where((candidate) => candidate.id == args.channelId)
+          .firstOrNull;
+      if (channel == null ||
+          channel.isArchived ||
+          !channel.mentionsOutsidePeople) {
+        return false;
+      }
+      final search = ref.watch(mentionUserSearchProvider(args.query));
+      return search.hasError && !search.isLoading;
+    });

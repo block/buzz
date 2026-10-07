@@ -433,27 +433,31 @@ Future<DateTime?> _showNativeDateTimePicker(
         color: context.colors.surface,
         child: SafeArea(
           top: false,
-          child: SizedBox(
-            height: 300,
-            child: Column(
-              children: [
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () => Navigator.of(pickerContext).pop(selected),
-                    child: const Text('Done'),
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: Grid.half),
+            child: SizedBox(
+              height: 300,
+              child: Column(
+                children: [
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: () =>
+                          Navigator.of(pickerContext).pop(selected),
+                      child: const Text('Done'),
+                    ),
                   ),
-                ),
-                Expanded(
-                  child: CupertinoDatePicker(
-                    mode: CupertinoDatePickerMode.dateAndTime,
-                    minimumDate: minimum,
-                    initialDateTime: safeInitial,
-                    use24hFormat: MediaQuery.alwaysUse24HourFormatOf(context),
-                    onDateTimeChanged: (value) => selected = value,
+                  Expanded(
+                    child: CupertinoDatePicker(
+                      mode: CupertinoDatePickerMode.dateAndTime,
+                      minimumDate: minimum,
+                      initialDateTime: safeInitial,
+                      use24hFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+                      onDateTimeChanged: (value) => selected = value,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

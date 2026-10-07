@@ -181,6 +181,10 @@ pub struct Config {
     /// Whether REST API requests must present a valid token. Independent of
     /// WebSocket protocol auth, which is *always* required by REQ/EVENT/COUNT.
     pub require_auth_token: bool,
+    /// Opt-in private accessory API; disabled until explicitly deployed.
+    pub buzz_v1_enabled: bool,
+    /// Author-time unread tracking duration, independent of NIP-RS retention.
+    pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
     /// If empty, permissive CORS is used (dev mode).
     /// Example: "tauri://localhost,http://localhost:3000"
@@ -1332,6 +1336,15 @@ impl Config {
             ));
         }
 
+        let buzz_v1_enabled = std::env::var("BUZZ_V1_ENABLED").is_ok_and(|v| v == "true");
+        // Read only when enabled: a disabled relay ignores every v1 setting.
+        let buzz_v1_retention_seconds = match std::env::var("BUZZ_V1_RETENTION_SECONDS") {
+            Ok(v) if buzz_v1_enabled => v.parse().ok().filter(|s| *s > 0).ok_or_else(|| {
+                ConfigError::InvalidValue("BUZZ_V1_RETENTION_SECONDS must be positive".into())
+            })?,
+            _ => buzz_db::personal_read::DEFAULT_RETENTION_SECONDS,
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -1351,6 +1364,8 @@ impl Config {
             slow_client_grace_limit,
             auth,
             require_auth_token,
+            buzz_v1_enabled,
+            buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
             uds_path,
@@ -1907,6 +1922,33 @@ mod tests {
         .admin
         .expect("admin surface is configured");
         assert!(matches!(admin.auth, crate::config::AdminAuth::Nip98));
+    }
+
+    #[test]
+    fn buzz_v1_retention_is_validated_only_when_enabled() {
+        let _guards = env_guards();
+        const KEYS: [&str; 2] = ["BUZZ_V1_ENABLED", "BUZZ_V1_RETENTION_SECONDS"];
+        let previous = KEYS.map(std::env::var_os);
+        std::env::set_var("BUZZ_V1_RETENTION_SECONDS", "0");
+        std::env::remove_var("BUZZ_V1_ENABLED");
+        let disabled = Config::from_env();
+        std::env::set_var("BUZZ_V1_ENABLED", "true");
+        let enabled = Config::from_env();
+        for (key, value) in KEYS.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert!(
+            disabled.is_ok(),
+            "a disabled relay ignores it: {disabled:?}"
+        );
+        assert!(matches!(
+            enabled,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_V1_RETENTION_SECONDS")
+        ));
     }
 
     #[test]

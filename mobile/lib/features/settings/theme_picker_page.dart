@@ -15,7 +15,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/ios_glass_theme_pagination.dart';
+import '../../shared/widgets/page_indicator.dart';
 import 'theme_option_sheets.dart';
 
 part 'theme_picker_page/theme_home_preview.dart';

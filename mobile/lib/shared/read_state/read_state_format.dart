@@ -14,6 +14,22 @@ const threadContextPrefix = 'thread:';
 String msgContextKey(String messageId) => '$msgContextPrefix$messageId';
 String threadContextKey(String rootId) => '$threadContextPrefix$rootId';
 
+/// Catch-up marks, written by the web and desktop app (`buzz-app`) when the
+/// reader reaches the bottom of a channel or thread. `activity:<channel>`
+/// reads ordinary top-level messages up to its time; `thread-activity:<root>`
+/// reads that thread's replies. Neither reads mentions, broadcasts or DMs
+/// in the channel, so neither is a channel marker.
+String activityContextKey(String channelId) => 'activity:$channelId';
+String threadActivityContextKey(String rootId) => 'thread-activity:$rootId';
+
+/// Whether `activity:<channel>` reads a message: an ordinary top-level
+/// message, not a reply, mention, broadcast or DM.
+bool readByChannelCatchUp({
+  required bool isDm,
+  required bool isReply,
+  required bool highPriority,
+}) => !isDm && !isReply && !highPriority;
+
 int? maxReadAt(Iterable<int?> markers) {
   int? latest;
   for (final marker in markers) {

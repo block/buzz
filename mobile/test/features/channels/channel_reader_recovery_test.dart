@@ -104,6 +104,33 @@ class _Config extends RelayConfigNotifier {
       RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
 }
 
+class _InitializingSortSession extends ConnectedRelaySession {
+  _InitializingSortSession(this.firstSnapshot);
+  final NostrEvent firstSnapshot;
+  final secondSnapshot = Completer<List<NostrEvent>>();
+  void Function(NostrEvent)? onEvent;
+  var fetchCount = 0;
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    fetchCount++;
+    return fetchCount == 1 ? [firstSnapshot] : secondSnapshot.future;
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) callback, {
+    void Function(String)? onClosed,
+  }) async {
+    onEvent = callback;
+    return () => onEvent = null;
+  }
+}
+
 /// Missed heads, one per lane, each marked with `zz` so the persisted
 /// cache shows whether that lane's provider re-read on resume.
 const _missedHeads = {
@@ -160,6 +187,54 @@ void main() {
       c.dispose();
     });
   }
+
+  fakeAsyncTest('sort readiness waits for the post-subscription snapshot', (
+    clock,
+  ) {
+    final relay = SidebarRelay();
+    final first = relay.event('channel-sort', {
+      'version': 1,
+      'groups': {'channels': 'alpha'},
+    }, nowSeconds());
+    final session = _InitializingSortSession(first);
+    final c = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(() => _Config(relay.keys.nsec)),
+        relaySessionProvider.overrideWith(() => session),
+        activeCommunityProvider.overrideWith(
+          (ref) async => Community(
+            id: 'c',
+            name: 'c',
+            relayUrl: 'wss://relay.example',
+            addedAt: DateTime(2026),
+          ),
+        ),
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
+      ],
+    );
+    c.read(activeCommunityProvider);
+    clock.flushMicrotasks();
+    c.listen(channelSortProvider, (_, _) {});
+    clock.flushMicrotasks();
+    expect(session.fetchCount, 2);
+    // A live preference arrives while the second history snapshot is pending.
+    final latest = relay.event('channel-sort', {
+      'version': 1,
+      'groups': {'channels': 'recent'},
+    }, nowSeconds() + 1);
+    session.onEvent!(latest);
+    expect(
+      c.read(channelSortProvider).sortModeFor('channels'),
+      ChannelSortMode.recent,
+    );
+    expect(c.read(channelSortProvider).isReady, isFalse);
+
+    session.secondSnapshot.complete([latest]);
+    clock.flushMicrotasks();
+    expect(c.read(channelSortProvider).isReady, isTrue);
+    c.dispose();
+  });
 
   for (final lane in _lanes) {
     Map<String, Object> blob(Map<String, (bool, int)> entries) => {
