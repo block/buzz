@@ -1530,6 +1530,49 @@ mod postgres_tests {
             "every schema/ file must be included by schema/schema.sql exactly once"
         );
 
+        fn strip_comments(text: &str) -> String {
+            text.lines()
+                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Table DDL must live in its table file, where SchemaBot reads it. A
+        // merge conflict resolved by pasting DDL into the manifest, or a table
+        // declared in a sibling directory, would still build and pass CI.
+        for line in strip_comments(&manifest).lines().map(str::trim) {
+            assert!(
+                line.is_empty()
+                    || line.starts_with("\\i ")
+                    || line.to_ascii_uppercase().starts_with("CREATE EXTENSION "),
+                "schema/schema.sql may only hold \\i includes and CREATE EXTENSION; \
+                 put table DDL in tables/public/<table>.sql: {line:.80}"
+            );
+        }
+        for file in included.iter().filter(|f| !f.starts_with("tables/public/")) {
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+            for statement in strip_comments(&text).to_ascii_uppercase().split(';') {
+                let tokens: Vec<_> = statement.split_whitespace().collect();
+                assert!(
+                    !tokens.windows(2).any(|pair| pair == ["ALTER", "TABLE"]),
+                    "{file} may not ALTER TABLE; change the table file in tables/public/ instead"
+                );
+                let creates_table = tokens.iter().enumerate().any(|(i, token)| {
+                    *token == "CREATE"
+                        && tokens[i + 1..].iter().find(|t| {
+                            !matches!(**t, "UNLOGGED" | "TEMP" | "TEMPORARY" | "GLOBAL" | "LOCAL")
+                        }) == Some(&"TABLE")
+                });
+                assert!(
+                    !creates_table
+                        || (file.starts_with("partitions/")
+                            && tokens.windows(2).any(|pair| pair == ["PARTITION", "OF"])),
+                    "{file} may not CREATE TABLE; only partitions/ may, and only PARTITION OF. \
+                     Declare tables in tables/public/<table>.sql"
+                );
+            }
+        }
+
         let tables_dir = schema_dir.join("tables");
         for entry in std::fs::read_dir(&tables_dir).expect("read schema/tables") {
             let path = entry.expect("schema/tables entry").path();
@@ -1546,11 +1589,7 @@ mod postgres_tests {
                 .and_then(|name| name.strip_suffix(".sql"))
                 .expect("table file name");
             let text = std::fs::read_to_string(schema_dir.join(file)).expect("read table file");
-            let code: String = text
-                .lines()
-                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let code = strip_comments(&text);
             let mut creates = 0;
             for statement in code
                 .split(';')
