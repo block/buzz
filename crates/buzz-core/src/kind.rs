@@ -100,7 +100,7 @@ pub const KIND_AGENT_ENGRAM: u32 = 30174;
 /// over the agent↔owner conversation key and the owner is the optional single
 /// `p` tag. Buzz only; enabled by `BUZZ_AGENT_ATTENTION_ENABLED`. See
 /// `docs/nips/NIP-AT.md`.
-pub const KIND_AGENT_ATTENTION: u32 = 30173;
+pub const KIND_AGENT_ATTENTION: u32 = 30183;
 
 /// Global kinds readable only by their agent author or the owner named in
 /// their `#p` tag (NIP-AE engrams, NIP-AT attention configuration).
@@ -892,7 +892,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
-const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_ATTENTION)); // 30173 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_ATTENTION)); // 30183 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

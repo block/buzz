@@ -1,4 +1,4 @@
-//! End-to-end tests for kind:30173 agent attention configuration (NIP-AT).
+//! End-to-end tests for kind:30183 agent attention configuration (NIP-AT).
 //!
 //! The ingest and read-gate unit tests in `buzz-relay` pin the rules in
 //! isolation. These tests prove the rules on the live relay paths (the relay
@@ -35,7 +35,7 @@ use nostr::nips::nip44;
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 use sha2::{Digest, Sha256};
 
-const ATTENTION_KIND: u16 = 30173;
+const ATTENTION_KIND: u16 = 30183;
 const ALT: [&str; 2] = ["alt", "encrypted agent attention configuration"];
 
 fn relay_url() -> String {

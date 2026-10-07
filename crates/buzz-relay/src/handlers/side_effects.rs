@@ -433,7 +433,7 @@ pub async fn validate_standard_deletion_event(
     Ok(())
 }
 
-/// NIP-AT deletion rules for a kind:5 whose `a` tag targets kind:30173. Only
+/// NIP-AT deletion rules for a kind:5 whose `a` tag targets kind:30183. Only
 /// the agent deletes its own objects (no owner deletes): with one writer for
 /// deletes, a writer can always find the last delete of its own address. The
 /// `k` tag lets readers subscribe to these deletes with `#k`. The relay's
@@ -2289,7 +2289,7 @@ pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
             })
 }
 
-/// The `(agent pubkey, d tag)` of a NIP-AT delete when `kind:30173` is
+/// The `(agent pubkey, d tag)` of a NIP-AT delete when `kind:30183` is
 /// enabled: a `kind:5` with no `e` tag whose first `a` tag names the kind.
 /// Matches the authorization and dispatch rule that only the first `a` tag
 /// is processed.

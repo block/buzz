@@ -355,7 +355,7 @@ pub struct Config {
     /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
     /// are enabled for this deployment. Defaults to false.
     pub push_enabled: bool,
-    /// Whether NIP-AT agent attention configuration (kind:30173) is accepted.
+    /// Whether NIP-AT agent attention configuration (kind:30183) is accepted.
     /// With it off the relay rejects the kind. Defaults to false.
     pub agent_attention_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
