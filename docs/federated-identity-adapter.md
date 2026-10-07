@@ -1,4 +1,4 @@
-# Enterprise identity adapter: Desktop implementation guide
+# Federated Identity Adapter: Desktop implementation guide
 
 Buzz Desktop learns that a relay requires enterprise identity from the relay's
 NIP-11 `federated_identity` advertisement. Discovery deliberately contains no
