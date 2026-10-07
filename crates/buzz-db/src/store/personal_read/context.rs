@@ -39,7 +39,9 @@ impl Db {
             .await?;
         writes::deadlines(&mut tx).await?;
         let actor_bytes = actor.to_bytes();
-        let account = read_account(&mut tx, retention_seconds).await?;
+        let account = read_account(&mut tx, community, &actor_bytes, retention_seconds).await?;
+        // Every frontier is floored at the account's start.
+        let floor = account.floor();
         let mut contexts = Vec::with_capacity(queries.len());
         // Replies whose state turns on conversation membership, by position.
         let mut pending = Vec::new();
@@ -128,7 +130,7 @@ impl Db {
                                 account.cutoff_ms,
                             ) {
                                 MessageReadState::NotCounted
-                            } else if prefix.is_some_and(|p| received <= p) {
+                            } else if received <= prefix.map_or(floor, |p| p.max(floor)) {
                                 MessageReadState::Read
                             } else {
                                 let reason = classification::reason(

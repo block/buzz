@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -56,6 +57,18 @@ pub struct ReadAccount {
     pub retention_seconds: u32,
     /// Read-time author-time cutoff (Unix milliseconds), not a discard boundary.
     pub cutoff_ms: i64,
+    /// Arrival floor of every frontier: the account's first applied read
+    /// intent. `None` until then, and nothing counts as unread. Not on the wire.
+    #[serde(skip)]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+impl ReadAccount {
+    /// The arrival every frontier is floored at: the start, or the end of time
+    /// for an account that has not started.
+    pub(super) fn floor(&self) -> DateTime<Utc> {
+        self.started_at.unwrap_or(DateTime::<Utc>::MAX_UTC)
+    }
 }
 
 /// Maximum channel summaries in one sidebar page.

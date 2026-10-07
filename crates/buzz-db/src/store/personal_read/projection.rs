@@ -77,7 +77,7 @@ impl Db {
         writes::deadlines(&mut tx).await?;
         sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
         let actor_bytes = actor.to_bytes();
-        let account = read_account(&mut tx, retention_seconds).await?;
+        let account = read_account(&mut tx, community, &actor_bytes, retention_seconds).await?;
         // The inner event LIMIT is deliberately before eligibility filtering.
         // This bounds rows/joins even with long deleted or self-authored runs.
         // Aggregate equivalent eligible evidence before transfer. Multiplicity
@@ -132,10 +132,11 @@ impl Db {
                 ), classified AS (
                     SELECT e.*, tm.root_event_id AS root, tm.parent_event_id AS parent,
                         COALESCE(tm.root_event_id<>e.id,false) AS is_reply,
-                        COALESCE(e.received_at <=
+                        -- Every frontier is floored at the account's start.
+                        COALESCE(e.received_at <= GREATEST(COALESCE($10::timestamptz,'infinity'),
                             CASE WHEN tm.root_event_id IS NOT NULL AND tm.root_event_id<>e.id
                                 THEN GREATEST(tf.through_timestamp, cf.threads_through_timestamp)
-                                ELSE cf.through_timestamp END,false) AS covered
+                                ELSE cf.through_timestamp END),false) AS covered
                     FROM (SELECT * FROM candidates ORDER BY created_at DESC,id LIMIT $8-1) e
                     LEFT JOIN thread_metadata tm ON tm.community_id=$1 AND tm.channel_id=r.id
                         AND tm.event_created_at=e.created_at AND tm.event_id=e.id
@@ -189,6 +190,7 @@ impl Db {
                 .ok_or_else(|| DbError::InvalidData("invalid unread cutoff".into()))?)
             .bind((MAX_UNREAD_SCAN+1) as i64)
             .bind(only)
+            .bind(account.started_at)
             .fetch_all(&mut *tx).await?;
         let has_more = rows.len() > limit;
         let mut channels = Vec::new();
@@ -379,20 +381,28 @@ pub(super) fn summarize(
     ThreadSummaries { items, complete }
 }
 
-/// Read-time horizon only: frontier state is not discarded on expiry.
+/// Read-time horizon and the account's start, in the caller's snapshot.
+/// Frontier state is not discarded on expiry.
 pub(super) async fn read_account(
     conn: &mut PgConnection,
+    community: CommunityId,
+    actor: &[u8],
     retention_seconds: u32,
 ) -> Result<ReadAccount> {
-    let cutoff: DateTime<Utc> = sqlx::query_scalar(
-        "SELECT date_trunc('milliseconds',transaction_timestamp()-make_interval(secs=>$1::double precision))",
+    let row = sqlx::query(
+        "SELECT date_trunc('milliseconds',transaction_timestamp()-make_interval(secs=>$1::double precision)) AS cutoff,
+            (SELECT started_at FROM personal_read_accounts WHERE community_id=$2 AND actor=$3) AS started_at",
     )
     .bind(f64::from(retention_seconds))
+    .bind(community.as_uuid())
+    .bind(actor)
     .fetch_one(conn)
     .await?;
+    let cutoff: DateTime<Utc> = row.try_get("cutoff")?;
     Ok(ReadAccount {
         retention_seconds,
         cutoff_ms: cutoff.timestamp_millis(),
+        started_at: row.try_get("started_at")?,
     })
 }
 

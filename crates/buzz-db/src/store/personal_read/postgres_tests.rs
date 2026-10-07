@@ -38,7 +38,26 @@ pub(super) async fn fixture() -> (Db, PgPool, CommunityId, Uuid, Keys, nostr::Ev
     db.insert_event(community, &event, Some(channel))
         .await
         .unwrap();
+    start_before_everything(&pool, community, &actor.public_key()).await;
     (db, pool, community, channel, actor, event)
+}
+
+/// Start an account before any fixture arrival, so unread semantics can be
+/// tested without the start floor covering every message.
+pub(super) async fn start_before_everything(
+    pool: &PgPool,
+    community: CommunityId,
+    actor: &nostr::PublicKey,
+) {
+    sqlx::query(
+        "INSERT INTO personal_read_accounts (community_id,actor,started_at)
+         VALUES ($1,$2,'1900-01-01T00:00:00Z')",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.to_bytes().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// Move every community message past the default horizon by author time, the
@@ -253,6 +272,7 @@ async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail
 #[ignore = "requires Postgres"]
 async fn personal_read_sidebar_is_read_only_and_does_not_wait_for_account() {
     let (db, pool, community, channel, actor, event) = fixture().await;
+    unstart(&pool, community).await;
     db.personal_read_sidebar(
         community,
         &actor.public_key(),
@@ -540,6 +560,7 @@ async fn personal_read_latest_old_message_is_not_an_empty_channel() {
 #[ignore = "requires Postgres"]
 async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
     let (db, pool, community, channel, actor, event) = fixture().await;
+    unstart(&pool, community).await;
     let target = ReadTarget {
         channel_id: channel,
         root_id: None,
@@ -626,6 +647,15 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
     assert!(sparse.is_none());
 }
 
+/// Undo the fixture's start, for tests of what creates an account.
+async fn unstart(pool: &PgPool, community: CommunityId) {
+    sqlx::query("DELETE FROM personal_read_accounts WHERE community_id=$1")
+        .bind(community.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn started_at(
     pool: &PgPool,
     community: CommunityId,
@@ -644,7 +674,7 @@ async fn started_at(
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn personal_read_first_applied_intent_starts_the_account_once() {
-    let (db, pool, community, channel, actor, event) = fixture().await;
+    let (db, pool, community, channel, _, event) = fixture().await;
     let intent = ReadIntent::MarkThrough {
         target: ReadTarget {
             channel_id: channel,
@@ -652,7 +682,17 @@ async fn personal_read_first_applied_intent_starts_the_account_once() {
         },
         message_id: event.id.to_hex(),
     };
-    let actor = actor.public_key();
+    // The fixture actor is already started; the channel is open to anyone.
+    let actor = Keys::generate().public_key();
+    assert!(sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2"
+    )
+    .bind(community.as_uuid())
+    .bind(actor.to_bytes().as_slice())
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
+    .is_none());
     for _ in 0..2 {
         assert_eq!(
             db.apply_personal_read_intent(community, &actor, &intent)
@@ -687,6 +727,78 @@ async fn personal_read_first_applied_intent_starts_the_account_once() {
         .unwrap();
     assert_eq!(started_at(&pool, community, &pending).await, pending_start);
     assert_eq!(started_at(&pool, community, &actor).await, first);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn personal_read_counts_only_arrivals_after_the_account_starts() {
+    let (db, pool, community, channel, actor, _) = fixture().await;
+    unstart(&pool, community).await;
+    let unread = |page: &SidebarPage, id: Uuid| {
+        let row = page.channels.iter().find(|c| c.channel_id == id).unwrap();
+        match row.unread {
+            ReadCount::Exact { value } => value,
+            _ => panic!("expected an exact count"),
+        }
+    };
+    let sidebar = || async {
+        db.personal_read_sidebar(
+            community,
+            &actor.public_key(),
+            DEFAULT_RETENTION_SECONDS,
+            20,
+            None,
+        )
+        .await
+        .unwrap()
+    };
+    // Before the first read intent nothing counts, not the 30-day window.
+    assert_eq!(unread(&sidebar().await, channel), 0);
+
+    // The first intent, in another channel, starts the account everywhere.
+    let other = db
+        .create_channel(
+            community,
+            "elsewhere",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &actor.public_key().to_bytes(),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let elsewhere = EventBuilder::new(Kind::Custom(9), "elsewhere")
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    db.insert_event(community, &elsewhere, Some(other))
+        .await
+        .unwrap();
+    db.apply_personal_read_intent(
+        community,
+        &actor.public_key(),
+        &ReadIntent::MarkThrough {
+            target: ReadTarget {
+                channel_id: other,
+                root_id: None,
+            },
+            message_id: elsewhere.id.to_hex(),
+        },
+    )
+    .await
+    .unwrap();
+    // A channel never marked starts caught up: earlier arrivals stay read.
+    assert_eq!(unread(&sidebar().await, channel), 0);
+
+    // Arrivals after the start count.
+    let later = EventBuilder::new(Kind::Custom(9), "after the start")
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    db.insert_event(community, &later, Some(channel))
+        .await
+        .unwrap();
+    assert_eq!(unread(&sidebar().await, channel), 1);
 }
 
 #[tokio::test]
@@ -840,7 +952,7 @@ async fn personal_read_contexts_bound_selectors_and_use_only_matching_frontiers(
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(accounts, 0, "context GET must never create authority");
+    assert_eq!(accounts, 1, "context GET must never create authority");
     db.apply_personal_read_intent(
         community,
         &actor.public_key(),
@@ -887,17 +999,26 @@ async fn personal_read_contexts_bound_selectors_and_use_only_matching_frontiers(
     .unwrap();
     assert_eq!(page["contexts"][1]["messages"][1]["status"], "read");
     let other = Keys::generate();
-    let page = serde_json::to_value(
-        db.personal_read_contexts(
-            community,
-            &other.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
+    let other_page = || async {
+        serde_json::to_value(
+            db.personal_read_contexts(
+                community,
+                &other.public_key(),
+                DEFAULT_RETENTION_SECONDS,
+                &queries,
+            )
+            .await
+            .unwrap(),
         )
-        .await
-        .unwrap(),
-    )
-    .unwrap();
+        .unwrap()
+    };
+    // Nothing counts before an account starts.
+    let page = other_page().await;
+    assert_eq!(page["contexts"][0]["messages"][0]["status"], "read");
+    assert_eq!(page["contexts"][1]["messages"][1]["status"], "read");
+    // Frontiers are per actor: the actor's marks never read for another.
+    start_before_everything(&pool, community, &other.public_key()).await;
+    let page = other_page().await;
     assert_eq!(page["contexts"][0]["messages"][0]["status"], "unread");
     assert_eq!(page["contexts"][1]["messages"][1]["status"], "unread");
     assert!(db

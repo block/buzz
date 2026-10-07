@@ -56,6 +56,24 @@ async fn request(
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
+/// Start a reader's account before any fixture arrival. Nothing counts as
+/// unread until an account starts.
+async fn start_before_everything(
+    state: &crate::state::AppState,
+    community: buzz_core::CommunityId,
+    key: &Keys,
+) {
+    sqlx::query(
+        "INSERT INTO personal_read_accounts (community_id,actor,started_at)
+         VALUES ($1,$2,'1900-01-01T00:00:00Z')",
+    )
+    .bind(community.as_uuid())
+    .bind(key.public_key().to_bytes().as_slice())
+    .execute(state.db.pool())
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
@@ -217,6 +235,7 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         .map(|b| format!("%{b:02X}"))
         .collect();
     let path = format!("/buzz/v1/me/read-state?targets={targets}");
+    start_before_everything(&state, community, &other).await;
     for (key, status) in [(&actor, "read"), (&other, "unread")] {
         let auth = proof(key, &host, &path, "GET", None);
         let page = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
@@ -275,6 +294,7 @@ async fn accessory_context_get_signed_query_and_independent_batch_outcomes() {
         "/buzz/v1/me/read-state?targets={}",
         encode(&targets.to_string())
     );
+    start_before_everything(&state, community, &actor).await;
     let auth = proof(&actor, &host, &path, "GET", None);
     let result = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
@@ -609,6 +629,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         .sign_with_keys(signer)
         .unwrap();
     let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
+    start_before_everything(&state, community, &reader).await;
     for (event, key, count) in [(&message, &author, 1), (&deletion, signer, 0)] {
         let body = serde_json::to_vec(event).unwrap();
         let auth = proof(key, &host, "/events", "POST", Some(&body));

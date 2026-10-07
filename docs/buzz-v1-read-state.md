@@ -229,10 +229,12 @@ examined: the 4,096 most recent events by author time inside the horizon. So
 marking through it reads everything counted. When the horizon holds no message,
 it is the last to arrive among the channel's 256 most recent events.
 
-There is no import of earlier client read state: an account starts with no
-frontiers, and the horizon bounds what that can show as unread. The relay
-records the account's `started_at` at its first applied read intent and never
-moves it; projections do not read it yet. Manual unread remains device-local.
+There is no import of earlier client read state. The relay records the
+account's `started_at` at its first applied read intent and never moves it.
+Every frontier is floored at `started_at`: until the account starts nothing
+counts as unread, and from then it starts caught up, so a context it has never
+marked counts only arrivals after the start. Manual unread remains
+device-local.
 
 ## Bounds and deployment
 
