@@ -1851,6 +1851,16 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                         .execute(&mut **tx)
                         .await?;
                     }
+                    let root = meta.root_event_id.unwrap_or(pid);
+                    crate::personal_read::record_reply(
+                        tx,
+                        community_id,
+                        event,
+                        meta.channel_id,
+                        root,
+                        received_at,
+                    )
+                    .await?;
                 }
             }
         }

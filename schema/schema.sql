@@ -195,11 +195,15 @@ CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
 
 -- Private accessory read progress. Never included in Nostr event queries.
 -- A frontier is the relay arrival time (events.received_at) of the message a
--- context was read through; the unread cutoff alone is signed event time. An
--- empty root_id denotes a channel frontier.
+-- context was read through, never signed event time. An empty root_id denotes
+-- a channel frontier.
+-- started_at is the actor's first read intent and the floor of every
+-- position: until then nothing counts, and from then the actor starts caught
+-- up. Ingest creates accounts for thread membership without starting them.
 CREATE TABLE personal_read_accounts (
     community_id UUID NOT NULL REFERENCES communities(id),
     actor BYTEA NOT NULL CHECK (octet_length(actor) = 32),
+    started_at TIMESTAMPTZ,
     PRIMARY KEY (community_id, actor)
 );
 

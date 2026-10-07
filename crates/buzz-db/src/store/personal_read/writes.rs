@@ -23,22 +23,26 @@ pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// Serialize private frontier writes, never shared conversation rows.
+/// Start the account if this is the actor's first read intent, then serialize
+/// private frontier writes, never shared conversation rows. NO KEY UPDATE
+/// leaves ingest's foreign-key checks (which create thread rows) unblocked.
 pub(super) async fn lock_account(
     conn: &mut PgConnection,
     community: CommunityId,
     actor: &[u8],
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO personal_read_accounts (community_id,actor) VALUES ($1,$2)
-        ON CONFLICT (community_id,actor) DO NOTHING",
+        "INSERT INTO personal_read_accounts (community_id,actor,started_at) VALUES ($1,$2,now())
+        ON CONFLICT (community_id,actor) DO UPDATE SET started_at=now()
+        WHERE personal_read_accounts.started_at IS NULL",
     )
     .bind(community.as_uuid())
     .bind(actor)
     .execute(&mut *conn)
     .await?;
     sqlx::query(
-        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2 FOR UPDATE",
+        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2
+         FOR NO KEY UPDATE",
     )
     .bind(community.as_uuid())
     .bind(actor)
@@ -83,11 +87,14 @@ async fn access(
 struct Message {
     id: Vec<u8>,
     received_at: DateTime<Utc>,
-    root: Option<Vec<u8>>,
+    /// Canonical thread root, when the message is a reply.
+    thread: Option<Vec<u8>>,
+    /// Shown on the channel timeline: not a reply, or a broadcast depth-1 reply.
+    on_timeline: bool,
 }
 
-/// A channel event and its canonical ancestry. `kinds` bounds the lookup: an
-/// anchor must be a kind that can be unread; a thread root need not be.
+/// A channel event and its place. `kinds` bounds the lookup: an anchor must be
+/// a kind that can be unread; a thread root need not be.
 async fn message(
     conn: &mut PgConnection,
     community: CommunityId,
@@ -96,7 +103,7 @@ async fn message(
     kinds: Option<&[i32]>,
 ) -> Result<Option<Message>> {
     let row = sqlx::query(
-        "SELECT e.id, e.received_at, e.tags, tm.root_event_id
+        "SELECT e.id, e.received_at, tm.root_event_id, tm.depth, tm.broadcast
          FROM events e LEFT JOIN thread_metadata tm ON tm.community_id=e.community_id
              AND tm.event_created_at=e.created_at AND tm.event_id=e.id AND tm.channel_id=e.channel_id
          WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3
@@ -104,23 +111,16 @@ async fn message(
          LIMIT 1",
     ).bind(community.as_uuid()).bind(channel).bind(id).bind(kinds).fetch_optional(&mut *conn).await?;
     row.map(|row| {
-        let received_at: DateTime<Utc> = row.try_get("received_at")?;
         let id: Vec<u8> = row.try_get("id")?;
         let root: Option<Vec<u8>> = row.try_get("root_event_id")?;
-        let tags: serde_json::Value = row.try_get("tags")?;
-        let tags: Vec<Vec<String>> = serde_json::from_value(tags)
-            .map_err(|_| crate::DbError::InvalidData("invalid message tags".into()))?;
-        let markers =
-            buzz_core::nip10::parse_thread_markers_from_parts(tags.iter().map(Vec::as_slice));
-        if markers.resolve().is_some() && root.is_none() {
-            return Err(crate::DbError::InvalidData(
-                "unresolved message ancestry".into(),
-            ));
-        }
+        let thread = root.filter(|root| root != &id);
+        let broadcast_reply = row.try_get::<Option<i32>, _>("depth")? == Some(1)
+            && row.try_get::<Option<bool>, _>("broadcast")? == Some(true);
         Ok(Message {
+            on_timeline: thread.is_none() || broadcast_reply,
+            received_at: row.try_get("received_at")?,
+            thread,
             id,
-            received_at,
-            root,
         })
     })
     .transpose()
@@ -163,34 +163,15 @@ pub(super) async fn valid_target(
     }
     if !root.is_empty() {
         // Deleted roots still own living replies, and so do roots of a kind
-        // that is never unread itself (a diff). Validate actual ancestry, not
-        // absence of metadata: a missing index row is not a top-level proof.
+        // that is never unread itself (a diff).
         let Some(msg) = message(conn, community, target.channel_id, &root, None).await? else {
             return Ok(None);
         };
-        if msg.root.as_ref().is_some_and(|r| r != &msg.id) {
+        if msg.thread.is_some() {
             return Ok(None);
         }
     }
     Ok(Some(root))
-}
-
-async fn frontier(
-    conn: &mut PgConnection,
-    community: CommunityId,
-    actor: &[u8],
-    target: &ReadTarget,
-    root: &[u8],
-    through: DateTime<Utc>,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO personal_read_frontiers
-         (community_id, actor, channel_id, root_id, through_timestamp) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
-         SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, EXCLUDED.through_timestamp)",
-    ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root).bind(through)
-        .execute(&mut *conn).await?;
-    Ok(())
 }
 
 pub(super) async fn apply(
@@ -218,13 +199,42 @@ pub(super) async fn apply(
             else {
                 return Ok(IntentOutcome::Blocked);
             };
-            let is_reply = msg.root.as_ref().is_some_and(|r| r != &msg.id);
-            if (root.is_empty() && is_reply)
-                || (!root.is_empty() && msg.id != root && msg.root.as_ref() != Some(&root))
-            {
-                return Ok(IntentOutcome::Blocked);
+            if root.is_empty() {
+                if !msg.on_timeline {
+                    return Ok(IntentOutcome::Blocked);
+                }
+                sqlx::query(
+                    "INSERT INTO personal_read_frontiers
+                     (community_id, actor, channel_id, root_id, through_timestamp)
+                     VALUES ($1,$2,$3,''::bytea,$4)
+                     ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
+                     SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, $4)",
+                )
+                .bind(community.as_uuid())
+                .bind(actor)
+                .bind(target.channel_id)
+                .bind(msg.received_at)
+                .execute(&mut *conn)
+                .await?;
+            } else {
+                if msg.id != root && msg.thread.as_ref() != Some(&root) {
+                    return Ok(IntentOutcome::Blocked);
+                }
+                // Reading a thread never joins it: only the actor's threads
+                // have a row to advance.
+                sqlx::query(
+                    "UPDATE personal_read_frontiers
+                     SET through_timestamp=GREATEST(through_timestamp, $5)
+                     WHERE community_id=$1 AND actor=$2 AND channel_id=$3 AND root_id=$4",
+                )
+                .bind(community.as_uuid())
+                .bind(actor)
+                .bind(target.channel_id)
+                .bind(&root)
+                .bind(msg.received_at)
+                .execute(&mut *conn)
+                .await?;
             }
-            frontier(conn, community, actor, target, &root, msg.received_at).await?;
         }
         ReadIntent::MarkChannelRead {
             channel_id,
