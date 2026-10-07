@@ -158,6 +158,8 @@ class RunnerTests: XCTestCase {
     bar.view().layoutIfNeeded()
     let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
     let label = try XCTUnwrap(title.contentView.subviews.compactMap { $0 as? UILabel }.first)
+    XCTAssertEqual(navigation.traitCollection.preferredContentSizeCategory, .extraExtraExtraLarge)
+    XCTAssertEqual(label.font.pointSize, 20, accuracy: 0.01)
     XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
 
     arguments["title"] = String(repeating: "Long channel name ", count: 12)
