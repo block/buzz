@@ -1,6 +1,6 @@
 //! Side-by-side benchmark (not for merge). Identical file in both branches.
 //! BENCH_THREADS (default 5000) followed threads, 3 replies each.
-use super::postgres_tests::{apply, channel_read, mention};
+use super::postgres_tests::{apply, channel_read, mark, mention};
 use super::*;
 use crate::{
     channel::{ChannelType, ChannelVisibility},
@@ -147,30 +147,49 @@ async fn bench_unread() {
     // Phase 1: followed threads, serial ingest.
     let (mut roots_t, mut reps_t) = (Vec::new(), Vec::new());
     let mut roots = Vec::new();
-    let mut latest = firsts[0].clone();
+    // The caught-up cut must be the bottom message in display order (author
+    // time, then ID), which a mark reads through; the last insert is not.
+    let mut bottom = firsts[0].clone();
+    let mut lower = |e: &nostr::Event| {
+        if (e.created_at, e.id) > (bottom.created_at, bottom.id) {
+            bottom = e.clone();
+        }
+    };
     for i in 0..threads {
         let at = base + 1 + (i as u64 % 3000);
         let root = ev(&others[i % 8], at, vec![]);
         roots_t.push(top(&db, c, busy, &root).await);
+        lower(&root);
         let mine = ev(&actor, at, vec![]);
         reps_t.push(rep(&db, c, busy, &root, &mine).await);
+        lower(&mine);
         for j in 1..3 {
             let r = ev(&others[(i + j) % 8], at, vec![]);
             reps_t.push(rep(&db, c, busy, &root, &r).await);
-            latest = r;
+            lower(&r);
         }
         roots.push(root);
     }
     stats("ingest top-level serial", roots_t);
     stats("ingest reply serial", reps_t);
     assert_eq!(
-        apply(&db, c, &actor, channel_read(busy, &latest)).await,
+        apply(&db, c, &actor, channel_read(busy, &bottom)).await,
         IntentOutcome::Applied
     );
     for (ch, e) in channels.iter().zip(&firsts).skip(1) {
         apply(&db, c, &actor, channel_read(*ch, e)).await;
     }
     sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let page = db
+        .personal_read_sidebar(c, &actor.public_key(), 20, None)
+        .await
+        .unwrap();
+    assert!(
+        page.channels
+            .iter()
+            .all(|r| !r.unread && r.threads.is_empty()),
+        "the caught-up phase must start with nothing unread"
+    );
     sidebar_bench(&db, c, &actor, &format!("caught-up {threads} threads")).await;
 
     // Phase 2: a 20k timeline backlog with 12 mentions.
@@ -195,6 +214,42 @@ async fn bench_unread() {
         rep(&db, c, busy, root, &r).await;
     }
     sidebar_bench(&db, c, &actor, "20k backlog + 500 unread threads").await;
+
+    // Phase 4: a mostly-replies channel, far behind in one followed thread:
+    // one root the actor replied to, then 20k unread replies (12 mentions).
+    let quiet = channels[1];
+    let root = ev(&others[0], ts() - 900, vec![]);
+    top(&db, c, quiet, &root).await;
+    let mine = ev(&actor, ts() - 900, vec![]);
+    rep(&db, c, quiet, &root, &mine).await;
+    // The timeline is read, so its probe must walk past every reply.
+    assert_eq!(
+        apply(&db, c, &actor, mark(quiet, None, &root)).await,
+        IntentOutcome::Applied
+    );
+    let now = ts();
+    for i in 0..20_000u64 {
+        let tags = if i % 1667 == 0 {
+            mention(&actor)
+        } else {
+            vec![]
+        };
+        let r = ev(&others[(i % 8) as usize], now - 600 + i / 40, tags);
+        rep(&db, c, quiet, &root, &r).await;
+    }
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let page = db
+        .personal_read_sidebar_channels(c, &actor.public_key(), &[quiet])
+        .await
+        .unwrap();
+    let row = &page.channels[0];
+    println!(
+        "BENCH far-behind thread: channel unread={} threads={} thread mentions={}",
+        row.unread,
+        row.threads.len(),
+        row.threads.first().map_or(0, |t| t.mentions)
+    );
+    sidebar_bench(&db, c, &actor, "+ far-behind thread, 20k unread replies").await;
 
     // Concurrency: 16 writers into one channel, then into 16 channels.
     for (label, spread) in [("same channel", false), ("16 channels", true)] {
