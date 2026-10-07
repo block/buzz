@@ -44,12 +44,14 @@ class _ThreadHeadScrollInput extends HookWidget {
   final bool enabled;
   final ScrollPosition? Function() scrollPosition;
   final ValueListenable<Iterable<ItemPosition>> positions;
+  final double viewportTopEdge;
   final Widget child;
 
   const _ThreadHeadScrollInput({
     required this.enabled,
     required this.scrollPosition,
     required this.positions,
+    required this.viewportTopEdge,
     required this.child,
   });
 
@@ -62,7 +64,7 @@ class _ThreadHeadScrollInput extends HookWidget {
           (item) =>
               item.index == 0 &&
               item.itemLeadingEdge < 1 &&
-              item.itemTrailingEdge > 0,
+              item.itemTrailingEdge > viewportTopEdge,
         );
     final drag = useRef<Drag?>(null);
     useEffect(

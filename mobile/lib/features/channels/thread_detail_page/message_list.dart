@@ -314,6 +314,8 @@ class _ThreadMessageList extends HookWidget {
                       enabled: visible,
                       scrollPosition: () => headScrollPosition.value,
                       positions: itemPositionsListener.itemPositions,
+                      viewportTopEdge:
+                          frostedAppBarHeight(context) / constraints.maxHeight,
                       child: ConstrainedBox(
                         constraints: BoxConstraints(
                           maxHeight: visible

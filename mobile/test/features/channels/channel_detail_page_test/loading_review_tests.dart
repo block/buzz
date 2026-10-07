@@ -146,6 +146,27 @@ void _loadingReviewTests() {
             labels.any((label) => label.contains('Original message')),
             isFalse,
           );
+          list.itemScrollController!.jumpTo(index: 1, alignment: 0.04);
+          await tester.pumpAndSettle();
+          final headPosition = list.itemPositionsNotifier!.itemPositions.value
+              .singleWhere((item) => item.index == 0);
+          expect(headPosition.itemTrailingEdge, greaterThan(0));
+          expect(headPosition.itemTrailingEdge, lessThan(0.05));
+          labels.clear();
+          collectLabels(semanticsOwner.rootSemanticsNode!);
+          expect(
+            labels.any((label) => label.contains('Original message')),
+            isFalse,
+            reason: 'The frosted app bar covers the remaining head extent.',
+          );
+          list.itemScrollController!.jumpTo(index: 0);
+          await tester.pumpAndSettle();
+          labels.clear();
+          collectLabels(semanticsOwner.rootSemanticsNode!);
+          expect(
+            labels.any((label) => label.contains('Original message')),
+            isTrue,
+          );
           semantics.dispose();
         }
       },
