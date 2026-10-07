@@ -1506,11 +1506,16 @@ fn cfg_test_item_len(item: &str) -> usize {
 
 /// Whether `source` inserts into `events` itself (not `event_mentions` or any
 /// other `events_*` table), in any letter case, across line breaks and string
-/// continuations, and with or without a `public.` schema prefix.
+/// continuations, `\n`/`\t`/`\r` escapes, and with or without a `public.`
+/// schema prefix.
 fn inserts_events_row(source: &str) -> bool {
     let mut normalized = String::with_capacity(source.len());
-    for ch in source.chars() {
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
         if ch.is_whitespace() || ch == '\\' {
+            if ch == '\\' && matches!(chars.peek(), Some('n' | 't' | 'r')) {
+                chars.next();
+            }
             if !normalized.ends_with(' ') {
                 normalized.push(' ');
             }
@@ -1632,6 +1637,12 @@ pub(crate) async fn writer_under_brace_mention(tx: &mut AdmittedTx) {
         .await
         .expect("write");
 }
+pub(crate) async fn writer_with_escaped_newline(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO\nevents (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
 #[cfg(test)]
 fn test_only_helper() -> (&'static str, char, &'static str, char) {
     // an unbalanced { in a comment
@@ -1663,6 +1674,7 @@ mod tests {
             "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_under_brace_mention(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_escaped_newline(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
