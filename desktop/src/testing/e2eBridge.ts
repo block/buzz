@@ -33,6 +33,9 @@ import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
+import { createMockReviewArtifacts } from "./e2eBridgeReviewArtifacts.ts";
+import { resetSubmissionStore } from "@/features/review-canvas/lib/reviewSubmissionStore";
+import { KIND_ARTIFACT } from "@/shared/constants/kinds";
 import {
   createMockSubscription,
   hasMockSubscription,
@@ -3340,6 +3343,7 @@ const mockChannels: MockChannel[] = [
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
+const mockReviewArtifacts = createMockReviewArtifacts();
 const deferredSendMessageLiveEchoes: Array<{
   channelId: string;
   event: RelayEvent;
@@ -11216,6 +11220,12 @@ function sendToMockSocket(args: {
       }
     }
 
+    if (event.kind === KIND_ARTIFACT) {
+      const result = mockReviewArtifacts.acceptArtifactEvent(event);
+      sendWsText(socket.handler, ["OK", event.id, result.ok, result.message]);
+      return;
+    }
+
     if (event.kind === 28936) {
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
@@ -14631,6 +14641,75 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
+      case "get_review_artifact_revision":
+        return mockReviewArtifacts.getRevision(
+          payload as Parameters<typeof mockReviewArtifacts.getRevision>[0],
+        );
+      case "list_review_feedback":
+        return mockReviewArtifacts.listFeedback(
+          payload as Parameters<typeof mockReviewArtifacts.listFeedback>[0],
+        );
+      case "fetch_review_document":
+        return mockReviewArtifacts.fetchDocument(
+          payload as Parameters<typeof mockReviewArtifacts.fetchDocument>[0],
+        );
+      case "send_artifact_feedback_message": {
+        const args = payload as Parameters<
+          typeof mockReviewArtifacts.sendFeedbackMessage
+        >[0];
+        return mockReviewArtifacts.sendFeedbackMessage(args, (message) =>
+          handleSendChannelMessage(message, activeConfig),
+        );
+      }
+      // Test-only seams: the review factory publishes revisions out-of-band,
+      // and specs arm one-shot relay failures.
+      case "e2e_publish_review_revision":
+        return mockReviewArtifacts.publishRevision(
+          payload as Parameters<typeof mockReviewArtifacts.publishRevision>[0],
+        );
+      case "e2e_fail_next_review_publish":
+        return mockReviewArtifacts.failNextPublish(
+          (payload as { message: string }).message,
+        );
+      case "e2e_fail_next_review_notification":
+        return mockReviewArtifacts.failNextNotification(
+          (payload as { message: string }).message,
+        );
+      case "e2e_lose_next_review_notification_ack":
+        return mockReviewArtifacts.loseNextNotificationAck(
+          (payload as { message: string }).message,
+        );
+      case "e2e_lose_next_review_publish_ack": {
+        // Test-only seam: the spec supplies exactly this payload shape.
+        const seam = payload as { message: string };
+        return mockReviewArtifacts.loseNextPublishAck(seam.message);
+      }
+      case "e2e_fail_review_head_reads": {
+        // Test-only seam: a null message clears the armed failure.
+        const seam = payload as { message: string | null };
+        return mockReviewArtifacts.failHeadReads(seam.message);
+      }
+      case "reconcile_review_feedback_event":
+        return mockReviewArtifacts.reconcileFeedback(
+          payload as Parameters<typeof mockReviewArtifacts.reconcileFeedback>[0],
+        );
+      // Test-only seams: simulated elapsed time, the relay's wake bookkeeping,
+      // an unreadable relay, and an app restart (the live submission handles
+      // are dropped; the durable outbox in local storage is kept).
+      case "e2e_advance_review_relay_clock": {
+        const seam = payload as { seconds: number };
+        return mockReviewArtifacts.advanceClock(seam.seconds);
+      }
+      case "e2e_list_review_wake_attempts":
+        return mockReviewArtifacts.listWakeAttempts();
+      case "e2e_fail_review_reconcile": {
+        // A null message clears the armed failure.
+        const seam = payload as { message: string | null };
+        return mockReviewArtifacts.failReconcile(seam.message);
+      }
+      case "e2e_restart_review_client":
+        resetSubmissionStore();
+        return null;
       case "fetch_snapshot_bytes": {
         // The real command fetches + validates a snapshot attachment in memory
         // (size cap, SHA-256, decode). In E2E the bridge returns a minimal
@@ -14691,33 +14770,47 @@ export function maybeInstallE2eTauriMocks() {
               ) as RelayEvent,
           ),
         );
-      case "sign_event":
+      case "sign_event": {
+        const request = payload as {
+          content: string;
+          createdAt?: number;
+          kind: number;
+          tags: string[][];
+        };
+        // Review feedback is stamped on the mock relay's clock, which specs
+        // may advance to age a frozen event past the relay's freshness window.
+        const createdAt =
+          request.createdAt ??
+          (request.kind === KIND_ARTIFACT
+            ? mockReviewArtifacts.nowSeconds()
+            : undefined);
         window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
-          content: (payload as { content: string }).content,
-          createdAt: (payload as { createdAt?: number }).createdAt,
-          kind: (payload as { kind: number }).kind,
-          tags: (payload as { tags: string[][] }).tags,
+          content: request.content,
+          createdAt: request.createdAt,
+          kind: request.kind,
+          tags: request.tags,
         });
         if (identity) {
           return JSON.stringify(
             await signWithIdentity(identity, {
-              kind: (payload as { kind: number }).kind,
-              content: (payload as { content: string }).content,
-              createdAt: (payload as { createdAt?: number }).createdAt,
-              tags: (payload as { tags: string[][] }).tags,
+              kind: request.kind,
+              content: request.content,
+              createdAt,
+              tags: request.tags,
             }),
           );
         }
 
         return JSON.stringify(
           createMockEvent(
-            (payload as { kind: number }).kind,
-            (payload as { content: string }).content,
-            (payload as { tags: string[][] }).tags,
+            request.kind,
+            request.content,
+            request.tags,
             DEFAULT_MOCK_IDENTITY.pubkey,
-            (payload as { createdAt?: number }).createdAt,
+            createdAt,
           ),
         );
+      }
       case "nip44_encrypt_to_self":
         return (payload as { plaintext: string }).plaintext;
       case "nip44_decrypt_from_self":

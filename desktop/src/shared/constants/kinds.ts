@@ -31,6 +31,10 @@ export const KIND_JOB_CANCEL = 43005;
 export const KIND_JOB_ERROR = 43006;
 export const KIND_FORUM_POST = 45001;
 export const KIND_FORUM_COMMENT = 45003;
+// NIP-AR channel artifact revision. Revisions are state changes read over the
+// relay's HTTP artifact query, never part of the ordinary timeline or unread
+// filters, so this kind is deliberately absent from CHANNEL_TIMELINE_CONTENT_KINDS.
+export const KIND_ARTIFACT = 45010;
 export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;

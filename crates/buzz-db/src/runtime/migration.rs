@@ -705,7 +705,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations[56].version, 57);
+        assert!(migrations[56]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE artifact_feedback_wakes"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -2070,6 +2075,36 @@ mod postgres_tests {
         }
         expected_fences.extend(personal.fence_attachments);
         expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
+        let feedback_wakes = surface(
+            MIGRATOR
+                .iter()
+                .find(|m| m.version == 57)
+                .expect("artifact feedback wake migration")
+                .sql
+                .as_ref(),
+        );
+        assert_eq!(
+            feedback_wakes.tables.len(),
+            1,
+            "migration 0057 must define exactly the wake ledger"
+        );
+        for (table, definition) in &feedback_wakes.tables {
+            assert_eq!(
+                schema.tables.get(table),
+                Some(definition),
+                "artifact feedback wake table {table} differs"
+            );
+        }
+        assert!(feedback_wakes
+            .tables
+            .contains_key("artifact_feedback_wakes"));
+        for index in &feedback_wakes.indexes {
+            assert!(
+                schema.indexes.contains(index),
+                "schema.sql is missing (or drifted on) wake ledger index: {index}"
+            );
+        }
+        expected_fences.extend(feedback_wakes.fence_attachments);
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

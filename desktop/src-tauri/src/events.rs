@@ -777,6 +777,10 @@ pub use workflows::{
     build_workflow_trigger,
 };
 
+mod artifact_feedback;
+
+pub use artifact_feedback::{build_artifact_feedback_message, ArtifactRevisionRef};
+
 // ── Transport ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

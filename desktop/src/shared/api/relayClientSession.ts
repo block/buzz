@@ -41,6 +41,7 @@ import { RelayLiveReqDrain } from "./relayLiveReqDrain";
 import { RelayChannelAccessRevocations } from "./relayChannelAccessRevocations";
 import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
 import { activateRateLimitIfSignalled } from "@/shared/api/relayRateLimitGate";
+import { RelayEventRejectedError } from "@/shared/api/relayEventRejection";
 import {
   fetchChunkedHistory,
   requestFirstEventGated,
@@ -1037,7 +1038,9 @@ export class RelayClient {
       // rejects an over-quota EVENT on the OK channel so this pending publish
       // can be settled at all. Unarmed, the send retries into the same quota.
       activateRateLimitIfSignalled(message);
-      pendingEvent.reject(new Error(message || "Relay rejected the event."));
+      pendingEvent.reject(
+        new RelayEventRejectedError(message || "Relay rejected the event."),
+      );
     }
   }
 

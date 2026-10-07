@@ -45,6 +45,8 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
+import { ReviewArtifactCard } from "@/features/review-canvas/ui/ReviewArtifactCard";
+import { parseReviewNotification } from "@/features/review-canvas/lib/reviewContract";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
@@ -300,6 +302,13 @@ export const MessageRow = React.memo(
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
       [message.tags],
+    );
+    // A kind-9 message carrying the Synaxis review tags also offers a card that
+    // opens the dedicated Review Canvas. Anything else renders as an ordinary
+    // message; the notification is never trusted beyond naming a revision.
+    const reviewNotification = React.useMemo(
+      () => parseReviewNotification(message),
+      [message],
     );
     const snapshotSharedBy = React.useMemo(
       () =>
@@ -687,6 +696,12 @@ export const MessageRow = React.memo(
       <>
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
+        {reviewNotification && channelId ? (
+          <ReviewArtifactCard
+            channelId={channelId}
+            notification={reviewNotification}
+          />
+        ) : null}
         {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}

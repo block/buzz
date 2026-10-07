@@ -8,6 +8,37 @@ pub struct SubmitEventResponse {
     pub message: String,
 }
 
+/// Why a signed-event submission did not complete, as far as the caller can
+/// tell what the relay did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitFailure {
+    /// The relay answered with an HTTP error. `message` is the relay's own
+    /// text rendered for the UI (`relay returned <status>: <reason>`).
+    Refused { status: u16, message: String },
+    /// Transport failure, malformed answer, or a 2xx that did not accept the
+    /// event: nothing is known about what the relay stored.
+    Unknown(String),
+}
+
+impl SubmitFailure {
+    /// The relay refused the event only because its `created_at` is outside
+    /// the relay's freshness window. The relay checks the window before it
+    /// stores anything, so such an event is certainly not stored.
+    pub fn is_stale_timestamp(&self) -> bool {
+        matches!(
+            self,
+            Self::Refused { status: 400, message }
+                if message.contains(buzz_core_pkg::artifact::STALE_EVENT_TIMESTAMP_REJECTION)
+        )
+    }
+
+    pub fn into_message(self) -> String {
+        match self {
+            Self::Refused { message, .. } | Self::Unknown(message) => message,
+        }
+    }
+}
+
 /// POST an already-signed event to an explicit relay with an explicit owner.
 ///
 /// Deferred/scoped publication uses this form so a workspace or identity
@@ -19,14 +50,31 @@ pub async fn submit_signed_event_at_with_keys(
     api_base_url: &str,
     keys: &nostr::Keys,
 ) -> Result<SubmitEventResponse, String> {
+    submit_signed_event_classified(event, state, api_base_url, keys)
+        .await
+        .map_err(SubmitFailure::into_message)
+}
+
+/// [`submit_signed_event_at_with_keys`], but a failure says whether the relay
+/// explicitly refused the event or nothing is known about what it did.
+pub async fn submit_signed_event_classified(
+    event: &nostr::Event,
+    state: &AppState,
+    api_base_url: &str,
+    keys: &nostr::Keys,
+) -> Result<SubmitEventResponse, SubmitFailure> {
     if event.pubkey != keys.public_key() {
-        return Err("signed event does not match the publishing identity".to_string());
+        return Err(SubmitFailure::Unknown(
+            "signed event does not match the publishing identity".to_string(),
+        ));
     }
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", api_base_url.trim_end_matches('/'));
     let body_bytes = event.as_json().into_bytes();
-    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")
+        .map_err(SubmitFailure::Unknown)?;
+    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)
+        .map_err(SubmitFailure::Unknown)?;
 
     let response = build_authenticated_relay_request(
         &state.http_client,
@@ -39,15 +87,24 @@ pub async fn submit_signed_event_at_with_keys(
     )
     .send()
     .await
-    .map_err(|e| classify_request_error(&e))?;
+    .map_err(|e| SubmitFailure::Unknown(classify_request_error(&e)))?;
 
     if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
+        let status = response.status().as_u16();
+        return Err(SubmitFailure::Refused {
+            status,
+            message: relay_error_message(response).await,
+        });
     }
 
-    let result: SubmitEventResponse = parse_json_response(response).await?;
+    let result: SubmitEventResponse = parse_json_response(response)
+        .await
+        .map_err(SubmitFailure::Unknown)?;
     if !result.accepted {
-        return Err(format!("relay rejected event: {}", result.message));
+        return Err(SubmitFailure::Unknown(format!(
+            "relay rejected event: {}",
+            result.message
+        )));
     }
 
     Ok(result)

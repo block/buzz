@@ -399,6 +399,9 @@ pub async fn get_channel_messages_before(
 mod event_batch;
 pub use event_batch::{get_event, get_events};
 
+mod artifact_feedback;
+pub use artifact_feedback::send_artifact_feedback_message;
+
 // ── Writes ──────────────────────────────────────────────────────────────────
 
 mod thread_ref;

@@ -78,6 +78,7 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "api_tokens",
     "archived_identities",
+    "artifact_feedback_wakes",
     "artifact_heads",
     "artifact_revisions",
     "audit_log",
@@ -133,6 +134,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "relay_invites",
     "delivery_log",
     "artifact_heads",
+    "artifact_feedback_wakes",
     "artifact_revisions",
     "events",
     "parameterized_event_watermarks",

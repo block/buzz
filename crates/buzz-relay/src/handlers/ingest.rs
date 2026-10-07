@@ -2446,12 +2446,46 @@ async fn ingest_event_inner(
         });
     }
 
+    // Lost-ACK recovery for a review-feedback wake: a resend of the exact wake
+    // the relay already recorded is acknowledged before the freshness check, so
+    // the stale timestamp frozen into that event never strands its retry.
+    if buzz_core::artifact::is_feedback_wake_candidate(&event)
+        && event.pubkey == *auth.pubkey()
+        && state
+            .db
+            .feedback_wake_event_accepted(
+                tenant.community(),
+                event.pubkey.to_bytes().as_slice(),
+                event.id.as_bytes(),
+            )
+            .await
+            .map_err(|e| IngestError::Internal(e.to_string()))?
+    {
+        emit(
+            tracer,
+            TraceAction::WriteDuplicate {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                channel: channel_label(
+                    extract_channel_id(&event)
+                        .ok_or_else(|| IngestError::Rejected("invalid: missing home".into()))?,
+                ),
+                claimed_community: claimed_community_from_event(&event),
+            },
+            state_for_request(tenant, auth.pubkey()),
+        );
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: "duplicate: feedback wake already recorded".into(),
+        });
+    }
+
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
         return Err(IngestError::Rejected(
-            "invalid: event timestamp too far from server time".into(),
+            buzz_core::artifact::STALE_EVENT_TIMESTAMP_REJECTION.into(),
         ));
     }
 
@@ -2904,6 +2938,20 @@ async fn ingest_event_inner(
         }
         return Ok(result);
     }
+
+    // A kind-9 message carrying a `feedback` tag is a review-feedback wake and
+    // must have the exact wake layout; it is admitted against the feedback
+    // revision it names at storage. Every other kind-9 path is unchanged, and
+    // all gates above (auth, scope, membership, archive, freshness) have
+    // already applied to it.
+    let feedback_wake = if buzz_core::artifact::is_feedback_wake_candidate(&event) {
+        Some(
+            buzz_core::artifact::validate_feedback_wake(&event)
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?,
+        )
+    } else {
+        None
+    };
 
     // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
     // `a` tag (addressable/parameterized-replaceable events like kind:30620).
@@ -3417,6 +3465,41 @@ async fn ingest_event_inner(
             }
             buzz_db::ChannelHeadWriteStatus::Inserted => (stored_event, true),
             buzz_db::ChannelHeadWriteStatus::Duplicate => (stored_event, false),
+        }
+    } else if let Some(wake) = feedback_wake.as_ref() {
+        // The wake is admitted against its recorded feedback revision and stored
+        // in one transaction; a repeat of the same wake, whatever its timestamp,
+        // stores and emits nothing.
+        let channel = channel_id.ok_or_else(|| {
+            IngestError::Rejected("invalid: channel-scoped events must include an h tag".into())
+        })?;
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        match state
+            .db
+            .accept_feedback_wake(tenant.community(), &event, channel, wake, thread_params)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        {
+            buzz_db::artifact::FeedbackWakeOutcome::Inserted(stored) => (stored, true),
+            buzz_db::artifact::FeedbackWakeOutcome::Duplicate => {
+                emit(
+                    tracer,
+                    TraceAction::WriteDuplicate {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(channel),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: "duplicate: feedback wake already recorded".into(),
+                });
+            }
+            buzz_db::artifact::FeedbackWakeOutcome::Rejected(reason) => {
+                return Err(IngestError::Rejected(format!("invalid: {reason}")));
+            }
         }
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
@@ -6562,6 +6645,405 @@ mod postgres_tests {
             Err(other) => panic!("a failed source lookup must be internal, got {other:?}"),
             Ok(_) => panic!("a failed source lookup must deny the move, got accepted"),
         }
+    }
+
+    /// A `synaxis.html-review` head belongs to its signer: through relay
+    /// admission another channel writer holding the exact `prev` can neither
+    /// update, delete, nor move it, while the signer advances it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn synaxis_review_head_is_signer_bound_through_relay_admission() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Tag};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+
+        let host = format!("review-signer-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let (adapter, writer) = (Keys::generate(), Keys::generate());
+        let [home, elsewhere] = [Uuid::new_v4(), Uuid::new_v4()];
+        for channel in [home, elsewhere] {
+            state
+                .db
+                .create_channel_with_id(
+                    community,
+                    channel,
+                    &format!("review-signer-{}", channel.simple()),
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    adapter.public_key().to_bytes().as_slice(),
+                    None,
+                )
+                .await
+                .expect("create channel");
+        }
+        state.membership_cache.insert(
+            (community, home, writer.public_key().to_bytes().to_vec()),
+            true,
+        );
+
+        let artifact = Uuid::new_v4().to_string();
+        let revision = |key: &Keys, op: &str, channel: Uuid, prev: Option<&Event>, tag: &str| {
+            let mut tags = vec![
+                vec!["ar".to_string(), "1".into()],
+                vec!["d".into(), artifact.clone()],
+                vec!["h".into(), channel.to_string()],
+                vec!["type".into(), "synaxis.html-review".into()],
+                vec!["op".into(), op.into()],
+            ];
+            if op != "delete" {
+                tags.push(vec!["title".into(), "Review".into()]);
+            }
+            tags.extend(prev.map(|p| vec!["prev".into(), p.id.to_hex()]));
+            let content = if op == "delete" { "" } else { tag };
+            EventBuilder::new(Kind::Custom(45010), content)
+                .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+                .sign_with_keys(key)
+                .expect("sign revision")
+        };
+        let auth = |key: &Keys| IngestAuth::Http {
+            pubkey: key.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let accept = |event: Event, key: Keys| {
+            let (state, tenant, auth) = (state.clone(), tenant.clone(), auth(&key));
+            async move { super::super::artifact::accept(&state, &tenant, &event, &auth).await }
+        };
+
+        let r1 = revision(&adapter, "create", home, None, "r1");
+        accept(r1.clone(), adapter.clone())
+            .await
+            .expect("the adapter creates the review");
+
+        for (op, channel) in [("update", home), ("delete", home), ("move", elsewhere)] {
+            let foreign = revision(&writer, op, channel, Some(&r1), "foreign");
+            match accept(foreign, writer.clone()).await {
+                Err(IngestError::Rejected(reason)) => assert!(
+                    reason.starts_with("invalid: a synaxis.html-review accepts only"),
+                    "{op}: {reason}"
+                ),
+                Err(other) => panic!("foreign {op} must be rejected, got {other:?}"),
+                Ok(_) => panic!("foreign {op} must be rejected, got accepted"),
+            }
+        }
+
+        // The refusals left the head at r1, so the signer's exact-prev update lands
+        // and the writer is then refused against the new head too.
+        let r2 = revision(&adapter, "update", home, Some(&r1), "r2");
+        assert!(
+            accept(r2.clone(), adapter.clone())
+                .await
+                .expect("the adapter advances its own review")
+                .accepted
+        );
+        let late = revision(&writer, "update", home, Some(&r2), "late");
+        assert!(matches!(
+            accept(late, writer.clone()).await,
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    /// A review-feedback wake refused for a stale frozen timestamp is retried
+    /// with a fresh one: the relay stores and emits at most one wake per
+    /// feedback revision, acknowledges every later attempt as a duplicate, and
+    /// admits no one but the feedback's author.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn review_feedback_wake_retry_with_a_fresh_timestamp_stores_one_wake() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Tag, Timestamp};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+
+        let host = format!("feedback-wake-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let (adapter, author, intruder) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let channel = Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                community,
+                channel,
+                &format!("feedback-wake-{}", channel.simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                adapter.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        for key in [&adapter, &author, &intruder] {
+            state.membership_cache.insert(
+                (community, channel, key.public_key().to_bytes().to_vec()),
+                true,
+            );
+        }
+
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+        let auth = |key: &Keys| IngestAuth::Http {
+            pubkey: key.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let submit = |event: Event, key: &Keys| {
+            let (state, tracer, tenant, auth) =
+                (state.clone(), tracer.clone(), tenant.clone(), auth(key));
+            async move { ingest_event_inner(&state, &tracer, &tenant, event, auth).await }
+        };
+        let now = chrono::Utc::now().timestamp() as u64;
+        let build = |key: &Keys, kind: u16, content: String, tags: Vec<Vec<String>>, at: u64| {
+            EventBuilder::new(Kind::Custom(kind), content)
+                .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+                .custom_created_at(Timestamp::from(at))
+                .sign_with_keys(key)
+                .expect("sign event")
+        };
+        let tag = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let home = channel.to_string();
+        let digest = "2".repeat(64);
+
+        // The conversation the review lives in. This ordinary kind-9 message
+        // carries an `artifact` tag (the factory's review-ready notification)
+        // but no `feedback` tag, so it takes the unchanged kind-9 path.
+        let review_d = Uuid::new_v4().to_string();
+        let root = build(
+            &adapter,
+            9,
+            "Review is ready".into(),
+            vec![tag(&["h", &home]), tag(&["artifact", &review_d, &digest])],
+            now,
+        );
+        submit(root.clone(), &adapter)
+            .await
+            .expect("an ordinary kind-9 message is untouched");
+
+        let review = build(
+            &adapter,
+            45010,
+            serde_json::json!({
+                "schema": "synaxis.html-review/v1",
+                "artifact": { "id": "01SYN", "payload_digest": digest },
+                "presentation": { "blob_sha256": digest },
+            })
+            .to_string(),
+            vec![
+                tag(&["ar", "1"]),
+                tag(&["d", &review_d]),
+                tag(&["h", &home]),
+                tag(&["type", "synaxis.html-review"]),
+                tag(&["op", "create"]),
+                tag(&["title", "Review"]),
+            ],
+            now,
+        );
+        submit(review.clone(), &adapter)
+            .await
+            .expect("the adapter creates the review");
+        let feedback_d = Uuid::new_v4().to_string();
+        let feedback = build(
+            &author,
+            45010,
+            serde_json::json!({
+                "schema": "synaxis.artifact-feedback/v1",
+                "reviewed": {
+                    "buzz_artifact_id": review_d,
+                    "buzz_revision_event_id": review.id.to_hex(),
+                    "synaxis_artifact_id": "01SYN",
+                    "payload_digest": digest,
+                },
+                "target": { "review_id": "checkout.primary-action", "title": "Primary" },
+                "request": "Move this above the summary.",
+            })
+            .to_string(),
+            vec![
+                tag(&["ar", "1"]),
+                tag(&["d", &feedback_d]),
+                tag(&["h", &home]),
+                tag(&["type", "synaxis.artifact-feedback"]),
+                tag(&["title", "Feedback"]),
+                tag(&["op", "create"]),
+                tag(&["target", "checkout.primary-action"]),
+                tag(&["target_revision", &review.id.to_hex()]),
+                tag(&["synaxis_artifact", "01SYN"]),
+                tag(&["payload", &digest]),
+            ],
+            now,
+        );
+        submit(feedback.clone(), &author)
+            .await
+            .expect("the author's feedback revision is accepted");
+
+        let agent = Keys::generate().public_key().to_hex();
+        let wake_tags = |feedback_ref: &[&str]| {
+            vec![
+                tag(&["h", &home]),
+                tag(&["e", &root.id.to_hex(), "", "reply"]),
+                tag(&["p", &agent]),
+                tag(feedback_ref),
+                tag(&["artifact", &review_d, &review.id.to_hex()]),
+            ]
+        };
+        let feedback_rev = feedback.id.to_hex();
+        let feedback_ref = ["feedback", feedback_d.as_str(), feedback_rev.as_str()];
+        let wake = |key: &Keys, at: u64| {
+            build(
+                key,
+                9,
+                "Please address the feedback.".into(),
+                wake_tags(&feedback_ref),
+                at,
+            )
+        };
+        let marker = serde_json::json!([["feedback", feedback_d, feedback_rev]]);
+        async fn stored_wakes(
+            pool: &sqlx::PgPool,
+            community: CommunityId,
+            marker: &serde_json::Value,
+        ) -> i64 {
+            sqlx::query_scalar(
+                "SELECT count(*) FROM events WHERE community_id = $1 AND kind = 9 AND tags @> $2",
+            )
+            .bind(community.as_uuid())
+            .bind(marker)
+            .fetch_one(pool)
+            .await
+            .expect("count stored wakes")
+        }
+        let duplicate = "duplicate: feedback wake already recorded";
+
+        // W1 carries a timestamp frozen more than 900 s ago: refused by the
+        // freshness window, and nothing is stored.
+        let w1 = wake(&author, now - 1000);
+        match submit(w1.clone(), &author).await {
+            Err(IngestError::Rejected(reason)) => {
+                assert_eq!(reason, buzz_core::artifact::STALE_EVENT_TIMESTAMP_REJECTION)
+            }
+            Err(other) => panic!("a stale first wake must be rejected as stale, got {other:?}"),
+            Ok(_) => panic!("a stale first wake must be rejected as stale, got accepted"),
+        }
+        assert_eq!(stored_wakes(&pool, community, &marker).await, 0);
+
+        // W2 is the same wake with a fresh timestamp.
+        let w2 = wake(&author, now);
+        let accepted = submit(w2.clone(), &author)
+            .await
+            .expect("the fresh retry is admitted");
+        assert!(accepted.accepted);
+        assert_eq!(accepted.message, "");
+        assert_eq!(stored_wakes(&pool, community, &marker).await, 1);
+
+        // W3 differs only in its timestamp, hence its event ID: a duplicate.
+        let w3 = wake(&author, now + 1);
+        assert_ne!(w3.id, w2.id);
+        let again = submit(w3, &author)
+            .await
+            .expect("another fresh retry is acknowledged");
+        assert!(again.accepted);
+        assert_eq!(again.message, duplicate);
+        // A lost ACK resends W2 itself.
+        let resent = submit(w2.clone(), &author)
+            .await
+            .expect("the recorded wake is acknowledged");
+        assert!(resent.accepted);
+        assert_eq!(resent.message, duplicate);
+        assert_eq!(
+            stored_wakes(&pool, community, &marker).await,
+            1,
+            "exactly one wake per feedback"
+        );
+
+        // Once its timestamp has aged out of the window, the recorded wake is
+        // still acknowledged ahead of the freshness check. Recording W1, the
+        // wake refused above, in the ledger under another feedback revision
+        // stands in for such an old record.
+        sqlx::query(
+            "INSERT INTO artifact_feedback_wakes \
+             (community_id, author_pubkey, feedback_event_id, wake_event_id, channel_id, \
+              feedback_artifact_id, reviewed_artifact_id, reviewed_event_id, root_event_id, \
+              parent_event_id, agent_pubkey) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $3, $3, $3, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(author.public_key().to_bytes().as_slice())
+        .bind(Keys::generate().public_key().to_bytes().as_slice())
+        .bind(w1.id.as_bytes().as_slice())
+        .bind(channel)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("record an aged wake");
+        let acknowledged = submit(w1, &author)
+            .await
+            .expect("a recorded wake is acknowledged even after it ages out");
+        assert!(acknowledged.accepted);
+        assert_eq!(acknowledged.message, duplicate);
+
+        // Only the feedback's author wakes for it, and the refusal discloses
+        // nothing about the feedback revision.
+        match submit(wake(&intruder, now), &intruder).await {
+            Err(IngestError::Rejected(reason)) => assert_eq!(
+                reason,
+                "invalid: wake names no accepted feedback revision of this author"
+            ),
+            Err(other) => panic!("a foreign wake must be rejected, got {other:?}"),
+            Ok(_) => panic!("a foreign wake must be rejected, got accepted"),
+        }
+
+        // A candidate with a malformed feedback tag is refused before storage.
+        let malformed = build(
+            &author,
+            9,
+            "Please address the feedback.".into(),
+            wake_tags(&["feedback", "not-a-uuid", &feedback.id.to_hex()]),
+            now,
+        );
+        match submit(malformed, &author).await {
+            Err(IngestError::Rejected(reason)) => {
+                assert!(reason.starts_with("invalid: feedback wake"), "{reason}")
+            }
+            Err(other) => panic!("a malformed wake must be rejected, got {other:?}"),
+            Ok(_) => panic!("a malformed wake must be rejected, got accepted"),
+        }
+
+        // The ordinary message, the stale W1, and the refused wakes left only
+        // the one recorded wake stored for this feedback revision.
+        assert_eq!(stored_wakes(&pool, community, &marker).await, 1);
+        let ordinary: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(root.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count ordinary message");
+        assert_eq!(ordinary, 1);
     }
 
     /// End-to-end CAS dispatch wiring: a tagged write inserts, a stale same-head

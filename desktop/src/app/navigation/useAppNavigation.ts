@@ -8,6 +8,7 @@ import {
 
 import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
+import type { ReviewRouteSearch } from "@/features/review-canvas/lib/reviewRoute";
 import {
   allowNavigation,
   type GuardedNavigation,
@@ -388,6 +389,24 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goReview = React.useCallback(
+    (
+      channelId: string,
+      artifactId: string,
+      search: ReviewRouteSearch,
+      behavior?: NavigationBehavior,
+    ) =>
+      commitNavigation(
+        {
+          to: "/channels/$channelId/review/$artifactId",
+          params: { channelId, artifactId },
+          search,
+        },
+        { ...behavior, resetScroll: false },
+      ),
+    [commitNavigation],
+  );
+
   const goSettings = React.useCallback(
     (section?: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -470,6 +489,7 @@ export function useAppNavigation() {
     goProject,
     goProjects,
     goPulse,
+    goReview,
     goProfile,
     goSettings,
     goWorkflow,

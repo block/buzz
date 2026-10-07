@@ -322,3 +322,18 @@ test("resolveSnapshotCard: .TEAM.PNG classifies as team snapshot card", () => {
   assert.ok(card !== null);
   assert.equal(card.snapshotKind, "team");
 });
+
+// The Review Canvas is opened only from a tagged review notification. A plain
+// HTML attachment must remain an inert download card, never an inline or
+// frame-rendered document, whatever its filename or MIME claims.
+test("resolveFileCard: a generic HTML attachment stays a download-only file card", () => {
+  const url = `https://relay.example/media/${"b".repeat(64)}.html`;
+  assert.deepEqual(
+    resolveFileCard(
+      { m: "text/html", size: 4096, filename: "synaxis-review.html" },
+      url,
+      "",
+    ),
+    { href: url, filename: "synaxis-review.html", size: 4096 },
+  );
+});
