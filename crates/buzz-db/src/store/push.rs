@@ -37,13 +37,19 @@ async fn begin_operation_transaction(
 /// sees the committed lease or strictly precedes the activation (in which case
 /// no wake was owed). Distinct key domain from the audit lock and the lease
 /// address/author locks.
-pub(crate) const PUSH_GATE_LOCK_NAMESPACE: &str = "buzz_push_gate:";
+const PUSH_GATE_LOCK_NAMESPACE: &str = "buzz_push_gate:";
+
+/// The push-gate advisory lock key for `community`. Both sides of the lock
+/// protocol build it here, so the SHARED and EXCLUSIVE keys cannot drift.
+pub(crate) fn push_gate_lock_key(community: CommunityId) -> String {
+    format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid())
+}
 
 async fn acquire_push_gate_lock(tx: &mut sqlx::PgConnection, community: CommunityId) -> Result<()> {
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid()))
+            .bind(push_gate_lock_key(community))
             .execute(&mut *tx),
     )
     .await?;

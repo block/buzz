@@ -33,10 +33,6 @@ pub(crate) const PUSH_MATCH_KINDS: [i32; 4] = [9, 40002, 45001, 45003];
 /// Kind 9007 creates the channel and initializes its deadline itself.
 const KIND_CHANNEL_CREATE: i32 = 9007;
 
-/// SQLSTATE `query_canceled`. The TTL trigger's `EXCEPTION WHEN OTHERS` does
-/// not catch it, so a cancelled refresh has always rejected the event.
-const SQLSTATE_QUERY_CANCELED: &str = "57014";
-
 /// SQLSTATE `lock_not_available`, raised when `lock_timeout` expires.
 const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 
@@ -80,14 +76,13 @@ pub(crate) async fn enqueue_push_match(
     if !PUSH_MATCH_KINDS.contains(&kind) {
         return Ok(());
     }
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
-        .bind(format!(
-            "{}{}",
-            crate::push::PUSH_GATE_LOCK_NAMESPACE,
-            community.as_uuid()
-        ))
-        .execute(&mut *conn)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::PushGate,
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
+            .bind(crate::push::push_gate_lock_key(community))
+            .execute(&mut *conn),
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO push_match_queue (community_id, event_id) \
          SELECT $1, $2 \
@@ -106,16 +101,18 @@ pub(crate) async fn enqueue_push_match(
     Ok(())
 }
 
-/// Whether an event in `channel_id` of `kind` refreshes the channel's TTL.
-pub(crate) fn refreshes_channel_ttl(channel_id: Option<Uuid>, kind: i32) -> Option<Uuid> {
+/// The channel whose TTL an event of `kind` in `channel_id` refreshes, if any.
+pub(crate) fn ttl_refresh_channel(channel_id: Option<Uuid>, kind: i32) -> Option<Uuid> {
     channel_id.filter(|_| kind != KIND_CHANNEL_CREATE)
 }
 
 /// Refresh the TTL deadline of every channel that received an event in this
-/// transaction. [`AdmittedTx::commit`] calls this as its last statement
-/// before COMMIT, which keeps the deferred-trigger timing from migration
-/// 0024: the deadline is computed at commit, and the channel row is locked
-/// only for the commit itself.
+/// transaction. [`AdmittedTx::commit`] calls this as its last work before
+/// COMMIT, which keeps the deferred-trigger timing from migration 0024: the
+/// deadline is computed at commit. An ephemeral channel's row lock, taken by
+/// the UPDATE, is held through the remaining refreshes and the COMMIT round
+/// trip; the trigger held it only inside COMMIT. A permanent channel's row is
+/// never locked.
 ///
 /// Channels are refreshed in sorted order, so two transactions that touch the
 /// same channels cannot deadlock on the shared locks against an exclusive
@@ -139,8 +136,9 @@ pub(crate) async fn refresh_channel_ttls(
                     .await?;
             }
             Err(error) => {
-                let sqlstate = sqlstate(&error);
-                if sqlstate.as_deref() == Some(SQLSTATE_QUERY_CANCELED) {
+                // plpgsql `WHEN OTHERS` never caught `query_canceled`, so a
+                // cancelled refresh has always rejected the event.
+                if error.is_statement_cancelled() {
                     return Err(error);
                 }
                 sqlx::query("ROLLBACK TO SAVEPOINT channel_ttl_refresh")
@@ -149,7 +147,7 @@ pub(crate) async fn refresh_channel_ttls(
                 sqlx::query("RELEASE SAVEPOINT channel_ttl_refresh")
                     .execute(&mut *conn)
                     .await?;
-                let reason = if sqlstate.as_deref() == Some(SQLSTATE_LOCK_NOT_AVAILABLE) {
+                let reason = if sqlstate(&error).as_deref() == Some(SQLSTATE_LOCK_NOT_AVAILABLE) {
                     "lock_timeout"
                 } else {
                     "error"
@@ -179,22 +177,12 @@ async fn refresh_channel_ttl(
     // SHARED here, EXCLUSIVE in `update_channel` for TTL transitions: the same
     // total order the 0022 row lock gave, without serializing hot channels.
     sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
-        .bind(format!(
-            "buzz_channel_ttl:{}:{channel}",
-            community.as_uuid()
-        ))
+        .bind(crate::channel::channel_ttl_lock_key(community, channel))
         .execute(&mut *conn)
         .await?;
-    // Read first so a permanent channel's row is never locked (migration 0024).
-    let ttl_seconds: Option<Option<i32>> =
-        sqlx::query_scalar("SELECT ttl_seconds FROM channels WHERE community_id = $1 AND id = $2")
-            .bind(community.as_uuid())
-            .bind(channel)
-            .fetch_optional(&mut *conn)
-            .await?;
-    if ttl_seconds.flatten().is_none() {
-        return Ok(());
-    }
+    // A separate statement, so its snapshot is taken after the lock is
+    // granted. `ttl_seconds IS NOT NULL` filters a permanent channel before
+    // any tuple lock is taken, so its row is never locked (migration 0024).
     sqlx::query(
         "UPDATE channels \
          SET ttl_deadline = clock_timestamp() + make_interval(secs => ttl_seconds) \

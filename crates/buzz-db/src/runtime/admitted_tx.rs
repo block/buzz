@@ -124,8 +124,7 @@ impl AdmittedTx {
     /// Record that an event committed with this transaction belongs to
     /// `channel_id`, so [`AdmittedTx::commit`] refreshes the channel's TTL.
     pub(crate) fn record_channel_event(&mut self, channel_id: Option<Uuid>, kind: i32) {
-        if let Some(channel) =
-            crate::store::event_follow_up::refreshes_channel_ttl(channel_id, kind)
+        if let Some(channel) = crate::store::event_follow_up::ttl_refresh_channel(channel_id, kind)
         {
             self.ttl_refresh_channels.insert(channel);
         }

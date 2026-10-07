@@ -1413,16 +1413,112 @@ const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
     "pub async fn verify_channel_roster_fence_behavior(",
 ];
 
+/// `source` with every `#[cfg(test)]` item removed, wherever it sits in the
+/// file. Each item runs to the `;` that ends it or to the brace that closes
+/// its body. Braces inside string, raw string, and char literals and in line
+/// comments are not counted. Unlike cutting the file at the first
+/// `#[cfg(test)]`, this keeps production code that follows a test-only item.
+fn strip_cfg_test_items(source: &str) -> String {
+    const MARKER: &str = "#[cfg(test)]";
+    let mut kept = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find(MARKER) {
+        kept.push_str(&rest[..at]);
+        let item = &rest[at + MARKER.len()..];
+        rest = &item[cfg_test_item_len(item)..];
+    }
+    kept.push_str(rest);
+    kept
+}
+
+fn cfg_test_item_len(item: &str) -> usize {
+    let bytes = item.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
+                && !bytes
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|prev| prev.is_ascii_alphanumeric() || *prev == b'_') =>
+            {
+                let hashes = bytes[index + 1..]
+                    .iter()
+                    .take_while(|byte| **byte == b'#')
+                    .count();
+                if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                    let close = format!("\"{}", "#".repeat(hashes));
+                    let body = index + 2 + hashes;
+                    index = item[body..]
+                        .find(&close)
+                        .map_or(bytes.len(), |offset| body + offset + close.len());
+                    continue;
+                }
+            }
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+            }
+            // A char literal such as '{', '"', or '\''. A lifetime has no
+            // closing quote and falls through.
+            b'\''
+                if bytes.get(index + 2) == Some(&b'\'') && bytes.get(index + 1) != Some(&b'\\') =>
+            {
+                index += 3;
+                continue;
+            }
+            b'\''
+                if bytes.get(index + 1) == Some(&b'\\') && bytes.get(index + 3) == Some(&b'\'') =>
+            {
+                index += 4;
+                continue;
+            }
+            b';' if depth == 0 => return index + 1,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    item.len()
+}
+
 /// Whether `source` inserts into `events` itself (not `event_mentions` or any
-/// other `events_*` table).
+/// other `events_*` table), in any letter case, across line breaks and string
+/// continuations, and with or without a `public.` schema prefix.
 fn inserts_events_row(source: &str) -> bool {
-    source
-        .match_indices("INSERT INTO events")
-        .any(|(index, marker)| {
-            source[index + marker.len()..]
-                .chars()
-                .next()
-                .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
+    let mut normalized = String::with_capacity(source.len());
+    for ch in source.chars() {
+        if ch.is_whitespace() || ch == '\\' {
+            if !normalized.ends_with(' ') {
+                normalized.push(' ');
+            }
+        } else {
+            normalized.push(ch.to_ascii_lowercase());
+        }
+    }
+    ["insert into events", "insert into public.events"]
+        .iter()
+        .any(|marker| {
+            normalized.match_indices(marker).any(|(index, marker)| {
+                normalized[index + marker.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
+            })
         })
 }
 
@@ -1452,7 +1548,7 @@ fn event_insert_follow_up_violations(production_source: &str) -> Vec<String> {
 
 #[test]
 fn event_insert_follow_up_policy_rejects_writers_without_the_hook() {
-    let source = r#"
+    let source = r##"
 pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
         .execute(&mut **tx)
@@ -1500,13 +1596,50 @@ pub async fn verify_floor_guard_behavior(pool: &PgPool) {
         .await
         .expect("probe");
 }
-"#;
+pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {
+    sqlx::query("insert into
+        public.events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \
+                 events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+#[cfg(test)]
+fn test_only_helper() -> (&'static str, char, &'static str, char) {
+    // an unbalanced { in a comment
+    ("{", '{', r#"}"} {"#, '"')
+}
+pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+#[cfg(test)]
+mod tests {
+    async fn test_writer(pool: &PgPool) {
+        sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+            .execute(pool)
+            .await
+            .expect("fixture");
+    }
+}
+"##;
 
     assert_eq!(
-        event_insert_follow_up_violations(source),
+        event_insert_follow_up_violations(&strip_cfg_test_items(source)),
         [
             "pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
     );
@@ -1531,25 +1664,28 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
         .parent()
         .expect("crate lives under crates/");
     let mut files = Vec::new();
-    for crate_name in ["buzz-db", "buzz-relay", "buzz-admin"] {
-        collect_rs_files(&crates_root.join(crate_name).join("src"), &mut files);
+    for entry in std::fs::read_dir(crates_root).expect("read crates directory") {
+        let src = entry.expect("read crates entry").path().join("src");
+        if src.is_dir() {
+            collect_rs_files(&src, &mut files);
+        }
     }
 
     let mut hooked_writers = 0usize;
     let mut violations = Vec::new();
     for path in files {
         let source = std::fs::read_to_string(&path).expect("read source file");
-        let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
-        if !inserts_events_row(production) {
+        let production = strip_cfg_test_items(&source);
+        if !inserts_events_row(&production) {
             continue;
         }
-        for function_source in function_slices(production) {
+        for function_source in function_slices(&production) {
             if inserts_events_row(function_source) && runs_event_follow_ups(function_source) {
                 hooked_writers += 1;
             }
         }
         violations.extend(
-            event_insert_follow_up_violations(production)
+            event_insert_follow_up_violations(&production)
                 .into_iter()
                 .map(|header| format!("{}: {header}", path.display())),
         );

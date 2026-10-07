@@ -3,6 +3,7 @@ mod postgres_tests {
     use buzz_db::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
     use buzz_db::{event, migration, push, AdmittedTx, Db, DbConfig, DbError};
     use chrono::{DateTime, Utc};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
     use nostr::{Event, EventBuilder, Keys, Kind, Tag};
     use sqlx::PgPool;
     use std::time::Duration;
@@ -134,6 +135,28 @@ mod postgres_tests {
         .fetch_one(pool)
         .await
         .expect("reset disposable channel deadline")
+    }
+
+    /// `buzz_db_channel_ttl_refresh_failures_total` by `reason` label.
+    fn ttl_refresh_failures(snapshotter: &Snapshotter) -> Vec<(String, u64)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_channel_ttl_refresh_failures_total")
+            .map(|(key, _, _, value)| {
+                let reason = key
+                    .key()
+                    .labels()
+                    .find(|label| label.key() == "reason")
+                    .map(|label| label.value().to_owned())
+                    .unwrap_or_default();
+                let DebugValue::Counter(count) = value else {
+                    panic!("TTL refresh failures must be a counter");
+                };
+                (reason, count)
+            })
+            .collect()
     }
 
     async fn begin_caller_owned_event_transaction(db: &Db, community: CommunityId) -> AdmittedTx {
@@ -546,10 +569,44 @@ mod postgres_tests {
                 .expect("insert while TTL lock held")
                 .1
         );
-        timeout(Duration::from_secs(5), locked_tx.commit())
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        {
+            let _local = metrics::set_default_local_recorder(&recorder);
+            timeout(Duration::from_secs(5), locked_tx.commit())
+                .await
+                .expect("commit must not hang on TTL lock")
+                .expect("TTL warning must not abort event commit");
+        }
+        assert_eq!(
+            ttl_refresh_failures(&snapshotter),
+            [("lock_timeout".to_owned(), 1)],
+            "a swallowed TTL refresh failure must be counted once, by reason"
+        );
+
+        // A cancelled statement is not swallowed: plpgsql `WHEN OTHERS` never
+        // caught 57014, so the event is rejected. Only the app-only arm
+        // discriminates; with the trigger present, its own wait at COMMIT is
+        // cancelled too.
+        let cancelled_event = signed_event(&keys, 9, "ttl-statement-cancel");
+        let mut cancelled_tx = begin_caller_owned_event_transaction(&db, community).await;
+        sqlx::query("SET LOCAL statement_timeout = '200ms'")
+            .execute(&mut *cancelled_tx)
+            .await
+            .expect("bound TTL statement");
+        assert!(
+            event::insert_event_in_transaction(&mut cancelled_tx, &cancelled_event, Some(channel))
+                .await
+                .expect("insert while TTL lock held")
+                .1
+        );
+        let cancel_error = timeout(Duration::from_secs(5), cancelled_tx.commit())
             .await
             .expect("commit must not hang on TTL lock")
-            .expect("TTL warning must not abort event commit");
+            .expect_err("a cancelled TTL refresh must reject the event");
+        assert_sqlstate(&cancel_error, "57014");
+        assert_eq!(event_count(pool, community, &cancelled_event).await, 0);
+        assert_eq!(match_count(pool, community, &cancelled_event).await, 0);
         assert_eq!(
             deadline(pool, community, channel).await,
             before_lock_timeout
