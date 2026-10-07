@@ -4831,6 +4831,7 @@ pub(crate) mod postgres_tests {
         pubkey_hex: &str,
         body: &[u8],
     ) -> (axum::http::StatusCode, String) {
+        let _tracing = crate::test_support::tracing_dispatch_lock();
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let make_writer = CapturingMakeWriter {
             buf: Arc::clone(&buf),

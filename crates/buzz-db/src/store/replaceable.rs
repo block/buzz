@@ -1871,4 +1871,484 @@ mod postgres_tests {
             assert_ne!(leaked.as_deref(), Some("on"));
         }
     }
+
+    /// NIP-09 deletion of a retention-free coordinate (NIP-RS read state, mesh
+    /// status) is physical in application code, so it holds on desired-state
+    /// databases that never installed the migration 0009/0019 purge triggers.
+    /// Ordinary addressable events, and look-alikes that fail classification,
+    /// keep the soft-delete contract.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip09_deletion_purges_retention_free_rows_and_mentions() {
+        assert_nip09_deletion_purges_retention_free_rows_and_mentions(false).await;
+    }
+
+    /// The same contract on a migration-built database, where the 0009/0011/
+    /// 0019 purge and hard-delete fence triggers are still installed. Each row
+    /// shape is also soft-deleted the way a pre-0009 writer would, so the
+    /// table proves the app classification agrees with the triggers.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_nip09_deletion_purges_retention_free_rows_and_mentions() {
+        assert_nip09_deletion_purges_retention_free_rows_and_mentions(true).await;
+    }
+
+    async fn assert_nip09_deletion_purges_retention_free_rows_and_mentions(migration: bool) {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Delete {
+            Coordinate,
+            Id,
+        }
+
+        let db = setup_db().await;
+        let triggers_installed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_trigger \
+             WHERE tgname = 'trg_events_purge_soft_deleted_nip_rs')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect purge trigger");
+        assert_eq!(
+            triggers_installed, migration,
+            "schema mode must match the test variant (run through the Postgres wrapper)"
+        );
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let nip_rs = buzz_core::kind::KIND_READ_STATE as u16;
+        let mesh = buzz_core::kind::KIND_BOOKMARK_SET as u16;
+        let read_state_d = format!("read-state:{}", "b".repeat(32));
+        let mesh_d = "buzz-mesh-member-status:purge-test".to_string();
+        let tag = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let t_read_state = tag(&["t", "read-state"]);
+        let k_mesh = tag(&["k", "buzz-mesh-status"]);
+        // (label, kind, column d_tag, tags, physically purged)
+        type Case = (&'static str, u16, String, Vec<Vec<String>>, bool);
+        let cases: Vec<Case> = vec![
+            (
+                "nip-rs",
+                nip_rs,
+                read_state_d.clone(),
+                vec![tag(&["d", &read_state_d]), t_read_state.clone()],
+                true,
+            ),
+            (
+                "nip-rs without t tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![tag(&["d", &read_state_d])],
+                false,
+            ),
+            (
+                "nip-rs uppercase hex slot",
+                nip_rs,
+                format!("read-state:{}", "B".repeat(32)),
+                vec![
+                    tag(&["d", &format!("read-state:{}", "B".repeat(32))]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs 31-char slot",
+                nip_rs,
+                format!("read-state:{}", "b".repeat(31)),
+                vec![
+                    tag(&["d", &format!("read-state:{}", "b".repeat(31))]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs duplicate d tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &read_state_d]),
+                    tag(&["d", &read_state_d]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs duplicate t tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &read_state_d]),
+                    t_read_state.clone(),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs d tag differs from column",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &format!("read-state:{}", "c".repeat(32))]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "mesh-status",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), k_mesh.clone()],
+                true,
+            ),
+            (
+                // Containment semantics (`tags @>`), shared by trigger and app.
+                "mesh-status k tag with extra element",
+                mesh,
+                mesh_d.clone(),
+                vec![
+                    tag(&["d", &mesh_d]),
+                    tag(&["k", "buzz-mesh-status", "extra"]),
+                ],
+                true,
+            ),
+            (
+                "mesh-status wrong d prefix",
+                mesh,
+                "buzz-mesh-member:purge-test".into(),
+                vec![tag(&["d", "buzz-mesh-member:purge-test"]), k_mesh.clone()],
+                false,
+            ),
+            (
+                "mesh-status without k tag",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d])],
+                false,
+            ),
+            (
+                "mesh-status wrong k value",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), tag(&["k", "buzz-mesh-other"])],
+                false,
+            ),
+            (
+                "ordinary addressable",
+                buzz_core::kind::KIND_PROJECT as u16,
+                "retained-project".into(),
+                vec![tag(&["d", "retained-project"])],
+                false,
+            ),
+        ];
+
+        // Store one event of this shape with one mention; return
+        // (keys, id, created_at secs).
+        let store = |label: &'static str, kind: u16, d_tag: String, tags: Vec<Vec<String>>| {
+            let db = &db;
+            async move {
+                let keys = Keys::generate();
+                let created_at = Timestamp::now().as_secs();
+                let event = EventBuilder::new(Kind::Custom(kind), label)
+                    .tags(
+                        tags.iter()
+                            .map(|tag| Tag::parse(tag.clone()).expect("tag"))
+                            .collect::<Vec<_>>(),
+                    )
+                    .custom_created_at(Timestamp::from(created_at))
+                    .sign_with_keys(&keys)
+                    .expect("sign event");
+                assert!(
+                    db.replace_parameterized_event(community, &event, &d_tag, None)
+                        .await
+                        .expect("store event")
+                        .1,
+                    "{label}: event must be stored"
+                );
+                let id = event.id.as_bytes().to_vec();
+                sqlx::query(
+                    "INSERT INTO event_mentions \
+                     (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+                     SELECT community_id, $3, id, created_at, NULL, kind \
+                     FROM events WHERE community_id = $1 AND id = $2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .bind("c".repeat(64))
+                .execute(&db.pool)
+                .await
+                .expect("index mention");
+                (keys, id, created_at)
+            }
+        };
+        // (event rows, live event rows, mention rows) for one id.
+        let state = |id: Vec<u8>| {
+            let pool = db.pool.clone();
+            async move {
+                let (rows, live): (i64, i64) = sqlx::query_as(
+                    "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) \
+                     FROM events WHERE community_id=$1 AND id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("count event rows");
+                let mentions: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("count mentions");
+                (rows, live, mentions)
+            }
+        };
+        let expected = |purged: bool| -> (i64, i64, i64) {
+            if purged {
+                (0, 0, 0)
+            } else {
+                (1, 0, 1)
+            }
+        };
+
+        for (label, kind, d_tag, tags, purged) in cases {
+            if migration {
+                // Trigger half of the parity table: a pre-0009 writer's plain
+                // soft delete, classified only by the 0009/0011/0019 triggers.
+                let (_, id, _) = store(label, kind, d_tag.clone(), tags.clone()).await;
+                sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id=$1 AND id=$2")
+                    .bind(community.as_uuid())
+                    .bind(&id)
+                    .execute(&db.pool)
+                    .await
+                    .expect("legacy soft delete");
+                assert_eq!(
+                    state(id).await,
+                    expected(purged),
+                    "{label}: trigger classification"
+                );
+            }
+
+            for mode in [Delete::Coordinate, Delete::Id] {
+                let (keys, id, created_at) = store(label, kind, d_tag.clone(), tags.clone()).await;
+                let delete = || async {
+                    match mode {
+                        Delete::Coordinate => event::soft_delete_by_coordinate(
+                            &db.pool,
+                            community,
+                            i32::from(kind),
+                            &keys.public_key().to_bytes(),
+                            &d_tag,
+                            (created_at + 1) as i64,
+                        )
+                        .await
+                        .expect("coordinate delete"),
+                        Delete::Id => event::soft_delete_event_and_update_thread(
+                            &db.pool, community, &id, None, None,
+                        )
+                        .await
+                        .expect("id delete"),
+                    }
+                };
+                assert!(
+                    delete().await,
+                    "{label}/{mode:?}: deletion must report success"
+                );
+                assert_eq!(
+                    state(id.clone()).await,
+                    expected(purged),
+                    "{label}/{mode:?}: app classification"
+                );
+                assert!(
+                    !delete().await,
+                    "{label}/{mode:?}: repeated deletion is a no-op"
+                );
+            }
+        }
+
+        // A mesh-status-shaped row whose `d_tag` column was never backfilled:
+        // `kind = 30003 AND NULL LIKE … AND tags @> …` makes the purge
+        // predicate NULL (a read-state row cannot: its tag/column EXISTS is
+        // false), which the triggers treat as false. The id path must still
+        // soft-delete it (the `COALESCE` in the generic soft delete), not
+        // silently skip it. Coordinate deletes key on `d_tag`, so only the id
+        // path can reach this row.
+        let null_d_tag_row = || async {
+            let (_, id, _) = store(
+                "mesh-status with NULL d_tag column",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), k_mesh.clone()],
+            )
+            .await;
+            sqlx::query("UPDATE events SET d_tag = NULL WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(&id)
+                .execute(&db.pool)
+                .await
+                .expect("clear d_tag column");
+            id
+        };
+        if migration {
+            let id = null_d_tag_row().await;
+            sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(&id)
+                .execute(&db.pool)
+                .await
+                .expect("legacy soft delete");
+            assert_eq!(
+                state(id).await,
+                expected(false),
+                "NULL d_tag: trigger classification"
+            );
+        }
+        let id = null_d_tag_row().await;
+        assert!(
+            event::soft_delete_event_and_update_thread(&db.pool, community, &id, None, None)
+                .await
+                .expect("id delete"),
+            "NULL d_tag/Id: deletion must report success"
+        );
+        assert_eq!(
+            state(id).await,
+            expected(false),
+            "NULL d_tag/Id: app classification"
+        );
+    }
+
+    /// A coordinate deletion racing a NIP-RS replacement must never leave a
+    /// soft-deleted read-state row behind. The purge waits on the old head's
+    /// row lock; the replacement commits a newer head that the purge's snapshot
+    /// cannot see; the generic soft delete then runs on a fresh snapshot and
+    /// must spare that head rather than soft-delete it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn coordinate_deletion_racing_nip_rs_replacement_never_soft_deletes_read_state() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("read-state:{}", "d".repeat(32));
+        let created_at = Timestamp::now().as_secs();
+        let old_head = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "old head",
+        )
+        .tags([
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ])
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(&keys)
+        .expect("sign old head");
+        assert!(
+            db.replace_parameterized_event(community, &old_head, &d_tag, None)
+                .await
+                .expect("store old head")
+                .1
+        );
+        let old_id = old_head.id.as_bytes().to_vec();
+        let new_id = vec![0x5a_u8; 32];
+
+        // The replacement: insert a newer head (still at or before the
+        // tombstone), hard-delete the old head, and hold the transaction open.
+        let mut replacement = db.pool.begin().await.expect("begin replacement");
+        sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+            .execute(&mut *replacement)
+            .await
+            .expect("opt in to hard delete");
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag) \
+             SELECT community_id, $3, pubkey, created_at + interval '1 second', kind, tags, \
+                    'new head', sig, channel_id, d_tag \
+             FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&old_id)
+        .bind(&new_id)
+        .execute(&mut *replacement)
+        .await
+        .expect("insert new head");
+        sqlx::query("DELETE FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(&old_id)
+            .execute(&mut *replacement)
+            .await
+            .expect("delete old head");
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let application_name = format!("nip-rs-race-{}", Uuid::new_v4().simple());
+        let deleter_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                PgConnectOptions::from_str(&database_url)
+                    .expect("parse test database URL")
+                    .application_name(&application_name),
+            )
+            .await
+            .expect("connect deleter pool");
+        let pubkey = keys.public_key().to_bytes();
+        let deletion = tokio::spawn({
+            let d_tag = d_tag.clone();
+            async move {
+                event::soft_delete_by_coordinate(
+                    &deleter_pool,
+                    community,
+                    buzz_core::kind::KIND_READ_STATE as i32,
+                    &pubkey,
+                    &d_tag,
+                    (created_at + 5) as i64,
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND application_name = $1 \
+                       AND wait_event_type = 'Lock')",
+                )
+                .bind(&application_name)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect deleter lock");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deletion reached the old head's row lock");
+
+        replacement.commit().await.expect("commit replacement");
+        deletion
+            .await
+            .expect("join deletion")
+            .expect("coordinate delete");
+
+        let rows: Vec<(Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT id, deleted_at IS NOT NULL FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_READ_STATE as i32)
+        .bind(keys.public_key().to_bytes().as_slice())
+        .bind(&d_tag)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read coordinate rows");
+        assert_eq!(
+            rows,
+            vec![(new_id, false)],
+            "the racing head is spared and no soft-deleted read-state row remains"
+        );
+    }
 }

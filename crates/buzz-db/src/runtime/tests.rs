@@ -3811,3 +3811,159 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
 
 #[path = "tests/thread_window_postgres_tests.rs"]
 mod thread_window_postgres_tests;
+
+/// `insert_event_with_serving_write_guard` indexes mentions in the event's own
+/// transaction, and an indexing failure stays best-effort: the savepoint rolls
+/// back only the mention rows, never the event.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    let db = setup_db().await;
+    let community = db
+        .ensure_configured_community(&format!(
+            "serving-mentions-{}.example",
+            Uuid::new_v4().simple()
+        ))
+        .await
+        .expect("create serving-write mention community")
+        .id;
+    let store = db.deletion_store();
+    let lease = store
+        .acquire_serving_write_lease(
+            community,
+            "mention_index_test",
+            "mention-index-test",
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire serving-write lease");
+    let mentioned = Keys::generate().public_key().to_hex();
+    let build = |content: &str| {
+        EventBuilder::new(Kind::TextNote, content)
+            .tags([Tag::parse(["p", mentioned.as_str()]).expect("p tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event")
+    };
+    let counts = |event_id: Vec<u8>| {
+        let pool = db.pool.clone();
+        async move {
+            let live: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM events \
+                 WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(&event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count live events");
+            let mentions: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(&event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count mentions");
+            (live, mentions)
+        }
+    };
+
+    // Pin in-transaction indexing: the mention insert must run in the same
+    // top-level transaction that inserted the event row. A post-commit index
+    // runs in a later transaction, raises here, is logged as a warning, and
+    // leaves zero mentions.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION test_require_event_tx_mentions() RETURNS trigger AS $$ \
+         BEGIN \
+             IF NEW.community_id = '{}'::uuid AND NOT EXISTS ( \
+                 SELECT 1 FROM events \
+                 WHERE community_id = NEW.community_id AND id = NEW.event_id \
+                   AND xmin = pg_current_xact_id()::xid) THEN \
+                 RAISE EXCEPTION 'test: post-commit mention'; \
+             END IF; \
+             RETURN NEW; \
+         END; $$ LANGUAGE plpgsql",
+        community.as_uuid()
+    )))
+    .execute(&db.pool)
+    .await
+    .expect("create same-transaction mention function");
+    sqlx::query(
+        "CREATE TRIGGER trg_test_require_event_tx_mentions BEFORE INSERT ON event_mentions \
+         FOR EACH ROW EXECUTE FUNCTION test_require_event_tx_mentions()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install same-transaction mention trigger");
+
+    let indexed = build("indexed");
+    let result = db
+        .insert_event_with_serving_write_guard(&lease, &indexed, None)
+        .await;
+
+    sqlx::query("DROP TRIGGER trg_test_require_event_tx_mentions ON event_mentions")
+        .execute(&db.pool)
+        .await
+        .expect("drop same-transaction mention trigger");
+    sqlx::query("DROP FUNCTION test_require_event_tx_mentions()")
+        .execute(&db.pool)
+        .await
+        .expect("drop same-transaction mention function");
+
+    let (_, inserted) = result.expect("guarded insert");
+    assert!(inserted);
+    assert_eq!(
+        counts(indexed.id.as_bytes().to_vec()).await,
+        (1, 1),
+        "mentions must be indexed in the event's own transaction"
+    );
+
+    // Make mention indexing fail for this community only. Without the
+    // savepoint the aborted statement poisons the event transaction and the
+    // commit fails.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION test_reject_mentions() RETURNS trigger AS $$ \
+         BEGIN \
+             IF NEW.community_id = '{}'::uuid THEN \
+                 RAISE EXCEPTION 'test: mention indexing rejected'; \
+             END IF; \
+             RETURN NEW; \
+         END; $$ LANGUAGE plpgsql",
+        community.as_uuid()
+    )))
+    .execute(&db.pool)
+    .await
+    .expect("create mention rejection function");
+    sqlx::query(
+        "CREATE TRIGGER trg_test_reject_mentions BEFORE INSERT ON event_mentions \
+         FOR EACH ROW EXECUTE FUNCTION test_reject_mentions()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("install mention rejection trigger");
+
+    let rejected = build("mention indexing fails");
+    let result = db
+        .insert_event_with_serving_write_guard(&lease, &rejected, None)
+        .await;
+
+    sqlx::query("DROP TRIGGER trg_test_reject_mentions ON event_mentions")
+        .execute(&db.pool)
+        .await
+        .expect("drop mention rejection trigger");
+    sqlx::query("DROP FUNCTION test_reject_mentions()")
+        .execute(&db.pool)
+        .await
+        .expect("drop mention rejection function");
+
+    let (_, inserted) = result.expect("mention failure must not reject the event");
+    assert!(inserted);
+    assert_eq!(counts(rejected.id.as_bytes().to_vec()).await, (1, 0));
+
+    assert!(store
+        .release_serving_write_lease(&lease)
+        .await
+        .expect("release serving-write lease"));
+}
