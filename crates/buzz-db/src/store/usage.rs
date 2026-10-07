@@ -1802,8 +1802,13 @@ mod postgres_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
+        // A fresh Db has a cold Aurora capability cache, so the first
+        // post-acquire await is the capability probe, as in production after
+        // a failed boot ping. This pins close-on-drop ahead of that await.
+        let cold = Db::from_pools(writer.clone(), read_pool.clone());
+        cold.fence().force_open_for_tests(Utc::now());
         proxy.set_dark(true);
-        tokio::time::timeout(Duration::from_secs(1), db.usage_fleet_stock_snapshot())
+        tokio::time::timeout(Duration::from_secs(1), cold.usage_fleet_stock_snapshot())
             .await
             .expect_err("a dark reader must stall the collection until its deadline");
         proxy.set_dark(false);
@@ -1825,6 +1830,7 @@ mod postgres_tests {
         assert_eq!(one, 1);
         drop(replacement);
 
+        drop(cold);
         drop(db);
         read_pool.close().await;
         drop_scratch_db(&admin, reader, &reader_name).await;
