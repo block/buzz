@@ -3,10 +3,13 @@ kind: Deployment
 metadata:
   name: {{ include "push.name" . }}
   labels: {{- include "push.runtimeLabels" . | nindent 4 }}
+  {{- $annotations := deepCopy .Values.deploymentAnnotations }}
   {{- if not .Values.networkPolicy.enabled }}
-  annotations:
-    buzz.block.xyz/release-namespace: {{ .Release.Namespace | quote }}
-    buzz.block.xyz/external-network-policy: {{ .Values.networkPolicy.externalPolicyName | quote }}
+  {{- $_ := set $annotations "buzz.block.xyz/release-namespace" .Release.Namespace }}
+  {{- $_ := set $annotations "buzz.block.xyz/external-network-policy" .Values.networkPolicy.externalPolicyName }}
+  {{- end }}
+  {{- with $annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
