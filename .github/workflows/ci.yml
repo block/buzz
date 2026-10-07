@@ -64,8 +64,9 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'justfile'
+              - 'Justfile'
             desktop:
+              - '.github/workflows/_ci-desktop.yml'
               - 'scripts/generate-macos-icon.py'
               - 'scripts/macos-icon.sh'
               - 'bin/uv'

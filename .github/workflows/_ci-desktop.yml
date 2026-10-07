@@ -21,14 +21,68 @@ env:
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
 
 jobs:
-  desktop-core:
-    name: Desktop Core
+  # Frontend-only checks: biome, node:test, and the Vite build do not compile
+  # Rust, so they run only when desktop paths change (and on every push).
+  desktop-js:
+    name: Desktop JS
     runs-on: ubuntu-latest
-    # The compiled-flag verification step recompiles buzz_lib for the internal
-    # and demo BUZZ_BUILD_* states and reruns its suite in each; the complete
-    # job needed ~46m before that recipe was trimmed, so budget 60m.
-    timeout-minutes: 60
-    if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
+    timeout-minutes: 20
+    if: github.event_name == 'push' || inputs.desktop
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+      - name: Desktop lint and format
+        run: just desktop-check
+      - name: Desktop unit tests
+        run: just desktop-test
+      - name: Desktop build
+        run: just desktop-build
+      - name: Save pnpm store cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+  # Tauri Rust lanes run in parallel. The compiled-flags lane only rebuilds
+  # buzz_lib under other BUZZ_BUILD_* values, so it restores the core lane's
+  # cache read-only; the mesh-llm feature pulls its own dependency graph.
+  desktop-tauri:
+    name: Desktop Tauri (${{ matrix.lane }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'push' || inputs.desktop_rust || inputs.rust
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: core
+            cache: desktop-core
+            save-cache: true
+            run: just desktop-tauri-clippy && just desktop-tauri-check && just desktop-tauri-test
+          - lane: mesh
+            cache: desktop-mesh
+            save-cache: true
+            run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --features mesh-llm --lib
+          - lane: compiled-flags
+            cache: desktop-core
+            save-cache: false
+            run: just desktop-tauri-test-compiled-flags
     permissions:
       contents: read
     steps:
@@ -40,7 +94,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: desktop/src-tauri
-          save-if: ${{ github.event_name != 'pull_request' }}
+          shared-key: ${{ matrix.cache }}
+          save-if: ${{ matrix.save-cache && github.event_name != 'pull_request' }}
       - name: Install Tauri dependencies (Linux)
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -66,58 +121,10 @@ jobs:
             libxdo-dev \
             patchelf \
             wget
-      - name: Get pnpm store directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
-      - name: Install desktop dependencies
-        run: just desktop-install-ci
-      - name: Desktop lint and format
-        run: just desktop-check
-      - name: Desktop unit tests
-        run: just desktop-test
-      - name: Desktop build
-        run: just desktop-build
-      - name: Desktop Tauri clippy
-        run: just desktop-tauri-clippy
+      - name: Desktop Tauri ${{ matrix.lane }}
+        run: ${{ matrix.run }}
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Tauri check
-        run: just desktop-tauri-check
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Tauri tests
-        run: just desktop-tauri-test
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Mesh feature tests
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --features mesh-llm --lib
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Desktop Tauri compiled-flag verification
-        run: just desktop-tauri-test-compiled-flags
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Upload desktop e2e artifacts
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: desktop-e2e-artifacts
-          path: |
-            desktop/playwright-report
-            desktop/test-results
-          if-no-files-found: ignore
-      - name: Save pnpm store cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
   desktop-smoke-e2e:
     name: Desktop Smoke E2E (${{ matrix.shard }})
@@ -125,11 +132,13 @@ jobs:
     # Chromium dependency setup can take 10m; a serial smoke shard needs
     # ~25m. Leave time for the full suite and its reports to finish.
     timeout-minutes: 45
-    if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
+    if: github.event_name == 'push' || inputs.desktop
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # Playwright shards smoke specs by test count, not duration; ten
+        # shards keep the slowest one near 11 minutes of test time.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     permissions:
       contents: read
     steps:
@@ -169,7 +178,7 @@ jobs:
       - name: Desktop E2E build
         run: pnpm -C desktop build:e2e
       - name: Desktop smoke e2e
-        run: cd desktop && pnpm exec playwright test --project=smoke --shard=${{ matrix.shard }}/4
+        run: cd desktop && pnpm exec playwright test --project=smoke --shard=${{ matrix.shard }}/${{ strategy.job-total }}
       - name: Summarize flaky tests
         if: ${{ !cancelled() }}
         run: node scripts/summarize-flaky-tests.mjs playwright-report.json "Desktop Smoke E2E (${{ matrix.shard }})"
@@ -190,32 +199,42 @@ jobs:
     name: Desktop
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [desktop-core, desktop-smoke-e2e, desktop-windows-build]
+    needs: [desktop-js, desktop-tauri, desktop-smoke-e2e, desktop-windows-build]
     if: always() && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read
     steps:
       - name: Check desktop jobs
+        env:
+          JS_SELECTED: ${{ github.event_name == 'push' || inputs.desktop }}
+          RUST_SELECTED: ${{ github.event_name == 'push' || inputs.desktop_rust || inputs.rust }}
+          JS: ${{ needs.desktop-js.result }}
+          TAURI: ${{ needs.desktop-tauri.result }}
+          SMOKE: ${{ needs.desktop-smoke-e2e.result }}
+          WINDOWS: ${{ needs.desktop-windows-build.result }}
         run: |
-          if [ "${{ needs.desktop-core.result }}" != "success" ]; then
-            echo "Desktop Core finished with: ${{ needs.desktop-core.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.desktop-smoke-e2e.result }}" != "success" ]; then
-            echo "Desktop Smoke E2E shards finished with: ${{ needs.desktop-smoke-e2e.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.desktop-windows-build.result }}" != "success" ]; then
-            echo "Desktop Windows Build finished with: ${{ needs.desktop-windows-build.result }}"
-            exit 1
-          fi
-          echo "Desktop jobs passed"
+          # A selected job must succeed; an unselected job must be skipped.
+          status=0
+          check() {
+            local name="$1" selected="$2" result="$3" want=skipped
+            [ "$selected" = true ] && want=success
+            if [ "$result" != "$want" ]; then
+              echo "$name finished with: $result (expected $want)"
+              status=1
+            fi
+          }
+          check "Desktop JS" "$JS_SELECTED" "$JS"
+          check "Desktop Tauri lanes" "$RUST_SELECTED" "$TAURI"
+          check "Desktop Smoke E2E shards" "$JS_SELECTED" "$SMOKE"
+          check "Desktop Windows Build" "$JS_SELECTED" "$WINDOWS"
+          [ "$status" = 0 ] && echo "Desktop jobs passed"
+          exit "$status"
 
   desktop-windows-build:
     name: Desktop Windows Build
     runs-on: windows-latest
     timeout-minutes: 20
-    if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
+    if: github.event_name == 'push' || inputs.desktop
     permissions:
       contents: read
     steps:

@@ -15,10 +15,6 @@
 # Deliberate deviations:
 # - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
 #   is omitted; a CI-workflow-only edit doesn't need a local test run.
-# - `desktop-check`/`desktop-typecheck`/`desktop-test` don't trigger on `rust`
-#   changes, though CI's Desktop Core job does. Those commands are pure TS
-#   (biome + tsc + node:test) with no Rust dependency, so the extra trigger
-#   would be spurious locally.
 # - The repository-wide `file-size-check` is deliberately unfiltered. Its own
 #   merge-base diff is the path filter; duplicating its governed roots here is
 #   the coverage drift this gate is intended to prevent.
@@ -131,7 +127,7 @@ pre-push:
       env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-test
     desktop-tauri-checks:
-      # Keep local lint parity with Desktop Core CI for every path that can
+      # Keep local lint parity with Desktop Tauri CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
       files: git diff --name-only origin/main...HEAD
