@@ -157,7 +157,6 @@ async fn event_write_transaction_preserves_legacy_acquisition_metrics() {
 
 #[test]
 fn nip43_reconciliation_compatibility_alias_is_preserved() {
-    #[allow(deprecated)]
     async fn call(
         db: &Db,
         community_id: CommunityId,

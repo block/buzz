@@ -159,7 +159,7 @@ two gauges labelled `phase`:
 - `buzz_startup_phase_seconds` is the finished step's duration.
 
 `degraded` means the step hit a non-fatal error and startup continued — for
-example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
+example, some large channel rosters failed to reconcile or a NIP-FI issuer did
 not warm. `failed` means startup aborted inside the step.
 
 These are gauges, not counters, because each value is written once per boot
@@ -169,8 +169,12 @@ field of the `Prometheus metrics exporter started` log (2700 s with default
 intervals). A step that runs longer than that timeout loses its `_current`
 series, so a pod stuck that long shows no current step. The `phase` values are
 the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
-they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
-also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
+they never reuse an early lifecycle phase name.
+
+NIP-43 membership snapshot repair is not a startup step: it runs in the
+background, starting as the relay boots and then every
+`BUZZ_NIP43_RECONCILE_INTERVAL_SECS` (default 60). Its first pass logs `NIP-43
+membership snapshots reconciled` with `count`, `failed`, and `elapsed_ms`.
 
 ### Readiness contract
 
