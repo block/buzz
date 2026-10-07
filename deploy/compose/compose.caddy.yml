@@ -2,10 +2,16 @@ services:
   relay:
     ports: !reset []
 
+  # Caddy routes /pair to the sidecar, so its direct host port goes away too.
+  pair:
+    ports: !reset []
+
   caddy:
     image: caddy:2-alpine
     depends_on:
       relay:
+        condition: service_healthy
+      pair:
         condition: service_healthy
     environment:
       BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}
