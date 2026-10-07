@@ -608,10 +608,12 @@ impl Db {
     /// Idempotently archives a community when the asserted pubkey is its current owner.
     ///
     /// Locks the community row before reading ownership so a concurrent owner
-    /// transfer, which holds the same row lock, has one serial order with the
-    /// archive. A single `UPDATE ... FROM relay_members` would keep its
-    /// pre-lock ownership snapshot after waiting and could archive the new
-    /// owner's community on the old owner's assertion.
+    /// transfer, whose `FOR UPDATE` conflicts with this `FOR NO KEY UPDATE`,
+    /// has one serial order with the archive. The weaker lock lets the archive
+    /// proceed past foreign-key child inserts' `FOR KEY SHARE`. A single
+    /// `UPDATE ... FROM relay_members` would keep its pre-lock ownership
+    /// snapshot after waiting and could archive the new owner's community on
+    /// the old owner's assertion.
     #[datastore_span(name = "archive_community_owned_by", system = "postgresql")]
     pub async fn archive_community_owned_by(
         &self,
@@ -628,7 +630,7 @@ impl Db {
         let target = sqlx::query(
             "SELECT id FROM communities \
              WHERE lower(host) = lower($1) AND lower(host) <> lower($2) \
-               AND deletion_state = 'active' AND deleted_at IS NULL FOR UPDATE",
+               AND deletion_state = 'active' AND deleted_at IS NULL FOR NO KEY UPDATE",
         )
         .bind(normalized_host)
         .bind(protected_deployment_host)
@@ -1388,9 +1390,10 @@ mod postgres_tests {
     }
 
     /// Foreign-key child inserts hold `FOR KEY SHARE` on the community row for
-    /// their whole transaction. The lifecycle fences must not queue behind
-    /// them, or a busy community stalls revalidation and conn-control on every
-    /// pod. `FOR UPDATE` would block here; `FOR NO KEY UPDATE` must not.
+    /// their whole transaction. Archive and the lifecycle fences must not queue
+    /// behind them, or a busy community stalls the operator archive and
+    /// revalidation and conn-control on every pod. `FOR UPDATE` would block
+    /// here; `FOR NO KEY UPDATE` must not.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn lifecycle_fences_do_not_wait_on_foreign_key_share_locks() {
@@ -1404,12 +1407,6 @@ mod postgres_tests {
         else {
             panic!("expected new community");
         };
-        let archived = db
-            .archive_community_owned_by(&host, &owner, "protected.example")
-            .await
-            .expect("archive community")
-            .expect("owned community");
-
         let mut child_writer = db.pool.begin().await.expect("begin child writer");
         sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR KEY SHARE")
             .bind(created.id.as_uuid())
@@ -1418,6 +1415,14 @@ mod postgres_tests {
             .expect("hold the lock a child-row insert takes");
 
         let wait = std::time::Duration::from_secs(5);
+        let archived = tokio::time::timeout(
+            wait,
+            db.archive_community_owned_by(&host, &owner, "protected.example"),
+        )
+        .await
+        .expect("archive must not wait on FOR KEY SHARE")
+        .expect("archive community")
+        .expect("owned community");
         assert_eq!(
             tokio::time::timeout(
                 wait,
