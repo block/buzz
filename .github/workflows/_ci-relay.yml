@@ -210,7 +210,6 @@ jobs:
 
   desktop-e2e-integration-shard:
     env:
-      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
     name: Desktop E2E Integration (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -405,7 +404,6 @@ jobs:
 
   backend-integration:
     env:
-      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
     name: Backend Integration (relay e2e)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -577,7 +575,6 @@ jobs:
 
   relay-e2e:
     env:
-      COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
     name: Relay E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20

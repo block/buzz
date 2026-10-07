@@ -1,8 +1,9 @@
 # Buzz CI MinIO
 
 `ghcr.io/block/buzz-minio:latest` contains MinIO and `mc` for the disposable
-Linux AMD64 CI runners. `docker-compose.ci.yml` selects it for both services;
-development and deployment defaults stay in `docker-compose.yml`.
+Linux AMD64 runners. Only the publisher smoke test selects it through
+`docker-compose.ci.yml`. Ordinary CI inherits the Silo pins from
+`docker-compose.yml`; the Helm install test inherits the chart defaults.
 
 The **MinIO image** workflow builds only when its inputs change, or on a manual
 dispatch. Pull requests build and smoke-test without publishing. On `main`, a
