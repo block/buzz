@@ -1,5 +1,14 @@
 # Chart release notes
 
+## 0.3.5
+
+Adds optional string-valued `deploymentAnnotations` for Deployment metadata,
+including secret-reloader configuration. Chart-owned policy annotations remain
+reserved. Runtime Pod and migration annotations are unchanged, and the empty
+default preserves existing manifests.
+
+Implemented in [#8136](https://github.com/block/buzz/pull/8136).
+
 ## 0.3.4
 
 Adds runtime Pod labels, a service account name, and a configurable termination
