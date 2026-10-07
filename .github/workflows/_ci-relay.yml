@@ -227,7 +227,10 @@ jobs:
   desktop-e2e-integration-shard:
     name: Desktop E2E Integration (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A shard needs ~10m; Playwright install-deps is bounded by
+    # ci-apt-retry.sh (~25m worst case), so a degraded mirror fails with its
+    # own error instead of the job timeout.
+    timeout-minutes: 40
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     strategy:
       fail-fast: false
@@ -275,7 +278,7 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: cd desktop && pnpm exec playwright install chromium
       - name: Install Playwright system dependencies
-        run: cd desktop && pnpm exec playwright install-deps chromium
+        run: cd desktop && ../scripts/ci-apt-retry.sh pnpm exec playwright install-deps chromium
       - name: Save Playwright browser cache
         if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

@@ -67,7 +67,9 @@ jobs:
   desktop-tauri:
     name: Desktop Tauri (${{ matrix.lane }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A lane needs ~12m; the apt step is bounded by ci-apt-retry.sh (~32m worst
+    # case for update + install), so a degraded mirror fails with its own error.
+    timeout-minutes: 45
     # Keep in sync with RUST_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop_rust || inputs.rust
     strategy:
@@ -103,15 +105,8 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30
-          sudo apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            -o DPkg::Lock::Timeout=120 \
+          CI_APT_ATTEMPT_SECONDS=90 scripts/ci-apt-retry.sh sudo apt-get update
+          scripts/ci-apt-retry.sh sudo apt-get install -y --no-install-recommends \
             build-essential \
             curl \
             file \
@@ -132,8 +127,9 @@ jobs:
   desktop-smoke-e2e:
     name: Desktop Smoke E2E (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Chromium dependency setup can take 10m; a serial smoke shard needs
-    # ~25m. Leave time for the full suite and its reports to finish.
+    # A smoke shard needs ~12m, and Chromium dependency setup is bounded by
+    # ci-apt-retry.sh (3 attempts of up to 7m). Leave time for the full suite
+    # and its reports to finish.
     timeout-minutes: 45
     # Keep in sync with FRONTEND_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop
@@ -172,7 +168,7 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: cd desktop && pnpm exec playwright install chromium
       - name: Install Playwright system dependencies
-        run: cd desktop && pnpm exec playwright install-deps chromium
+        run: cd desktop && ../scripts/ci-apt-retry.sh pnpm exec playwright install-deps chromium
       - name: Save Playwright browser cache
         if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
