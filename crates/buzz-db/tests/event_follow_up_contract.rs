@@ -585,9 +585,11 @@ mod postgres_tests {
         );
 
         // A cancelled statement is not swallowed: plpgsql `WHEN OTHERS` never
-        // caught 57014, so the event is rejected. Only the app-only arm
-        // discriminates; with the trigger present, its own wait at COMMIT is
-        // cancelled too.
+        // caught 57014, so the event is rejected. Both arms discriminate: if
+        // the app swallowed the cancel, the app-only arm would commit the
+        // event, and in the dual arm the trigger's own wait at COMMIT is not
+        // cut short by the 200ms statement timeout, so the commit outlives the
+        // 5s guard.
         let cancelled_event = signed_event(&keys, 9, "ttl-statement-cancel");
         let mut cancelled_tx = begin_caller_owned_event_transaction(&db, community).await;
         sqlx::query("SET LOCAL statement_timeout = '200ms'")

@@ -1418,11 +1418,19 @@ const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
 /// its body. Braces inside string, raw string, and char literals and in line
 /// comments are not counted. Unlike cutting the file at the first
 /// `#[cfg(test)]`, this keeps production code that follows a test-only item.
+/// The marker counts as an attribute only when it is the first non-whitespace
+/// text on its line, so a mention in a comment or string strips nothing.
 fn strip_cfg_test_items(source: &str) -> String {
     const MARKER: &str = "#[cfg(test)]";
     let mut kept = String::with_capacity(source.len());
     let mut rest = source;
     while let Some(at) = rest.find(MARKER) {
+        let line_start = rest[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if !rest[line_start..at].trim().is_empty() {
+            kept.push_str(&rest[..at + MARKER.len()]);
+            rest = &rest[at + MARKER.len()..];
+            continue;
+        }
         kept.push_str(&rest[..at]);
         let item = &rest[at + MARKER.len()..];
         rest = &item[cfg_test_item_len(item)..];
@@ -1610,6 +1618,20 @@ pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {
         .await
         .expect("write");
 }
+/// Kept at module scope, not `#[cfg(test)]`, because production calls it.
+pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+// see `#[cfg(test)] mod x {`
+pub(crate) async fn writer_under_brace_mention(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
 #[cfg(test)]
 fn test_only_helper() -> (&'static str, char, &'static str, char) {
     // an unbalanced { in a comment
@@ -1639,6 +1661,8 @@ mod tests {
             "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_under_brace_mention(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
