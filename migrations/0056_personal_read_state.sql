@@ -5,9 +5,12 @@
 -- covers that thread, without inheritance.
 -- threads_through_timestamp is the only cross-context cut: an explicit
 -- whole-channel read that also covers every thread in that channel.
+-- started_at is the actor's first read intent. NULL until then: an account
+-- can exist before its actor has started.
 CREATE TABLE personal_read_accounts (
     community_id UUID NOT NULL REFERENCES communities(id),
     actor BYTEA NOT NULL CHECK (octet_length(actor) = 32),
+    started_at TIMESTAMPTZ,
     PRIMARY KEY (community_id, actor)
 );
 

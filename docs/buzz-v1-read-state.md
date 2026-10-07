@@ -230,8 +230,9 @@ marking through it reads everything counted. When the horizon holds no message,
 it is the last to arrive among the channel's 256 most recent events.
 
 There is no import of earlier client read state: an account starts with no
-frontiers, and the horizon bounds what that can show as unread. Manual unread
-remains device-local.
+frontiers, and the horizon bounds what that can show as unread. The relay
+records the account's `started_at` at its first applied read intent and never
+moves it; projections do not read it yet. Manual unread remains device-local.
 
 ## Bounds and deployment
 

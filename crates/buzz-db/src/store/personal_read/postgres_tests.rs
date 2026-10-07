@@ -626,6 +626,69 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
     assert!(sparse.is_none());
 }
 
+async fn started_at(
+    pool: &PgPool,
+    community: CommunityId,
+    actor: &nostr::PublicKey,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar(
+        "SELECT started_at FROM personal_read_accounts WHERE community_id=$1 AND actor=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.to_bytes().as_slice())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn personal_read_first_applied_intent_starts_the_account_once() {
+    let (db, pool, community, channel, actor, event) = fixture().await;
+    let intent = ReadIntent::MarkThrough {
+        target: ReadTarget {
+            channel_id: channel,
+            root_id: None,
+        },
+        message_id: event.id.to_hex(),
+    };
+    let actor = actor.public_key();
+    for _ in 0..2 {
+        assert_eq!(
+            db.apply_personal_read_intent(community, &actor, &intent)
+                .await
+                .unwrap(),
+            IntentOutcome::Applied
+        );
+    }
+    let first = started_at(&pool, community, &actor).await;
+    assert!(
+        first.is_some(),
+        "the first applied intent starts the account"
+    );
+
+    // An account can exist before its actor starts; the first intent starts
+    // it, and later intents never move the start.
+    let pending = Keys::generate().public_key();
+    sqlx::query("INSERT INTO personal_read_accounts (community_id,actor) VALUES ($1,$2)")
+        .bind(community.as_uuid())
+        .bind(pending.to_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(started_at(&pool, community, &pending).await, None);
+    db.apply_personal_read_intent(community, &pending, &intent)
+        .await
+        .unwrap();
+    let pending_start = started_at(&pool, community, &pending).await;
+    assert!(pending_start >= first);
+    db.apply_personal_read_intent(community, &pending, &intent)
+        .await
+        .unwrap();
+    assert_eq!(started_at(&pool, community, &pending).await, pending_start);
+    assert_eq!(started_at(&pool, community, &actor).await, first);
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn personal_read_channel_and_thread_never_inherit_each_other() {

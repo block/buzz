@@ -23,15 +23,17 @@ pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// Serialize private frontier writes, never shared conversation rows.
+/// Start the account if this is the actor's first read intent, then serialize
+/// private frontier writes, never shared conversation rows.
 pub(super) async fn lock_account(
     conn: &mut PgConnection,
     community: CommunityId,
     actor: &[u8],
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO personal_read_accounts (community_id,actor) VALUES ($1,$2)
-        ON CONFLICT (community_id,actor) DO NOTHING",
+        "INSERT INTO personal_read_accounts (community_id,actor,started_at) VALUES ($1,$2,now())
+        ON CONFLICT (community_id,actor) DO UPDATE SET started_at=now()
+        WHERE personal_read_accounts.started_at IS NULL",
     )
     .bind(community.as_uuid())
     .bind(actor)
