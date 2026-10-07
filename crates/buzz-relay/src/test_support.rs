@@ -6,8 +6,9 @@ const DEFAULT_DATABASE_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz
 /// process-wide from whichever dispatchers are live when it is first hit or
 /// rebuilt, so a parallel test's dispatcher (or a thread with none) can enable
 /// or disable another test's callsites. Not reentrant; take it once per test.
-/// Two async tests install a dispatcher without it, because the guard would be
-/// held across `.await`: `router.rs`'s otel-export test and
+/// Two async sites install a dispatcher without it, because the guard would be
+/// held across `.await`: `router.rs`'s otel-export test and the
+/// `pause_after_aux_page` helper in
 /// `api/bridge/thread_window/postgres_tests/failure_postgres_tests.rs`.
 pub(crate) fn tracing_dispatch_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

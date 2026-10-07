@@ -549,6 +549,12 @@ test-unit:
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'
+        # boot_lifecycle spawns the real relay binary and asserts its startup
+        # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
+        # non-ignored tests need no Postgres or Redis; the Postgres cases are
+        # #[ignore]d and stay in the PostgreSQL lane. Keep
+        # scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-relay --test boot_lifecycle
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
