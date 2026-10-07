@@ -193,6 +193,32 @@ CREATE UNIQUE INDEX idx_users_nip05 ON users (community_id, lower(nip05_handle))
 CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
     WHERE okta_user_id IS NOT NULL;
 
+-- Private accessory read progress. Never included in Nostr event queries.
+-- A frontier is the relay arrival time (events.received_at) of the message a
+-- context was read through; the unread cutoff alone is signed event time. An
+-- empty root_id denotes a channel frontier.
+CREATE TABLE personal_read_accounts (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    actor BYTEA NOT NULL CHECK (octet_length(actor) = 32),
+    PRIMARY KEY (community_id, actor)
+);
+
+CREATE TABLE personal_read_frontiers (
+    community_id UUID NOT NULL,
+    actor BYTEA NOT NULL,
+    channel_id UUID NOT NULL,
+    root_id BYTEA NOT NULL DEFAULT ''::bytea CHECK (octet_length(root_id) IN (0, 32)),
+    through_timestamp TIMESTAMPTZ NOT NULL,
+    -- Whole-channel cut covering every thread; channel rows only.
+    threads_through_timestamp TIMESTAMPTZ
+        CHECK (threads_through_timestamp IS NULL OR root_id = ''::bytea),
+    PRIMARY KEY (community_id, actor, channel_id, root_id),
+    FOREIGN KEY (community_id, actor)
+        REFERENCES personal_read_accounts (community_id, actor) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels (community_id, id) ON DELETE CASCADE
+);
+
 -- ── Events (partitioned by month on created_at) ──────────────────────────────
 -- Conformance: "Channel-less global events and DMs". `community_id` leads the
 -- PK and every hot-path index. Partition stays BY RANGE (created_at) — the
@@ -1789,6 +1815,8 @@ SELECT attach_community_write_fence('join_policy_acceptances');
 SELECT attach_community_write_fence('moderation_actions');
 SELECT attach_community_write_fence('moderation_reports');
 SELECT attach_community_write_fence('parameterized_event_watermarks');
+SELECT attach_community_write_fence('personal_read_accounts');
+SELECT attach_community_write_fence('personal_read_frontiers');
 SELECT attach_community_write_fence('pubkey_allowlist');
 SELECT attach_community_write_fence('push_leases');
 SELECT attach_community_write_fence('push_match_queue');

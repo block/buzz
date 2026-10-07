@@ -123,6 +123,8 @@ run_unit_tests() {
   # separate isolated-DB gate, so --lib keeps this step infra-free.
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
+  run_test_step "buzz-db source-policy tests" \
+    cargo test -p buzz-db --test observability_source -- --nocapture
 
   run_test_step "buzz-media storage snapshot serialization test" \
     cargo test -p buzz-media --lib bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys -- --exact --nocapture
@@ -179,11 +181,6 @@ run_unit_tests() {
   run_test_step "buzz-relay storage snapshot tests" \
     cargo test -p buzz-relay --lib storage_sweep::tests:: -- --nocapture
 
-  run_test_step "buzz-relay usage metrics replica budget config test" \
-    cargo test -p buzz-relay --lib \
-      config::tests::usage_metrics_replica_budget_defaults_on_independently_of_serving_reads \
-      -- --exact --nocapture
-
   # Mirror the four audio/FI suites from `just test-unit`'s nextest expression.
   # These are infra-free (no DB, no Redis); the `#[ignore]`-gated DB witnesses
   # are excluded by cargo test's default filter. Keep in step with the Justfile
@@ -205,6 +202,19 @@ run_unit_tests() {
 
   run_test_step "buzz-relay NIP-FI shadow session tests" \
     cargo test -p buzz-relay --lib nip_fi_shadow_session::tests:: -- --nocapture
+
+  run_test_step "buzz-relay startup step tests" \
+    cargo test -p buzz-relay --lib startup_steps::tests:: -- --nocapture
+
+  # telemetry and config tests mutate process env. libtest runs one process
+  # with many threads (nextest, used by `just test-unit`, isolates each test),
+  # so run them single-threaded here. `--skip` keeps the substring filter
+  # `config::tests::` from also selecting nip_fi_config, which runs above.
+  run_test_step "buzz-relay telemetry tests" \
+    cargo test -p buzz-relay --lib telemetry::tests:: -- --test-threads=1 --nocapture
+
+  run_test_step "buzz-relay config tests" \
+    cargo test -p buzz-relay --lib config::tests:: -- --skip nip_fi_config:: --test-threads=1 --nocapture
 
   # Mirror the NIP-FI (S3) stanza from `just test-unit`: module filters, then
   # each exact name. Keep this list in step with that stanza's `test(=...)`s.
@@ -307,6 +317,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
+
+  run_test_step "buzz-relay boot lifecycle tests" \
+    cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

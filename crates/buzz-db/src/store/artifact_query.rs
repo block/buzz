@@ -16,7 +16,15 @@ impl Db {
         query: &ArtifactQuery,
         count: bool,
     ) -> Result<(Vec<StoredEvent>, i64)> {
-        let mut tx = self.begin_event_write_transaction().await?;
+        // Read-only: a plain writer-pool snapshot transaction, labeled as the
+        // history read it is, so it neither takes community admission nor
+        // counts as an event write.
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
         sqlx::query("SET LOCAL statement_timeout='2s'")
             .execute(&mut *tx)
             .await?;

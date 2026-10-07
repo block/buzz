@@ -92,6 +92,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
+    "personal_read_accounts",
+    "personal_read_frontiers",
     "pubkey_allowlist",
     "push_leases",
     "push_match_queue",
@@ -110,6 +112,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "personal_read_frontiers",
+    "personal_read_accounts",
     "workflow_approvals",
     "scheduled_workflow_fires",
     "workflow_runs",
@@ -6872,7 +6876,7 @@ mod postgres_tests {
             .id;
 
         let writer = db
-            .begin_community_write_transaction(community)
+            .begin_event_write_transaction(community)
             .await
             .expect("open writer transaction with community lock");
 
@@ -6933,7 +6937,7 @@ mod postgres_tests {
         store.fence(&claim.lease).await.expect("fence");
 
         let error = db
-            .begin_community_write_transaction(request.community_id)
+            .begin_event_write_transaction(request.community_id)
             .await
             .expect_err("fenced community must reject fresh write admission");
         assert!(
@@ -6972,7 +6976,7 @@ mod postgres_tests {
         );
 
         let mut admitted_writer = db
-            .begin_community_write_transaction(request.community_id)
+            .begin_event_write_transaction(request.community_id)
             .await
             .expect("open admitted writer");
         let updated = sqlx::query(
@@ -7022,10 +7026,9 @@ mod postgres_tests {
             .expect("claim")
             .expect("won claim");
 
-        let mut open_write = db
-            .begin_event_write_transaction()
-            .await
-            .expect("open write transaction");
+        // A raw writer transaction on purpose: this pins that the fenced-table
+        // trigger itself takes the shared deletion lock, not the chokepoint.
+        let mut open_write = db.pool.begin().await.expect("open write transaction");
         sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
             .bind(request.community_id.as_uuid())
             .bind(vec![7_u8; 32])
