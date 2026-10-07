@@ -193,6 +193,9 @@ impl Db {
             .bind(account.started_at)
             .fetch_all(&mut *tx).await?;
         let has_more = rows.len() > limit;
+        // An unstarted account has read every arrival, scanned or not, so its
+        // counts are exactly zero whatever the scan cap left unexamined.
+        let started = account.started_at.is_some();
         let mut channels = Vec::new();
         let mut pending = Vec::new();
         for row in rows.into_iter().take(limit) {
@@ -200,7 +203,8 @@ impl Db {
             let evidence = evidence
                 .as_array()
                 .ok_or_else(|| DbError::InvalidData("invalid sidebar evidence".into()))?;
-            let complete = row.try_get::<i64, _>("scanned")? <= MAX_UNREAD_SCAN as i64;
+            let evidence = if started { evidence.as_slice() } else { &[] };
+            let complete = !started || row.try_get::<i64, _>("scanned")? <= MAX_UNREAD_SCAN as i64;
             let channel_type: String = row.try_get("channel_type")?;
             let mut unread = 0;
             let mut attention = 0;

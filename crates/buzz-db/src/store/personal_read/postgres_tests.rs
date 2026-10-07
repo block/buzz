@@ -803,6 +803,35 @@ async fn personal_read_counts_only_arrivals_after_the_account_starts() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn personal_read_unstarted_account_is_exactly_caught_up_past_the_scan_cap() {
+    let (db, pool, community, channel, actor, _) = fixture().await;
+    unstart(&pool, community).await;
+    let last = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
+    let page = db
+        .personal_read_sidebar(
+            community,
+            &actor.public_key(),
+            DEFAULT_RETENTION_SECONDS,
+            20,
+            None,
+        )
+        .await
+        .unwrap();
+    let row = &page.channels[0];
+    // The start floor covers rows the cap left unexamined: zero, not unknown.
+    assert!(matches!(row.unread, ReadCount::Exact { value: 0 }));
+    assert!(matches!(row.attention, ReadCount::Exact { value: 0 }));
+    assert!(row.threads.items.is_empty());
+    assert!(row.threads.complete);
+    assert_eq!(
+        row.latest_message_id.as_deref(),
+        Some(last.id.to_hex().as_str())
+    );
+    assert!(row.latest_message_complete);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn personal_read_channel_and_thread_never_inherit_each_other() {
     let (db, pool, community, channel, actor, root) = fixture().await;
     let base = root.created_at.as_secs();
