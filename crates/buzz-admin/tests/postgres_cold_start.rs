@@ -1,4 +1,4 @@
-//! Run the real command through delayed/broken PostgreSQL connections.
+//! Run the real run-once workers through delayed/broken PostgreSQL connections.
 //! The PostgreSQL nextest wrapper supplies a separate database per test.
 
 use std::process::{ExitStatus, Stdio};
@@ -164,6 +164,39 @@ struct WorkerOutput {
 }
 
 async fn run_worker(database_url: &str, proxy: &Server, s3: &Server) -> WorkerOutput {
+    run_admin(
+        database_url,
+        proxy,
+        &["storage-snapshot", "--max-objects", "100"],
+        &[
+            ("BUZZ_S3_ENDPOINT", format!("http://{}", s3.address)),
+            ("BUZZ_STORAGE_SNAPSHOT_CODE_SHA", "startup-test".to_owned()),
+        ],
+    )
+    .await
+}
+
+/// Run the scheduled deletion drain against an idle queue. Its Redis pool is
+/// lazy and an idle drain never reaches S3, so neither endpoint needs to exist.
+async fn run_drain(database_url: &str, proxy: &Server) -> WorkerOutput {
+    run_admin(
+        database_url,
+        proxy,
+        &["deletions", "drain", "--executor-id", "cold-start-test"],
+        &[
+            ("BUZZ_S3_ENDPOINT", "http://127.0.0.1:9".to_owned()),
+            ("REDIS_URL", "redis://127.0.0.1:9".to_owned()),
+        ],
+    )
+    .await
+}
+
+async fn run_admin(
+    database_url: &str,
+    proxy: &Server,
+    args: &[&str],
+    env: &[(&str, String)],
+) -> WorkerOutput {
     let mut url = Url::parse(database_url).expect("database URL");
     url.set_host(Some("127.0.0.1")).expect("proxy host");
     url.set_port(Some(proxy.address.port()))
@@ -176,15 +209,14 @@ async fn run_worker(database_url: &str, proxy: &Server, s3: &Server) -> WorkerOu
     let worker_binary = std::env::var_os("NEXTEST_BIN_EXE_buzz_admin")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_buzz-admin").into());
     let mut child = Command::new(worker_binary)
-        .args(["storage-snapshot", "--max-objects", "100"])
+        .args(args)
         .env_clear()
         .env("DATABASE_URL", url.as_str())
-        .env("BUZZ_S3_ENDPOINT", format!("http://{}", s3.address))
         .env("BUZZ_S3_BUCKET", "test-bucket")
         .env("BUZZ_S3_REGION", "us-east-1")
         .env("BUZZ_S3_ACCESS_KEY", "test-access-key")
         .env("BUZZ_S3_SECRET_KEY", "test-secret-key")
-        .env("BUZZ_STORAGE_SNAPSHOT_CODE_SHA", "startup-test")
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -289,4 +321,51 @@ async fn storage_snapshot_exhaustion_never_lists_s3_or_replaces_the_last_good_sn
     .expect("last good snapshot");
     assert_eq!(snapshot, json!({"previous": "complete"}));
     assert_eq!(revision, "before");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deletion_drain_retries_then_connects_after_the_old_three_second_budget() {
+    let (url, _pool) = database().await;
+    let proxy = postgres_proxy(&url, 1, Duration::from_secs(5)).await;
+    let output = run_drain(&url, &proxy).await;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        output.stdout,
+        output.stderr
+    );
+    // An idle pool opens only the session it uses: no spare connections that
+    // would each pay the cold-start delay.
+    assert_eq!(proxy.requests.load(Ordering::SeqCst), 2);
+    let startup = events(&output.stderr);
+    assert!(startup
+        .iter()
+        .any(|event| event["event"] == "deletion_db_connect_failed"
+            && event["attempt"] == 1
+            && event["retry_in_ms"] == 2000));
+    assert!(startup
+        .iter()
+        .any(|event| event["event"] == "deletion_db_connect_completed"
+            && event["attempt"] == 2
+            && event["attempt_elapsed_ms"].as_u64().unwrap() >= 5000));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deletion_drain_exhaustion_fails_after_three_bounded_attempts() {
+    let (url, _pool) = database().await;
+    let proxy = postgres_proxy(&url, usize::MAX, Duration::ZERO).await;
+    let output = run_drain(&url, &proxy).await;
+    assert_eq!(output.status.code(), Some(5), "{}", output.stderr);
+    assert_eq!(proxy.requests.load(Ordering::SeqCst), 3);
+    let failures: Vec<_> = events(&output.stderr)
+        .into_iter()
+        .filter(|event| event["event"] == "deletion_db_connect_failed")
+        .collect();
+    assert_eq!(failures.len(), 3);
+    assert!(failures.last().unwrap()["retry_in_ms"].is_null());
+    assert!(output
+        .stderr
+        .contains("deletion database startup failed after 3 attempt(s)"));
 }

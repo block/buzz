@@ -22,7 +22,6 @@
 
 mod communities;
 mod deletions;
-mod storage_snapshot_startup;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -203,7 +202,16 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
         return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
     }
 
-    let db = storage_snapshot_startup::connect_db().await?;
+    // One session: the worker detaches its lock-owning connection, and the
+    // cold-start pool opens no idle replacements while it scans S3.
+    let db = Db::connect_cold_start(
+        DbConfig {
+            max_connections: 1,
+            ..db_config_from_env()
+        },
+        "storage_snapshot",
+    )
+    .await?;
     let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
         anyhow::anyhow!("another storage-snapshot worker already holds the lease")
     })?;
