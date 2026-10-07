@@ -2533,7 +2533,7 @@ mod postgres_tests {
         let cancel = CancellationToken::new();
         let control = CommunityConnectionControl::new(cancel.clone());
         let reason = control.disconnect_reason();
-        let _guard = state
+        let guard = state
             .community_connections
             .register(Uuid::new_v4(), community, control);
 
@@ -2568,6 +2568,58 @@ mod postgres_tests {
             Some(CommunityDisconnectReason::CommunityArchived)
         );
 
+        drop(guard);
+
+        // A community fenced for deletion but never archived must not pass the
+        // unlocked active pre-check; it closes with the deletion reason.
+        let deleted_host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &deleted_host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let deleted_community = state
+            .db
+            .lookup_community_by_host(&deleted_host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let deleted_cancel = CancellationToken::new();
+        let deleted_control = CommunityConnectionControl::new(deleted_cancel.clone());
+        let deleted_reason = deleted_control.disconnect_reason();
+        let _deleted_guard = state.community_connections.register(
+            Uuid::new_v4(),
+            deleted_community,
+            deleted_control,
+        );
+        let mut tx = state
+            .db
+            .pool()
+            .begin()
+            .await
+            .expect("begin deletion fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+             set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(deleted_community.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("enter deletion executor scope");
+        sqlx::query("UPDATE communities SET deletion_state = 'fenced' WHERE id = $1")
+            .bind(deleted_community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("fence community deletion");
+        tx.commit().await.expect("commit deletion fixture");
+        assert_eq!(state.revalidate_live_communities().await, 1);
+        assert!(deleted_cancel.is_cancelled());
+        assert_eq!(
+            *deleted_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
     }
 
     /// The connection-control consumer serves ban disconnects and archive
