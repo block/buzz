@@ -168,6 +168,10 @@ async fn persist_command_event(
                 ))
             }
             ParameterizedReplaceStatus::Superseded => Ok(PersistResult::Duplicate),
+            // Only NIP-AT keeps delete watermarks, and it is not a command kind.
+            ParameterizedReplaceStatus::DeletedAt(t) => Err(IngestError::Rejected(format!(
+                "invalid: agent-attention address deleted at {t}"
+            ))),
             ParameterizedReplaceStatus::RevisionMissing => Err(IngestError::Rejected(
                 "conflict: workflow revision does not exist".into(),
             )),

@@ -50,7 +50,7 @@ pub async fn handle_count(
     if !super::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
         conn.send(RelayMessage::closed(
             &sub_id,
-            "restricted: agent-engram reads require authors=[self] or #p=[self]",
+            super::req::AGENT_OWNER_READ_RESTRICTED_CLOSED,
         ));
         return;
     }

@@ -355,6 +355,9 @@ pub struct Config {
     /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
     /// are enabled for this deployment. Defaults to false.
     pub push_enabled: bool,
+    /// Whether NIP-AT agent attention configuration (kind:30183) is accepted.
+    /// With it off the relay rejects the kind. Defaults to false.
+    pub agent_attention_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
     /// Exact HTTP(S) gateway endpoint used to sign and submit APNs delivery capabilities.
@@ -1062,6 +1065,7 @@ impl Config {
                 hex::encode(secret)
             });
         let push_enabled = parse_bool("BUZZ_PUSH_ENABLED", false)?;
+        let agent_attention_enabled = parse_bool("BUZZ_AGENT_ATTENTION_ENABLED", false)?;
         let push_executor_key_id =
             std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
@@ -1400,6 +1404,7 @@ impl Config {
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             push_enabled,
+            agent_attention_enabled,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,

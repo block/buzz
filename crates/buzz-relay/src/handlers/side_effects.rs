@@ -385,6 +385,11 @@ pub async fn validate_standard_deletion_event(
         }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
+        if state.config.agent_attention_enabled
+            && parts[0] == buzz_core::kind::KIND_AGENT_ATTENTION.to_string()
+        {
+            return validate_agent_attention_deletion(event, &target_pubkey_bytes);
+        }
         if target_pubkey_bytes != actor_bytes
             && !state
                 .db
@@ -403,6 +408,11 @@ pub async fn validate_standard_deletion_event(
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
 
+        if state.config.agent_attention_enabled
+            && u32::from(target_event.event.kind.as_u16()) == buzz_core::kind::KIND_AGENT_ATTENTION
+        {
+            anyhow::bail!("agent-attention objects are deleted by `a` tag, not `e` tag");
+        }
         if matches!(target_event.event.kind.as_u16(), 45010 | 45011) {
             anyhow::bail!(
                 "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
@@ -420,6 +430,33 @@ pub async fn validate_standard_deletion_event(
         }
     }
 
+    Ok(())
+}
+
+/// NIP-AT deletion rules for a kind:5 whose `a` tag targets kind:30183. Only
+/// the agent deletes its own objects (no owner deletes): with one writer for
+/// deletes, a writer can always find the last delete of its own address. The
+/// `k` tag lets readers subscribe to these deletes with `#k`. The relay's
+/// generic check already requires exactly one `e` or `a` target.
+fn validate_agent_attention_deletion(event: &Event, target_pubkey: &[u8]) -> anyhow::Result<()> {
+    if target_pubkey != event.pubkey.to_bytes().as_slice() {
+        anyhow::bail!("agent-attention deletes must be signed by the agent");
+    }
+    let kind = buzz_core::kind::KIND_AGENT_ATTENTION.to_string();
+    let a_tags = event
+        .tags
+        .iter()
+        .filter(|t| t.kind().to_string() == "a")
+        .count();
+    let has_k = event.tags.iter().any(|t| {
+        let parts = t.as_slice();
+        parts.len() >= 2 && parts[0] == "k" && parts[1] == kind
+    });
+    if a_tags != 1 || !has_k {
+        anyhow::bail!(
+            "agent-attention deletes need exactly one `a` tag and a [\"k\", \"{kind}\"] tag"
+        );
+    }
     Ok(())
 }
 
@@ -2252,6 +2289,54 @@ pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
             })
 }
 
+/// The `(agent pubkey, d tag)` of a NIP-AT delete when `kind:30183` is
+/// enabled: a `kind:5` with no `e` tag whose first `a` tag names the kind.
+/// Matches the authorization and dispatch rule that only the first `a` tag
+/// is processed.
+pub(crate) fn agent_attention_deletion_target(
+    event: &Event,
+    enabled: bool,
+) -> Option<(Vec<u8>, String)> {
+    if !enabled || event.kind != Kind::EventDeletion || has_e_tag(event) {
+        return None;
+    }
+    let coordinate = event
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "a")
+        .and_then(|tag| tag.content())?;
+    let mut parts = coordinate.splitn(3, ':');
+    let kind = parts.next()?.parse::<u32>().ok()?;
+    if kind != buzz_core::kind::KIND_AGENT_ATTENTION {
+        return None;
+    }
+    let pubkey = hex::decode(parts.next()?).ok()?;
+    let d_tag = parts.next()?.to_string();
+    Some((pubkey, d_tag))
+}
+
+/// Persist an already-authorized NIP-AT delete and apply it atomically. A
+/// failure rolls back the stored delete too, so the relay never reports or
+/// fans out a delete that did not take effect.
+pub(crate) async fn persist_agent_attention_deletion(
+    tenant: &TenantContext,
+    event: &Event,
+    pubkey: &[u8],
+    d_tag: &str,
+    state: &Arc<AppState>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+    Ok(state
+        .db
+        .insert_watermarked_deletion(
+            tenant.community(),
+            event,
+            buzz_core::kind::KIND_AGENT_ATTENTION as i32,
+            pubkey,
+            d_tag,
+        )
+        .await?)
+}
+
 /// Persist an already-authorized workflow deletion and its domain changes atomically.
 pub(crate) async fn persist_workflow_deletion(
     tenant: &TenantContext,
@@ -2331,7 +2416,14 @@ async fn handle_a_tag_deletion(
             let kind_i32 = k as i32;
             // NIP-09 scopes an a-tag deletion to versions at or before the
             // deletion's own created_at, so a stale/replayed tombstone can never
-            // erase a newer replacement head.
+            // erase a newer replacement head. NIP-AT also keeps the delete in
+            // effect: the relay then refuses versions dated at or before it.
+            if k == buzz_core::kind::KIND_AGENT_ATTENTION && state.config.agent_attention_enabled {
+                // NIP-AT deletion belongs to the atomic persistence path in ingest.
+                return Err(anyhow::anyhow!(
+                    "agent-attention deletion requires atomic persistence"
+                ));
+            }
             let deleted = state
                 .db
                 .soft_delete_by_coordinate(
@@ -3874,6 +3966,67 @@ mod tests {
             );
         }
         assert!(!(0..total).any(|done| nip43_progress_due(Maintenance, done, total)));
+    }
+
+    fn attention_delete(signer: &nostr::Keys, tags: &[Vec<String>]) -> Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(5), "")
+            .tags(tags.iter().map(|t| nostr::Tag::parse(t.clone()).unwrap()))
+            .sign_with_keys(signer)
+            .unwrap()
+    }
+
+    #[test]
+    fn attention_deletion_requires_agent_signature_one_a_and_k() {
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let kind = buzz_core::kind::KIND_AGENT_ATTENTION;
+        let coord = format!("{kind}:{}:{}", agent.public_key(), "d".repeat(64));
+        let a = vec!["a".to_string(), coord.clone()];
+        let k = vec!["k".to_string(), kind.to_string()];
+        let agent_bytes = agent.public_key().to_bytes();
+
+        let ok = attention_delete(&agent, &[a.clone(), k.clone()]);
+        assert!(validate_agent_attention_deletion(&ok, &agent_bytes).is_ok());
+
+        let by_owner = attention_delete(&owner, &[a.clone(), k.clone()]);
+        let err = validate_agent_attention_deletion(&by_owner, &agent_bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("signed by the agent"),
+            "got: {err}"
+        );
+
+        let no_k = attention_delete(&agent, std::slice::from_ref(&a));
+        assert!(validate_agent_attention_deletion(&no_k, &agent_bytes).is_err());
+
+        let wrong_k = attention_delete(&agent, &[a.clone(), vec!["k".into(), "30174".into()]]);
+        assert!(validate_agent_attention_deletion(&wrong_k, &agent_bytes).is_err());
+
+        let two_a = attention_delete(&agent, &[a.clone(), a.clone(), k.clone()]);
+        assert!(validate_agent_attention_deletion(&two_a, &agent_bytes).is_err());
+    }
+
+    #[test]
+    fn attention_deletion_target_routes_only_enabled_a_tag_deletes() {
+        let agent = nostr::Keys::generate();
+        let kind = buzz_core::kind::KIND_AGENT_ATTENTION;
+        let d_tag = "d".repeat(64);
+        let coord = format!("{kind}:{}:{d_tag}", agent.public_key());
+        let a = vec!["a".to_string(), coord];
+        let k = vec!["k".to_string(), kind.to_string()];
+        let event = attention_delete(&agent, &[a.clone(), k.clone()]);
+
+        assert_eq!(
+            agent_attention_deletion_target(&event, true),
+            Some((agent.public_key().to_bytes().to_vec(), d_tag))
+        );
+        assert_eq!(agent_attention_deletion_target(&event, false), None);
+        let other_kind = attention_delete(
+            &agent,
+            &[vec!["a".into(), format!("30023:{}:x", agent.public_key())]],
+        );
+        assert_eq!(agent_attention_deletion_target(&other_kind, true), None);
+        let with_e = attention_delete(&agent, &[vec!["e".into(), "0".repeat(64)], a, k]);
+        assert_eq!(agent_attention_deletion_target(&with_e, true), None);
     }
 
     #[test]

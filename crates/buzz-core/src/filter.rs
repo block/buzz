@@ -11,18 +11,37 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
 }
 
-/// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
-/// (owner). Returns `true` for every other kind.
+/// Kinds ([`crate::kind::RESULT_GATED_KINDS`]) whose stored events carry a
+/// per-event read check in [`reader_authorized_for_event`]. Delivery surfaces that only filter some
+/// kinds (live fan-out) use this to decide whether to apply the check.
+pub fn is_reader_gated_kind(kind: u32) -> bool {
+    crate::kind::RESULT_GATED_KINDS.contains(&kind)
+}
+
+/// Result-level read authorization for events that are private to named
+/// readers. Returns `true` for every kind outside [`is_reader_gated_kind`].
 ///
-/// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
-/// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
-/// bypasses the filter-level `#p` gate (e.g. a kindless `ids:[…]` lookup of
-/// a known event id) still cannot read another user's private event.
+/// - `KIND_DM_VISIBILITY` and `KIND_AGENT_TURN_METRIC`: the reader MUST equal
+///   the event's `#p` tag (owner).
+/// - `KIND_AGENT_ATTENTION` (NIP-AT): the reader MUST be the author (agent)
+///   or equal the event's `#p` tag (owner). Knowing the event id is not
+///   authorization.
+///
+/// This guards every delivery surface — WS historical pull (`req.rs`), COUNT,
+/// HTTP bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
+/// bypasses the filter-level gate (e.g. a kindless `ids:[…]` lookup of a
+/// known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if !is_reader_gated_kind(kind) {
+        return true;
+    }
+    if kind == crate::kind::KIND_AGENT_ATTENTION
+        && event
+            .pubkey
+            .to_hex()
+            .eq_ignore_ascii_case(reader_pubkey_hex)
+    {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -285,6 +304,34 @@ mod tests {
             .sign_with_keys(&relay)
             .expect("sign");
         assert!(reader_authorized_for_event(&note, other));
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_agent_attention_to_agent_and_owner() {
+        let agent_keys = Keys::generate();
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let stranger = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let attention = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_AGENT_ATTENTION as u16),
+            "encrypted-payload",
+        )
+        .tags([
+            Tag::parse(["d", "opaque"]).unwrap(),
+            Tag::parse(["p", owner]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .expect("sign");
+
+        assert!(reader_authorized_for_event(
+            &attention,
+            &agent_keys.public_key().to_hex()
+        ));
+        assert!(reader_authorized_for_event(&attention, owner));
+        assert!(
+            !reader_authorized_for_event(&attention, stranger),
+            "knowing an attention event id must not authorize a stranger"
+        );
+        assert!(is_reader_gated_kind(crate::kind::KIND_AGENT_ATTENTION));
     }
 
     #[test]
