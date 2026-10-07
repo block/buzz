@@ -527,12 +527,12 @@ pub(crate) async fn begin_transaction(
     pool: &sqlx::PgPool,
     operation: TransactionOperation,
 ) -> sqlx::Result<(sqlx::Transaction<'static, sqlx::Postgres>, TransactionTimer)> {
-    let connection = acquire(
-        pool,
-        operation.writer_operation().pair(),
-        operation.emits_legacy_pool_metrics(),
-    )
-    .await?;
+    let writer = operation.writer_operation();
+    let connection = if operation.emits_legacy_pool_metrics() {
+        acquire_writer_with_legacy_metrics(pool, writer).await?
+    } else {
+        acquire_writer(pool, writer).await?
+    };
     let transaction = sqlx::Transaction::begin(connection, None).await?;
     Ok((transaction, TransactionTimer::start(operation)))
 }
