@@ -183,7 +183,7 @@ async fn nip43_membership_snapshot_drift(
                 SELECT COALESCE(
                     jsonb_agg(
                         jsonb_build_array(lower(tag->>1), tag->>2)
-                        ORDER BY lower(tag->>1) COLLATE "C", tag->>2 COLLATE "C"
+                        ORDER BY lower(tag->>1) COLLATE "C", (tag->>2) COLLATE "C"
                     ),
                     '[]'::jsonb
                 )
