@@ -209,7 +209,6 @@ jobs:
             --archive-file target/ci/postgres-tests.tar.zst
 
   desktop-e2e-integration-shard:
-    env:
     name: Desktop E2E Integration (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -403,7 +402,6 @@ jobs:
           echo "Desktop E2E Integration shards passed"
 
   backend-integration:
-    env:
     name: Backend Integration (relay e2e)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -574,7 +572,6 @@ jobs:
           if-no-files-found: ignore
 
   relay-e2e:
-    env:
     name: Relay E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20
