@@ -81,7 +81,7 @@ jobs:
           - lane: mesh
             cache: desktop-mesh
             save-cache: true
-            run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --features mesh-llm --lib
+            run: just desktop-tauri-test-mesh
           - lane: compiled-flags
             cache: desktop-core
             save-cache: false

@@ -13,8 +13,8 @@
 # tree, not the pushed commit — the always-on `push-head-scope` lane warns when
 # they diverge and CI remains the authoritative gate for that ref.
 # Deliberate deviations:
-# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
-#   is omitted; a CI-workflow-only edit doesn't need a local test run.
+# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`desktop`/`mobile`
+#   filters is omitted; a CI-workflow-only edit doesn't need a local test run.
 # - `desktop-test` doesn't trigger on `crates/**` changes, though CI's Desktop
 #   JS job does: a few node:test cases read relay/DB crate sources to pin shared
 #   constants. Running the full desktop suite on every crate push would be

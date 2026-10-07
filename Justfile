@@ -231,6 +231,10 @@ desktop-tauri-check: _ensure-sidecar-stubs
 desktop-tauri-test: _ensure-sidecar-stubs
     cd desktop/src-tauri && cargo test --workspace
 
+# Run the desktop Tauri lib tests with the mesh-llm feature graph
+desktop-tauri-test-mesh: _ensure-sidecar-stubs
+    cargo test --manifest-path {{desktop_tauri_manifest}} --features mesh-llm --lib
+
 # Run the native terminal latency gate explicitly on a known-idle host.
 # This is intentionally excluded from shared CI: scheduler contention makes a
 # wall-clock assertion flaky, and the release profile is the shipped shape.
