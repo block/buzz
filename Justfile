@@ -258,14 +258,11 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     # nothing, so require exactly one passing test per filter.
     run_ignored() {
       local out
-      out="$(mktemp)"
-      cargo test --lib -- --ignored --nocapture "$@" 2>&1 | tee "$out"
-      if ! grep -qE "^test result: ok\. $# passed;" "$out"; then
+      out="$(cargo test --lib -- --ignored --nocapture "$@" 2>&1 | tee /dev/stderr)"
+      if ! grep -qE "^test result: ok\. $# passed;" <<<"$out"; then
         echo "expected exactly $# ignored compiled-flag assertions to pass: $*" >&2
-        rm -f "$out"
         exit 1
       fi
-      rm -f "$out"
     }
     flag_tests=(compiled_flag_matches_expected compiled_policy_matches_expected)
     echo "=== Clean build (no flag) → expect false ==="
