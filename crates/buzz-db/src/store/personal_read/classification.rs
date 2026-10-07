@@ -1,16 +1,6 @@
-//! Selector eligibility and shared directed-reason rules. Aggregate SQL applies
-//! the same eligibility before grouping, covered by the PostgreSQL parity test.
-use super::model::{Reason, ELIGIBLE_KINDS};
-
-pub(super) fn eligible(
-    kind: i32,
-    own: bool,
-    deleted: bool,
-    created_ms: i64,
-    cutoff_ms: i64,
-) -> bool {
-    ELIGIBLE_KINDS.contains(&kind) && !own && !deleted && created_ms >= cutoff_ms
-}
+//! Directed-reason rules for explicit selectors. The sidebar's SQL applies the
+//! same rules, covered by the PostgreSQL parity test.
+use super::model::Reason;
 
 /// Why a message is directed, before conversation membership is known.
 pub(super) fn reason(channel_type: &str, actor_hex: &str, tags: &[Vec<String>]) -> Option<Reason> {

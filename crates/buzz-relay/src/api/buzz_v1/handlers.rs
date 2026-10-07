@@ -47,7 +47,6 @@ pub(super) async fn sidebar(
             return Err(Error::invalid());
         }
         let community = principal.tenant.community();
-        let retention = state.config.buzz_v1_retention_seconds;
         let page = match query.channel_ids {
             Some(ids) => {
                 let ids = parse_channel_ids(&ids)
@@ -55,7 +54,7 @@ pub(super) async fn sidebar(
                     .ok_or_else(Error::invalid)?;
                 state
                     .db
-                    .personal_read_sidebar_channels(community, &principal.actor, retention, &ids)
+                    .personal_read_sidebar_channels(community, &principal.actor, &ids)
                     .await
             }
             None => {
@@ -64,7 +63,6 @@ pub(super) async fn sidebar(
                     .personal_read_sidebar(
                         community,
                         &principal.actor,
-                        retention,
                         query.limit.unwrap_or(MAX_CHANNELS),
                         query.cursor,
                     )
@@ -170,12 +168,7 @@ pub(super) async fn contexts(
         }
         let mut page = state
             .db
-            .personal_read_contexts(
-                principal.tenant.community(),
-                &principal.actor,
-                state.config.buzz_v1_retention_seconds,
-                &targets,
-            )
+            .personal_read_contexts(principal.tenant.community(), &principal.actor, &targets)
             .await
             .map_err(|_| Error::unavailable())?;
         auth::recheck(&state, &headers, &principal).await?;

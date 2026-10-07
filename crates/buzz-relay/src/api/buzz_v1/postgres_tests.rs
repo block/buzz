@@ -28,6 +28,19 @@ fn proof(key: &Keys, host: &str, path: &str, method: &str, body: Option<&[u8]>) 
     )
 }
 
+/// Start `key`'s read state an hour ago, as a first intent would have.
+async fn start(state: &crate::state::AppState, community: buzz_core::CommunityId, key: &Keys) {
+    sqlx::query(
+        "INSERT INTO personal_read_accounts (community_id,actor,started_at)
+         VALUES ($1,$2,now()-interval '1 hour')",
+    )
+    .bind(community.as_uuid())
+    .bind(key.public_key().to_bytes().as_slice())
+    .execute(state.db.pool())
+    .await
+    .unwrap();
+}
+
 async fn request(
     state: Arc<crate::state::AppState>,
     host: &str,
@@ -165,6 +178,18 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         .await
         .unwrap()
         .id;
+    state
+        .db
+        .add_member(
+            community,
+            channel,
+            &other.public_key().to_bytes(),
+            buzz_db::channel::MemberRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+    start(&state, community, &other).await;
     let event = EventBuilder::new(Kind::Custom(9), "read by one signer only")
         .sign_with_keys(&Keys::generate())
         .unwrap();
@@ -256,6 +281,7 @@ async fn accessory_context_get_signed_query_and_independent_batch_outcomes() {
         .await
         .unwrap()
         .id;
+    start(&state, community, &actor).await;
     let event = EventBuilder::new(Kind::Custom(9), "message selector")
         .sign_with_keys(&Keys::generate())
         .unwrap();
@@ -407,7 +433,6 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
         let mut state = (*fixture).clone();
         let config = Arc::make_mut(&mut state.config);
         config.buzz_v1_enabled = enabled;
-        config.buzz_v1_retention_seconds = 1234;
         let state = Arc::new(state);
         for known_host in [true, false] {
             let request_host = if known_host {
@@ -439,7 +464,8 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     let d = &doc["buzz_v1"];
                     assert_eq!(d["version"], 1);
                     assert_eq!(d["base_path"], "/buzz/v1");
-                    assert_eq!(d["retention_seconds"], 1234);
+                    assert_eq!(d["unread_cap"], 99);
+                    assert!(d.get("retention_seconds").is_none());
                     assert_eq!(d["max_channels"], buzz_db::personal_read::MAX_CHANNELS);
                     assert_eq!(d["max_intents"], buzz_db::personal_read::MAX_INTENTS);
                     assert_eq!(d["max_contexts"], buzz_db::personal_read::MAX_CONTEXTS);
@@ -593,6 +619,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
             .await
             .unwrap();
     }
+    start(&state, community, &reader).await;
     let message = EventBuilder::new(Kind::Custom(9), "unread message to delete")
         .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
         .sign_with_keys(&author)
@@ -632,7 +659,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         assert_eq!(result["accepted"], true, "{result}");
         assert_eq!(result["event_id"], event.id.to_hex(), "{result}");
 
-        // This distinct member never writes a frontier. Reads alone must not
+        // This distinct member never marks anything. Reads alone must not
         // erase unread state; only the accepted signed deletion changes it.
         let auth = proof(&reader, &host, &path, "GET", None);
         let (status, sidebar) = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
@@ -642,7 +669,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         assert_eq!(channels[0]["channel_id"], channel.to_string());
         assert_eq!(
             channels[0]["unread"],
-            json!({"status":"exact", "value":count}),
+            json!(count),
             "kind {deletion_kind}, after kind {}: {sidebar}",
             event.kind.as_u16()
         );

@@ -1,11 +1,25 @@
 //! Read progress follows relay arrival (`received_at`), never author time.
 //! Each case sets every arrival explicitly: back-to-back inserts share a clock.
-use super::{postgres_tests::fixture, *};
+use super::{postgres_tests, projection::LATEST_PROBE, *};
 use crate::Db;
 use buzz_core::CommunityId;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// The shared fixture, with the actor's membership moved an hour back so
+/// arrivals set within that hour fall after joining.
+async fn fixture() -> (Db, PgPool, CommunityId, Uuid, Keys, nostr::Event) {
+    let fixture = postgres_tests::fixture().await;
+    sqlx::query(
+        "UPDATE channel_members SET joined_at=now()-interval '1 hour' WHERE community_id=$1",
+    )
+    .bind(fixture.2.as_uuid())
+    .execute(&fixture.1)
+    .await
+    .unwrap();
+    fixture
+}
 
 /// Store `event` as having arrived at `arrived` (Unix seconds).
 async fn arrive(pool: &PgPool, community: CommunityId, event: &nostr::Event, arrived: u64) {
@@ -22,18 +36,18 @@ async fn arrive(pool: &PgPool, community: CommunityId, event: &nostr::Event, arr
     assert_eq!(updated, 1, "arrival must land on exactly one stored event");
 }
 
-/// A message authored at `authored` that arrives at `arrived`.
-async fn post(
+/// A message of `kind` authored at `authored` that arrives at `arrived`.
+#[allow(clippy::too_many_arguments)]
+async fn post_kind(
     db: &Db,
     pool: &PgPool,
     community: CommunityId,
     channel: Uuid,
+    kind: u16,
     authored: u64,
     arrived: u64,
-    tags: Vec<Tag>,
 ) -> nostr::Event {
-    let event = EventBuilder::new(Kind::Custom(9), format!("authored {authored}"))
-        .tags(tags)
+    let event = EventBuilder::new(Kind::Custom(kind), format!("authored {authored}"))
         .custom_created_at(nostr::Timestamp::from(authored))
         .sign_with_keys(&Keys::generate())
         .unwrap();
@@ -44,7 +58,18 @@ async fn post(
     event
 }
 
-/// A reply to `root` that mentions the actor, so it counts without membership.
+async fn post(
+    db: &Db,
+    pool: &PgPool,
+    community: CommunityId,
+    channel: Uuid,
+    authored: u64,
+    arrived: u64,
+) -> nostr::Event {
+    post_kind(db, pool, community, channel, 9, authored, arrived).await
+}
+
+/// A reply to `root` that mentions the actor, which makes it their thread.
 #[allow(clippy::too_many_arguments)]
 async fn reply(
     db: &Db,
@@ -56,44 +81,27 @@ async fn reply(
     authored: u64,
     arrived: u64,
 ) -> nostr::Event {
-    let mention = Tag::public_key(actor.public_key());
-    let event = post(
+    let event = postgres_tests::reply(
         db,
-        pool,
         community,
         channel,
+        root,
+        &Keys::generate(),
         authored,
-        arrived,
-        vec![mention],
+        vec![Tag::public_key(actor.public_key())],
+        false,
     )
     .await;
-    sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-        VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
-        .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice())
-        .bind(event.created_at.as_secs() as f64)
-        .bind(channel).bind(root.id.as_bytes().as_slice()).execute(pool).await.unwrap();
+    arrive(pool, community, &event, arrived).await;
     event
 }
 
 async fn sidebar(db: &Db, community: CommunityId, actor: &Keys) -> ChannelReadSummary {
-    db.personal_read_sidebar(
-        community,
-        &actor.public_key(),
-        DEFAULT_RETENTION_SECONDS,
-        20,
-        None,
-    )
-    .await
-    .unwrap()
-    .channels
-    .remove(0)
+    postgres_tests::sidebar(db, community, actor).await
 }
 
 async fn apply(db: &Db, community: CommunityId, actor: &Keys, intent: ReadIntent) {
-    let outcome = db
-        .apply_personal_read_intent(community, &actor.public_key(), &intent)
-        .await
-        .unwrap();
+    let outcome = postgres_tests::apply(db, community, actor, intent).await;
     assert_eq!(outcome, IntentOutcome::Applied);
 }
 
@@ -107,6 +115,13 @@ fn mark_through(channel: Uuid, root: Option<&str>, message: &str) -> ReadIntent 
     }
 }
 
+fn mark_channel_read(channel: Uuid, message: String) -> ReadIntent {
+    ReadIntent::MarkChannelRead {
+        channel_id: channel,
+        message_id: message,
+    }
+}
+
 /// Channel-timeline states of `messages`, in order.
 async fn states(
     db: &Db,
@@ -115,36 +130,7 @@ async fn states(
     channel: Uuid,
     messages: &[&nostr::Event],
 ) -> Vec<String> {
-    let query = ContextQuery {
-        target: ReadTarget {
-            channel_id: channel,
-            root_id: None,
-        },
-        message_ids: messages.iter().map(|e| e.id.to_hex()).collect(),
-    };
-    let page = db
-        .personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &[query],
-        )
-        .await
-        .unwrap();
-    let page = serde_json::to_value(page).unwrap();
-    page["contexts"][0]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["status"].as_str().unwrap().to_owned())
-        .collect()
-}
-
-fn exact(count: &ReadCount) -> Option<u32> {
-    match count {
-        ReadCount::Exact { value } => Some(*value),
-        _ => None,
-    }
+    postgres_tests::status(db, community, actor, channel, None, messages).await
 }
 
 #[tokio::test]
@@ -162,16 +148,13 @@ async fn late_arrival_with_old_author_time_is_unread() {
     .await;
 
     // Authored ten minutes before the read message, arriving after it was read.
-    let late = post(&db, &pool, community, channel, now - 600, now - 30, vec![]).await;
+    let late = post(&db, &pool, community, channel, now - 600, now - 30).await;
 
     assert_eq!(
         states(&db, community, &actor, channel, &[&read, &late]).await,
         ["read", "unread"]
     );
-    assert_eq!(
-        exact(&sidebar(&db, community, &actor).await.unread),
-        Some(1)
-    );
+    assert_eq!(sidebar(&db, community, &actor).await.unread, 1);
 }
 
 #[tokio::test]
@@ -181,7 +164,7 @@ async fn future_dated_anchor_does_not_swallow_later_arrivals() {
     let now = earlier.created_at.as_secs();
     arrive(&pool, community, &earlier, now - 60).await;
     // Stamped ten minutes ahead; the relay accepts up to fifteen.
-    let ahead = post(&db, &pool, community, channel, now + 600, now - 40, vec![]).await;
+    let ahead = post(&db, &pool, community, channel, now + 600, now - 40).await;
     apply(
         &db,
         community,
@@ -190,16 +173,13 @@ async fn future_dated_anchor_does_not_swallow_later_arrivals() {
     )
     .await;
 
-    let later = post(&db, &pool, community, channel, now, now - 30, vec![]).await;
+    let later = post(&db, &pool, community, channel, now, now - 30).await;
 
     assert_eq!(
         states(&db, community, &actor, channel, &[&earlier, &ahead, &later]).await,
         ["read", "read", "unread"]
     );
-    assert_eq!(
-        exact(&sidebar(&db, community, &actor).await.unread),
-        Some(1)
-    );
+    assert_eq!(sidebar(&db, community, &actor).await.unread, 1);
 }
 
 /// Marking the sidebar's own latest message must clear the badge even when the
@@ -210,32 +190,17 @@ async fn mark_as_read_with_the_sidebar_anchor_clears_a_late_arrival() {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     arrive(&pool, community, &first, now - 60).await;
-    post(&db, &pool, community, channel, now + 1, now - 40, vec![]).await;
-    post(&db, &pool, community, channel, now - 600, now - 30, vec![]).await;
-    assert_eq!(
-        exact(&sidebar(&db, community, &actor).await.unread),
-        Some(3)
-    );
+    post(&db, &pool, community, channel, now + 1, now - 40).await;
+    post(&db, &pool, community, channel, now - 600, now - 30).await;
+    assert_eq!(sidebar(&db, community, &actor).await.unread, 3);
 
     let anchor = sidebar(&db, community, &actor)
         .await
         .latest_message_id
         .expect("a channel with messages has a latest message");
-    apply(
-        &db,
-        community,
-        &actor,
-        ReadIntent::MarkChannelRead {
-            channel_id: channel,
-            message_id: anchor,
-        },
-    )
-    .await;
+    apply(&db, community, &actor, mark_channel_read(channel, anchor)).await;
 
-    assert_eq!(
-        exact(&sidebar(&db, community, &actor).await.unread),
-        Some(0)
-    );
+    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
 }
 
 #[tokio::test]
@@ -273,12 +238,21 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
         now - 30,
     )
     .await;
+    // Ingest started the actor's thread row at real arrival time; move it
+    // back to before the backdated replies.
+    sqlx::query("UPDATE personal_read_frontiers SET through_timestamp=to_timestamp($3) WHERE community_id=$1 AND root_id=$2")
+        .bind(community.as_uuid())
+        .bind(root.id.as_bytes().as_slice())
+        .bind((now - 60) as f64)
+        .execute(&pool)
+        .await
+        .unwrap();
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(exact(&row.unread), Some(2));
-    assert_eq!(row.threads.items.len(), 1);
+    assert_eq!((row.unread, row.unread_thread_count), (2, 1));
+    assert_eq!(row.threads.len(), 1);
 
     let root_id = root.id.to_hex();
-    let anchor = row.threads.items[0].latest_reply_id.clone();
+    let anchor = row.threads[0].latest_reply_id.clone();
     apply(
         &db,
         community,
@@ -288,79 +262,47 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
     .await;
 
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(exact(&row.unread), Some(0));
-    assert!(row.threads.items.is_empty() && row.threads.complete);
+    assert_eq!((row.unread, row.unread_thread_count), (0, 0));
+    assert!(row.threads.is_empty());
 }
 
-/// The shallow latest probe reads the newest `MAX_CHANNEL_SCAN + 1` events by
-/// author time, of any kind. A late arrival with an older author time than
-/// that many events is counted unread, so the unread scan must supply the
-/// anchor or Mark as read with the sidebar anchor leaves it.
-async fn mark_as_read_behind_fillers(fillers: u64) -> Option<u32> {
+/// The latest probe holds only the newest messages by author time. A late
+/// arrival authored before all of them is still counted, so it must still be
+/// the anchor, or Mark as read with the sidebar anchor leaves it unread.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn mark_as_read_clears_a_late_arrival_behind_the_latest_probe() {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     arrive(&pool, community, &first, now - 60).await;
-    apply(
-        &db,
-        community,
-        &actor,
-        mark_through(channel, None, &first.id.to_hex()),
-    )
-    .await;
-    for i in 0..fillers {
-        // Reactions are not counted, but the probe's LIMIT sees them.
-        let filler = EventBuilder::new(Kind::Custom(7), "+")
-            .custom_created_at(nostr::Timestamp::from(now - 500 + i))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-        db.insert_event(community, &filler, Some(channel))
-            .await
-            .unwrap();
-        arrive(&pool, community, &filler, now - 50).await;
+    for i in 0..LATEST_PROBE as u64 {
+        post(&db, &pool, community, channel, now - 500 + i, now - 50).await;
     }
-    post(&db, &pool, community, channel, now - 600, now - 10, vec![]).await;
-    assert_eq!(
-        exact(&sidebar(&db, community, &actor).await.unread),
-        Some(1)
-    );
-
     let anchor = sidebar(&db, community, &actor)
         .await
         .latest_message_id
-        .expect("a channel with messages has a latest message");
+        .unwrap();
+    apply(&db, community, &actor, mark_channel_read(channel, anchor)).await;
+    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
+
+    let late = post(&db, &pool, community, channel, now - 600, now - 10).await;
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(row.unread, 1);
+    assert_eq!(row.latest_message_id, Some(late.id.to_hex()));
     apply(
         &db,
         community,
         &actor,
-        ReadIntent::MarkChannelRead {
-            channel_id: channel,
-            message_id: anchor,
-        },
+        mark_channel_read(channel, late.id.to_hex()),
     )
     .await;
-    exact(&sidebar(&db, community, &actor).await.unread)
+    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
 }
 
-/// Control: with one slot to spare the late arrival is inside the probe.
+/// Reactions never fill the latest probe.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn mark_as_read_clears_a_late_arrival_inside_the_latest_probe() {
-    let fillers = MAX_CHANNEL_SCAN as u64 - 1;
-    assert_eq!(mark_as_read_behind_fillers(fillers).await, Some(0));
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn mark_as_read_clears_a_late_arrival_outside_the_latest_probe() {
-    let fillers = MAX_CHANNEL_SCAN as u64;
-    assert_eq!(mark_as_read_behind_fillers(fillers).await, Some(0));
-}
-
-/// When the newest 257 events are all uncounted, the only message is still in
-/// the unread scan: the summary reports it as found, as one coherent triple.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn latest_message_behind_a_full_probe_of_reactions_is_found() {
+async fn latest_message_behind_newer_reactions_is_found() {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     let demoted = sqlx::query("UPDATE events SET kind=7 WHERE community_id=$1 AND id=$2")
@@ -371,23 +313,15 @@ async fn latest_message_behind_a_full_probe_of_reactions_is_found() {
         .unwrap()
         .rows_affected();
     assert_eq!(demoted, 1);
-    let only = post(&db, &pool, community, channel, now - 600, now - 10, vec![]).await;
-    for i in 0..MAX_CHANNEL_SCAN as u64 {
-        let filler = EventBuilder::new(Kind::Custom(7), "+")
-            .custom_created_at(nostr::Timestamp::from(now - 500 + i))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-        db.insert_event(community, &filler, Some(channel))
-            .await
-            .unwrap();
-        arrive(&pool, community, &filler, now - 50).await;
+    let only = post(&db, &pool, community, channel, now - 600, now - 10).await;
+    for i in 0..LATEST_PROBE as u64 {
+        post_kind(&db, &pool, community, channel, 7, now - 500 + i, now - 50).await;
     }
 
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(row.latest_message_id, Some(only.id.to_hex()));
     assert_eq!(row.latest_message_at, Some((now - 600) as i64));
-    assert!(row.latest_message_complete);
-    assert_eq!(exact(&row.unread), Some(1));
+    assert_eq!(row.unread, 1);
 }
 
 /// Store `event` as having arrived at exactly `seconds` plus `micros`. Built
@@ -421,10 +355,10 @@ async fn arrive_exact(
 
 /// Two messages with the same author time arriving within one second; marks
 /// the one at `pick` and returns both channel states.
-async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, Option<u32>) {
+async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, u32) {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
-    let second = post(&db, &pool, community, channel, now, now, vec![]).await;
+    let second = post(&db, &pool, community, channel, now, now).await;
     let arrived = now as i64 - 30;
     arrive_exact(&pool, community, &first, arrived, micros[0]).await;
     arrive_exact(&pool, community, &second, arrived, micros[1]).await;
@@ -438,7 +372,7 @@ async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, 
     .await;
     (
         states(&db, community, &actor, channel, &both).await,
-        exact(&sidebar(&db, community, &actor).await.unread),
+        sidebar(&db, community, &actor).await.unread,
     )
 }
 
@@ -449,7 +383,7 @@ async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, 
 async fn arrivals_one_microsecond_apart_in_the_same_second_are_ordered() {
     assert_eq!(
         mark_within_one_second([500_000, 500_001], 0).await,
-        (vec!["read".to_owned(), "unread".to_owned()], Some(1))
+        (vec!["read".to_owned(), "unread".to_owned()], 1)
     );
 }
 
@@ -461,7 +395,7 @@ async fn marking_either_of_two_identical_arrivals_reads_both() {
     for pick in [0, 1] {
         assert_eq!(
             mark_within_one_second([500_000, 500_000], pick).await,
-            (vec!["read".to_owned(), "read".to_owned()], Some(0)),
+            (vec!["read".to_owned(), "read".to_owned()], 0),
             "marked index {pick}"
         );
     }

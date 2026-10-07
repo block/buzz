@@ -6149,11 +6149,7 @@ pub(crate) mod postgres_tests {
                 br#"{"outcomes":[{"status":"blocked"}],"projection_status":"not_requested"}"#
             );
         } else {
-            assert!(value["account"]["cutoff_ms"].is_i64());
-            assert_eq!(
-                value["account"]["retention_seconds"],
-                state.config.buzz_v1_retention_seconds
-            );
+            assert!(value.get("account").is_none());
             if path.contains("sidebar") {
                 assert_eq!(value["channels"], serde_json::json!([]));
                 assert_eq!(value["next_cursor"], serde_json::Value::Null);
