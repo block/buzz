@@ -3250,7 +3250,11 @@ async fn publish_nip43_membership_snapshot(
         .record(started_at.elapsed().as_secs_f64());
     metrics::counter!(
         "buzz_nip43_membership_publications_total",
-        "result" => if result.is_ok() { "succeeded" } else { "failed" }
+        "result" => match &result {
+            Ok(false) if only_if_drifted => "skipped",
+            Ok(_) => "succeeded",
+            Err(_) => "failed",
+        }
     )
     .increment(1);
     result
@@ -4253,6 +4257,10 @@ mod tests {
             assert!(publish_nip43_membership_snapshot(&tenant, &state, false)
                 .await
                 .expect("publish current snapshot"));
+            // Move to a later second: an unconditional republish in the same
+            // second signs the same event id and is deduplicated, which would
+            // hide a pass that skipped the locked re-check.
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
             let recorder = DebuggingRecorder::new();
             let summary = {
@@ -4267,6 +4275,28 @@ mod tests {
             assert_eq!((summary.repaired, summary.failed), (0, 0));
             assert_eq!(reconciliation_failures(&recorder), 0);
             assert_eq!(relay_signed_snapshots(&pool, id, &state).await, 1);
+            assert_eq!(publications(&recorder, "skipped"), 1);
+            assert_eq!(publications(&recorder, "succeeded"), 0);
+        }
+
+        fn publications(recorder: &DebuggingRecorder, result: &str) -> u64 {
+            recorder
+                .snapshotter()
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, _, _, _)| {
+                    key.key().name() == "buzz_nip43_membership_publications_total"
+                        && key
+                            .key()
+                            .labels()
+                            .any(|label| label.key() == "result" && label.value() == result)
+                })
+                .map(|(_, _, _, value)| match value {
+                    DebugValue::Counter(value) => value,
+                    other => panic!("publications_total must be a counter: {other:?}"),
+                })
+                .sum()
         }
     }
 }
