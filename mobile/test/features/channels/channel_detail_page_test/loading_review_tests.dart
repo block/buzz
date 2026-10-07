@@ -1,47 +1,95 @@
 part of '../channel_detail_page_test.dart';
 
 void _loadingReviewTests() {
-  testWidgets(
-    'empty thread keeps its original message visible during loading',
-    (tester) async {
-      tester.view.physicalSize = const Size(400, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      final root = _textMsg(
-        id: 'thread-root',
-        pubkey: 'alice',
-        content: 'Original message',
-      );
-      final query = Completer<List<NostrEvent>>();
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [root],
-          pendingThreadReplies: {'thread-root': query.future},
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.longPress(find.text('Original message').hitTestable());
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Reply').hitTestable());
-      await tester.pumpAndSettle();
-
-      void expectOriginalVisible() {
-        final gate = find.byKey(const ValueKey('thread-initial-viewport-gate'));
-        expect(tester.widget<Opacity>(gate).opacity, 1);
+  for (final (count, target) in [(0, null), (3, null), (40, null), (40, 5)]) {
+    testWidgets(
+      'thread stays visible while loading $count replies target=$target',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final root = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Original message',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < count; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final query = Completer<List<NostrEvent>>();
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            pendingThreadReplies: {'thread-root': query.future},
+            home: target == null
+                ? null
+                : ThreadDetailPage(
+                    threadHead: formatTimeline([root]).single,
+                    allMessages: formatTimeline([root]),
+                    channelId: _channelId,
+                    currentPubkey: 'self',
+                    isMember: true,
+                    isArchived: false,
+                    initialMessageId: 'reply-$target',
+                  ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (target == null) {
+          await tester.longPress(find.text('Original message').hitTestable());
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Reply').hitTestable());
+          await tester.pumpAndSettle();
+        }
         expect(find.text('Original message').hitTestable(), findsOneWidget);
-      }
-
-      expectOriginalVisible();
-      await tester.pump(const Duration(seconds: 2));
-      expectOriginalVisible();
-      query.complete([]);
-      for (var frame = 0; frame < 10; frame++) {
-        await tester.pump(const Duration(milliseconds: 16));
-        expectOriginalVisible();
-      }
-      expect(find.text('0 replies'), findsOneWidget);
-    },
-  );
+        await tester.pump(const Duration(seconds: 2));
+        expect(find.text('Original message').hitTestable(), findsOneWidget);
+        query.complete(replies);
+        for (var frame = 0; frame < 120; frame++) {
+          await tester.pump(const Duration(milliseconds: 16));
+          final gate = find.byKey(
+            const ValueKey('thread-initial-viewport-gate'),
+          );
+          if (count <= 3) {
+            expect(find.text('Original message').hitTestable(), findsOneWidget);
+          }
+          if (tester.widget<Opacity>(gate).opacity == 0 || count == 0) {
+            expect(
+              find.text('Original message').hitTestable(),
+              findsOneWidget,
+              reason:
+                  'The original must remain usable while replies are positioned (frame $frame).',
+            );
+          } else {
+            expect(
+              find.text('Reply ${target ?? count - 1}').hitTestable(),
+              findsOneWidget,
+              reason:
+                  'Reveal the reply list only at its final position (frame $frame).',
+            );
+          }
+        }
+        expect(
+          tester
+              .widget<Opacity>(
+                find.byKey(const ValueKey('thread-initial-viewport-gate')),
+              )
+              .opacity,
+          1,
+        );
+      },
+    );
+  }
 
   testWidgets('loaded page rebuild formats the timeline once', (tester) async {
     var transforms = 0;

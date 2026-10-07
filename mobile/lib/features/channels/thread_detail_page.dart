@@ -284,14 +284,11 @@ class ThreadDetailPage extends HookConsumerWidget {
             ? settledImeLift
             : 0);
     final navigationBottomInset = composerDockHeight.value + settledImeLift;
-    // Keep the route snapshot usable while the relay query is pending. Once
-    // authoritative replies arrive, suppress only the frame(s) used to place
-    // the hydrated target. An ordinary empty thread has no target to place:
-    // keep its original message visible across hydration.
+    // Keep the route snapshot usable during loading. While the hydrated list
+    // settles, the message-list view keeps the original message visible and
+    // reveals the positioned list in one frame, for empty and populated threads.
     final threadViewportVisible =
-        !relayRepliesAvailable ||
-        (initialMessageId == null && replies.isEmpty) ||
-        initialViewportReady.value;
+        !relayRepliesAvailable || initialViewportReady.value;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
