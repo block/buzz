@@ -1018,6 +1018,11 @@ impl Db {
                 }
             };
         let mut conn = conn;
+        if operation.bounded_release() {
+            // Must precede the first post-acquire await: a caller deadline
+            // can drop this checkout at any of them.
+            conn.close_on_drop();
+        }
         let aurora = self.reader_aurora_capability_on(&mut conn).await;
         let mut tx = match sqlx::Transaction::begin(
             conn,

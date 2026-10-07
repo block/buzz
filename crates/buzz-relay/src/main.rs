@@ -2424,9 +2424,10 @@ async fn emit_fleet_db_usage_metrics(state: &AppState, schedule: &mut FleetUsage
 }
 
 /// Run each due fleet collection under its relay-side deadline and apply the
-/// outcome. An expired collection is dropped (rolling back its reader
-/// transaction) and treated as a failed refresh, so a reader that stops
-/// answering cannot stall the leader's poller.
+/// outcome. An expired collection is dropped and treated as a failed refresh,
+/// so a reader that stops answering cannot stall the leader's poller. The
+/// dropped reader connection is closed in the background under SQLx's
+/// bounded close-on-drop rather than returned to the shared reader pool.
 async fn refresh_due_fleet_usage(
     schedule: &mut FleetUsageSchedule,
     stock: impl std::future::Future<Output = FleetStockRefresh>,
@@ -3376,15 +3377,33 @@ mod tests {
             )
         };
 
+        // The outer bound turns a missing deadline into a failure instead of
+        // a hang under paused time.
+        async fn bounded(refresh: impl std::future::Future<Output = ()>) {
+            tokio::time::timeout(Duration::from_secs(60 * 60), refresh)
+                .await
+                .expect("a stalled family must be abandoned at its deadline");
+        }
+
         let started = tokio::time::Instant::now();
-        refresh_due_fleet_usage(&mut schedule(), std::future::pending(), activity()).await;
+        bounded(refresh_due_fleet_usage(
+            &mut schedule(),
+            std::future::pending(),
+            activity(),
+        ))
+        .await;
         assert_eq!(
             tokio::time::Instant::now() - started,
             FLEET_STOCK_COLLECTION_DEADLINE
         );
 
         let started = tokio::time::Instant::now();
-        refresh_due_fleet_usage(&mut schedule(), stock(), std::future::pending()).await;
+        bounded(refresh_due_fleet_usage(
+            &mut schedule(),
+            stock(),
+            std::future::pending(),
+        ))
+        .await;
         assert_eq!(
             tokio::time::Instant::now() - started,
             FLEET_ACTIVITY_COLLECTION_DEADLINE

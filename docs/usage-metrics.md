@@ -48,7 +48,10 @@ fresh proved reader was available, `query_error` when the reader query failed,
 and `timeout` when the whole collection (reader proof included) exceeded its
 relay-side deadline of 10 seconds for stock or 20 seconds for activity. The
 deadline bounds a reader that stops answering, which the server-side statement
-timeout cannot, so a hung reader cannot stall the leader's poller.
+timeout cannot, so a hung reader cannot stall the leader's poller. Telemetry
+reader connections are closed when the collection ends rather than returned to
+the reader pool, and an abandoned one is closed within 5 seconds, so a dark
+reader cannot hold slots that serving reads need.
 
 Storage totals come from the `buzz-admin` worker snapshot and carry their own
 `buzz_storage_snapshot_load_ok` and `buzz_storage_snapshot_age_seconds` health

@@ -1674,4 +1674,160 @@ mod postgres_tests {
         drop_scratch_db(&admin, reader, &reader_name).await;
         drop_scratch_db(&admin, writer, &writer_name).await;
     }
+
+    /// Loopback TCP proxy that can make the reader go dark. While dark, any
+    /// session that receives bytes stops relaying for good but keeps both
+    /// sockets open, like a replica that stops answering mid-query. Sessions
+    /// opened after the proxy comes back relay normally.
+    struct DarkeningProxy {
+        port: u16,
+        dark: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl DarkeningProxy {
+        async fn spawn(upstream_host: String, upstream_port: u16) -> Self {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            async fn pump(
+                mut from: tokio::net::tcp::OwnedReadHalf,
+                mut to: tokio::net::tcp::OwnedWriteHalf,
+                dark: Arc<AtomicBool>,
+            ) {
+                let mut buf = [0u8; 8192];
+                loop {
+                    let Ok(n) = from.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    if dark.load(Ordering::SeqCst) {
+                        // Swallow the bytes and hold both sockets open.
+                        let _held = (from, to);
+                        std::future::pending::<()>().await;
+                        return;
+                    }
+                    if to.write_all(&buf[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind proxy");
+            let port = listener.local_addr().expect("proxy addr").port();
+            let dark = Arc::new(AtomicBool::new(false));
+            let accept_dark = dark.clone();
+            tokio::spawn(async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    let Ok(server) =
+                        tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port))
+                            .await
+                    else {
+                        continue;
+                    };
+                    let (client_read, client_write) = client.into_split();
+                    let (server_read, server_write) = server.into_split();
+                    tokio::spawn(pump(client_read, server_write, accept_dark.clone()));
+                    tokio::spawn(pump(server_read, client_write, accept_dark.clone()));
+                }
+            });
+            Self { port, dark }
+        }
+
+        fn set_dark(&self, dark: bool) {
+            self.dark.store(dark, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A fleet collection abandoned at its relay-side deadline on a reader
+    /// that went dark mid-query must release its slot in the shared reader
+    /// pool within SQLx's bounded close-on-drop, not hold it until the kernel
+    /// gives up on the socket. SQLx's default return-to-pool path pings the
+    /// dark connection with no timeout while holding the slot.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn abandoned_fleet_collection_releases_its_reader_slot() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::time::{Duration, Instant};
+
+        let admin_url = crate::test_support::database_url();
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .expect("connect admin to create scratch db");
+        let (writer, writer_name) = create_scratch_db(&admin, "usage_writer").await;
+        let (reader, reader_name) = create_scratch_db(&admin, "usage_reader").await;
+        let (reader_community, _, _) = make_community(&reader).await;
+        insert_user(&reader, reader_community, &random_pubkey(), false).await;
+
+        let reader_options = reader.connect_options();
+        let proxy = DarkeningProxy::spawn(
+            reader_options.get_host().to_owned(),
+            reader_options.get_port(),
+        )
+        .await;
+        let proxied: PgConnectOptions =
+            (*reader_options).clone().host("127.0.0.1").port(proxy.port);
+        // One slot, so a stranded slot blocks every later acquire. No
+        // before-acquire ping, so the stall lands after the checkout is
+        // handed out, where the relay deadline drops it.
+        let read_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .test_before_acquire(false)
+            .acquire_timeout(Duration::from_secs(15))
+            .connect_with(proxied)
+            .await
+            .expect("connect reader through proxy");
+        let db = Db::from_pools(writer.clone(), read_pool.clone());
+        db.fence().force_open_for_tests(Utc::now());
+        db.usage_fleet_stock_snapshot()
+            .await
+            .expect("healthy collection")
+            .expect("fresh proved reader");
+
+        // Leave one established, idle connection for the collection to use.
+        drop(read_pool.acquire().await.expect("warm reader connection"));
+        let warm_deadline = Instant::now() + Duration::from_secs(5);
+        while read_pool.num_idle() != 1 {
+            assert!(
+                Instant::now() < warm_deadline,
+                "warm connection never returned to the pool"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        proxy.set_dark(true);
+        tokio::time::timeout(Duration::from_secs(1), db.usage_fleet_stock_snapshot())
+            .await
+            .expect_err("a dark reader must stall the collection until its deadline");
+        proxy.set_dark(false);
+
+        let started = Instant::now();
+        let mut replacement = read_pool
+            .acquire()
+            .await
+            .expect("the abandoned collection must release its reader slot");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "slot release must be bounded by close-on-drop, took {:?}",
+            started.elapsed()
+        );
+        let one: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&mut *replacement)
+            .await
+            .expect("replacement reader is usable");
+        assert_eq!(one, 1);
+        drop(replacement);
+
+        drop(db);
+        read_pool.close().await;
+        drop_scratch_db(&admin, reader, &reader_name).await;
+        drop_scratch_db(&admin, writer, &writer_name).await;
+    }
 }
