@@ -41,6 +41,7 @@ export type AppSidebarProps = {
   selectedView:
     | "home"
     | "channel"
+    | "canvas"
     | "messages"
     | "agents"
     | "workflows"
@@ -86,6 +87,7 @@ export type AppSidebarProps = {
   onRemoveCommunityFromDevice: (id: string) => Promise<void>;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
+  onSelectCanvas: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;

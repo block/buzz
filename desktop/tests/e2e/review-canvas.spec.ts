@@ -235,6 +235,55 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/");
 });
 
+test("Canvas is a persistent sidebar screen with a review inbox and reloadable artifact route", async ({
+  page,
+}) => {
+  await seedReview(page);
+
+  const canvasEntry = page.getByTestId("open-canvas-view");
+  await expect(canvasEntry).toBeVisible();
+  await canvasEntry.click();
+  await expect(page).toHaveURL(/\/canvas$/);
+
+  const inbox = page.getByTestId("review-inbox");
+  await expect(inbox).toBeVisible();
+  const review = inbox.getByRole("button", { name: /Checkout review/ });
+  await expect(review).toContainText("general");
+  await review.click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`/canvas/${GENERAL}/${ARTIFACT_ID}\\?`),
+  );
+  await expect(canvasEntry).toHaveAttribute("data-active", "true");
+  await waitForReadyFrame(page);
+  await expect(page.getByTestId("review-canvas-revision")).toHaveText(
+    "Revision 1",
+  );
+
+  await page.reload();
+  await expect(page.getByTestId("review-canvas")).toBeVisible();
+  await waitForReadyFrame(page);
+
+  // The reloaded route retains enough signed context to review, not just view.
+  await block(page, PRIMARY).focus();
+  await page.keyboard.press("Enter");
+  const form = page.getByTestId("review-comment-form");
+  await expect(form).toBeVisible();
+  await form
+    .getByLabel("Your comment")
+    .fill("Keep this review open after reload.");
+  await expect(
+    form.getByRole("button", { name: "Send feedback" }),
+  ).toBeEnabled();
+  await form.getByRole("button", { name: "Cancel" }).click();
+
+  await page.getByTestId("review-canvas-back").click();
+  await expect(page).toHaveURL(/\/canvas$/);
+  await expect(
+    inbox.getByRole("button", { name: /Checkout review/ }),
+  ).toBeVisible();
+});
+
 test("keyboard review: tagged card → canvas → one signed feedback + one wake → disposition on revision 2", async ({
   page,
 }) => {
@@ -395,7 +444,7 @@ test("keyboard review: tagged card → canvas → one signed feedback + one wake
   await expect(resolved).toContainText("Addressed in revision 2");
 
   // Original channel and thread stay one click away.
-  await page.getByTestId("review-canvas-back").click();
+  await page.getByTestId("review-canvas-thread").click();
   await expect(page.getByTestId("review-artifact-card")).toBeVisible();
 });
 
@@ -793,7 +842,7 @@ test("accepted feedback whose wake failed survives leaving the review and finish
   );
 
   // Leave the review for its thread, then open the same review again.
-  await page.getByTestId("review-canvas-back").click();
+  await page.getByTestId("review-canvas-thread").click();
   const card = page.getByTestId("review-artifact-card");
   await expect(card).toBeVisible();
   await card.getByTestId("review-artifact-open").click();
@@ -1010,7 +1059,7 @@ test("quitting and restarting after a lost acknowledgement keeps the comment: wa
   expect(saved).not.toMatch(/nsec|secret|private/i);
 
   // Leave, quit, and relaunch: every live handle is gone; the outbox is not.
-  await page.getByTestId("review-canvas-back").click();
+  await page.getByTestId("review-canvas-thread").click();
   await invokeMockCommand(page, "e2e_restart_review_client", {});
   expect(await outboxEntries(page)).toHaveLength(1);
   await invokeMockCommand(page, "e2e_fail_review_reconcile", { message: null });

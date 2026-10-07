@@ -60,6 +60,17 @@ export function reviewSearchFromNotification(
   };
 }
 
+/** Self-contained route context for a review selected from the Canvas inbox. */
+export function reviewSearchFromRevision(
+  revision: ReviewRevision,
+): ReviewRouteSearch {
+  return {
+    revision: revision.eventId,
+    agent: revision.attribution.submittedBy,
+    thread: revision.rootEventId,
+  };
+}
+
 /**
  * Check a loaded revision against what its notification announced. A review
  * that was swapped, re-signed by someone else, or republished with different

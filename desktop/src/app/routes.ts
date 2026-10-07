@@ -2,6 +2,8 @@ import { index, rootRoute, route } from "@tanstack/virtual-file-routes";
 
 export const routes = rootRoute("root.tsx", [
   index("index.tsx"),
+  route("/canvas", "canvas.tsx"),
+  route("/canvas/$channelId/$artifactId", "canvas.$channelId.$artifactId.tsx"),
   route("/agents", "agents.tsx"),
   route("/pulse", "pulse.tsx"),
   route("/reminders", "reminders.tsx"),
@@ -15,9 +17,5 @@ export const routes = rootRoute("root.tsx", [
   route(
     "/channels/$channelId/posts/$postId",
     "channels.$channelId.posts.$postId.tsx",
-  ),
-  route(
-    "/channels/$channelId/review/$artifactId",
-    "channels.$channelId.review.$artifactId.tsx",
   ),
 ]);

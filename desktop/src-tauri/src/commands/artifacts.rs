@@ -25,8 +25,8 @@ use crate::{
     app_state::AppState,
     commands::media_download::{fetch_blob_bytes_with_cap, validate_download_url},
     relay::{
-        assert_expected_relay_scope, assert_expected_signer, query_relay,
-        query_relay_at_with_keys, relay_api_base_url_with_override,
+        assert_expected_relay_scope, assert_expected_signer, query_relay, query_relay_at_with_keys,
+        relay_api_base_url_with_override,
     },
 };
 
@@ -36,6 +36,10 @@ pub const REVIEW_ARTIFACT_TYPE: &str = "synaxis.html-review";
 pub const FEEDBACK_ARTIFACT_TYPE: &str = "synaxis.artifact-feedback";
 /// Largest review document Buzz will fetch and render.
 pub const MAX_REVIEW_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
+/// Review artifact rows requested per relay page.
+const REVIEW_LIST_PAGE_LIMIT: usize = 200;
+/// Most current reviews returned to the Canvas inbox.
+const MAX_REVIEW_LIST_ROWS: usize = 1000;
 /// Most reviewed revisions one feedback listing may ask about.
 const MAX_TARGET_REVISIONS: usize = 8;
 /// Most explicit feedback revisions one listing may ask about (the
@@ -57,6 +61,18 @@ pub struct ReviewArtifactRevision {
     /// Event ID of the artifact's current revision (equals `event.id` when
     /// the requested revision is current).
     pub current_event_id: String,
+}
+
+/// Verified current HTML reviews for the persistent Canvas inbox.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewArtifactListing {
+    /// Current, verified `synaxis.html-review` revisions, newest first.
+    pub events: Vec<serde_json::Value>,
+    /// Events the relay returned that failed verification and were withheld.
+    pub rejected: usize,
+    /// The relay holds more current reviews than one listing reads.
+    pub truncated: bool,
 }
 
 /// Verified feedback revisions plus how many returned events were rejected.
@@ -95,6 +111,15 @@ fn current_revision_filter(channel_id: &str, artifact_id: &str) -> serde_json::V
 
 fn exact_revision_filter(revision_event_id: &str) -> serde_json::Value {
     serde_json::json!({ "ids": [revision_event_id], "limit": 1 })
+}
+
+fn current_reviews_filter(offset: usize, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "artifact": "current",
+        "#type": [REVIEW_ARTIFACT_TYPE],
+        "limit": limit,
+        "offset": offset,
+    })
 }
 
 fn feedback_by_target_filter(
@@ -251,6 +276,62 @@ pub async fn get_review_artifact_revision(
             .map_err(|e| format!("failed to encode artifact revision: {e}"))?,
         current_event_id,
     })
+}
+
+/// Keep only verified, undeleted current HTML reviews and sort them newest first.
+fn partition_review_artifacts(mut events: Vec<Event>, truncated: bool) -> ReviewArtifactListing {
+    events.sort_unstable_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+    let mut seen = std::collections::HashSet::new();
+    let mut verified = Vec::new();
+    let mut rejected = 0;
+    for event in events {
+        if event.verify().is_err() {
+            rejected += 1;
+            continue;
+        }
+        let Ok(envelope) = artifact::validate(&event) else {
+            rejected += 1;
+            continue;
+        };
+        if envelope.artifact_type != REVIEW_ARTIFACT_TYPE || envelope.op == ArtifactOp::Delete {
+            rejected += 1;
+            continue;
+        }
+        if seen.insert(envelope.id) {
+            verified.push(event);
+        }
+    }
+    ReviewArtifactListing {
+        events: verified
+            .iter()
+            .filter_map(|event| serde_json::to_value(event).ok())
+            .collect(),
+        rejected,
+        truncated,
+    }
+}
+
+/// List current HTML review artifacts available on the active relay.
+///
+/// The HTTP artifact query applies the authenticated relay scope before
+/// pagination. The native boundary then verifies every event's ID, signature,
+/// envelope, type, and non-deletion state before exposing it to the webview.
+#[tauri::command]
+pub async fn list_review_artifacts(
+    state: State<'_, AppState>,
+) -> Result<ReviewArtifactListing, String> {
+    let mut events = Vec::new();
+    let mut finished = false;
+    while !finished && events.len() <= MAX_REVIEW_LIST_ROWS {
+        let offset = events.len();
+        let limit = REVIEW_LIST_PAGE_LIMIT.min(MAX_REVIEW_LIST_ROWS + 1 - offset);
+        let page = query_relay(&state, &[current_reviews_filter(offset, limit)]).await?;
+        finished = page.len() < limit;
+        events.extend(page);
+    }
+    let truncated = events.len() > MAX_REVIEW_LIST_ROWS;
+    events.truncate(MAX_REVIEW_LIST_ROWS);
+    Ok(partition_review_artifacts(events, truncated))
 }
 
 /// Keep only verified feedback revisions; count the rest as rejected.
@@ -547,6 +628,15 @@ mod tests {
             })
         );
         assert_eq!(
+            current_reviews_filter(200, 50),
+            serde_json::json!({
+                "artifact": "current",
+                "#type": [REVIEW_ARTIFACT_TYPE],
+                "limit": 50,
+                "offset": 200
+            })
+        );
+        assert_eq!(
             exact_revision_filter(PREV),
             serde_json::json!({ "ids": [PREV], "limit": 1 })
         );
@@ -648,6 +738,46 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         assert!(select_review_revision(vec![chat], CHANNEL, ARTIFACT, None).is_err());
+    }
+
+    #[test]
+    fn review_listing_withholds_invalid_events_and_dedupes_artifact_heads() {
+        let keys = Keys::generate();
+        let first = review(&keys);
+        let newer_same_artifact =
+            artifact_event(&keys, REVIEW_ARTIFACT_TYPE, CHANNEL, ARTIFACT, "update");
+        let other = artifact_event(
+            &keys,
+            REVIEW_ARTIFACT_TYPE,
+            CHANNEL,
+            OTHER_ARTIFACT,
+            "create",
+        );
+        let tampered = mutate(&other, |v| v["content"] = serde_json::json!("changed"));
+        let wrong_type = artifact_event(&keys, FEEDBACK_ARTIFACT_TYPE, CHANNEL, ARTIFACT, "create");
+        let deleted = artifact_event(
+            &keys,
+            REVIEW_ARTIFACT_TYPE,
+            CHANNEL,
+            OTHER_ARTIFACT,
+            "delete",
+        );
+
+        let listing = partition_review_artifacts(
+            vec![
+                first,
+                newer_same_artifact,
+                other.clone(),
+                other,
+                tampered,
+                wrong_type,
+                deleted,
+            ],
+            true,
+        );
+        assert_eq!(listing.events.len(), 2);
+        assert_eq!(listing.rejected, 3);
+        assert!(listing.truncated);
     }
 
     #[test]
@@ -807,10 +937,12 @@ mod tests {
         let good = artifact_event(&keys, FEEDBACK_ARTIFACT_TYPE, CHANNEL, ARTIFACT, "create");
         assert!(verify_feedback_for_reconcile(&good, CHANNEL, ARTIFACT).is_ok());
         assert!(verify_feedback_for_reconcile(&good, CHANNEL, OTHER_ARTIFACT).is_err());
-        assert!(
-            verify_feedback_for_reconcile(&good, "8a1657ac-f7aa-5db0-b632-d8bbeb6dfb50", ARTIFACT)
-                .is_err()
-        );
+        assert!(verify_feedback_for_reconcile(
+            &good,
+            "8a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+            ARTIFACT
+        )
+        .is_err());
         let review_event = review(&keys);
         assert!(verify_feedback_for_reconcile(&review_event, CHANNEL, ARTIFACT).is_err());
         let update = artifact_event(&keys, FEEDBACK_ARTIFACT_TYPE, CHANNEL, ARTIFACT, "update");

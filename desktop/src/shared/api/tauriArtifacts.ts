@@ -13,6 +13,13 @@ export type VerifiedReviewRevision = {
   currentEventId: string;
 };
 
+/** Current, verified HTML reviews available to the persistent Canvas inbox. */
+export type VerifiedReviewArtifacts = {
+  events: RelayEvent[];
+  rejected: number;
+  truncated: boolean;
+};
+
 /**
  * Verified feedback revisions plus how many returned events were withheld.
  * `truncated` means the relay holds more feedback than one listing reads (the
@@ -40,6 +47,15 @@ export async function getReviewArtifactRevision(input: {
     artifactId: input.artifactId,
     revisionEventId: input.revisionEventId ?? null,
   });
+}
+
+/**
+ * List current HTML review revisions available on the active relay. The native
+ * layer withholds events whose signature, NIP-AR envelope, type, or operation
+ * does not verify.
+ */
+export async function listReviewArtifacts(): Promise<VerifiedReviewArtifacts> {
+  return invokeTauri<VerifiedReviewArtifacts>("list_review_artifacts");
 }
 
 /**

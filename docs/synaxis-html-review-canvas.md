@@ -16,21 +16,29 @@ must be one value before anything renders.
 
 ## Discovery and flow
 
-1. Synaxis posts a kind-9 notification in the original thread with
+1. **Canvas** is a permanent sidebar destination. `/canvas` lists the current
+   `synaxis.html-review` heads available on the active relay, newest first. The
+   native layer pages the writer-authoritative artifact query and verifies each
+   event before the webview parses or displays it.
+2. Selecting an inbox row routes to
+   `/canvas/<channel>/<artifact>?revision=<event>&agent=<pubkey>&thread=<event>`.
+   The URL pins the exact reviewed revision and signed attribution, so the
+   screen survives a reload. **All reviews** returns to the Canvas inbox;
+   **Open thread** returns to the review's conversation.
+3. Synaxis also posts a kind-9 notification in the original thread with
    `artifact` = `[uuid, revision event ID]`, `artifact_type`, `agent`
-   (executive agent pubkey), and `x` (payload digest). NIP-AR revisions never
-   notify, so only this exact tag set produces a review card.
-2. **Open review** routes to `/channels/<channel>/review/<artifact>` and
-   carries the notification, thread, agent, digest, and author so the canvas
-   can verify the announcement and return to the thread.
-3. A reviewer selects a declared block (pointer click, Enter, or Space in the
+   (executive agent pubkey), and `x` (payload digest). Only this exact tag set
+   produces a timeline review card. **Open review** uses the same Canvas route
+   and additionally carries the notification author and digest so the canvas
+   verifies that announcement.
+4. A reviewer selects a declared block (pointer click, Enter, or Space in the
    document, or the block list in trusted chrome) and writes a comment.
-4. Buzz signs and publishes one feedback revision, then — only after the relay
+5. Buzz signs and publishes one feedback revision, then — only after the relay
    accepts it — one kind-9 reply in the thread with a `p` mention of the
    executive agent and `feedback` / `artifact` tags. A retry republishes the
    identical signed event; a failed wake retries without republishing. Neither
    retry depends on the review head (see Retry reconciliation below).
-5. The next review revision (same artifact UUID, `prev` set) lists each
+6. The next review revision (same artifact UUID, `prev` set) lists each
    feedback revision as `addressed` or `unresolved`; the canvas shows it.
 
 Feedback is accepted only on the current revision. Approval stays in Synaxis.
@@ -50,11 +58,13 @@ workspace-relative path. Any violation rejects the whole document.
 
 The HTML is factory-generated but untrusted.
 
-- **Native reads.** Revisions are read over the relay's HTTP artifact query
-  (never the WebSocket timeline or unread filters). Rust verifies event ID,
-  signature, the NIP-AR envelope, channel, artifact identity, and type before
-  the webview sees them. Document bytes are size-capped (4 MiB), hash-checked,
-  and UTF-8-checked natively and again in the webview.
+- **Native reads.** The Canvas inbox and individual revisions are read over
+  the relay's HTTP artifact query (never the WebSocket timeline or unread
+  filters). Rust verifies event ID, signature, the NIP-AR envelope, artifact
+  type, and non-deletion state before an inbox row reaches the webview; an
+  opened review is additionally bound to its exact channel and artifact
+  identity. Document bytes are size-capped (4 MiB), hash-checked, and
+  UTF-8-checked natively and again in the webview.
 - **Sanitize.** Scripts, frames, plugins, `meta`/`base`/`link`, handlers, URLs,
   and remote CSS references are stripped; forms are unwrapped. CSS is scrubbed
   to a fixpoint (deleting a match can splice its neighbours into a new one, such
@@ -209,19 +219,20 @@ entry the relay may hold is never expired, because it is the only record that
 its wake is owed. Signing out clears the origin's storage with it.
 
 **Recovery after leaving or restarting.** Because the outbox is on disk, a
-signed comment survives leaving the canvas (back to the thread, “Open the
-latest revision”, any route change) *and* quitting Buzz. Reopening that same
-revision restores the locked form and Retry, lists it under “Feedback waiting
-to finish”, and marks every comment whose wake is owed “Agent not notified
-yet” instead of showing it as an ordinary comment. That mark is keyed by the
-outbox's signed event ID, not by what the relay lists, so it holds even while
-the publish's acknowledgement is still unconfirmed (`ambiguous`) and after a
-restart. A different relay or signer never sees it. From another revision of
-the same artifact (typically the current head) it is not restored as a form;
-it is listed under “Feedback waiting to finish” with its own revision number
-and block title, and an action that navigates to exactly that reviewed
-revision (the route's `revision` search value), where its Retry and Discard
-live. A restored comment finishes with the agent and thread it was signed for.
+signed comment survives leaving the canvas (back to **All reviews**, **Open
+thread**, “Open the latest revision”, any route change) *and* quitting Buzz.
+Reopening that same revision restores the locked form and Retry, lists it under
+“Feedback waiting to finish”, and marks every comment whose wake is owed
+“Agent not notified yet” instead of showing it as an ordinary comment. That
+mark is keyed by the outbox's signed event ID, not by what the relay lists, so
+it holds even while the publish's acknowledgement is still unconfirmed
+(`ambiguous`) and after a restart. A different relay or signer never sees it.
+From another revision of the same artifact (typically the current head) it is
+not restored as a form; it is listed under “Feedback waiting to finish” with
+its own revision number and block title, and an action that navigates to
+exactly that reviewed revision (the route's `revision` search value), where its
+Retry and Discard live. A restored comment finishes with the agent and thread
+it was signed for.
 
 **Binding on display.** Feedback is shown only if its Buzz artifact UUID, exact
 revision event, Synaxis artifact ID, and payload digest match the revision it

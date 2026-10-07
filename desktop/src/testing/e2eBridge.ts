@@ -14641,6 +14641,8 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
+      case "list_review_artifacts":
+        return mockReviewArtifacts.listArtifacts();
       case "get_review_artifact_revision":
         return mockReviewArtifacts.getRevision(
           payload as Parameters<typeof mockReviewArtifacts.getRevision>[0],
@@ -14691,7 +14693,9 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "reconcile_review_feedback_event":
         return mockReviewArtifacts.reconcileFeedback(
-          payload as Parameters<typeof mockReviewArtifacts.reconcileFeedback>[0],
+          payload as Parameters<
+            typeof mockReviewArtifacts.reconcileFeedback
+          >[0],
         );
       // Test-only seams: simulated elapsed time, the relay's wake bookkeeping,
       // an unreadable relay, and an app restart (the live submission handles

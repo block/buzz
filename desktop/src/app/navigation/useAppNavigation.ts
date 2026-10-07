@@ -83,6 +83,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goCanvas = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/canvas",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goAgents = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -398,7 +409,7 @@ export function useAppNavigation() {
     ) =>
       commitNavigation(
         {
-          to: "/channels/$channelId/review/$artifactId",
+          to: "/canvas/$channelId/$artifactId",
           params: { channelId, artifactId },
           search,
         },
@@ -478,6 +489,7 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goCanvas,
     goChannel,
     goDuplicateWorkflow,
     goEditWorkflow,

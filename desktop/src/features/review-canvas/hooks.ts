@@ -7,6 +7,7 @@ import {
 import {
   fetchReviewDocument,
   getReviewArtifactRevision,
+  listReviewArtifacts,
   listReviewFeedback,
 } from "@/shared/api/tauriArtifacts";
 import {
@@ -24,6 +25,43 @@ import { loadReviewDocument } from "./lib/reviewDocumentLoader";
 export const REVIEW_HEAD_REFRESH_MS = 30_000;
 /** Earlier revisions a feedback listing may resolve to verify dispositions. */
 const MAX_HISTORICAL_REVISIONS = 8;
+
+export type ReviewInboxResult = {
+  reviews: ReviewRevision[];
+  rejected: number;
+  truncated: boolean;
+};
+
+async function readReviewInbox(): Promise<ReviewInboxResult> {
+  const listing = await listReviewArtifacts();
+  const reviews: ReviewRevision[] = [];
+  let rejected = listing.rejected;
+  for (const event of listing.events) {
+    try {
+      reviews.push(parseReviewRevision(event));
+    } catch (error) {
+      if (!(error instanceof ReviewContractError)) throw error;
+      rejected += 1;
+    }
+  }
+  reviews.sort(
+    (left, right) =>
+      right.createdAt - left.createdAt ||
+      left.eventId.localeCompare(right.eventId),
+  );
+  return { reviews, rejected, truncated: listing.truncated };
+}
+
+/** Current reviews available to the persistent Canvas inbox. */
+export function useReviewInboxQuery() {
+  return useQuery({
+    queryKey: ["review-artifacts"],
+    queryFn: readReviewInbox,
+    retry: 1,
+    staleTime: REVIEW_HEAD_REFRESH_MS,
+    refetchOnWindowFocus: true,
+  });
+}
 
 type RevisionInput = {
   channelId: string;

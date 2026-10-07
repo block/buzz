@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, MessageSquare, RefreshCw } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
@@ -53,7 +53,7 @@ export function ReviewCanvasScreen({
   artifactId,
   search,
 }: ReviewCanvasScreenProps) {
-  const { goChannel, goReview } = useAppNavigation();
+  const { goCanvas, goChannel, goReview } = useAppNavigation();
   const validIdentity =
     isCanonicalUuid(channelId) && isCanonicalUuid(artifactId);
   const revisionQuery = useReviewRevisionQuery({
@@ -65,28 +65,54 @@ export function ReviewCanvasScreen({
   const revision = revisionQuery.data?.revision;
   const documentQuery = useReviewDocumentQuery(revision);
 
-  // Pin a "latest" open to the exact revision it resolved, so later refreshes
-  // report a newer head instead of silently swapping the document under the
-  // reviewer.
+  // Pin an inbox/direct "latest" open to the exact revision it resolved. Also
+  // persist the signed revision's agent and thread context so the top-level
+  // Canvas route remains fully functional after a reload.
   const resolvedRevisionId = revision?.eventId;
+  const resolvedAgent = revision?.attribution.submittedBy;
+  const resolvedThread = revision?.rootEventId;
   React.useEffect(() => {
-    if (!search.revision && resolvedRevisionId) {
+    if (revision && (!search.revision || !search.agent || !search.thread)) {
       void goReview(
         channelId,
         artifactId,
-        { ...search, revision: resolvedRevisionId },
+        {
+          ...search,
+          revision: search.revision ?? resolvedRevisionId,
+          agent: search.agent ?? resolvedAgent,
+          thread: search.thread ?? resolvedThread,
+        },
         { replace: true },
       );
     }
-  }, [artifactId, channelId, goReview, resolvedRevisionId, search]);
+  }, [
+    artifactId,
+    channelId,
+    goReview,
+    resolvedAgent,
+    resolvedRevisionId,
+    resolvedThread,
+    revision,
+    search,
+  ]);
 
-  const backToThread = React.useCallback(() => {
+  const backToCanvas = React.useCallback(() => {
+    void goCanvas();
+  }, [goCanvas]);
+
+  const openThread = React.useCallback(() => {
     void goChannel(channelId, {
       messageId: search.notification,
-      thread: search.thread,
-      threadRootId: search.thread,
+      thread: search.thread ?? revision?.rootEventId,
+      threadRootId: search.thread ?? revision?.rootEventId,
     });
-  }, [channelId, goChannel, search.notification, search.thread]);
+  }, [
+    channelId,
+    goChannel,
+    revision?.rootEventId,
+    search.notification,
+    search.thread,
+  ]);
 
   // The notification's digest and author promise are about the announced
   // revision only; any other revision is verified on its own signature and
@@ -193,13 +219,13 @@ export function ReviewCanvasScreen({
           <div className="flex h-9 min-w-0 items-center gap-2.5">
             <Button
               data-testid="review-canvas-back"
-              onClick={backToThread}
+              onClick={backToCanvas}
               size="sm"
               type="button"
               variant="ghost"
             >
               <ArrowLeft aria-hidden="true" />
-              Back to thread
+              All reviews
             </Button>
             <h1
               className="min-w-0 flex-1 truncate text-sm font-semibold"
@@ -215,6 +241,16 @@ export function ReviewCanvasScreen({
                 Revision {revision.revision}
               </span>
             ) : null}
+            <Button
+              data-testid="review-canvas-thread"
+              onClick={openThread}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <MessageSquare aria-hidden="true" />
+              Open thread
+            </Button>
             <Button
               aria-disabled={refreshUnavailable || undefined}
               aria-label="Check for a newer revision"

@@ -662,6 +662,7 @@ pub fn run() {
             get_channel_reconnect_repair,
             get_channel_window,
             get_review_artifact_revision,
+            list_review_artifacts,
             list_review_feedback,
             reconcile_review_feedback_event,
             fetch_review_document,

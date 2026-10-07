@@ -1,4 +1,11 @@
-import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  Folders,
+  Inbox,
+  PanelsTopLeft,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
@@ -17,6 +24,7 @@ import { ProtectedBestieSidebarEntry } from "@protected-feature-components";
 type SidebarSelectedView =
   | "home"
   | "channel"
+  | "canvas"
   | "messages"
   | "agents"
   | "workflows"
@@ -42,6 +50,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectCanvas: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -92,6 +101,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectCanvas,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -126,6 +136,19 @@ export function AppSidebarPrimaryMenu({
                 {Math.min(homeBadgeCount, 99)}
               </SidebarMenuBadge>
             ) : null}
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="data-[active=true]:font-normal"
+              data-testid="open-canvas-view"
+              isActive={selectedView === "canvas"}
+              onClick={onSelectCanvas}
+              tooltip="Canvas"
+              type="button"
+            >
+              <PanelsTopLeft className="h-4 w-4" />
+              <SidebarMenuLabel>Canvas</SidebarMenuLabel>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <FeatureGate feature="pulse">
             <SidebarMenuItem>

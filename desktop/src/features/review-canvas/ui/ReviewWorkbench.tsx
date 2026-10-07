@@ -72,8 +72,8 @@ export function ReviewWorkbench({
   );
 
   const stale = currentEventId !== revision.eventId;
-  const agent = search.agent ?? null;
-  const canComment = !stale && agent !== null;
+  const agent = search.agent ?? revision.attribution.submittedBy;
+  const canComment = !stale;
   // Sending a new comment fails closed: while the head check is in flight or
   // has failed, or a newer revision exists, the form stays open but cannot
   // send, and the composer re-verifies the head immediately before signing.
@@ -88,8 +88,8 @@ export function ReviewWorkbench({
         : null;
 
   // The thread the wake message joins: the notification's own thread when the
-  // review was opened from it, else the human request that started the work.
-  const rootEventId = search.thread ?? revision.attribution.originEventId;
+  // review was opened from it, else the signed review's thread root.
+  const rootEventId = search.thread ?? revision.rootEventId;
   const parentEventId = search.notification ?? rootEventId;
 
   // A fresh nonce per composed document; the annotator is a first-party asset.

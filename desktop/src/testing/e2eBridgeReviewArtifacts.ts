@@ -2,9 +2,10 @@ import type { RelayEvent } from "@/shared/api/types";
 
 /**
  * Mock-mode NIP-AR review artifact store. It mirrors the observable contract
- * of the native commands (`get_review_artifact_revision`,
- * `list_review_feedback`, `fetch_review_document`,
- * `send_artifact_feedback_message`) so E2E specs exercise the real webview
+ * of the native commands (`list_review_artifacts`,
+ * `get_review_artifact_revision`, `list_review_feedback`,
+ * `fetch_review_document`, `send_artifact_feedback_message`) so E2E specs
+ * exercise the real webview
  * pipeline: query → parse → hash-verified document → sandboxed frame →
  * signed feedback → wake message. Signature, envelope, and hash verification
  * themselves are proven by the native Rust tests; the document hash check is
@@ -37,6 +38,26 @@ type SendChannelMessage = (args: {
 
 /** The relay's freshness window for an event timestamp, in seconds. */
 const MAX_TIMESTAMP_DRIFT_SECONDS = 900;
+const REVIEW_ARTIFACTS_STORAGE_KEY = "buzz-e2e-review-artifacts.v1";
+
+type StoredReviewArtifacts = {
+  revisions: Array<[string, RelayEvent[]]>;
+  documents: Array<[string, string]>;
+};
+
+function readStoredReviewArtifacts(): StoredReviewArtifacts {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(REVIEW_ARTIFACTS_STORAGE_KEY) ?? "{}",
+    ) as Partial<StoredReviewArtifacts>;
+    return {
+      revisions: Array.isArray(parsed.revisions) ? parsed.revisions : [],
+      documents: Array.isArray(parsed.documents) ? parsed.documents : [],
+    };
+  } catch {
+    return { revisions: [], documents: [] };
+  }
+}
 
 function tagValue(event: RelayEvent, name: string): string | undefined {
   return event.tags.find((tag) => tag[0] === name)?.[1];
@@ -50,10 +71,20 @@ async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
 }
 
 export function createMockReviewArtifacts() {
+  const stored = readStoredReviewArtifacts();
   /** Revision history per artifact UUID, oldest first. */
-  const revisions = new Map<string, RelayEvent[]>();
+  const revisions = new Map<string, RelayEvent[]>(stored.revisions);
   /** Document HTML by the SHA-256 the revision *declares* (not its real hash). */
-  const documents = new Map<string, string>();
+  const documents = new Map<string, string>(stored.documents);
+  const persistArtifacts = () => {
+    window.localStorage.setItem(
+      REVIEW_ARTIFACTS_STORAGE_KEY,
+      JSON.stringify({
+        revisions: [...revisions],
+        documents: [...documents],
+      } satisfies StoredReviewArtifacts),
+    );
+  };
   const feedback: RelayEvent[] = [];
   let failNextPublish: string | null = null;
   let failNextNotification: string | null = null;
@@ -139,6 +170,7 @@ export function createMockReviewArtifacts() {
       if (declared && input.html !== undefined) {
         documents.set(declared, input.html);
       }
+      persistArtifacts();
       return null;
     },
 
@@ -231,6 +263,18 @@ export function createMockReviewArtifacts() {
         throw new Error("artifact revision belongs to a different channel");
       }
       return { event, currentEventId: current.id };
+    },
+
+    listArtifacts() {
+      const events = [...revisions.values()]
+        .map((history) => history.at(-1))
+        .filter((event): event is RelayEvent => event !== undefined)
+        .sort(
+          (left, right) =>
+            right.created_at - left.created_at ||
+            left.id.localeCompare(right.id),
+        );
+      return { events, rejected: 0, truncated: false };
     },
 
     listFeedback(args: {
