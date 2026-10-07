@@ -98,6 +98,37 @@ test("remarkDetails: accepts markers a composer paste indented into a list item"
   );
 });
 
+test("remarkDetails: accepts no-break spaces the composer sent around a bold title", () => {
+  // Bytes a user's composer sent: U+00A0 after `:::details` and
+  // after the closing `**`, items as escaped-dash paragraphs.
+  const html = render(
+    ":::details\u00a0**Fleet working**\u00a0(2)\n\n\\- model routing\n\n" +
+      "\\- OpenClaw upgrade\n\n:::",
+  );
+  assert.match(
+    html,
+    /^<section data-key="0:Fleet working\u00a0\(2\)"><h6><strong>Fleet working<\/strong>\u00a0\(2\)<\/h6>/,
+  );
+  assert.match(
+    html,
+    /<p>- model routing<\/p><p>- OpenClaw upgrade<\/p><\/section>$/,
+  );
+  assert.doesNotMatch(html, /:::/);
+});
+
+test("normalizeMarkerLine: turns no-break spaces in a marker into spaces", () => {
+  assert.equal(
+    normalizeMarkerLine(":::details\u00a0##\u00a0Title"),
+    ":::details ## Title",
+  );
+  assert.equal(
+    normalizeMarkerLine("**:::details\u00a0X**\u00a0"),
+    ":::details **X**",
+  );
+  assert.equal(normalizeMarkerLine(":::\u00a0"), ":::");
+  assert.equal(normalizeMarkerLine(":::details\u00a0"), null);
+});
+
 test("prepareDetailsBlocks: leaves content without markers untouched", () => {
   const content = "plain ::: text\n:::\n";
   assert.equal(prepareDetailsBlocks(content), content);

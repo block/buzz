@@ -13,17 +13,20 @@
 /// [maxDetailsDepth] deep.
 /// Anything else stays text. A marker line wrapped in emphasis as a whole
 /// (`**:::details Title**`, `**:::**`, what the composer sends with bold
-/// switched on) still counts. A title may carry inline formatting and start
-/// with `#`..`######` to render as a heading.
+/// switched on) still counts. A no-break space counts as a space inside a
+/// marker (the composer has sent one next to a bold title). A title may
+/// carry inline formatting and start with `#`..`######` to render as a
+/// heading.
 library;
 
 /// Deeper markers stay text, which bounds nesting on hostile input.
 const maxDetailsDepth = 4;
 
-final _openRe = RegExp(r'^:::details[ \t]+(\S.*)$');
-final _closeRe = RegExp(r'^:::[ \t]*$');
-final _wrappedRe = RegExp(r'^(\*\*|__|\*|_)(:::.*?)\1[ \t]*$');
-final _headingRe = RegExp(r'^(#{1,6})[ \t]+');
+final _openRe = RegExp(r'^:::details[ \t\u00a0]+(\S.*)$');
+final _openPrefixRe = RegExp(r'^:::details[ \t\u00a0]+');
+final _closeRe = RegExp(r'^:::[ \t\u00a0]*$');
+final _wrappedRe = RegExp(r'^(\*\*|__|\*|_)(:::.*?)\1[ \t\u00a0]*$');
+final _headingRe = RegExp(r'^(#{1,6})[ \t\u00a0]+');
 final _indentRe = RegExp(r'^ {1,3}');
 // Any indentation: a fence nested in a list item may sit deeper than the
 // markers it contains. Reading indented code as a fence only keeps markers
@@ -139,21 +142,28 @@ String flattenDetailsBlocks(String content) {
   return text;
 }
 
-/// The marker a line stands for, unindented and with a whole-line emphasis
-/// wrapper moved into the title (`**:::details X**` → `:::details **X**`),
-/// or null.
+/// The marker a line stands for, or null: unindented, `:::` for a closer,
+/// one plain space after `:::details` and after a heading's hashes, and a
+/// whole-line emphasis wrapper moved into the title
+/// (`**:::details X**` → `:::details **X**`).
 String? normalizeMarkerLine(String rawLine) {
   final line = rawLine.replaceFirst(_indentRe, '');
-  if (_openRe.hasMatch(line) || _closeRe.hasMatch(line)) return line;
-  final wrapped = _wrappedRe.firstMatch(line);
-  if (wrapped == null) return null;
-  final mark = wrapped[1]!;
-  final inner = wrapped[2]!;
-  if (_closeRe.hasMatch(inner)) return ':::';
-  if (!_openRe.hasMatch(inner)) return null;
-  final title = inner.replaceFirst(RegExp(r'^:::details[ \t]+'), '');
-  final heading = _headingRe.firstMatch(title)?[0] ?? '';
-  return ':::details $heading$mark${title.substring(heading.length)}$mark';
+  var marker = line;
+  var mark = '';
+  if (!_openRe.hasMatch(line) && !_closeRe.hasMatch(line)) {
+    final wrapped = _wrappedRe.firstMatch(line);
+    if (wrapped != null) {
+      mark = wrapped[1]!;
+      marker = wrapped[2]!;
+    }
+  }
+  if (_closeRe.hasMatch(marker)) return ':::';
+  if (!_openRe.hasMatch(marker)) return null;
+  final title = marker.replaceFirst(_openPrefixRe, '');
+  final heading = _headingRe.firstMatch(title);
+  final prefix = heading == null ? '' : '${heading[1]} ';
+  final rest = title.substring(heading?[0]!.length ?? 0);
+  return ':::details $prefix$mark$rest$mark';
 }
 
 /// Longest title the sanitizers read. Each title costs at most this squared,

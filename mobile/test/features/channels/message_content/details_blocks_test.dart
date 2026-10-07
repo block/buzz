@@ -69,6 +69,23 @@ void main() {
     expect((segments[2] as DetailsBlock).title, 'Next');
   });
 
+  test('accepts no-break spaces the composer sent around a bold title', () {
+    // Bytes a user's composer sent: U+00A0 after `:::details` and
+    // after the closing `**`, items as escaped-dash paragraphs.
+    final segments = splitDetailsBlocks(
+      ':::details **Fleet working** (2)\n\n\\- model routing\n\n'
+      '\\- OpenClaw upgrade\n\n:::',
+    );
+    final block = segments.single as DetailsBlock;
+    expect(block.title, 'Fleet working (2)');
+    expect(block.titleMarkdown, '**Fleet working** (2)');
+    expect(block.body, '\n\\- model routing\n\n\\- OpenClaw upgrade\n');
+    expect(normalizeMarkerLine(':::details ## Title'), ':::details ## Title');
+    expect(normalizeMarkerLine('**:::details X** '), ':::details **X**');
+    expect(normalizeMarkerLine('::: '), ':::');
+    expect(normalizeMarkerLine(':::details '), isNull);
+  });
+
   test('flattens sections for previews', () {
     expect(
       flattenDetailsBlocks('Board\n:::details Private (1)\n- item\n:::'),

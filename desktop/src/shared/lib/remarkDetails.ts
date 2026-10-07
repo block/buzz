@@ -15,8 +15,10 @@
  * is indented code), outside fenced code, in matched pairs and at most
  * `MAX_DETAILS_DEPTH` deep; anything else stays text. A marker line wrapped in emphasis as a
  * whole (`**:::details Title**`, `**:::**`, what the composer sends with bold
- * switched on) still counts. A title may carry inline formatting and start
- * with `#`..`######` to render as a heading. Mobile mirrors these rules in
+ * switched on) still counts. A no-break space counts as a space inside a
+ * marker (the composer has sent one next to a bold title). A title may
+ * carry inline formatting and start with `#`..`######` to render as a
+ * heading. Mobile mirrors these rules in
  * `details_blocks.dart`.
  */
 
@@ -28,25 +30,30 @@ type Node = {
 /** Deeper markers stay text, which bounds render recursion on hostile input. */
 export const MAX_DETAILS_DEPTH = 4;
 
-const OPEN_RE = /^:::details[ \t]+\S.*$/;
-const CLOSE_RE = /^:::[ \t]*$/;
-const WRAPPED_RE = /^(\*\*|__|\*|_)(:::.*?)\1[ \t]*$/;
-const HEADING_RE = /^(#{1,6})[ \t]+/;
+const OPEN_RE = /^:::details[ \t\u00a0]+\S.*$/;
+const OPEN_PREFIX_RE = /^:::details[ \t\u00a0]+/;
+const CLOSE_RE = /^:::[ \t\u00a0]*$/;
+const WRAPPED_RE = /^(\*\*|__|\*|_)(:::.*?)\1[ \t\u00a0]*$/;
+const HEADING_RE = /^(#{1,6})[ \t\u00a0]+/;
 
-/** The marker a line stands for, unindented and with a whole-line emphasis
- * wrapper moved into the title (`**:::details X**` → `:::details **X**`),
- * or null. */
+/** The marker a line stands for, or null: unindented, `:::` for a closer,
+ * one plain space after `:::details` and after a heading's hashes, and a
+ * whole-line emphasis wrapper moved into the title
+ * (`**:::details X**` → `:::details **X**`). */
 export function normalizeMarkerLine(rawLine: string): string | null {
   const line = rawLine.replace(/^ {1,3}/, "");
-  if (OPEN_RE.test(line) || CLOSE_RE.test(line)) return line;
-  const wrapped = WRAPPED_RE.exec(line);
-  if (!wrapped) return null;
-  const [, mark, inner] = wrapped;
-  if (CLOSE_RE.test(inner)) return ":::";
-  if (!OPEN_RE.test(inner)) return null;
-  const title = inner.replace(/^:::details[ \t]+/, "");
-  const heading = HEADING_RE.exec(title)?.[0] ?? "";
-  return `:::details ${heading}${mark}${title.slice(heading.length)}${mark}`;
+  let marker = line;
+  let mark = "";
+  const wrapped =
+    OPEN_RE.test(line) || CLOSE_RE.test(line) ? null : WRAPPED_RE.exec(line);
+  if (wrapped) [, mark, marker] = wrapped;
+  if (CLOSE_RE.test(marker)) return ":::";
+  if (!OPEN_RE.test(marker)) return null;
+  const title = marker.replace(OPEN_PREFIX_RE, "");
+  const heading = HEADING_RE.exec(title);
+  const prefix = heading ? `${heading[1]} ` : "";
+  const rest = title.slice(heading ? heading[0].length : 0);
+  return `:::details ${prefix}${mark}${rest}${mark}`;
 }
 // Any indentation: a fence nested in a list item may sit deeper than the
 // markers it contains. Reading indented code as a fence only keeps markers
