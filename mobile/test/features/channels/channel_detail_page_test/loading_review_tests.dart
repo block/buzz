@@ -87,6 +87,143 @@ void _loadingReviewTests() {
               .opacity,
           1,
         );
+        if (count == 40) {
+          final list = tester.widget<ScrollablePositionedList>(
+            find.byKey(const ValueKey('thread-message-list')),
+          );
+          list.itemScrollController!.jumpTo(index: 0);
+          await tester.pumpAndSettle();
+          final before = tester.getTopLeft(find.text('Reply 0')).dy;
+          await tester.drag(
+            find.text('Original message').hitTestable(),
+            const Offset(0, -100),
+          );
+          await tester.pumpAndSettle();
+          final after = tester.getTopLeft(find.text('Reply 0')).dy;
+          expect(
+            after < before,
+            isTrue,
+            reason: 'Dragging the persistent head scrolls the reply list.',
+          );
+        }
+      },
+    );
+  }
+
+  for (final completesAfterDisposal in [false, true]) {
+    testWidgets(
+      'thread hydration owns one video preview lifecycle late=$completesAfterDisposal',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final root = _textMsg(
+          id: 'video-root',
+          pubkey: 'alice',
+          content: '![video](https://example.com/head.mp4)',
+          extraTags: const [
+            [
+              'imeta',
+              'url https://example.com/head.mp4',
+              'm video/mp4',
+              'dim 320x180',
+            ],
+          ],
+        );
+        final replies = Completer<List<NostrEvent>>();
+        final preview = Completer<LoadedVideoPreviewFrame?>();
+        var loads = 0;
+        var disposals = 0;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            pendingThreadReplies: {'video-root': replies.future},
+            videoPreviewLoader: (_) {
+              loads++;
+              return preview.future;
+            },
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([root]).single,
+              allMessages: formatTimeline([root]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(loads, 1);
+        final frameResource = LoadedVideoPreviewFrame(
+          child: const SizedBox(),
+          aspectRatio: 16 / 9,
+          dispose: () async {
+            disposals++;
+          },
+        );
+        if (!completesAfterDisposal) {
+          preview.complete(frameResource);
+          await tester.pump();
+        }
+        replies.complete([
+          _textMsg(
+            id: 'video-reply',
+            pubkey: 'bob',
+            content: 'Reply to video',
+            extraTags: const [
+              ['e', 'video-root', '', 'reply'],
+            ],
+          ),
+        ]);
+        for (var frame = 0; frame < 30; frame++) {
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            loads,
+            1,
+            reason: 'One head owns video initialization at frame $frame',
+          );
+          expect(
+            find
+                .byKey(
+                  const ValueKey(
+                    'message-media-video-preview:https://example.com/head.mp4',
+                  ),
+                )
+                .hitTestable(),
+            findsOneWidget,
+          );
+        }
+        final semantics = tester.ensureSemantics();
+        await tester.pump();
+        final video = find.byKey(
+          const ValueKey(
+            'message-media-video-preview:https://example.com/head.mp4',
+          ),
+        );
+        final node = tester.getSemantics(video);
+        var semanticRect = node.rect;
+        for (var ancestor = node; ;) {
+          final transform = ancestor.transform;
+          if (transform != null) {
+            semanticRect = MatrixUtils.transformRect(transform, semanticRect);
+          }
+          final parent = ancestor.parent;
+          if (parent == null) break;
+          ancestor = parent;
+        }
+        expect(semanticRect.contains(tester.getCenter(video)), isTrue);
+        semantics.dispose();
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump();
+        if (completesAfterDisposal) preview.complete(frameResource);
+        await tester.pump();
+        expect(
+          disposals,
+          1,
+          reason: 'Late completion releases its single resource',
+        );
       },
     );
   }

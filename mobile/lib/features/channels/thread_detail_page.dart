@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart' show Drag;
+import 'package:flutter/semantics.dart' show OrdinalSortKey;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -52,6 +54,7 @@ import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_page/message_list.dart';
+part 'thread_detail_page/head_layout.dart';
 part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
@@ -254,6 +257,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final didJumpToInitialMessage = useRef(false);
     final initialHighlightTargetIndex = useState<int?>(null);
     final initialViewportReady = useState(false);
+    final headHeight = useState<double?>(null);
     final followsThreadTail = useRef(false);
     final userOptedOutOfTailFollow = useRef(false);
     final userDragDetachedTailFollow = useRef(false);
@@ -520,7 +524,11 @@ class ThreadDetailPage extends HookConsumerWidget {
         // error before consuming the one-shot jump. During loading, the fallback
         // main-timeline list can contain only the linked reply; after an error,
         // that hydrated snapshot is the best available target list.
-        if (messageId == null || !canUseMessagesForInitialTarget) return null;
+        if (messageId == null ||
+            !canUseMessagesForInitialTarget ||
+            headHeight.value == null) {
+          return null;
+        }
         final chronologicalIndex = replies.indexWhere(
           (reply) => reply.id == messageId,
         );
@@ -560,6 +568,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       },
       [
         initialMessageId,
+        headHeight.value,
         canUseMessagesForInitialTarget,
         fetchedReplies,
         replies.length,
@@ -613,7 +622,11 @@ class ThreadDetailPage extends HookConsumerWidget {
       viewportHeight,
     );
     useEffect(() {
-      if (!hasFetchedReplies || viewportHeight <= 0) return null;
+      if (!hasFetchedReplies ||
+          viewportHeight <= 0 ||
+          headHeight.value == null) {
+        return null;
+      }
       if (initialMessageId != null) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
@@ -685,7 +698,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         action: correctThreadTailInstantly,
       );
       return null;
-    }, [hasFetchedReplies, replies.length, settleGeometry]);
+    }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
     _useThreadReplyReadState(ref, threadHead.id, replies);
 
     // Thread-scoped typing indicators (exclude self).
@@ -850,6 +863,10 @@ class ThreadDetailPage extends HookConsumerWidget {
             children: [
               Expanded(
                 child: _ThreadMessageList(
+                  headHeight: headHeight.value ?? 0,
+                  onHeadHeightChanged: (height) {
+                    if (context.mounted) headHeight.value = height;
+                  },
                   viewport: listViewport,
                   onUserScrollStart: () {
                     hidesLatestForInitialTailSettle.value = false;
