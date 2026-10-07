@@ -3122,21 +3122,50 @@ pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyh
 /// deployment costs one query and produces no events. A failure in one
 /// community is logged and counted but does not prevent the remaining
 /// communities from being repaired; the next sweep retries it.
+///
+/// Each community is re-checked under its publication lock, so a community
+/// that another pass or a live membership write already repaired is left
+/// alone and counts as neither repaired nor failed. A pass whose drift query
+/// fails increments `buzz_nip43_membership_reconciliation_sweep_failures_total`
+/// before returning the error.
 pub async fn reconcile_nip43_membership_snapshot_drift(
     state: &Arc<AppState>,
 ) -> anyhow::Result<ReconcileSummary> {
-    let communities = state
+    let communities = match state
         .db
         .nip43_membership_snapshots_needing_reconciliation(&state.relay_keypair.public_key())
-        .await?;
+        .await
+    {
+        Ok(communities) => communities,
+        Err(error) => {
+            metrics::counter!("buzz_nip43_membership_reconciliation_sweep_failures_total")
+                .increment(1);
+            return Err(error.into());
+        }
+    };
+    let summary = repair_nip43_snapshot_drift(state, communities).await;
+    metrics::counter!("buzz_nip43_membership_reconciliations_total")
+        .increment(summary.repaired as u64);
+    Ok(summary)
+}
+
+/// Republish each listed community's snapshot if it is still drifted once
+/// its publication lock is held. The list can be stale by then: another pod's
+/// pass or a live membership write may already have repaired a community, and
+/// that community counts as neither repaired nor failed.
+async fn repair_nip43_snapshot_drift(
+    state: &Arc<AppState>,
+    communities: Vec<buzz_db::usage::CommunityHost>,
+) -> ReconcileSummary {
     let mut summary = ReconcileSummary::default();
 
     for community in communities {
         let community_id = buzz_core::CommunityId::from_uuid(community.id);
         let host = community.host;
         let tenant = TenantContext::resolved(community_id, host.clone());
-        match publish_nip43_membership_list(&tenant, state).await {
-            Ok(()) => summary.repaired += 1,
+        match publish_nip43_membership_snapshot(&tenant, state, true).await {
+            Ok(true) => summary.repaired += 1,
+            Ok(false) => {}
             Err(error) => {
                 summary.failed += 1;
                 metrics::counter!("buzz_nip43_membership_reconciliation_failures_total")
@@ -3146,9 +3175,44 @@ pub async fn reconcile_nip43_membership_snapshot_drift(
         }
     }
 
-    metrics::counter!("buzz_nip43_membership_reconciliations_total")
-        .increment(summary.repaired as u64);
-    Ok(summary)
+    summary
+}
+
+/// Start the background NIP-43 snapshot reconciler.
+///
+/// The first pass starts as soon as the task is scheduled; later passes follow
+/// `interval`, and a slow pass delays the next tick rather than bursting to
+/// catch up. This is a plain `fn` returning the task handle, so relay startup
+/// cannot await a pass before opening its listener. The first pass always logs
+/// its counts and duration; later passes log only when they repaired or
+/// failed something.
+pub fn spawn_nip43_snapshot_reconciler(
+    state: Arc<AppState>,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut first_pass = true;
+        loop {
+            interval.tick().await;
+            let started = std::time::Instant::now();
+            match reconcile_nip43_membership_snapshot_drift(&state).await {
+                Ok(summary) if first_pass || summary.repaired > 0 || summary.failed > 0 => info!(
+                    count = summary.repaired,
+                    failed = summary.failed,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "NIP-43 membership snapshots reconciled"
+                ),
+                Ok(_) => {}
+                Err(error) => warn!(
+                    %error,
+                    "periodic NIP-43 membership snapshot reconciliation failed"
+                ),
+            }
+            first_pass = false;
+        }
+    })
 }
 
 /// Publish a kind:13534 relay membership list event (NIP-43).
@@ -3165,10 +3229,23 @@ pub async fn publish_nip43_membership_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
+    publish_nip43_membership_snapshot(tenant, state, false)
+        .await
+        .map(|_| ())
+}
+
+/// Publish the kind:13534 snapshot, or with `only_if_drifted` skip it when the
+/// live snapshot already matches the canonical rows. Returns whether a new
+/// snapshot was written.
+async fn publish_nip43_membership_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    only_if_drifted: bool,
+) -> anyhow::Result<bool> {
     let started_at = std::time::Instant::now();
     metrics::counter!("buzz_nip43_membership_publications_total", "result" => "attempted")
         .increment(1);
-    let result = publish_nip43_membership_list_inner(tenant, state).await;
+    let result = publish_nip43_membership_list_inner(tenant, state, only_if_drifted).await;
     metrics::histogram!("buzz_nip43_membership_publication_seconds")
         .record(started_at.elapsed().as_secs_f64());
     metrics::counter!(
@@ -3182,7 +3259,8 @@ pub async fn publish_nip43_membership_list(
 async fn publish_nip43_membership_list_inner(
     tenant: &TenantContext,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+    only_if_drifted: bool,
+) -> anyhow::Result<bool> {
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
     let community = tenant.community();
 
@@ -3191,10 +3269,22 @@ async fn publish_nip43_membership_list_inner(
     // concurrent publication that reads newer state will block until our
     // replacement commits, then read the updated membership. This prevents a
     // stale snapshot from winning by arrival order.
-    let (stored, was_inserted, member_count) = state
-        .db
-        .publish_nip43_membership_locked(community, &state.relay_keypair)
-        .await?;
+    let published = if only_if_drifted {
+        state
+            .db
+            .republish_nip43_membership_if_drifted(community, &state.relay_keypair)
+            .await?
+    } else {
+        Some(
+            state
+                .db
+                .publish_nip43_membership_locked(community, &state.relay_keypair)
+                .await?,
+        )
+    };
+    let Some((stored, was_inserted, member_count)) = published else {
+        return Ok(false);
+    };
 
     if was_inserted {
         dispatch_persistent_event(
@@ -3209,7 +3299,7 @@ async fn publish_nip43_membership_list_inner(
     }
 
     info!(member_count, "NIP-43 membership list published");
-    Ok(())
+    Ok(was_inserted)
 }
 
 /// Shared helper: publish a NIP-43 membership delta event (kind 8000 or 8001).
@@ -3983,19 +4073,10 @@ mod tests {
         }
 
         fn reconciliation_failures(recorder: &DebuggingRecorder) -> u64 {
-            recorder
-                .snapshotter()
-                .snapshot()
-                .into_vec()
-                .into_iter()
-                .filter(|(key, _, _, _)| {
-                    key.key().name() == "buzz_nip43_membership_reconciliation_failures_total"
-                })
-                .map(|(_, _, _, value)| match value {
-                    DebugValue::Counter(value) => value,
-                    other => panic!("reconciliation failures must be a counter: {other:?}"),
-                })
-                .sum()
+            counter_total(
+                recorder,
+                "buzz_nip43_membership_reconciliation_failures_total",
+            )
         }
 
         /// Regression for #7558 on the worker path: repeated NIP-43
@@ -4038,7 +4119,7 @@ mod tests {
                 "no community may fail reconciliation on any sweep"
             );
             assert_eq!(
-                membership_snapshots(&pool, active).await,
+                relay_signed_snapshots(&pool, active, &state).await,
                 1,
                 "the active community is reconciled once and then left alone"
             );
@@ -4061,6 +4142,131 @@ mod tests {
                     .await
                     .expect("tombstone row is retained");
             assert_eq!(tombstone_state, "tombstone");
+        }
+
+        async fn relay_signed_snapshots(
+            pool: &sqlx::PgPool,
+            id: Uuid,
+            state: &Arc<AppState>,
+        ) -> i64 {
+            sqlx::query_scalar(
+                "SELECT count(*) FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3",
+            )
+            .bind(id)
+            .bind(KIND_NIP43_MEMBERSHIP_LIST as i32)
+            .bind(state.relay_keypair.public_key().to_bytes().to_vec())
+            .fetch_one(pool)
+            .await
+            .expect("count relay-signed membership snapshots")
+        }
+
+        fn counter_total(recorder: &DebuggingRecorder, name: &str) -> u64 {
+            recorder
+                .snapshotter()
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, _, _, _)| key.key().name() == name)
+                .map(|(_, _, _, value)| match value {
+                    DebugValue::Counter(value) => value,
+                    other => panic!("{name} must be a counter: {other:?}"),
+                })
+                .sum()
+        }
+
+        /// The reconciler's first pass runs as soon as it is spawned, not one
+        /// interval later: with an hour-long interval a community missing its
+        /// snapshot is repaired long before the hour. Real time, not a paused clock,
+        /// because a paused clock auto-advances while the task waits on
+        /// Postgres and would hide a first-tick delay.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn reconciler_first_pass_runs_without_waiting_an_interval() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to test DB");
+            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+            let community = insert_community(&pool).await;
+
+            let reconciler = spawn_nip43_snapshot_reconciler(
+                Arc::clone(&state),
+                std::time::Duration::from_secs(3600),
+            );
+            // The deadline is generous because the pass sweeps every community
+            // in the shared test database; it only has to be well short of the
+            // hour a delayed first tick would take.
+            let repaired = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+                // Count only this state's snapshots: concurrent tests sweep the
+                // same database with their own relay keys.
+                while relay_signed_snapshots(&pool, community, &state).await == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            reconciler.abort();
+            assert!(
+                repaired.is_ok(),
+                "the first reconcile pass must not wait for the interval"
+            );
+        }
+
+        /// A pass whose drift query fails surfaces as a counter, not only a
+        /// log line, so a backstop that fails every pass is visible.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn failed_sweep_query_increments_the_sweep_failure_counter() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to test DB");
+            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+            pool.close().await;
+
+            let recorder = DebuggingRecorder::new();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            assert!(reconcile_nip43_membership_snapshot_drift(&state)
+                .await
+                .is_err());
+            assert_eq!(
+                counter_total(
+                    &recorder,
+                    "buzz_nip43_membership_reconciliation_sweep_failures_total"
+                ),
+                1
+            );
+        }
+
+        /// A community the drift query listed, but that another pod's pass or
+        /// a live write repaired before this pass took its lock, is skipped:
+        /// no write, and it counts as neither repaired nor failed.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn community_repaired_after_listing_is_skipped_not_failed() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to test DB");
+            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+            let id = insert_community(&pool).await;
+            let host = format!("nip43-sweep-{}.example", id.simple());
+            let tenant =
+                TenantContext::resolved(buzz_core::CommunityId::from_uuid(id), host.clone());
+            assert!(publish_nip43_membership_snapshot(&tenant, &state, false)
+                .await
+                .expect("publish current snapshot"));
+
+            let recorder = DebuggingRecorder::new();
+            let summary = {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                repair_nip43_snapshot_drift(
+                    &state,
+                    vec![buzz_db::usage::CommunityHost { id, host }],
+                )
+                .await
+            };
+
+            assert_eq!((summary.repaired, summary.failed), (0, 0));
+            assert_eq!(reconciliation_failures(&recorder), 0);
+            assert_eq!(relay_signed_snapshots(&pool, id, &state).await, 1);
         }
     }
 }

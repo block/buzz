@@ -155,6 +155,17 @@ async fn nip43_membership_snapshot_drift(
 ) -> Result<Vec<crate::usage::CommunityHost>> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Maintenance).await?;
+    nip43_membership_snapshot_drift_on(&mut connection, relay_pubkey, only).await
+}
+
+/// [`nip43_membership_snapshot_drift`] on a caller-held connection, so the
+/// snapshot publisher can re-check one community inside its locked
+/// transaction.
+async fn nip43_membership_snapshot_drift_on(
+    connection: &mut sqlx::PgConnection,
+    relay_pubkey: &nostr::PublicKey,
+    only: Option<CommunityId>,
+) -> Result<Vec<crate::usage::CommunityHost>> {
     let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         SELECT c.id, c.host
@@ -209,7 +220,7 @@ async fn nip43_membership_snapshot_drift(
     .bind(relay_pubkey.to_bytes().to_vec())
     .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
     .bind(only.map(|community| *community.as_uuid()))
-    .fetch_all(&mut *connection)
+    .fetch_all(connection)
     .await?;
     Ok(rows
         .into_iter()
@@ -1132,7 +1143,6 @@ impl Db {
         name = "nip43_membership_snapshot_needs_reconciliation",
         system = "postgresql"
     )]
-    #[deprecated(note = "use nip43_membership_snapshots_needing_reconciliation")]
     pub async fn nip43_membership_snapshot_needs_reconciliation(
         &self,
         community_id: CommunityId,
@@ -1175,6 +1185,39 @@ impl Db {
         community_id: CommunityId,
         relay_keypair: &nostr::Keys,
     ) -> Result<(StoredEvent, bool, usize)> {
+        self.write_nip43_membership_snapshot(community_id, relay_keypair, false)
+            .await?
+            .ok_or_else(|| {
+                DbError::InvalidData("unconditional NIP-43 publication was skipped".to_string())
+            })
+    }
+
+    /// Like [`Self::publish_nip43_membership_locked`], but after taking the
+    /// per-community lock it re-checks whether the live snapshot still
+    /// differs from the canonical rows, and writes nothing (`None`) when it
+    /// does not.
+    ///
+    /// The background reconciler lists drifted communities once per pass and
+    /// then publishes them one by one; several pods may run passes at the
+    /// same time, and live membership writes republish too. Checking under
+    /// the lock means each community is repaired once however many passes
+    /// overlap.
+    #[datastore_span(name = "republish_nip43_membership_if_drifted", system = "postgresql")]
+    pub async fn republish_nip43_membership_if_drifted(
+        &self,
+        community_id: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<Option<(StoredEvent, bool, usize)>> {
+        self.write_nip43_membership_snapshot(community_id, relay_keypair, true)
+            .await
+    }
+
+    async fn write_nip43_membership_snapshot(
+        &self,
+        community_id: CommunityId,
+        relay_keypair: &nostr::Keys,
+        only_if_drifted: bool,
+    ) -> Result<Option<(StoredEvent, bool, usize)>> {
         use nostr::{EventBuilder, Kind, Tag};
 
         let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
@@ -1196,7 +1239,7 @@ impl Db {
         let transaction_timer = observability::TransactionTimer::start(
             observability::TransactionOperation::PublishNip43MembershipLocked,
         );
-        let (event, received_at, was_inserted, member_count) = transaction_timer
+        let Some((event, received_at, was_inserted, member_count)) = transaction_timer
             .observe(async {
 
         // Acquire the per-community snapshot lock BEFORE reading members.
@@ -1210,6 +1253,19 @@ impl Db {
                 .execute(&mut *tx),
         )
         .await?;
+
+        if only_if_drifted
+            && nip43_membership_snapshot_drift_on(
+                &mut tx,
+                &relay_keypair.public_key(),
+                Some(community_id),
+            )
+            .await?
+            .is_empty()
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
 
         // Read current members inside the locked transaction.
         let rows = sqlx::query(
@@ -1289,9 +1345,12 @@ impl Db {
         } else {
             tx.rollback().await?;
         }
-        Ok::<_, DbError>((event, received_at, was_inserted, member_count))
+        Ok::<_, DbError>(Some((event, received_at, was_inserted, member_count)))
             })
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
 
         if was_inserted {
             if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
@@ -1299,11 +1358,11 @@ impl Db {
             }
         }
 
-        Ok((
+        Ok(Some((
             StoredEvent::with_received_at(event, received_at, None, was_inserted),
             was_inserted,
             member_count,
-        ))
+        )))
     }
 }
 
@@ -2041,5 +2100,82 @@ mod postgres_tests {
                 "{label}: single-community check still reports drift"
             );
         }
+    }
+
+    /// The reconciler's publish re-checks drift under the per-community lock:
+    /// a community whose snapshot became current after the pass listed it is
+    /// left alone, so overlapping passes on several pods repair it once.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn republish_if_drifted_writes_only_when_the_locked_snapshot_is_stale() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let relay = nostr::Keys::generate();
+        // Older than any publish below, so a write cannot collide with the
+        // fixture's event id and a skipped write is visible in the row count.
+        let earlier = chrono::Utc::now().timestamp() - 60;
+
+        async fn snapshot_rows(pool: &PgPool, community: CommunityId) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2")
+                .bind(community.as_uuid())
+                .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+                .fetch_one(pool)
+                .await
+                .expect("count snapshots")
+        }
+
+        let (current, owner) = owned_community(&pool).await;
+        insert_snapshot(
+            &pool,
+            current,
+            &relay.public_key(),
+            Snapshot::at(earlier, 1),
+            member_tags(&[(&owner, "owner")]),
+        )
+        .await;
+        assert!(
+            db.republish_nip43_membership_if_drifted(current, &relay)
+                .await
+                .expect("republish current")
+                .is_none(),
+            "a current snapshot is not republished"
+        );
+        assert_eq!(snapshot_rows(&pool, current).await, 1, "nothing written");
+
+        let (stale, owner) = owned_community(&pool).await;
+        insert_snapshot(
+            &pool,
+            stale,
+            &relay.public_key(),
+            Snapshot::at(earlier, 2),
+            member_tags(&[(&owner, "member")]),
+        )
+        .await;
+        let (_, inserted, members) = db
+            .republish_nip43_membership_if_drifted(stale, &relay)
+            .await
+            .expect("republish stale")
+            .expect("a stale snapshot is republished");
+        assert!(inserted);
+        assert_eq!(members, 1);
+        assert!(
+            nip43_membership_snapshot_drift(&pool, &relay.public_key(), Some(stale))
+                .await
+                .expect("drift after repair")
+                .is_empty(),
+            "the republished snapshot matches the roster"
+        );
+        assert!(
+            db.republish_nip43_membership_if_drifted(stale, &relay)
+                .await
+                .expect("second republish")
+                .is_none(),
+            "a second pass that listed the same community writes nothing"
+        );
+        assert_eq!(
+            snapshot_rows(&pool, stale).await,
+            2,
+            "fixture plus one repair"
+        );
     }
 }

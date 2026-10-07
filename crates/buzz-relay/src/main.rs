@@ -855,9 +855,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // in step with the canonical `relay_members` rows. Membership writes
     // republish on every change; this background sweep repairs snapshots that
     // are missing or whose publication failed after the membership commit.
-    // It runs off the startup path: the first pass starts now and each later
-    // pass follows the interval, so a large deployment opens its listener
-    // without waiting on it. A failed community is retried on the next pass.
+    // It runs off the startup path (see `spawn_nip43_snapshot_reconciler`), so
+    // a large deployment opens its listener without waiting on it. A failed
+    // community is retried on the next pass.
     if config.require_relay_membership {
         let reconcile_state = Arc::clone(&state);
         let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
@@ -865,36 +865,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(60)
             .max(1);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut first_pass = true;
-            loop {
-                interval.tick().await;
-                let started = std::time::Instant::now();
-                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshot_drift(
-                    &reconcile_state,
-                )
-                .await
-                {
-                    Ok(summary) if first_pass || summary.repaired > 0 || summary.failed > 0 => {
-                        info!(
-                            count = summary.repaired,
-                            failed = summary.failed,
-                            elapsed_ms =
-                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                            "NIP-43 membership snapshots reconciled"
-                        )
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "periodic NIP-43 membership snapshot reconciliation failed"
-                    ),
-                }
-                first_pass = false;
-            }
-        });
+        buzz_relay::handlers::side_effects::spawn_nip43_snapshot_reconciler(
+            reconcile_state,
+            std::time::Duration::from_secs(interval_secs),
+        );
     }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
