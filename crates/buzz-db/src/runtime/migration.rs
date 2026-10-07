@@ -705,12 +705,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 57);
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
             .as_str()
             .contains("CREATE TABLE personal_read_accounts"));
+        assert_eq!(migrations[56].version, 57);
+        assert!(migrations[56]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE personal_read_accounts ADD COLUMN started_at"));
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -2210,9 +2215,30 @@ mod postgres_tests {
                 .sql
                 .as_ref(),
         );
+        // 0057 adds personal_read_accounts.started_at after 0056's CREATE TABLE.
+        let started_at_column = "started_at timestamptz, ";
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 57)
+            .expect("personal read start migration")
+            .sql
+            .as_str()
+            .contains("ADD COLUMN started_at TIMESTAMPTZ"));
+        assert!(schema
+            .tables
+            .get("personal_read_accounts")
+            .expect("schema.sql personal read accounts")
+            .contains(started_at_column));
         for (table, definition) in personal.tables {
+            let in_schema = schema.tables.get(&table).map(|schema_definition| {
+                if table == "personal_read_accounts" {
+                    schema_definition.replacen(started_at_column, "", 1)
+                } else {
+                    schema_definition.clone()
+                }
+            });
             assert_eq!(
-                schema.tables.get(&table),
+                in_schema.as_ref(),
                 Some(&definition),
                 "personal read table {table} differs"
             );

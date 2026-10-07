@@ -254,10 +254,11 @@ device-local.
   shared eight-second intent-processing deadline after admission. Limits are
   containment, not a production capacity claim.
 
-Apply migration 0056 (or the equivalent desired schema). It creates two empty
-private tables and no index on `events`: both sidebar scans are served by the
-existing `idx_events_community_channel_created`. No new per-message ingest write
-path or stored unread counters are introduced.
+Apply migrations 0056 and 0057 (or the equivalent desired schema). 0056
+creates two empty private tables and no index on `events`, and 0057 adds the
+nullable `personal_read_accounts.started_at` column. Both sidebar scans are
+served by the existing `idx_events_community_channel_created`. No new
+per-message ingest write path or stored unread counters are introduced.
 
 Use existing HTTP route/status/latency metrics for `/buzz/v1/me/sidebar` and
 `/buzz/v1/me/read-state`, plus database pool/statement metrics. Inspect exact /
@@ -295,9 +296,9 @@ is no new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
 
-Migration 0056 must be applied before this relay serves, enabled or not: started
-without it and with auto-migration off, the relay stops before readiness. There
-is no down migration, and disabling the API is not a rollback. A relay built
+Migrations 0056 and 0057 must be applied before this relay serves, enabled or
+not: started without them and with auto-migration off, the relay stops before
+readiness. There is no down migration, and disabling the API is not a rollback. A relay built
 before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
 refuses to start on the migrated schema. Whole-community deletion run from a
 build before 0056 rejects the two new tables. A deletion approved on the
