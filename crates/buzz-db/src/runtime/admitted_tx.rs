@@ -49,11 +49,19 @@ use crate::Result;
 /// }
 /// ```
 ///
-/// and cannot reach the connection to swap it out:
+/// and cannot reach the connection to swap it out, through a dereference:
 ///
 /// ```compile_fail
 /// fn swap(tx: &mut buzz_db::AdmittedTx, other: &mut sqlx::PgConnection) {
-///     std::mem::swap(tx.conn(), other);
+///     std::mem::swap(&mut **tx, other);
+/// }
+/// ```
+///
+/// or through `AsMut`:
+///
+/// ```compile_fail
+/// fn swap(tx: &mut buzz_db::AdmittedTx, other: &mut sqlx::PgConnection) {
+///     std::mem::swap(AsMut::<sqlx::PgConnection>::as_mut(tx), other);
 /// }
 /// ```
 #[must_use = "dropping an AdmittedTx rolls it back; call commit()"]

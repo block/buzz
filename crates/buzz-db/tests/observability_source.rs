@@ -1167,15 +1167,16 @@ fn admitted_tx_is_constructed_only_by_admitting_constructors() {
     // build the value. Pin that each function there that builds it also admits
     // the transaction it wraps, so a new unguarded constructor cannot slip in.
     let source = include_str!("../src/runtime/admitted_tx.rs");
-    let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
-    let production: String = production
+    let production: String = strip_cfg_test_items(source)
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
+        // `impl … for AdmittedTx {` headers open a block, not a value.
+        .filter(|line| !line.trim_start().starts_with("impl"))
         .map(|line| format!("{line}\n"))
         .collect();
     let constructors: Vec<&str> = function_slices(&production)
         .into_iter()
-        .filter(|function| function.contains("Self {"))
+        .filter(|function| function.contains("Self {") || function.contains("AdmittedTx {"))
         .collect();
     assert_eq!(
         constructors.len(),
@@ -1187,6 +1188,127 @@ fn admitted_tx_is_constructed_only_by_admitting_constructors() {
             constructor.contains(".guard_transaction(&mut tx, community)")
                 || constructor.contains(".guard_transaction_with_serving_lease(&mut tx, lease)"),
             "AdmittedTx constructor must admit the transaction it wraps: {constructor}"
+        );
+    }
+}
+
+/// Remove each top-level `#[cfg(test)]` item and keep the production code
+/// around it. Truncating at the first `#[cfg(test)]` would hide production
+/// functions that follow a test-only item. Tracks brace depth: the item ends
+/// on the first line that leaves depth at or below zero and ends with `;` or
+/// `}`, ignoring a trailing `//` comment. A column-0 `}` line (rustfmt's
+/// top-level close) always ends it. Braces inside string or char literals are
+/// still counted, so a test-only item with unbalanced literal braces (for
+/// example `"{"`) runs on to the next column-0 `}`; no such item exists today.
+fn strip_cfg_test_items(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if line != "#[cfg(test)]" {
+            kept.push_str(line);
+            kept.push('\n');
+            continue;
+        }
+        let mut depth = 0_isize;
+        for line in lines.by_ref().skip_while(|line| line.starts_with("#[")) {
+            depth += line.matches('{').count() as isize - line.matches('}').count() as isize;
+            // Any `//` may start the trailing comment (an earlier one can sit
+            // inside a string such as `"https://…"`), so try every prefix. A
+            // false match inside a string only ends the item early, which
+            // scans more lines and can never hide production code.
+            let item_end = depth <= 0
+                && line
+                    .match_indices("//")
+                    .map(|(at, _)| &line[..at])
+                    .chain([line])
+                    .any(|text| {
+                        let text = text.trim_end();
+                        text.ends_with(';') || text.ends_with('}')
+                    });
+            if item_end || line == "}" || line == "};" {
+                break;
+            }
+        }
+    }
+    kept
+}
+
+#[test]
+fn cfg_test_items_are_skipped_without_hiding_later_production_code() {
+    let source = "pub fn before() {}\n\
+#[cfg(test)]\n\
+struct Marker;\n\
+pub fn after_struct() {}\n\
+#[cfg(test)]\n\
+static LOCK: std::sync::Mutex<()> =\n\
+    std::sync::Mutex::new(());\n\
+pub fn after_static() {}\n\
+#[cfg(test)]\n\
+static S: [u8; 1] =\n\
+    [const { 0 }; 1];\n\
+pub fn after_const_block() {}\n\
+#[cfg(test)]\n\
+#[derive(Debug)]\n\
+struct Fields {\n\
+    value: u8,\n\
+}\n\
+pub fn after_fields() {}\n\
+#[cfg(test)]\n\
+mod tests {\n\
+    fn hidden() {\n\
+    }\n\
+}\n\
+pub fn after_module() {}\n";
+    let production = strip_cfg_test_items(source);
+    for name in [
+        "before",
+        "after_struct",
+        "after_static",
+        "after_const_block",
+        "after_fields",
+        "after_module",
+    ] {
+        assert!(
+            production.contains(&format!("pub fn {name}()")),
+            "{name} is production code and must stay visible: {production}"
+        );
+    }
+    for hidden in ["Marker", "LOCK", "static S", "value: u8", "fn hidden"] {
+        assert!(
+            !production.contains(hidden),
+            "{hidden} is test-only and must be skipped: {production}"
+        );
+    }
+
+    let raw_writer = "pub(crate) async fn raw_writer(conn: &mut sqlx::PgConnection) {\n\
+    sqlx::query(\"INSERT INTO events (community_id, id) VALUES ($1, $2)\")\n\
+        .execute(conn)\n\
+        .await\n\
+        .expect(\"write\");\n\
+}\n";
+    for (test_item, hidden) in [
+        ("struct X;", "struct X"),
+        ("fn helper() {} // test helper", "fn helper"),
+        ("const BRACES: &str = \"{}\"; // fixture", "BRACES"),
+        (
+            "const URL: &str = \"https://relay.test\"; // fixture",
+            "relay.test",
+        ),
+        ("fn u() -> &'static str { \"ws://x\" } // c", "ws://x"),
+    ] {
+        let production = strip_cfg_test_items(&format!("#[cfg(test)]\n{test_item}\n{raw_writer}"));
+        assert!(
+            !production.contains(hidden),
+            "`{test_item}` is test-only and must be skipped: {production}"
+        );
+        assert!(
+            production_contains_guarded_write(&production),
+            "a guarded write after `{test_item}` must stay visible: {production}"
+        );
+        assert_eq!(
+            syntactic_guarded_write_route_violations(&production),
+            ["pub(crate) async fn raw_writer(conn: &mut sqlx::PgConnection) {"],
+            "a raw writer after `{test_item}` must still be scanned"
         );
     }
 }
@@ -1265,10 +1387,10 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
                 .to_string_lossy()
                 .replace('\\', "/");
             let source = std::fs::read_to_string(&path).expect("read source file");
-            let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
-            if production_contains_guarded_write(production) {
+            let production = strip_cfg_test_items(&source);
+            if production_contains_guarded_write(&production) {
                 checked_guarded_files += 1;
-                let violations = syntactic_guarded_write_route_violations(production);
+                let violations = syntactic_guarded_write_route_violations(&production);
                 assert!(
                     violations.is_empty(),
                     "{crate_name}/src/{relative} has guarded-table INSERT/UPDATE/DELETE seams \

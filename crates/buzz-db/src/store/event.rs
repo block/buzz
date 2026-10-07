@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use buzz_core::kind::{
@@ -1167,8 +1167,7 @@ pub async fn soft_delete_by_coordinate(
     .await?;
     let purged = if may_be_retention_free(kind) {
         purge_retention_free_events(
-            tx.conn(),
-            community_id,
+            &mut tx,
             RetentionFreeTarget::Coordinate {
                 kind,
                 pubkey,
@@ -1244,15 +1243,15 @@ enum RetentionFreeTarget<'a> {
 /// purged here or left live, never soft-deleted. Returns the number of events
 /// removed.
 async fn purge_retention_free_events(
-    tx: &mut PgConnection,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     target: RetentionFreeTarget<'_>,
 ) -> Result<u64> {
+    let community_id = tx.community();
     // Migration 0011 fences NIP-RS hard deletes behind a transaction-local
     // opt-in. The fence and this opt-in are removed together once the
     // migration-only triggers are dropped.
     sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
     let purged: i64 = match target {
@@ -1260,7 +1259,7 @@ async fn purge_retention_free_events(
             sqlx::query_scalar(purge_retention_free_sql!("id = $2"))
                 .bind(community_id.as_uuid())
                 .bind(event_id)
-                .fetch_one(&mut *tx)
+                .fetch_one(tx.conn())
                 .await?
         }
         RetentionFreeTarget::Coordinate {
@@ -1277,7 +1276,7 @@ async fn purge_retention_free_events(
             .bind(pubkey)
             .bind(d_tag)
             .bind(created_at_or_before)
-            .fetch_one(&mut *tx)
+            .fetch_one(tx.conn())
             .await?
         }
     };
@@ -1333,7 +1332,6 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
     let community_id = tx.community();
-    let tx: &mut PgConnection = tx.conn();
     use crate::store::replaceable::event_replacement_lock_key;
 
     // Derive the target event's kind and channel_id inside the transaction so
@@ -1344,7 +1342,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     )
     .bind(community_id.as_uuid())
     .bind(event_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     // Relay-signed move removals are the source channel's only replay record.
@@ -1364,14 +1362,13 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
             );
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(lock_key)
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
         }
     }
 
     let purged = if target.is_some_and(|(kind, _)| may_be_retention_free(kind)) {
-        purge_retention_free_events(&mut *tx, community_id, RetentionFreeTarget::Id(event_id))
-            .await?
+        purge_retention_free_events(tx, RetentionFreeTarget::Id(event_id)).await?
     } else {
         0
     };
@@ -1383,7 +1380,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     ))
     .bind(community_id.as_uuid())
     .bind(event_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     let deleted = purged > 0 || result.rows_affected() > 0;
@@ -1397,7 +1394,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
             )
             .bind(community_id.as_uuid())
             .bind(pid)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
 
             if let Some(root_id) = root_event_id {
@@ -1408,7 +1405,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
                 )
                 .bind(community_id.as_uuid())
                 .bind(root_id)
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
             }
         }
