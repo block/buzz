@@ -22,7 +22,7 @@ use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
-use buzz_pubsub::conn_control::ConnControl;
+use buzz_pubsub::conn_control::{ConnControl, ScopedConnControl};
 use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
@@ -1996,6 +1996,70 @@ impl AppState {
             )
             .await?;
         Ok(closed)
+    }
+
+    /// Consumes cross-pod connection-control commands until the broadcast closes.
+    ///
+    /// Pubkey disconnects are in-memory and run inline. Community disconnects
+    /// wait on a writer connection and the community row lock, so each runs in
+    /// its own task and a ban disconnect never queues behind one. Every
+    /// community disconnect is fenced against the row, so their relative order
+    /// does not matter.
+    pub async fn run_conn_control_consumer(
+        self: Arc<Self>,
+        mut rx: tokio::sync::broadcast::Receiver<ScopedConnControl>,
+    ) {
+        loop {
+            match rx.recv().await {
+                Ok(scoped) => match scoped.command {
+                    ConnControl::DisconnectCommunity { archived_at } => {
+                        let state = Arc::clone(&self);
+                        let community_id = scoped.community_id;
+                        tokio::spawn(async move {
+                            match state
+                                .apply_community_disconnect(community_id, archived_at)
+                                .await
+                            {
+                                Ok(Some(_)) => {}
+                                Ok(None) => tracing::info!(
+                                    community = %community_id,
+                                    ?archived_at,
+                                    "ignored community disconnect for a community that is active or re-archived"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    community = %community_id,
+                                    ?archived_at,
+                                    %error,
+                                    "could not verify archive disconnect; retaining sockets until lifecycle revalidation"
+                                ),
+                            }
+                        });
+                    }
+                    ConnControl::DisconnectPubkey {
+                        pubkey,
+                        event_id,
+                        reason,
+                        unowned_only,
+                    } => {
+                        self.disconnect_pubkey_local(
+                            scoped.community_id,
+                            &pubkey,
+                            &event_id,
+                            &reason,
+                            unowned_only,
+                        );
+                    }
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    metrics::counter!("buzz_conn_control_lag_total").increment(n);
+                    tracing::warn!("Connection-control consumer lagged by {n} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::error!("Connection-control broadcast channel closed");
+                    break;
+                }
+            }
+        }
     }
 
     /// Applies a cross-pod `DisconnectCommunity` command to local sockets.

@@ -2567,6 +2567,122 @@ mod postgres_tests {
             *reason.borrow(),
             Some(CommunityDisconnectReason::CommunityArchived)
         );
+
+    }
+
+    /// The connection-control consumer serves ban disconnects and archive
+    /// disconnects from one receiver. An archive disconnect waits on the
+    /// community row lock, so a pubkey disconnect queued behind it must still
+    /// close its socket promptly, and the archive disconnect must still land
+    /// once the lock is released.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conn_control_consumer_does_not_queue_pubkey_disconnects_behind_a_locked_archive() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use buzz_pubsub::conn_control::{ConnControl, ScopedConnControl};
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let community_control = CommunityConnectionControl::new(CancellationToken::new());
+        let community_reason = community_control.disconnect_reason();
+        let _community_guard = state.community_connections.register(
+            Uuid::new_v4(),
+            community,
+            community_control.clone(),
+        );
+        let banned = [7u8; 32];
+        let banned_control = CommunityConnectionControl::new(CancellationToken::new());
+        banned_control.bind_pubkey(banned);
+        let banned_reason = banned_control.disconnect_reason();
+        let _banned_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, banned_control.clone());
+
+        let archived = state
+            .db
+            .archive_community_owned_by(&host, &owner.public_key().to_hex(), "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        let mut row_lock = state.db.pool().begin().await.expect("begin row lock");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *row_lock)
+            .await
+            .expect("hold the community row lock");
+
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let consumer = tokio::spawn(Arc::clone(&state).run_conn_control_consumer(rx));
+        tx.send(ScopedConnControl {
+            community_id: community,
+            command: ConnControl::DisconnectCommunity {
+                archived_at: Some(archived.archived_at),
+            },
+        })
+        .expect("send community disconnect");
+        tx.send(ScopedConnControl {
+            community_id: community,
+            command: ConnControl::DisconnectPubkey {
+                pubkey: banned.to_vec(),
+                event_id: "ban".to_string(),
+                reason: "blocked: you are banned from this community".to_string(),
+                unowned_only: false,
+            },
+        })
+        .expect("send pubkey disconnect");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            banned_control.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("a pubkey disconnect must not wait behind a locked community disconnect");
+        assert_eq!(
+            *banned_reason.borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        assert!(
+            !community_control.cancellation_token().is_cancelled(),
+            "the community disconnect must wait for the row lock"
+        );
+
+        row_lock.rollback().await.expect("release row lock");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            community_control.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("the community disconnect must land once the row lock is released");
+        assert_eq!(
+            *community_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(5), consumer)
+            .await
+            .expect("the consumer must stop when the broadcast closes")
+            .expect("consumer task");
     }
 
     #[tokio::test]
