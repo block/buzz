@@ -65,12 +65,11 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
     assert_eq!(thread_rows(&pool, community, &starter).await, root_row);
     assert!(thread_rows(&pool, community, &bystander).await.is_empty());
     let row = sidebar(&db, community, &starter).await;
-    // Only the reply is unread: attention, but no ordinary timeline backlog.
-    assert_eq!(
-        (row.unread, row.attention, row.threads.len()),
-        (false, true, 1)
-    );
-    assert_eq!(row.threads[0].latest_reply_id, own.id.to_hex());
+    // Only the reply is unread: posting read the root, and a reply never
+    // makes the channel unread.
+    assert_eq!((row.unread, row.mentions, row.threads.len()), (false, 0, 1));
+    assert_eq!(row.threads[0].latest_id, own.id.to_hex());
+    assert_eq!(row.threads[0].read_through_id, None, "no reply read yet");
     assert_eq!(
         states(&db, community, &starter, channel, Some(&root), &[&own]).await,
         [serde_json::json!({"status":"unread","reason":"conversation"})]
@@ -92,11 +91,13 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
     )
     .await;
     let row = sidebar(&db, community, &actor).await;
+    assert_eq!((row.unread, row.mentions, row.threads.len()), (true, 0, 1));
+    assert_eq!(row.threads[0].latest_id, other.id.to_hex());
     assert_eq!(
-        (row.unread, row.attention, row.threads.len()),
-        (true, true, 1)
+        row.threads[0].read_through_id,
+        Some(own.id.to_hex()),
+        "posting read the actor's own reply"
     );
-    assert_eq!(row.threads[0].latest_reply_id, other.id.to_hex());
 
     // A mention makes a channel member a thread member; a non-member gets nothing.
     let outsider = Keys::generate();
@@ -116,11 +117,9 @@ async fn replying_mentioning_and_starting_a_thread_make_members() {
     assert_eq!(thread_rows(&pool, community, &bystander).await, root_row);
     assert!(thread_rows(&pool, community, &outsider).await.is_empty());
     let row = sidebar(&db, community, &bystander).await;
-    // The mention, and the root on the timeline.
-    assert_eq!(
-        (row.unread, row.attention, row.threads.len()),
-        (true, true, 1)
-    );
+    // The root on the timeline; the mention counts on the thread row only.
+    assert_eq!((row.unread, row.mentions, row.threads.len()), (true, 0, 1));
+    assert_eq!(row.threads[0].mentions, 1);
     assert_eq!(
         states(
             &db,
@@ -262,10 +261,8 @@ async fn dm_replies_make_every_member_a_thread_member() {
         .unwrap()
         .channels
         .remove(0);
-    assert_eq!(
-        (row.unread, row.attention, row.threads.len()),
-        (false, true, 1)
-    );
+    // The root is unread on the timeline, the reply on the thread row.
+    assert_eq!((row.unread, row.mentions, row.threads.len()), (true, 0, 1));
 }
 
 #[tokio::test]
@@ -316,13 +313,9 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
         IntentOutcome::Applied
     );
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(
-        (row.unread, row.attention),
-        (true, true),
-        "top at +20 and reply at +30 remain"
-    );
-    assert_eq!(row.threads.len(), 1);
-    assert_eq!(row.threads[0].latest_reply_id, second.id.to_hex());
+    assert!(row.unread, "top at +20 remains");
+    assert_eq!(row.threads.len(), 1, "reply at +30 remains");
+    assert_eq!(row.threads[0].latest_id, second.id.to_hex());
 
     assert_eq!(
         apply(&db, community, &actor, channel_read(channel, &second)).await,
@@ -330,8 +323,8 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
     );
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(
-        (row.unread, row.attention, row.threads.len()),
-        (false, false, 0),
+        (row.unread, row.threads.len()),
+        (false, 0),
         "every thread is covered"
     );
 
@@ -359,8 +352,8 @@ async fn mark_channel_read_covers_every_thread_through_a_reply_anchor() {
     )
     .await;
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.attention), (false, true));
-    assert_eq!(row.threads[0].latest_reply_id, newer.id.to_hex());
+    assert!(!row.unread);
+    assert_eq!(row.threads[0].latest_id, newer.id.to_hex());
     assert_eq!(
         status(
             &db,
@@ -412,7 +405,7 @@ async fn mark_channel_read_validates_its_anchor() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn thread_summaries_order_cap_and_count_every_unread_thread() {
+async fn thread_summaries_order_newest_first_and_list_every_unread_thread() {
     let (db, _, community, channel, actor, _) = fixture().await;
     let base = now();
     let mut roots = Vec::new();
@@ -456,8 +449,9 @@ async fn thread_summaries_order_cap_and_count_every_unread_thread() {
         );
     }
     let row = sidebar(&db, community, &actor).await;
-    // The fixture's message is one ordinary timeline unread.
-    assert_eq!((row.unread, row.attention, row.threads.len()), (true, true, 5));
+    // Posting the roots read the timeline through them; no thread cap.
+    assert_eq!((row.unread, row.threads.len()), (false, 6));
+    assert_eq!(row.read_through_id, Some(roots[5].id.to_hex()));
     let mut tied = [roots[0].id.to_hex(), roots[1].id.to_hex()];
     tied.sort();
     let order: Vec<_> = row.threads.iter().map(|t| t.root_id.clone()).collect();
@@ -468,22 +462,21 @@ async fn thread_summaries_order_cap_and_count_every_unread_thread() {
             tied[1].clone(),
             roots[2].id.to_hex(),
             roots[3].id.to_hex(),
-            roots[4].id.to_hex()
+            roots[4].id.to_hex(),
+            roots[5].id.to_hex()
         ]
     );
-    assert_eq!(row.threads[2].latest_reply_id, last.unwrap().id.to_hex());
-    assert_eq!(row.threads[2].latest_reply_at, (base + 140) as i64);
-    // The row's activity is the greatest author time among the newest messages.
-    assert_eq!(row.latest_message_at, Some((base + 150) as i64));
+    // Ordered by its newest reply's author time, anchored at its last arrival.
+    assert_eq!(row.threads[2].latest_id, last.unwrap().id.to_hex());
 
-    // Reading a listed thread through its anchor promotes the sixth.
+    // Reading a listed thread through its anchor removes only it.
     let first = &row.threads[0];
     let intent = ReadIntent::MarkThrough {
         target: ReadTarget {
             channel_id: channel,
             root_id: Some(first.root_id.clone()),
         },
-        message_id: first.latest_reply_id.clone(),
+        message_id: first.latest_id.clone(),
     };
     assert_eq!(
         apply(&db, community, &actor, intent).await,
@@ -492,8 +485,7 @@ async fn thread_summaries_order_cap_and_count_every_unread_thread() {
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(row.threads.len(), 5);
     assert!(row.threads.iter().all(|t| t.root_id != first.root_id));
-    // Plus the fixture's timeline message.
-    assert!(row.unread);
+    assert!(!row.unread);
 }
 
 #[tokio::test]
@@ -536,11 +528,13 @@ async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
     .await;
 
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.attention), (true, true), "the root and two replies");
+    // The fixture's root; each reply's mention counts on its own thread.
+    assert_eq!((row.unread, row.mentions), (true, 0));
     assert_eq!(row.threads.len(), 2);
+    assert!(row.threads.iter().all(|t| t.mentions == 1));
     let listed = &row.threads[1];
     assert_eq!(listed.root_id, diff.id.to_hex());
-    assert_eq!(listed.latest_reply_id, on_diff.id.to_hex());
+    assert_eq!(listed.latest_id, on_diff.id.to_hex());
     assert_eq!(
         states(&db, community, &actor, channel, Some(&diff), &[&on_diff]).await,
         [serde_json::json!({"status":"unread","reason":"mention"})]
@@ -559,9 +553,9 @@ async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
         IntentOutcome::Applied
     );
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.attention), (true, true));
+    assert!(row.unread);
     assert_eq!(row.threads.len(), 1);
-    assert_eq!(row.threads[0].latest_reply_id, elsewhere.id.to_hex());
+    assert_eq!(row.threads[0].latest_id, elsewhere.id.to_hex());
 }
 
 #[tokio::test]
@@ -607,4 +601,178 @@ async fn targeted_sidebar_returns_only_requested_joined_channels() {
             .await
             .is_err());
     }
+}
+
+fn follow(channel: Uuid, root: &nostr::Event, following: bool) -> ReadIntent {
+    let target = ReadTarget {
+        channel_id: channel,
+        root_id: Some(root.id.to_hex()),
+    };
+    if following {
+        ReadIntent::Follow { target }
+    } else {
+        ReadIntent::Unfollow { target }
+    }
+}
+
+async fn following(pool: &PgPool, community: CommunityId, actor: &Keys) -> Vec<bool> {
+    sqlx::query_scalar(
+        "SELECT following FROM personal_read_frontiers
+         WHERE community_id=$1 AND actor=$2 AND root_id<>''::bytea",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_bytes().as_slice())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn follow_starts_caught_up_and_unfollow_is_sticky() {
+    let (db, pool, community, channel, actor, root) = fixture().await;
+    let base = now();
+    let other = Keys::generate();
+    let say = |at: u64, tags: Vec<nostr::Tag>| {
+        let (db, root, other) = (db.clone(), root.clone(), other.clone());
+        async move { reply(&db, community, channel, &root, &other, at, tags, false).await }
+    };
+    say(base, vec![]).await;
+    assert!(following(&pool, community, &actor).await.is_empty());
+
+    // Follow starts at the thread's last reply: nothing unread yet.
+    assert_eq!(
+        apply(&db, community, &actor, follow(channel, &root, true)).await,
+        IntentOutcome::Applied
+    );
+    assert!(sidebar(&db, community, &actor).await.threads.is_empty());
+    let next = say(base + 1, vec![]).await;
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(row.threads.len(), 1);
+    assert_eq!(row.threads[0].latest_id, next.id.to_hex());
+
+    // Unfollow keeps the row; later replies, mentions included, don't
+    // re-follow (whether a new mention should is an open product question).
+    assert_eq!(
+        apply(&db, community, &actor, follow(channel, &root, false)).await,
+        IntentOutcome::Applied
+    );
+    assert!(sidebar(&db, community, &actor).await.threads.is_empty());
+    say(base + 2, vec![]).await;
+    say(base + 3, mention(&actor)).await;
+    assert_eq!(following(&pool, community, &actor).await, [false]);
+    assert!(sidebar(&db, community, &actor).await.threads.is_empty());
+
+    // The actor's own reply re-follows, read through it.
+    let own = reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &actor,
+        base + 4,
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(following(&pool, community, &actor).await, [true]);
+    assert!(sidebar(&db, community, &actor).await.threads.is_empty());
+    say(base + 5, vec![]).await;
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(row.threads.len(), 1);
+    assert_eq!(
+        (
+            row.threads[0].mentions,
+            row.threads[0].read_through_id.clone()
+        ),
+        (0, Some(own.id.to_hex())),
+        "the earlier mention was read when the actor replied"
+    );
+
+    // Following again catches up; a target without a root is invalid.
+    assert_eq!(
+        apply(&db, community, &actor, follow(channel, &root, false)).await,
+        IntentOutcome::Applied
+    );
+    assert_eq!(
+        apply(&db, community, &actor, follow(channel, &root, true)).await,
+        IntentOutcome::Applied
+    );
+    assert!(sidebar(&db, community, &actor).await.threads.is_empty());
+    let channel_only = ReadIntent::Follow {
+        target: ReadTarget {
+            channel_id: channel,
+            root_id: None,
+        },
+    };
+    assert_eq!(
+        apply(&db, community, &actor, channel_only).await,
+        IntentOutcome::Invalid
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn mentions_count_exactly_in_their_own_scope() {
+    let (db, _, community, channel, actor, root) = fixture().await;
+    let base = now();
+    let author = Keys::generate();
+    let first = post(&db, community, channel, &author, base + 1, mention(&actor)).await;
+    post(&db, community, channel, &author, base + 2, mention(&actor)).await;
+    post(&db, community, channel, &author, base + 3, vec![]).await;
+    for at in [base + 4, base + 5, base + 6] {
+        reply(
+            &db,
+            community,
+            channel,
+            &root,
+            &author,
+            at,
+            mention(&actor),
+            false,
+        )
+        .await;
+    }
+    // A broadcast reply shows on the timeline, so its mention counts there.
+    reply(
+        &db,
+        community,
+        channel,
+        &root,
+        &author,
+        base + 7,
+        mention(&actor),
+        true,
+    )
+    .await;
+
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!((row.unread, row.mentions), (true, 3));
+    let thread = row
+        .threads
+        .iter()
+        .find(|t| t.root_id == root.id.to_hex())
+        .unwrap();
+    assert_eq!(
+        thread.mentions, 3,
+        "thread mentions never count on the channel"
+    );
+
+    // Reading through the first mention leaves the rest, still exact.
+    assert_eq!(
+        apply(&db, community, &actor, mark(channel, None, &first)).await,
+        IntentOutcome::Applied
+    );
+    let row = sidebar(&db, community, &actor).await;
+    assert_eq!(row.mentions, 2);
+    assert_eq!(row.read_through_id, Some(first.id.to_hex()));
+    let thread = row
+        .threads
+        .iter()
+        .find(|t| t.root_id == root.id.to_hex())
+        .unwrap();
+    assert_eq!(
+        thread.mentions, 3,
+        "a channel mark leaves thread positions alone"
+    );
 }

@@ -86,6 +86,7 @@ async fn access(
 
 struct Message {
     id: Vec<u8>,
+    created_at: DateTime<Utc>,
     received_at: DateTime<Utc>,
     /// Canonical thread root, when the message is a reply.
     thread: Option<Vec<u8>>,
@@ -103,7 +104,7 @@ async fn message(
     kinds: Option<&[i32]>,
 ) -> Result<Option<Message>> {
     let row = sqlx::query(
-        "SELECT e.id, e.received_at, tm.root_event_id, tm.depth, tm.broadcast
+        "SELECT e.id, e.created_at, e.received_at, tm.root_event_id, tm.depth, tm.broadcast
          FROM events e LEFT JOIN thread_metadata tm ON tm.community_id=e.community_id
              AND tm.event_created_at=e.created_at AND tm.event_id=e.id AND tm.channel_id=e.channel_id
          WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3
@@ -118,6 +119,7 @@ async fn message(
             && row.try_get::<Option<bool>, _>("broadcast")? == Some(true);
         Ok(Message {
             on_timeline: thread.is_none() || broadcast_reply,
+            created_at: row.try_get("created_at")?,
             received_at: row.try_get("received_at")?,
             thread,
             id,
@@ -126,15 +128,16 @@ async fn message(
     .transpose()
 }
 
-/// An eligible-kind message's arrival time, deleted or not, without tags.
-async fn anchor_received_at(
+/// An eligible-kind message's author and arrival times, deleted or not,
+/// without tags.
+async fn anchor_times(
     conn: &mut PgConnection,
     community: CommunityId,
     channel: Uuid,
     id: &[u8],
-) -> Result<Option<DateTime<Utc>>> {
-    Ok(sqlx::query_scalar(
-        "SELECT received_at FROM events
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+    Ok(sqlx::query_as(
+        "SELECT created_at, received_at FROM events
          WHERE community_id=$1 AND channel_id=$2 AND id=$3 AND kind=ANY($4) LIMIT 1",
     )
     .bind(community.as_uuid())
@@ -143,6 +146,47 @@ async fn anchor_received_at(
     .bind(ELIGIBLE_KINDS.as_slice())
     .fetch_optional(conn)
     .await?)
+}
+
+/// Where a mark through an anchor leaves the frontier: the last arrival among
+/// the messages displayed (by author time, then ID) at or before the anchor
+/// in `scope`. Clients name only display-order IDs, so a late arrival shown
+/// above the anchor is read with it instead of leaving a badge no mark can
+/// clear. Anything that arrived after the anchor was authored no earlier
+/// than the skew before the anchor's arrival, which bounds the range.
+/// `scope` is a thread root, empty for the channel timeline, or None for
+/// the whole channel.
+async fn display_through(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    channel: Uuid,
+    anchor: (&[u8], DateTime<Utc>, DateTime<Utc>),
+    scope: Option<&[u8]>,
+) -> Result<DateTime<Utc>> {
+    let (id, created_at, received_at) = anchor;
+    let through: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT max(e.received_at) FROM events e
+         LEFT JOIN thread_metadata tm ON tm.community_id=$1
+            AND tm.event_created_at=e.created_at AND tm.event_id=e.id
+         WHERE e.community_id=$1 AND e.channel_id=$2 AND e.kind=ANY($3)
+            AND e.created_at >= $4::timestamptz-$7 AND e.created_at <= $5
+            AND (e.created_at, e.id) <= ($5, $6) AND e.received_at > $4
+            AND CASE WHEN $8::bytea IS NULL THEN true
+                WHEN $8=''::bytea THEN tm.root_event_id IS NULL OR tm.root_event_id=e.id
+                    OR (tm.depth=1 AND tm.broadcast)
+                ELSE e.id=$8 OR tm.root_event_id=$8 END",
+    )
+    .bind(community.as_uuid())
+    .bind(channel)
+    .bind(ELIGIBLE_KINDS.as_slice())
+    .bind(received_at)
+    .bind(created_at)
+    .bind(id)
+    .bind(super::projection::skew())
+    .bind(scope)
+    .fetch_one(conn)
+    .await?;
+    Ok(through.map_or(received_at, |later| later.max(received_at)))
 }
 
 pub(super) async fn valid_target(
@@ -203,6 +247,14 @@ pub(super) async fn apply(
                 if !msg.on_timeline {
                     return Ok(IntentOutcome::Blocked);
                 }
+                let through = display_through(
+                    conn,
+                    community,
+                    target.channel_id,
+                    (msg.id.as_slice(), msg.created_at, msg.received_at),
+                    Some(root.as_slice()),
+                )
+                .await?;
                 sqlx::query(
                     "INSERT INTO personal_read_frontiers
                      (community_id, actor, channel_id, root_id, through_timestamp)
@@ -213,13 +265,21 @@ pub(super) async fn apply(
                 .bind(community.as_uuid())
                 .bind(actor)
                 .bind(target.channel_id)
-                .bind(msg.received_at)
+                .bind(through)
                 .execute(&mut *conn)
                 .await?;
             } else {
                 if msg.id != root && msg.thread.as_ref() != Some(&root) {
                     return Ok(IntentOutcome::Blocked);
                 }
+                let through = display_through(
+                    conn,
+                    community,
+                    target.channel_id,
+                    (msg.id.as_slice(), msg.created_at, msg.received_at),
+                    Some(root.as_slice()),
+                )
+                .await?;
                 // Reading a thread never joins it: only the actor's threads
                 // have a row to advance.
                 sqlx::query(
@@ -231,7 +291,7 @@ pub(super) async fn apply(
                 .bind(actor)
                 .bind(target.channel_id)
                 .bind(&root)
-                .bind(msg.received_at)
+                .bind(through)
                 .execute(&mut *conn)
                 .await?;
             }
@@ -246,11 +306,21 @@ pub(super) async fn apply(
             if !access(conn, community, actor, *channel_id).await? {
                 return Ok(IntentOutcome::Blocked);
             }
-            // Only the anchor's arrival matters: ancestry cannot change which
-            // messages a whole-channel cut covers.
-            let Some(through) = anchor_received_at(conn, community, *channel_id, &id).await? else {
+            // Ancestry cannot change which messages a whole-channel cut
+            // covers: everything displayed at or before the anchor.
+            let Some((created_at, received_at)) =
+                anchor_times(conn, community, *channel_id, &id).await?
+            else {
                 return Ok(IntentOutcome::Blocked);
             };
+            let through = display_through(
+                conn,
+                community,
+                *channel_id,
+                (&id, created_at, received_at),
+                None,
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO personal_read_frontiers (community_id, actor, channel_id, root_id,
                     through_timestamp, threads_through_timestamp) VALUES ($1,$2,$3,''::bytea,$4,$4)
@@ -259,6 +329,42 @@ pub(super) async fn apply(
                     threads_through_timestamp=GREATEST(personal_read_frontiers.threads_through_timestamp, $4)",
             ).bind(community.as_uuid()).bind(actor).bind(channel_id).bind(through)
                 .execute(&mut *conn).await?;
+        }
+        ReadIntent::Follow { target } | ReadIntent::Unfollow { target } => {
+            if target.root_id.is_none() {
+                return Ok(IntentOutcome::Invalid);
+            }
+            let Some(root) = valid_target(conn, community, actor, target).await? else {
+                return Ok(IntentOutcome::Blocked);
+            };
+            let following = matches!(intent, ReadIntent::Follow { .. });
+            // A new row starts caught up: at the thread's last reply, or the
+            // root itself before any reply. Following again also catches up,
+            // so replies that arrived while unfollowed stay muted. Unfollow
+            // keeps the row and its position, so later replies don't
+            // re-follow.
+            sqlx::query(
+                "INSERT INTO personal_read_frontiers
+                    (community_id, actor, channel_id, root_id, through_timestamp, following)
+                 SELECT $1, $2, $3, $4, COALESCE(
+                    (SELECT max(last_reply_received_at) FROM thread_metadata
+                     WHERE community_id=$1 AND channel_id=$3 AND event_id=$4 AND depth=0),
+                    (SELECT max(received_at) FROM events
+                     WHERE community_id=$1 AND channel_id=$3 AND id=$4)), $5
+                 ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
+                 SET following=excluded.following,
+                    through_timestamp=GREATEST(personal_read_frontiers.through_timestamp,
+                        excluded.through_timestamp)
+                 WHERE excluded.following AND NOT personal_read_frontiers.following
+                    OR NOT excluded.following",
+            )
+            .bind(community.as_uuid())
+            .bind(actor)
+            .bind(target.channel_id)
+            .bind(&root)
+            .bind(following)
+            .execute(&mut *conn)
+            .await?;
         }
     }
     Ok(IntentOutcome::Applied)

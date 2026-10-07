@@ -18,7 +18,8 @@ pub struct ReadTarget {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadIntent {
-    /// Advance a context through one fixed message, including equal arrivals.
+    /// Advance a context through one fixed message: everything displayed at
+    /// or before it in that context, and anything with an equal arrival.
     MarkThrough {
         /// Channel or canonical thread being marked.
         target: ReadTarget,
@@ -26,12 +27,24 @@ pub enum ReadIntent {
         message_id: String,
     },
     /// Advance the channel timeline and every thread in it through one fixed
-    /// message's arrival time. The anchor may be a reply; ancestry is irrelevant.
+    /// message: everything in the channel displayed at or before it. The
+    /// anchor may be a reply; ancestry is irrelevant.
     MarkChannelRead {
         /// Channel being marked, including all of its threads.
         channel_id: Uuid,
         /// Fixed anchor; retry must not substitute the latest message.
         message_id: String,
+    },
+    /// Follow a thread. A thread you did not follow starts caught up.
+    Follow {
+        /// The thread; a target without a root is invalid.
+        target: ReadTarget,
+    },
+    /// Stop following a thread. Sticky: later replies and mentions do not
+    /// re-follow; your own reply or `follow` does.
+    Unfollow {
+        /// The thread; a target without a root is invalid.
+        target: ReadTarget,
     },
 }
 
@@ -49,8 +62,6 @@ pub enum IntentOutcome {
 
 /// Maximum channel summaries in one sidebar page.
 pub const MAX_CHANNELS: usize = 20;
-/// Maximum unread-thread summaries per channel row.
-pub const MAX_THREAD_SUMMARIES: usize = 5;
 /// Ingest rejects author times further than this from relay time, so anything
 /// that arrived after a position has an author time no earlier than this
 /// before it. Forward scans range over author time and filter on arrival.
@@ -59,6 +70,7 @@ pub const MAX_ARRIVAL_SKEW_SECONDS: u32 = 900;
 pub const ELIGIBLE_KINDS: [i32; 4] = [9, 40002, 45001, 45003];
 
 /// One joined-channel summary, not a second conversation/history API.
+/// Clients receive message IDs only; positions stay relay-internal.
 #[derive(Debug, Serialize)]
 pub struct ChannelReadSummary {
     /// Joined channel UUID.
@@ -71,34 +83,33 @@ pub struct ChannelReadSummary {
     pub archived: bool,
     /// Existing DM visibility preference (not an authorization decision).
     pub hidden: bool,
-    /// An unread timeline message without a [`Reason`] exists: ordinary
-    /// backlog. Never true in a DM, where every message is direct.
+    /// The channel timeline has a message past the actor's position. Thread
+    /// replies never set it; they show on their thread row.
     pub unread: bool,
-    /// An unread message with a [`Reason`] exists: a direct, mention or
-    /// broadcast timeline message, or a reply in one of the actor's threads.
-    pub attention: bool,
-    /// Last eligible nondeleted event to arrive among the channel's newest
-    /// and the unread messages found, whatever its author:
-    /// `mark_channel_read` through it reads the row.
-    pub latest_message_id: Option<String>,
-    /// Display activity: the greatest author time (Unix seconds) among the
-    /// channel's newest, not necessarily latest_message_id's own. None
-    /// exactly when it is.
-    pub latest_message_at: Option<i64>,
-    /// The actor's threads with unread replies, newest unread reply first.
+    /// Unread timeline messages that mention the actor. Exact, uncapped.
+    pub mentions: i64,
+    /// The last timeline message, in display order, at or before the actor's
+    /// position: the "new" divider goes below it. None when there is none.
+    pub read_through_id: Option<String>,
+    /// Followed threads with an unread reply, newest unread reply first.
     pub threads: Vec<ThreadReadSummary>,
 }
 
-/// One of the actor's threads with an unread reply. No conversation bytes.
+/// One followed thread with an unread reply. No conversation bytes.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ThreadReadSummary {
     /// Canonical thread-root event ID.
     pub root_id: String,
-    /// Last unread reply to arrive: marking through it reads the thread.
-    pub latest_reply_id: String,
-    /// Greatest author time (Unix seconds) among unread replies, not
-    /// necessarily latest_reply_id's own; summaries order by it.
-    pub latest_reply_at: i64,
+    /// A reply past the actor's thread position. Listed rows are unread.
+    pub unread: bool,
+    /// Unread replies that mention the actor. Exact, uncapped.
+    pub mentions: i64,
+    /// The last reply, in display order, at or before the actor's thread
+    /// position. None when the actor has read no reply.
+    pub read_through_id: Option<String>,
+    /// Last unread reply to arrive: marking through it reads the thread, and
+    /// clients fetch it by ID for a preview.
+    pub latest_id: String,
 }
 
 /// A bounded roster page, with no cross-page snapshot or removal inference.

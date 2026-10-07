@@ -107,9 +107,17 @@ pub(crate) async fn insert_mentions_in_transaction(
     // transaction so all chunks share its commit boundary.
     const MENTION_INSERT_CHUNK_ROWS: usize = 5_000;
     for chunk in valid_pubkeys.chunks(MENTION_INSERT_CHUNK_ROWS) {
+        // Arrival time and read scope come from the stored event and its
+        // thread row, which every caller writes before (or with) its mentions.
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "INSERT INTO event_mentions \
-             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind, \
+              received_at, root_id) \
+             SELECT v.community_id, v.pubkey_hex, v.event_id, v.event_created_at, v.channel_id, \
+                v.event_kind, e.received_at, \
+                CASE WHEN tm.root_event_id <> v.event_id AND NOT (tm.depth = 1 AND tm.broadcast) \
+                    THEN tm.root_event_id END \
+             FROM (",
         );
 
         qb.push_values(chunk, |mut b, pubkey| {
@@ -121,7 +129,14 @@ pub(crate) async fn insert_mentions_in_transaction(
                 .push_bind(kind as i32);
         });
 
-        qb.push(" ON CONFLICT DO NOTHING");
+        qb.push(
+            ") v (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+             LEFT JOIN events e ON e.community_id = v.community_id \
+                AND e.created_at = v.event_created_at AND e.id = v.event_id \
+             LEFT JOIN thread_metadata tm ON tm.community_id = v.community_id \
+                AND tm.event_created_at = v.event_created_at AND tm.event_id = v.event_id \
+             ON CONFLICT DO NOTHING",
+        );
 
         qb.build().execute(&mut **tx).await?;
     }

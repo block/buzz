@@ -1,6 +1,6 @@
 //! Read progress follows relay arrival (`received_at`), never author time.
 //! Each case sets every arrival explicitly: back-to-back inserts share a clock.
-use super::{postgres_tests, projection::LATEST_PROBE, *};
+use super::{postgres_tests, *};
 use crate::Db;
 use buzz_core::CommunityId;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -182,30 +182,82 @@ async fn future_dated_anchor_does_not_swallow_later_arrivals() {
     assert!(sidebar(&db, community, &actor).await.unread);
 }
 
-/// Marking the sidebar's own latest message must clear the badge even when the
-/// last arrival is not the newest by author time.
+/// Clients name only display-order IDs. Marking the newest message shown
+/// must clear the badge even when the last arrival is displayed above it.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn mark_as_read_with_the_sidebar_anchor_clears_a_late_arrival() {
+async fn marking_the_newest_displayed_message_clears_a_late_arrival_above_it() {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     arrive(&pool, community, &first, now - 60).await;
-    post(&db, &pool, community, channel, now + 1, now - 40).await;
-    post(&db, &pool, community, channel, now - 600, now - 30).await;
+    let newest = post(&db, &pool, community, channel, now + 1, now - 40).await;
+    let late = post(&db, &pool, community, channel, now - 600, now - 30).await;
     assert!(sidebar(&db, community, &actor).await.unread);
 
-    let anchor = sidebar(&db, community, &actor)
-        .await
-        .latest_message_id
-        .expect("a channel with messages has a latest message");
-    apply(&db, community, &actor, mark_channel_read(channel, anchor)).await;
+    apply(
+        &db,
+        community,
+        &actor,
+        mark_through(channel, None, &newest.id.to_hex()),
+    )
+    .await;
 
+    let row = sidebar(&db, community, &actor).await;
+    assert!(!row.unread);
+    assert_eq!(
+        row.read_through_id,
+        Some(newest.id.to_hex()),
+        "the divider stays under the newest displayed message"
+    );
+    assert_eq!(
+        states(&db, community, &actor, channel, &[&late, &newest]).await,
+        ["read", "read"]
+    );
+}
+
+/// A mark reads only what is displayed at or before its anchor: a message
+/// shown below it stays unread, even one that arrived first.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn marking_leaves_messages_displayed_below_the_anchor_unread() {
+    let (db, pool, community, channel, actor, first) = fixture().await;
+    let now = first.created_at.as_secs();
+    arrive(&pool, community, &first, now - 60).await;
+    let below = post(&db, &pool, community, channel, now + 5, now - 50).await;
+    apply(
+        &db,
+        community,
+        &actor,
+        mark_through(channel, None, &first.id.to_hex()),
+    )
+    .await;
+    assert_eq!(
+        states(&db, community, &actor, channel, &[&first, &below]).await,
+        ["read", "unread"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn mark_channel_read_with_the_newest_displayed_message_clears_a_late_arrival() {
+    let (db, pool, community, channel, actor, first) = fixture().await;
+    let now = first.created_at.as_secs();
+    arrive(&pool, community, &first, now - 60).await;
+    let newest = post(&db, &pool, community, channel, now + 1, now - 40).await;
+    post(&db, &pool, community, channel, now - 600, now - 30).await;
+    apply(
+        &db,
+        community,
+        &actor,
+        mark_channel_read(channel, newest.id.to_hex()),
+    )
+    .await;
     assert!(!sidebar(&db, community, &actor).await.unread);
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
+async fn mark_thread_read_with_the_newest_displayed_reply_clears_a_late_reply() {
     let (db, pool, community, channel, actor, root) = fixture().await;
     let now = root.created_at.as_secs();
     arrive(&pool, community, &root, now - 60).await;
@@ -216,7 +268,7 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
         mark_through(channel, None, &root.id.to_hex()),
     )
     .await;
-    reply(
+    let newest = reply(
         &db,
         &pool,
         community,
@@ -227,7 +279,7 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
         now - 40,
     )
     .await;
-    reply(
+    let late = reply(
         &db,
         &pool,
         community,
@@ -248,80 +300,25 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
         .await
         .unwrap();
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.attention, row.threads.len()), (false, true, 1));
-    assert_eq!(row.threads.len(), 1);
+    assert_eq!((row.unread, row.threads.len()), (false, 1));
+    assert_eq!(
+        row.threads[0].latest_id,
+        late.id.to_hex(),
+        "the last arrival"
+    );
+    assert_eq!(row.threads[0].mentions, 2);
 
     let root_id = root.id.to_hex();
-    let anchor = row.threads[0].latest_reply_id.clone();
     apply(
         &db,
         community,
         &actor,
-        mark_through(channel, Some(&root_id), &anchor),
+        mark_through(channel, Some(&root_id), &newest.id.to_hex()),
     )
     .await;
 
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.attention, row.threads.len()), (false, false, 0));
-    assert!(row.threads.is_empty());
-}
-
-/// The latest probe holds only the newest messages by author time. A late
-/// arrival authored before all of them is still counted, so it must still be
-/// the anchor, or Mark as read with the sidebar anchor leaves it unread.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn mark_as_read_clears_a_late_arrival_behind_the_latest_probe() {
-    let (db, pool, community, channel, actor, first) = fixture().await;
-    let now = first.created_at.as_secs();
-    arrive(&pool, community, &first, now - 60).await;
-    for i in 0..LATEST_PROBE as u64 {
-        post(&db, &pool, community, channel, now - 500 + i, now - 50).await;
-    }
-    let anchor = sidebar(&db, community, &actor)
-        .await
-        .latest_message_id
-        .unwrap();
-    apply(&db, community, &actor, mark_channel_read(channel, anchor)).await;
-    assert!(!sidebar(&db, community, &actor).await.unread);
-
-    let late = post(&db, &pool, community, channel, now - 600, now - 10).await;
-    let row = sidebar(&db, community, &actor).await;
-    assert!(row.unread);
-    assert_eq!(row.latest_message_id, Some(late.id.to_hex()));
-    apply(
-        &db,
-        community,
-        &actor,
-        mark_channel_read(channel, late.id.to_hex()),
-    )
-    .await;
-    assert!(!sidebar(&db, community, &actor).await.unread);
-}
-
-/// Reactions never fill the latest probe.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn latest_message_behind_newer_reactions_is_found() {
-    let (db, pool, community, channel, actor, first) = fixture().await;
-    let now = first.created_at.as_secs();
-    let demoted = sqlx::query("UPDATE events SET kind=7 WHERE community_id=$1 AND id=$2")
-        .bind(community.as_uuid())
-        .bind(first.id.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(demoted, 1);
-    let only = post(&db, &pool, community, channel, now - 600, now - 10).await;
-    for i in 0..LATEST_PROBE as u64 {
-        post_kind(&db, &pool, community, channel, 7, now - 500 + i, now - 50).await;
-    }
-
-    let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.latest_message_id, Some(only.id.to_hex()));
-    assert_eq!(row.latest_message_at, Some((now - 600) as i64));
-    assert!(row.unread);
+    assert_eq!((row.unread, row.threads.len()), (false, 0));
 }
 
 /// Store `event` as having arrived at exactly `seconds` plus `micros`. Built
@@ -359,10 +356,13 @@ async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, 
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     let second = post(&db, &pool, community, channel, now, now).await;
+    // Equal author times display in ID order; index 0 displays first, so a
+    // mark reads only what arrived by then, not the other by display order.
+    let mut both = [&first, &second];
+    both.sort_by_key(|e| e.id);
     let arrived = now as i64 - 30;
-    arrive_exact(&pool, community, &first, arrived, micros[0]).await;
-    arrive_exact(&pool, community, &second, arrived, micros[1]).await;
-    let both = [&first, &second];
+    arrive_exact(&pool, community, both[0], arrived, micros[0]).await;
+    arrive_exact(&pool, community, both[1], arrived, micros[1]).await;
     apply(
         &db,
         community,

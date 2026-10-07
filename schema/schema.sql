@@ -216,6 +216,9 @@ CREATE TABLE personal_read_frontiers (
     -- Whole-channel cut covering every thread; channel rows only.
     threads_through_timestamp TIMESTAMPTZ
         CHECK (threads_through_timestamp IS NULL OR root_id = ''::bytea),
+    -- Thread rows only: false after unfollow, kept so later replies don't
+    -- re-follow. Replying or a follow intent sets it again.
+    following BOOLEAN NOT NULL DEFAULT true CHECK (following OR root_id <> ''::bytea),
     PRIMARY KEY (community_id, actor, channel_id, root_id),
     FOREIGN KEY (community_id, actor)
         REFERENCES personal_read_accounts (community_id, actor) ON DELETE CASCADE,
@@ -325,6 +328,10 @@ CREATE TABLE event_mentions (
     event_created_at    TIMESTAMPTZ NOT NULL,
     channel_id          UUID,
     event_kind          INT,
+    -- Arrival and read scope for personal read state: root_id is a reply's
+    -- thread, NULL on the channel timeline. NULL received_at predates it.
+    received_at         TIMESTAMPTZ,
+    root_id             BYTEA,
     PRIMARY KEY (community_id, pubkey_hex, event_id)
 );
 
@@ -332,6 +339,8 @@ CREATE INDEX idx_event_mentions_pubkey_created
     ON event_mentions (community_id, pubkey_hex, event_created_at DESC);
 CREATE INDEX idx_event_mentions_pubkey_kind_created
     ON event_mentions (community_id, pubkey_hex, event_kind, event_created_at DESC);
+CREATE INDEX idx_event_mentions_scope_received
+    ON event_mentions (community_id, pubkey_hex, channel_id, root_id, received_at);
 
 -- ── Subscriptions ─────────────────────────────────────────────────────────────
 -- Conformance: "Mesh, agents, ACP/MCP, and CLI" (persisted subscriptions).

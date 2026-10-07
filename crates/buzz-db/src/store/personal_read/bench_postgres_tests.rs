@@ -2,11 +2,11 @@
 //! BENCH_THREADS (default 5000) followed threads, 3 replies each.
 use super::postgres_tests::{apply, channel_read, mention};
 use super::*;
-use buzz_core::CommunityId;
 use crate::{
     channel::{ChannelType, ChannelVisibility},
     Db,
 };
+use buzz_core::CommunityId;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use sqlx::postgres::PgPoolOptions;
 use std::time::{Duration, Instant};
@@ -31,7 +31,9 @@ async fn top(db: &Db, c: CommunityId, ch: Uuid, e: &nostr::Event) -> Duration {
 }
 
 async fn rep(db: &Db, c: CommunityId, ch: Uuid, root: &nostr::Event, e: &nostr::Event) -> Duration {
-    let stamp = |e: &nostr::Event| chrono::DateTime::from_timestamp(e.created_at.as_secs() as i64, 0).unwrap();
+    let stamp = |e: &nostr::Event| {
+        chrono::DateTime::from_timestamp(e.created_at.as_secs() as i64, 0).unwrap()
+    };
     let t = Instant::now();
     db.insert_event_with_thread_metadata(
         c,
@@ -72,16 +74,19 @@ async fn sidebar_bench(db: &Db, c: CommunityId, actor: &Keys, label: &str) {
     let mut last = None;
     for _ in 0..30 {
         let t = Instant::now();
-        let page = db.personal_read_sidebar(c, &actor.public_key(), 20, None).await.unwrap();
+        let page = db
+            .personal_read_sidebar(c, &actor.public_key(), 20, None)
+            .await
+            .unwrap();
         v.push(t.elapsed());
         last = Some(page);
     }
     let page = last.unwrap();
     let busy = &page.channels.iter().max_by_key(|r| r.unread).unwrap();
     println!(
-        "BENCH {label}: busiest unread={} attention={} threads={} channels={}",
+        "BENCH {label}: busiest unread={} mentions={} threads={} channels={}",
         busy.unread,
-        busy.attention,
+        busy.mentions,
         busy.threads.len(),
         page.channels.len()
     );
@@ -91,7 +96,10 @@ async fn sidebar_bench(db: &Db, c: CommunityId, actor: &Keys, label: &str) {
 #[tokio::test]
 #[ignore = "benchmark"]
 async fn bench_unread() {
-    let threads: usize = std::env::var("BENCH_THREADS").ok().and_then(|s| s.parse().ok()).unwrap_or(5000);
+    let threads: usize = std::env::var("BENCH_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5000);
     let pool = PgPoolOptions::new()
         .max_connections(40)
         .connect(&crate::test_support::database_url())
@@ -107,10 +115,18 @@ async fn bench_unread() {
     let mut channels = Vec::new();
     for i in 0..20 {
         channels.push(
-            db.create_channel(c, &format!("bench {i}"), ChannelType::Stream, ChannelVisibility::Open, None, &actor.public_key().to_bytes(), None)
-                .await
-                .unwrap()
-                .id,
+            db.create_channel(
+                c,
+                &format!("bench {i}"),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &actor.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .unwrap()
+            .id,
         );
     }
     let busy = channels[0];
@@ -123,7 +139,10 @@ async fn bench_unread() {
         top(&db, c, *ch, &e).await;
         firsts.push(e);
     }
-    assert_eq!(apply(&db, c, &actor, channel_read(busy, &firsts[0])).await, IntentOutcome::Applied);
+    assert_eq!(
+        apply(&db, c, &actor, channel_read(busy, &firsts[0])).await,
+        IntentOutcome::Applied
+    );
 
     // Phase 1: followed threads, serial ingest.
     let (mut roots_t, mut reps_t) = (Vec::new(), Vec::new());
@@ -144,7 +163,10 @@ async fn bench_unread() {
     }
     stats("ingest top-level serial", roots_t);
     stats("ingest reply serial", reps_t);
-    assert_eq!(apply(&db, c, &actor, channel_read(busy, &latest)).await, IntentOutcome::Applied);
+    assert_eq!(
+        apply(&db, c, &actor, channel_read(busy, &latest)).await,
+        IntentOutcome::Applied
+    );
     for (ch, e) in channels.iter().zip(&firsts).skip(1) {
         apply(&db, c, &actor, channel_read(*ch, e)).await;
     }
@@ -155,7 +177,11 @@ async fn bench_unread() {
     let now = ts();
     let mut t2 = Vec::new();
     for i in 0..20_000u64 {
-        let tags = if i % 1667 == 0 { mention(&actor) } else { vec![] };
+        let tags = if i % 1667 == 0 {
+            mention(&actor)
+        } else {
+            vec![]
+        };
         let e = ev(&others[(i % 8) as usize], now - 600 + i / 40, tags);
         t2.push(top(&db, c, busy, &e).await);
     }
@@ -193,7 +219,10 @@ async fn bench_unread() {
         }
         let n = all.len();
         let secs = started.elapsed().as_secs_f64();
-        println!("BENCH concurrent {label}: {n} inserts in {secs:.2}s = {:.0}/s", n as f64 / secs);
+        println!(
+            "BENCH concurrent {label}: {n} inserts in {secs:.2}s = {:.0}/s",
+            n as f64 / secs
+        );
         stats(&format!("ingest concurrent {label}"), all);
     }
 }

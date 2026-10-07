@@ -1,8 +1,9 @@
 //! Private, signer-owned accessory read progress, separate from NIP-RS events.
 //!
 //! A frontier is the relay arrival time of the message a context was read
-//! through, and unread counts forward from it. Only fixed context intents
-//! advance frontiers; ingest only creates thread membership rows.
+//! through, and unread counts forward from it. Fixed intents advance and
+//! follow; ingest advances the author's own frontiers (posting marks read)
+//! and creates follow rows for replies and mentions.
 
 mod classification;
 mod context;
@@ -11,7 +12,7 @@ mod model;
 mod projection;
 mod writes;
 
-pub(crate) use membership::record_reply;
+pub(crate) use membership::{record_message, Place};
 pub use model::*;
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ impl Db {
             // The positions the sidebar counts against, both floored at the
             // account's start and absent before it: the channel's, never
             // before joining and absent for a non-member; and the thread's,
-            // which exists only for the actor's threads and includes any
+            // which exists only for threads the actor follows and includes any
             // whole-channel cut.
             let positions = sqlx::query(
                 "SELECT CASE WHEN m.joined_at IS NOT NULL AND s.started IS NOT NULL
@@ -65,7 +65,7 @@ impl Db {
                  LEFT JOIN personal_read_frontiers cf ON cf.community_id=$1 AND cf.actor=$2
                     AND cf.channel_id=$3 AND cf.root_id=''::bytea
                  LEFT JOIN personal_read_frontiers tf ON tf.community_id=$1 AND tf.actor=$2
-                    AND tf.channel_id=$3 AND tf.root_id=$4 AND $4<>''::bytea",
+                    AND tf.channel_id=$3 AND tf.root_id=$4 AND $4<>''::bytea AND tf.following",
             )
             .bind(community.as_uuid())
             .bind(actor_bytes.as_slice())

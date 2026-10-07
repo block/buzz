@@ -412,12 +412,15 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
     // Exercise the same per-item function the batch handler uses after admission.
     let result = super::handlers::write_intent(&state, &headers, &principal, &intent).await;
     assert_eq!(result, json!({"status":"blocked"}));
-    let persisted: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM personal_read_accounts WHERE community_id=$1")
-            .bind(community.as_uuid())
-            .fetch_one(state.db.pool())
-            .await
-            .unwrap();
+    // Ingest gives the message's author an account; the actor gets none.
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM personal_read_accounts WHERE community_id=$1 AND actor=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_bytes().as_slice())
+    .fetch_one(state.db.pool())
+    .await
+    .unwrap();
     assert_eq!(persisted, 0, "denied intent must not persist");
 }
 
@@ -473,7 +476,6 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                         d["max_context_messages"],
                         buzz_db::personal_read::MAX_CONTEXT_MESSAGES
                     );
-                    assert_eq!(d["max_thread_summaries"], 5);
                     assert_eq!(d["eligible_kinds"], json!([9, 40002, 45001, 45003]));
                 }
             }
@@ -636,7 +638,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         .sign_with_keys(signer)
         .unwrap();
     let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
-    for (event, key, count) in [(&message, &author, 1), (&deletion, signer, 0)] {
+    for (event, key, unread) in [(&message, &author, true), (&deletion, signer, false)] {
         let body = serde_json::to_vec(event).unwrap();
         let auth = proof(key, &host, "/events", "POST", Some(&body));
         // /events has a different response contract from the accessory helper.
@@ -669,7 +671,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         assert_eq!(channels[0]["channel_id"], channel.to_string());
         assert_eq!(
             channels[0]["unread"],
-            json!(count),
+            json!(unread),
             "kind {deletion_kind}, after kind {}: {sidebar}",
             event.kind.as_u16()
         );
@@ -678,12 +680,12 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn accessory_signed_kind5_deletion_clears_another_readers_sidebar_count() {
+async fn accessory_signed_kind5_deletion_clears_another_readers_sidebar_unread() {
     signed_sidebar_deletion(5).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn accessory_signed_kind9005_deletion_clears_another_readers_sidebar_count() {
+async fn accessory_signed_kind9005_deletion_clears_another_readers_sidebar_unread() {
     signed_sidebar_deletion(9005).await;
 }

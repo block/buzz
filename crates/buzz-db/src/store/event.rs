@@ -444,6 +444,17 @@ pub async fn insert_event_in_transaction(
 ) -> Result<(StoredEvent, bool)> {
     let result = insert_event_on(tx.as_mut(), community_id, event, channel_id).await?;
     if result.1 {
+        if let Some(channel) = channel_id {
+            crate::personal_read::record_message(
+                tx,
+                community_id,
+                event,
+                channel,
+                crate::personal_read::Place::TopLevel,
+                result.0.received_at,
+            )
+            .await?;
+        }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
     }
     Ok(result)
@@ -1853,12 +1864,15 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     .bind(received_at)
                     .execute(&mut **tx)
                     .await?;
-                    crate::personal_read::record_reply(
+                    crate::personal_read::record_message(
                         tx,
                         community_id,
                         event,
                         meta.channel_id,
-                        root,
+                        crate::personal_read::Place::Reply {
+                            root,
+                            broadcast: meta.depth == 1 && meta.broadcast,
+                        },
                         received_at,
                     )
                     .await?;
@@ -1866,6 +1880,17 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             }
         }
 
+        if let (None, Some(channel)) = (&thread_meta, channel_id) {
+            crate::personal_read::record_message(
+                tx,
+                community_id,
+                event,
+                channel,
+                crate::personal_read::Place::TopLevel,
+                received_at,
+            )
+            .await?;
+        }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, community_id, event).await?;
     }
 

@@ -14,39 +14,38 @@ async fn sidebar_sql_eligibility_matches_selector() {
         message_ids: vec![event.id.to_hex()],
     }];
     for kind in [9, 40002, 45001, 45003, 1, 7, 39002, 40008] {
-        for own in [false, true] {
-            for deleted in [false, true] {
-                sqlx::query("UPDATE events SET kind=$2,pubkey=$3,deleted_at=CASE WHEN $4 THEN now() ELSE NULL END WHERE community_id=$1")
-                    .bind(community.as_uuid()).bind(kind)
-                    .bind(if own { actor.public_key().to_bytes() } else { event.pubkey.to_bytes() }.as_slice())
-                    .bind(deleted).execute(&pool).await.unwrap();
-                let page = db
-                    .personal_read_sidebar(community, &actor.public_key(), 20, None)
-                    .await
-                    .unwrap();
-                let expected = u32::from(ELIGIBLE_KINDS.contains(&kind) && !own && !deleted);
-                assert_eq!(
-                    u32::from(page.channels[0].unread), expected,
-                    "kind={kind} own={own} deleted={deleted}"
-                );
-                let contexts = db
-                    .personal_read_contexts(community, &actor.public_key(), &query)
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    serde_json::to_value(&contexts).unwrap()["contexts"][0]["messages"][0]
-                        ["status"],
-                    ["not_counted", "unread"][expected as usize],
-                    "kind={kind} own={own} deleted={deleted}"
-                );
-            }
+        // Own messages need no rule here: posting marks the author read at
+        // ingest (`posting_marks_read_and_read_through_skips_deleted_and_auxiliary`).
+        for deleted in [false, true] {
+            sqlx::query("UPDATE events SET kind=$2,deleted_at=CASE WHEN $3 THEN now() ELSE NULL END WHERE community_id=$1")
+                .bind(community.as_uuid()).bind(kind)
+                .bind(deleted).execute(&pool).await.unwrap();
+            let page = db
+                .personal_read_sidebar(community, &actor.public_key(), 20, None)
+                .await
+                .unwrap();
+            let expected = u32::from(ELIGIBLE_KINDS.contains(&kind) && !deleted);
+            assert_eq!(
+                u32::from(page.channels[0].unread),
+                expected,
+                "kind={kind} deleted={deleted}"
+            );
+            let contexts = db
+                .personal_read_contexts(community, &actor.public_key(), &query)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&contexts).unwrap()["contexts"][0]["messages"][0]["status"],
+                ["not_counted", "unread"][expected as usize],
+                "kind={kind} deleted={deleted}"
+            );
         }
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sidebar_directed_fact_matches_selector_classifier() {
+async fn sidebar_mentions_match_selector_classifier() {
     let (db, pool, community, channel, actor, event) = fixture().await;
     let actor_hex = actor.public_key().to_hex();
     let fullwidth: String = actor_hex
@@ -79,9 +78,9 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
         .await
         .unwrap();
         for tags in &cases {
-            // A top-level message: `broadcast` tags alone direct nothing.
+            // A top-level message: `broadcast` tags alone direct nothing, and
+            // in a DM every message is direct but only mentions count.
             let reason = classification::reason(channel_type, &actor_hex, tags, false);
-            let expected = (channel_type != "dm" && reason.is_none(), reason.is_some());
             sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
                 .bind(community.as_uuid())
                 .bind(json!(tags))
@@ -94,13 +93,13 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
                 .execute(&pool)
                 .await
                 .unwrap();
-            let mentioned = tags.iter().any(|t| {
-                t.len() >= 2 && t[0] == "p" && t[1].eq_ignore_ascii_case(&actor_hex)
-            });
+            let mentioned = tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "p" && t[1].eq_ignore_ascii_case(&actor_hex));
             if mentioned {
                 sqlx::query(
-                    "INSERT INTO event_mentions (community_id,pubkey_hex,event_id,event_created_at,channel_id,event_kind)
-                     SELECT community_id,$2,id,created_at,channel_id,kind FROM events WHERE community_id=$1 AND id=$3",
+                    "INSERT INTO event_mentions (community_id,pubkey_hex,event_id,event_created_at,channel_id,event_kind,received_at)
+                     SELECT community_id,$2,id,created_at,channel_id,kind,received_at FROM events WHERE community_id=$1 AND id=$3",
                 )
                 .bind(community.as_uuid())
                 .bind(&actor_hex)
@@ -116,10 +115,13 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
                 .channels
                 .remove(0);
             assert_eq!(
-                (row.unread, row.attention),
-                expected,
+                (row.unread, row.mentions),
+                (true, i64::from(mentioned)),
                 "channel_type={channel_type} tags={tags:?}"
             );
+            if channel_type != "dm" {
+                assert_eq!(reason.is_some(), mentioned, "tags={tags:?}");
+            }
         }
     }
 }

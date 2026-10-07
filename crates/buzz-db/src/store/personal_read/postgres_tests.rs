@@ -236,7 +236,7 @@ async fn accounts(pool: &PgPool, community: CommunityId) -> i64 {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn unread_is_presence_and_serializes_as_booleans() {
+async fn sidebar_row_has_the_wire_shape() {
     let (db, _, community, channel, actor, _) = fixture().await;
     let author = Keys::generate();
     let base = now();
@@ -246,18 +246,37 @@ async fn unread_is_presence_and_serializes_as_booleans() {
     }
     let row = sidebar(&db, community, &actor).await;
     let wire = serde_json::to_value(&row).unwrap();
+    let mut keys: Vec<_> = wire.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "archived",
+            "channel_id",
+            "channel_type",
+            "hidden",
+            "mentions",
+            "name",
+            "read_through_id",
+            "threads",
+            "unread"
+        ]
+    );
     assert_eq!(wire["unread"], true);
-    assert_eq!(wire["attention"], false);
-    for gone in ["latest_message_complete", "account", "status", "unread_thread_count"] {
-        assert!(wire.get(gone).is_none(), "{gone}");
-    }
+    assert_eq!(wire["mentions"], 0);
+    assert_eq!(
+        wire["read_through_id"],
+        serde_json::Value::Null,
+        "nothing read yet"
+    );
     let last = last.unwrap();
-    assert_eq!(row.latest_message_id, Some(last.id.to_hex()));
     assert_eq!(
         apply(&db, community, &actor, mark(channel, None, &last)).await,
         IntentOutcome::Applied
     );
-    assert!(!sidebar(&db, community, &actor).await.unread);
+    let row = sidebar(&db, community, &actor).await;
+    assert!(!row.unread);
+    assert_eq!(row.read_through_id, Some(last.id.to_hex()));
 }
 
 #[tokio::test]
@@ -279,11 +298,11 @@ async fn joining_starts_caught_up_and_counts_only_what_arrives_after() {
     .unwrap();
     let row = sidebar(&db, community, &joiner).await;
     assert_eq!(
-        (row.unread, row.attention),
-        (false, false),
+        (row.unread, row.mentions),
+        (false, 0),
         "history before joining is read"
     );
-    assert_eq!(row.latest_message_id, Some(event.id.to_hex()));
+    assert_eq!(row.read_through_id, Some(event.id.to_hex()));
     assert_eq!(
         status(&db, community, &joiner, channel, None, &[&event]).await,
         ["read"]
@@ -303,7 +322,11 @@ async fn joining_starts_caught_up_and_counts_only_what_arrives_after() {
     )
     .await;
     let row = sidebar(&db, community, &joiner).await;
-    assert_eq!((row.unread, row.attention), (false, true), "a mention is attention, not backlog");
+    assert_eq!(
+        (row.unread, row.mentions),
+        (true, 1),
+        "a mention is unread and counted"
+    );
     assert_eq!(
         states(&db, community, &joiner, channel, None, &[&later]).await,
         [serde_json::json!({"status":"unread","reason":"mention"})]
@@ -402,11 +425,7 @@ async fn read_state_starts_caught_up_at_the_first_intent() {
     )
     .await;
     let row = sidebar(&db, community, &member).await;
-    assert_eq!(
-        (row.unread, row.attention, row.threads.len()),
-        (false, false, 0)
-    );
-    assert_eq!(row.latest_message_id, Some(before.id.to_hex()));
+    assert_eq!((row.unread, row.mentions, row.threads.len()), (false, 0, 0));
     assert_eq!(
         status(&db, community, &member, channel, None, &[&before]).await,
         ["not_counted"]
@@ -436,7 +455,7 @@ async fn read_state_starts_caught_up_at_the_first_intent() {
     .await;
     post(&db, community, channel, &Keys::generate(), now(), vec![]).await;
     let row = sidebar(&db, community, &member).await;
-    assert_eq!((row.unread, row.attention, row.threads.len()), (true, true, 1));
+    assert_eq!((row.unread, row.mentions, row.threads.len()), (true, 0, 1));
 }
 
 #[tokio::test]
@@ -535,12 +554,12 @@ async fn diff_alone_leaves_the_sidebar_row_unchanged() {
     .await;
     let after = serde_json::to_value(sidebar(&db, community, &actor).await).unwrap();
     assert_eq!(before["unread"], true);
-    assert_eq!(before, after, "not unread, not attention, not latest");
+    assert_eq!(before, after, "not unread, not a mention");
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn latest_includes_own_and_excludes_deleted_and_auxiliary() {
+async fn posting_marks_read_and_read_through_skips_deleted_and_auxiliary() {
     let (db, pool, community, channel, actor, _) = fixture().await;
     let base = now();
     let own = post(&db, community, channel, &actor, base + 1, vec![]).await;
@@ -553,10 +572,13 @@ async fn latest_includes_own_and_excludes_deleted_and_auxiliary() {
         .await
         .unwrap();
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.latest_message_id, Some(own.id.to_hex()));
-    assert_eq!(row.latest_message_at, Some((base + 1) as i64));
-    assert!(row.unread, "own, deleted and reaction do not count");
-    // An empty channel has no latest message.
+    assert!(!row.unread, "posting read through everything before it");
+    assert_eq!(
+        row.read_through_id,
+        Some(own.id.to_hex()),
+        "not deleted, not a reaction"
+    );
+    // An empty channel has nothing read.
     db.create_channel(
         community,
         "truly empty",
@@ -577,7 +599,7 @@ async fn latest_includes_own_and_excludes_deleted_and_auxiliary() {
         .iter()
         .find(|c| c.channel_id != channel)
         .unwrap();
-    assert!(empty.latest_message_id.is_none() && empty.latest_message_at.is_none());
+    assert!(!empty.unread && empty.mentions == 0 && empty.read_through_id.is_none());
 }
 
 #[tokio::test]
