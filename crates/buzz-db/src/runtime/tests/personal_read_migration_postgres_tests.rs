@@ -89,3 +89,104 @@ async fn migration_schema_personal_read_fresh_build_and_budgets() {
     assert_eq!(regclass_oid(&pool, "idx_thread_metadata_root").await, None);
     drop_scratch_db(&admin, pool, &name).await;
 }
+
+/// Under 0056 only a read intent creates an account, so 0057 starts every
+/// existing account at the migration. A message that arrives after upgrade
+/// counts without a further intent. Accounts in a community being deleted
+/// are skipped, so the write fence cannot fail the migration.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_personal_read_starts_existing_accounts() {
+    use crate::{
+        channel::{ChannelType, ChannelVisibility},
+        Db,
+    };
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    let admin = PgPool::connect(&admin_url().await).await.unwrap();
+    let (pool, name) = create_scratch_db_through(&admin, "pr_upgrade", Some(56)).await;
+    let actor = Keys::generate();
+    let actor_bytes = actor.public_key().to_bytes();
+    let active: Uuid =
+        sqlx::query_scalar("INSERT INTO communities (host) VALUES ($1) RETURNING id")
+            .bind(format!("upgrade-{}.local", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO personal_read_accounts (community_id,actor) VALUES ($1,$2)")
+        .bind(active)
+        .bind(actor_bytes.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A fenced community's account, set up past its fence only in this
+    // disposable superuser DB.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let fenced: Uuid = sqlx::query_scalar(
+        "INSERT INTO communities (host,deletion_state) VALUES ($1,'fenced') RETURNING id",
+    )
+    .bind(format!("fenced-{}.local", Uuid::new_v4()))
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO personal_read_accounts (community_id,actor) VALUES ($1,$2)")
+        .bind(fenced)
+        .bind(actor_bytes.as_slice())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    migration::run_migrations(&pool).await.unwrap();
+    let started = |community: Uuid| {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT started_at IS NOT NULL FROM personal_read_accounts
+             WHERE community_id=$1 AND actor=$2",
+        )
+        .bind(community)
+        .bind(actor_bytes.as_slice())
+        .fetch_one(&pool)
+    };
+    assert!(started(active).await.unwrap(), "existing account starts");
+    assert!(!started(fenced).await.unwrap(), "fenced account is skipped");
+
+    let db = Db::from_pool(pool.clone());
+    let community = CommunityId::from_uuid(active);
+    let channel = db
+        .create_channel(
+            community,
+            "upgraded",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &actor_bytes,
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let event = EventBuilder::new(Kind::Custom(9), "after upgrade")
+        .tags(vec![Tag::public_key(actor.public_key())])
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    db.insert_event(community, &event, Some(channel))
+        .await
+        .unwrap();
+    let row = db
+        .personal_read_sidebar(community, &actor.public_key(), 20, None)
+        .await
+        .unwrap()
+        .channels
+        .remove(0);
+    assert_eq!(
+        (row.unread, row.mentions),
+        (true, 1),
+        "an arrival after upgrade counts before the next intent"
+    );
+    drop(db);
+    drop_scratch_db(&admin, pool, &name).await;
+}

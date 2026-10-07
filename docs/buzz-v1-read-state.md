@@ -232,7 +232,9 @@ device-local.
 
 Apply migrations 0056 and 0057 (or the equivalent desired schema). 0056
 creates two private tables. 0057 adds `personal_read_accounts.started_at`
-(NULL for accounts from 0056, which start at their next read intent),
+(set to the migration's time for accounts from 0056, which only a read intent
+created, so arrivals from deploy onward count; accounts in a community being
+deleted stay NULL),
 `personal_read_frontiers.following`, `thread_metadata.last_reply_received_at`,
 `channels.last_timeline_received_at` and
 `event_mentions.received_at`/`root_id` (NULL for rows from before it, which no
@@ -241,11 +243,13 @@ position can reach), and one index on `event_mentions`. It also drops
 (0049). Ingest writes the author's own position and follow rows in the same
 transaction as the message.
 
-Like 0049, 0057 bounds lock waits and statement time, so it fails
-instead of blocking `event_mentions` writes while building its index on a
-populated table. Brownfield deployments prebuild the index first. Adding
-nullable columns is a catalog-only change; `CREATE INDEX CONCURRENTLY` cannot
-run inside a transaction block:
+Like 0049, 0057 bounds lock waits (1s per acquisition) and statement time
+(5s), so it fails instead of blocking `event_mentions` writes for a whole
+index build. On a large `event_mentions` table, 0057 will hit its statement
+timeout and roll back without recording the version, so brownfield
+deployments prebuild the index first. Adding nullable columns is a
+catalog-only change; `CREATE INDEX CONCURRENTLY` cannot run inside a
+transaction block:
 
 ```sql
 ALTER TABLE public.event_mentions
@@ -278,8 +282,9 @@ DROP INDEX CONCURRENTLY IF EXISTS public.idx_thread_metadata_root;
 
 0057 still takes brief exclusive locks to add columns to the two read-state
 tables, `thread_metadata`, `channels` and `event_mentions`. If a long reader holds one of them past the
-lock budget, startup fails and can be retried; ingestion does not queue behind
-it.
+lock budget, startup fails and can be retried. Ingestion may queue until the
+migration completes or aborts; lock waits are limited to 1s per acquisition
+and statements to 5s.
 
 During a rolling deploy, relay processes still on the old code write
 `event_mentions` rows without `received_at`/`root_id` and do not mark posting

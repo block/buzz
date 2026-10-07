@@ -11,8 +11,20 @@ SET LOCAL statement_timeout = '5s';
 -- started_at is the actor's first read intent and the floor of every
 -- position: until then nothing counts, and from then the actor starts caught
 -- up. Ingest creates accounts for thread membership without starting them.
--- Accounts from 0056 stay NULL and start at their next read intent.
 ALTER TABLE personal_read_accounts ADD COLUMN started_at TIMESTAMPTZ;
+
+-- Under 0056 only a read intent creates an account, so every existing
+-- account has already started. Start it now (this transaction's time) so
+-- arrivals from deploy onward count without waiting for its next intent. The
+-- arrival columns below fill in from the same point, so every position is
+-- still floored after them. Communities being deleted are skipped: their
+-- write fence would reject the update, and their accounts are going away.
+UPDATE personal_read_accounts a
+   SET started_at = now()
+  FROM communities c
+ WHERE c.id = a.community_id
+   AND c.deletion_state = 'active'
+   AND a.started_at IS NULL;
 
 -- A thread row exists for each thread the actor follows or has unfollowed.
 -- Ingest moves the author's own frontiers through each message they post.
@@ -31,7 +43,7 @@ ALTER TABLE thread_metadata ADD COLUMN last_reply_received_at TIMESTAMPTZ;
 -- reader with one comparison instead of walking past replies. Unindexed so
 -- updates stay HOT. NULL for channels with no timeline message since this
 -- migration, which no position can be behind: every position is floored at
--- a started_at set after it.
+-- a started_at set by this migration or later.
 ALTER TABLE channels ADD COLUMN last_timeline_received_at TIMESTAMPTZ;
 
 -- Arrival time and read scope of each mention, so the sidebar counts a
@@ -39,7 +51,7 @@ ALTER TABLE channels ADD COLUMN last_timeline_received_at TIMESTAMPTZ;
 -- position. root_id is the thread a reply belongs to, NULL when the mention
 -- shows on the channel timeline (a top-level message or broadcast reply).
 -- Existing rows stay NULL: every position is floored at its account's
--- started_at, set by a read intent after this migration, so no earlier
+-- started_at, set by this migration or a later read intent, so no earlier
 -- mention can be unread.
 -- IF NOT EXISTS admits the brownfield prebuild, which adds these columns
 -- before building the index concurrently. As in 0049, a prebuilt index skips
