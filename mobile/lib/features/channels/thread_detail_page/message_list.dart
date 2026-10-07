@@ -313,6 +313,7 @@ class _ThreadMessageList extends HookWidget {
                     child: _ThreadHeadScrollInput(
                       enabled: visible,
                       scrollPosition: () => headScrollPosition.value,
+                      positions: itemPositionsListener.itemPositions,
                       child: ConstrainedBox(
                         constraints: BoxConstraints(
                           maxHeight: visible

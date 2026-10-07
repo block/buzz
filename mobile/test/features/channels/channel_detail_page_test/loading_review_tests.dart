@@ -128,17 +128,97 @@ void _loadingReviewTests() {
           final headNode = tester.getSemantics(
             find.byKey(const ValueKey('thread-head-scroll-semantics')),
           );
-          headNode.owner!.performAction(
-            headNode.id,
-            SemanticsAction.scrollDown,
-          );
+          final semanticsOwner = headNode.owner!;
+          semanticsOwner.performAction(headNode.id, SemanticsAction.scrollDown);
           await tester.pumpAndSettle();
           expect(find.text('Original message').hitTestable(), findsNothing);
+          final labels = <String>[];
+          void collectLabels(SemanticsNode node) {
+            labels.add(node.label);
+            node.visitChildren((child) {
+              collectLabels(child);
+              return true;
+            });
+          }
+
+          collectLabels(semanticsOwner.rootSemanticsNode!);
+          expect(
+            labels.any((label) => label.contains('Original message')),
+            isFalse,
+          );
           semantics.dispose();
         }
       },
     );
   }
+
+  testWidgets('tall original message remains scrollable after hydration', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final root = _textMsg(
+      id: 'tall-root',
+      pubkey: 'alice',
+      content:
+          '${List.generate(70, (i) => 'Head line $i').join('\n')}\nEnd of original message',
+    );
+    final replies = Completer<List<NostrEvent>>();
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [root],
+        pendingThreadReplies: {'tall-root': replies.future},
+        home: ThreadDetailPage(
+          threadHead: formatTimeline([root]).single,
+          allMessages: formatTimeline([root]),
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    replies.complete([
+      _textMsg(
+        id: 'tall-reply',
+        pubkey: 'bob',
+        content: 'Reply after tall head',
+        extraTags: const [
+          ['e', 'tall-root', '', 'reply'],
+        ],
+      ),
+    ]);
+    await tester.pumpAndSettle();
+    final list = tester.widget<ScrollablePositionedList>(
+      find.byKey(const ValueKey('thread-message-list')),
+    );
+    list.itemScrollController!.jumpTo(index: 0);
+    await tester.pumpAndSettle();
+    final head = find.byType(MessageContent).first;
+    expect(tester.getSize(head).height, greaterThan(800));
+    final rect = tester.getRect(head);
+    final bottomPoint = Offset(rect.center.dx, rect.bottom - 20);
+    for (var i = 0; i < 9; i++) {
+      await tester.dragFrom(const Offset(200, 500), const Offset(0, -180));
+      await tester.pumpAndSettle();
+    }
+    final movedRect = tester.getRect(head);
+    expect(movedRect.bottom, lessThan(750));
+    expect(movedRect.bottom, greaterThan(100));
+    expect(
+      tester
+          .hitTestOnBinding(Offset(movedRect.center.dx, movedRect.bottom - 20))
+          .path
+          .any((entry) => entry.target == tester.renderObject(head)),
+      isTrue,
+      reason:
+          'The bottom of the tall original remains interactive, not clipped.',
+    );
+    expect(find.text('Reply after tall head').hitTestable(), findsOneWidget);
+    expect(bottomPoint.dy, greaterThan(800));
+  });
 
   for (final completesAfterDisposal in [false, true]) {
     testWidgets(

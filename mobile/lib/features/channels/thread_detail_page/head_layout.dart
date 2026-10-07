@@ -43,16 +43,27 @@ class _ThreadHeadLayout extends HookWidget {
 class _ThreadHeadScrollInput extends HookWidget {
   final bool enabled;
   final ScrollPosition? Function() scrollPosition;
+  final ValueListenable<Iterable<ItemPosition>> positions;
   final Widget child;
 
   const _ThreadHeadScrollInput({
     required this.enabled,
     required this.scrollPosition,
+    required this.positions,
     required this.child,
   });
 
   @override
   Widget build(BuildContext context) {
+    final headPositions = useValueListenable(positions);
+    final headVisible =
+        !enabled ||
+        headPositions.any(
+          (item) =>
+              item.index == 0 &&
+              item.itemLeadingEdge < 1 &&
+              item.itemTrailingEdge > 0,
+        );
     final drag = useRef<Drag?>(null);
     useEffect(
       () =>
@@ -70,51 +81,59 @@ class _ThreadHeadScrollInput extends HookWidget {
       }
     }
 
-    return Semantics(
-      key: const ValueKey('thread-head-scroll-semantics'),
-      sortKey: const OrdinalSortKey(-1),
-      onScrollUp:
-          enabled &&
-              position != null &&
-              position.pixels > position.minScrollExtent
-          ? () => scrollPage(-1)
-          : null,
-      onScrollDown:
-          enabled &&
-              position != null &&
-              position.pixels < position.maxScrollExtent
-          ? () => scrollPage(1)
-          : null,
-      child: Listener(
-        onPointerSignal: !enabled
-            ? null
-            : (event) {
-                if (event is PointerScrollEvent) {
-                  GestureBinding.instance.pointerSignalResolver.register(
-                    event,
-                    (_) {
-                      scrollPosition()?.pointerScroll(event.scrollDelta.dy);
+    return ExcludeSemantics(
+      excluding: !headVisible,
+      child: IgnorePointer(
+        ignoring: !headVisible,
+        child: Semantics(
+          key: const ValueKey('thread-head-scroll-semantics'),
+          sortKey: const OrdinalSortKey(-1),
+          onScrollUp:
+              enabled &&
+                  position != null &&
+                  position.pixels > position.minScrollExtent
+              ? () => scrollPage(-1)
+              : null,
+          onScrollDown:
+              enabled &&
+                  position != null &&
+                  position.pixels < position.maxScrollExtent
+              ? () => scrollPage(1)
+              : null,
+          child: Listener(
+            onPointerSignal: !enabled
+                ? null
+                : (event) {
+                    if (event is PointerScrollEvent) {
+                      GestureBinding.instance.pointerSignalResolver.register(
+                        event,
+                        (_) {
+                          scrollPosition()?.pointerScroll(event.scrollDelta.dy);
+                        },
+                      );
+                    }
+                  },
+            child: GestureDetector(
+              onVerticalDragStart: !enabled
+                  ? null
+                  : (details) {
+                      drag.value = scrollPosition()?.drag(
+                        details,
+                        () => drag.value = null,
+                      );
                     },
-                  );
-                }
-              },
-        child: GestureDetector(
-          onVerticalDragStart: !enabled
-              ? null
-              : (details) {
-                  drag.value = scrollPosition()?.drag(
-                    details,
-                    () => drag.value = null,
-                  );
-                },
-          onVerticalDragUpdate: !enabled
-              ? null
-              : (details) => drag.value?.update(details),
-          onVerticalDragEnd: !enabled
-              ? null
-              : (details) => drag.value?.end(details),
-          onVerticalDragCancel: !enabled ? null : () => drag.value?.cancel(),
-          child: child,
+              onVerticalDragUpdate: !enabled
+                  ? null
+                  : (details) => drag.value?.update(details),
+              onVerticalDragEnd: !enabled
+                  ? null
+                  : (details) => drag.value?.end(details),
+              onVerticalDragCancel: !enabled
+                  ? null
+                  : () => drag.value?.cancel(),
+              child: child,
+            ),
+          ),
         ),
       ),
     );
