@@ -4273,30 +4273,41 @@ mod tests {
             };
 
             assert_eq!((summary.repaired, summary.failed), (0, 0));
-            assert_eq!(reconciliation_failures(&recorder), 0);
             assert_eq!(relay_signed_snapshots(&pool, id, &state).await, 1);
-            assert_eq!(publications(&recorder, "skipped"), 1);
-            assert_eq!(publications(&recorder, "succeeded"), 0);
-        }
-
-        fn publications(recorder: &DebuggingRecorder, result: &str) -> u64 {
-            recorder
+            // One snapshot for every counter: taking a snapshot drains the
+            // recorder's counters, so a second read would see zero.
+            let counters: Vec<(String, Option<String>, u64)> = recorder
                 .snapshotter()
                 .snapshot()
                 .into_vec()
                 .into_iter()
-                .filter(|(key, _, _, _)| {
-                    key.key().name() == "buzz_nip43_membership_publications_total"
-                        && key
-                            .key()
+                .filter_map(|(key, _, _, value)| match value {
+                    DebugValue::Counter(value) => Some((
+                        key.key().name().to_owned(),
+                        key.key()
                             .labels()
-                            .any(|label| label.key() == "result" && label.value() == result)
+                            .find(|label| label.key() == "result")
+                            .map(|label| label.value().to_owned()),
+                        value,
+                    )),
+                    _ => None,
                 })
-                .map(|(_, _, _, value)| match value {
-                    DebugValue::Counter(value) => value,
-                    other => panic!("publications_total must be a counter: {other:?}"),
-                })
-                .sum()
+                .collect();
+            let total = |name: &str, result: Option<&str>| -> u64 {
+                counters
+                    .iter()
+                    .filter(|(n, r, _)| n == name && r.as_deref() == result)
+                    .map(|(_, _, value)| value)
+                    .sum()
+            };
+            let publications = "buzz_nip43_membership_publications_total";
+            assert_eq!(total(publications, Some("attempted")), 1);
+            assert_eq!(total(publications, Some("skipped")), 1);
+            assert_eq!(total(publications, Some("succeeded")), 0);
+            assert_eq!(
+                total("buzz_nip43_membership_reconciliation_failures_total", None),
+                0
+            );
         }
     }
 }
