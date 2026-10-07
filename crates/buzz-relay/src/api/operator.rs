@@ -2501,6 +2501,74 @@ mod postgres_tests {
         );
     }
 
+    /// Lifecycle revalidation runs for every live community on every pod each
+    /// tick. Active communities must be checked without the row lock, so a
+    /// conflicting lock on an active row must not stall the tick, while an
+    /// archived community is still closed under the fence.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revalidation_skips_the_row_lock_for_active_communities() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason = control.disconnect_reason();
+        let _guard = state
+            .community_connections
+            .register(Uuid::new_v4(), community, control);
+
+        let mut row_lock = state.db.pool().begin().await.expect("begin row lock");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *row_lock)
+            .await
+            .expect("hold the community row lock");
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                state.revalidate_live_communities()
+            )
+            .await
+            .expect("revalidation must not wait on an active community's row lock"),
+            0
+        );
+        row_lock.rollback().await.expect("release row lock");
+        assert!(!cancel.is_cancelled());
+
+        state
+            .db
+            .archive_community_owned_by(&host, &owner.public_key().to_hex(), "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(state.revalidate_live_communities().await, 1);
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            *reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn unarchive_restores_admission_and_is_idempotent_without_changing_ownership() {

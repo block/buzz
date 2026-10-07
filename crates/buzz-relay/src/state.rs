@@ -2071,6 +2071,12 @@ impl AppState {
         let (closed, failures) = revalidate_registered_communities(
             &self.community_connections,
             |community_id| async move {
+                // Nearly every live community is active. An unlocked read keeps
+                // the per-tick row lock off them; the fence re-checks under the
+                // lock before closing anything.
+                if self.db.is_community_active(community_id).await? {
+                    return Ok(0);
+                }
                 self.disconnect_if_inactive(community_id)
                     .await
                     .map(|disconnected| disconnected.unwrap_or(0))

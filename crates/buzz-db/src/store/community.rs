@@ -221,9 +221,9 @@ impl Db {
     /// The row lock serializes the synchronous action with unarchive so a
     /// periodic lifecycle revalidation cannot disconnect a community after it
     /// has been restored. Missing community ids are also treated as inactive.
-    /// It runs for every bound community on each revalidation tick, so it takes
-    /// `FOR NO KEY UPDATE` for the same reason as
-    /// [`Self::with_community_archive_fence`].
+    /// Revalidation calls it for each bound community whose unlocked
+    /// lifecycle read is not active, so it takes `FOR NO KEY UPDATE` for the
+    /// same reason as [`Self::with_community_archive_fence`].
     #[datastore_span(name = "with_inactive_community_fence", system = "postgresql")]
     pub async fn with_inactive_community_fence<T>(
         &self,

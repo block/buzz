@@ -1330,23 +1330,31 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                         buzz_pubsub::conn_control::ConnControl::DisconnectCommunity {
                             archived_at,
                         } => {
-                            match state_for_conn_ctrl
-                                .apply_community_disconnect(scoped.community_id, archived_at)
-                                .await
-                            {
-                                Ok(Some(_)) => {}
-                                Ok(None) => tracing::info!(
-                                    community = %scoped.community_id,
-                                    ?archived_at,
-                                    "ignored community disconnect for a community that is active or re-archived"
-                                ),
-                                Err(error) => tracing::warn!(
-                                    community = %scoped.community_id,
-                                    ?archived_at,
-                                    %error,
-                                    "could not verify archive disconnect; retaining sockets until lifecycle revalidation"
-                                ),
-                            }
+                            // The disconnect waits on a writer connection and the
+                            // community row lock; spawn it so ban disconnects on this
+                            // receiver never queue behind it. Each one is fenced
+                            // against the row, so their relative order is irrelevant.
+                            let state = Arc::clone(&state_for_conn_ctrl);
+                            let community_id = scoped.community_id;
+                            tokio::spawn(async move {
+                                match state
+                                    .apply_community_disconnect(community_id, archived_at)
+                                    .await
+                                {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => tracing::info!(
+                                        community = %community_id,
+                                        ?archived_at,
+                                        "ignored community disconnect for a community that is active or re-archived"
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        community = %community_id,
+                                        ?archived_at,
+                                        %error,
+                                        "could not verify archive disconnect; retaining sockets until lifecycle revalidation"
+                                    ),
+                                }
+                            });
                         }
                         buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
                             pubkey,

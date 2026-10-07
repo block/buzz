@@ -22,10 +22,12 @@ pub enum CommunitiesCommand {
         /// Current owner public key as 64-character hex.
         #[arg(long)]
         owner_pubkey: String,
-        /// Identity of the operator performing the action.
+        /// Identity of the operator performing the action. Echoed in the
+        /// command's JSON output only; not stored.
         #[arg(long)]
         operator_id: String,
-        /// Human-readable reason for the action.
+        /// Human-readable reason for the action. Echoed in the command's JSON
+        /// output only; not stored.
         #[arg(long)]
         reason: String,
     },
@@ -37,10 +39,12 @@ pub enum CommunitiesCommand {
         /// Current owner public key as 64-character hex.
         #[arg(long)]
         owner_pubkey: String,
-        /// Identity of the operator performing the action.
+        /// Identity of the operator performing the action. Echoed in the
+        /// command's JSON output only; not stored.
         #[arg(long)]
         operator_id: String,
-        /// Human-readable reason for the action.
+        /// Human-readable reason for the action. Echoed in the command's JSON
+        /// output only; not stored.
         #[arg(long)]
         reason: String,
     },
