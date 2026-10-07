@@ -338,15 +338,9 @@ export class RelayClient {
     onEvent: (event: RelayEvent) => void,
     onFlush?: () => void,
   ) {
-    return this.subscribe(
-      buildChannelLiveFilter(channelId),
-      onEvent,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+    return this.subscribe(buildChannelLiveFilter(channelId), onEvent, {
       onFlush,
-    );
+    });
   }
 
   /**
@@ -418,21 +412,18 @@ export class RelayClient {
     readinessTimeoutMs?: number,
     signal?: AbortSignal,
   ) {
-    return this.subscribe(filter, onEvent, onReady, readinessTimeoutMs, signal);
+    return this.subscribe(filter, onEvent, {
+      onReady,
+      readinessTimeoutMs,
+      signal,
+    });
   }
   /** Prioritize an interactive live consumer without changing its replay filter or pacing. */
   async subscribeInteractive(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(
-      filter,
-      onEvent,
-      undefined,
-      undefined,
-      undefined,
-      "interactive",
-    );
+    return this.subscribe(filter, onEvent, { priority: "interactive" });
   }
 
   async preconnect() {
@@ -615,11 +606,19 @@ export class RelayClient {
   private async subscribe(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
-    onReady?: (readiness: LiveSubscriptionReadiness) => void,
-    readinessTimeoutMs = 250,
-    signal?: AbortSignal,
-    priority?: "interactive",
-    onFlush?: () => void,
+    {
+      onReady,
+      readinessTimeoutMs = 250,
+      signal,
+      priority,
+      onFlush,
+    }: {
+      onReady?: (readiness: LiveSubscriptionReadiness) => void;
+      readinessTimeoutMs?: number;
+      signal?: AbortSignal;
+      priority?: "interactive";
+      onFlush?: () => void;
+    } = {},
   ) {
     const epoch = this.sessionEpoch;
     const sessionSignal = this.liveSessionAbort.signal;
