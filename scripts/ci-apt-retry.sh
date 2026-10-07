@@ -62,13 +62,14 @@ for attempt in $(seq 1 "$attempts"); do
   else
     echo "::warning::attempt $attempt/$attempts failed (exit $rc): $*"
   fi
-  [ "$attempt" -eq "$attempts" ] && break
   # timeout(1) signals only its own process group, but sudo runs its command
   # in a new one. When apt-get is not sudo's direct command (playwright
   # install-deps runs `sudo sh -c "apt-get update && apt-get install ..."`),
   # the forwarded signal stops sh and apt-get survives, holding the dpkg lock
-  # so every retry is a lock wait. Stop any survivor before retrying.
+  # so every retry is a lock wait. Stop any survivor before retrying, and
+  # before giving up so no apt-get outlives the step.
   reap_package_managers
+  [ "$attempt" -eq "$attempts" ] && break
   # A killed apt/dpkg run can leave dpkg half-configured; repair before
   # retrying, under its own deadline so a stuck repair can't eat the job.
   timeout --kill-after=15s "$repair_deadline" sudo dpkg --configure -a || true

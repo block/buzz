@@ -19,7 +19,7 @@ function run(args, { PATH: extraPath, ...env } = {}) {
     `#!/usr/bin/env bash
 case "$1" in
   tee) cat > "${dir}/conf" ;;
-  pkill|pgrep) "$@" ;;
+  pkill) "$@" ;;
   dpkg) echo repair >> "${calls}"; [ -n "\${STALL_REPAIR:-}" ] && sleep 30; true ;;
   *) echo cmd >> "${calls}"; "$@" ;;
 esac
@@ -107,10 +107,11 @@ test("no command is a usage error", () => {
 // Model that: the first attempt starts an `apt-get` in its own session that
 // holds a lock and blocks; the attempt's own process exits on TERM. The retry
 // must find the lock free, so the survivor has to have been stopped.
-test("a package manager that escapes the attempt's process group is stopped before the retry", () => {
+// Writes a fake `apt-get` that takes a lock: the first call holds it and
+// blocks, later calls succeed only if the lock is free.
+function escapingAptGet() {
   const dir = mkdtempSync(join(tmpdir(), "ci-apt-retry-escape-"));
   const lock = join(dir, "lock");
-  const fifo = join(dir, "fifo");
   writeFileSync(
     join(dir, "apt-get"),
     // #!/bin/bash, not env, so the process is named apt-get.
@@ -119,11 +120,18 @@ exec 9>"${lock}"
 flock -n 9 || { echo "lock held"; exit 1; }
 [ -e "${dir}/seen" ] && exit 0
 touch "${dir}/seen"
-mkfifo "${fifo}"; exec 8<>"${fifo}"
+mkfifo "${dir}/fifo"; exec 8<>"${dir}/fifo"
 read -r -t 30 -u 8 || true
 `,
   );
   chmodSync(join(dir, "apt-get"), 0o755);
+  const lockIsFree = () =>
+    spawnSync("flock", ["-n", lock, "true"]).status === 0;
+  return { dir, lockIsFree };
+}
+
+test("a package manager that escapes the attempt's process group is stopped before the retry", () => {
+  const { dir } = escapingAptGet();
   const r = run(["bash", "-c", "setsid apt-get & wait $!"], {
     CI_APT_ATTEMPTS: "2",
     PATH: dir,
@@ -131,5 +139,17 @@ read -r -t 30 -u 8 || true
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /attempt 1\/2 timed out/);
   assert.doesNotMatch(r.stdout, /lock held/);
+  assert.ok(r.seconds < 10, `took ${r.seconds}s`);
+});
+
+test("a package manager that escapes the final attempt is stopped before the wrapper exits", () => {
+  const { dir, lockIsFree } = escapingAptGet();
+  const r = run(["bash", "-c", "setsid apt-get & wait $!"], {
+    CI_APT_ATTEMPTS: "1",
+    PATH: dir,
+  });
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(r.calls, []);
+  assert.ok(lockIsFree(), "apt-get outlived the wrapper");
   assert.ok(r.seconds < 10, `took ${r.seconds}s`);
 });
