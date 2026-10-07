@@ -10,7 +10,7 @@ const script = fileURLToPath(new URL("./ci-apt-retry.sh", import.meta.url));
 
 // Run the wrapper with a fake `sudo` on PATH that records each call instead
 // of touching the system's apt or dpkg state.
-function run(args, env = {}) {
+function run(args, { PATH: extraPath, ...env } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ci-apt-retry-"));
   const calls = join(dir, "calls");
   writeFileSync(calls, "");
@@ -19,6 +19,7 @@ function run(args, env = {}) {
     `#!/usr/bin/env bash
 case "$1" in
   tee) cat > "${dir}/conf" ;;
+  pkill|pgrep) "$@" ;;
   dpkg) echo repair >> "${calls}"; [ -n "\${STALL_REPAIR:-}" ] && sleep 30; true ;;
   *) echo cmd >> "${calls}"; "$@" ;;
 esac
@@ -31,7 +32,7 @@ esac
     timeout: 20_000,
     env: {
       ...process.env,
-      PATH: `${dir}:${process.env.PATH}`,
+      PATH: [dir, extraPath, process.env.PATH].filter(Boolean).join(":"),
       CI_APT_ATTEMPT_SECONDS: "1",
       CI_APT_REPAIR_SECONDS: "1",
       ...env,
@@ -99,4 +100,36 @@ test("a stalled dpkg repair is bounded and the next attempt still runs", () => {
 
 test("no command is a usage error", () => {
   assert.equal(run([]).status, 2);
+});
+
+// playwright install-deps reaches apt-get through `sudo sh -c "..."`, and sudo
+// runs that in a new process group, so timeout(1)'s group signal misses it.
+// Model that: the first attempt starts an `apt-get` in its own session that
+// holds a lock and blocks; the attempt's own process exits on TERM. The retry
+// must find the lock free, so the survivor has to have been stopped.
+test("a package manager that escapes the attempt's process group is stopped before the retry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ci-apt-retry-escape-"));
+  const lock = join(dir, "lock");
+  const fifo = join(dir, "fifo");
+  writeFileSync(
+    join(dir, "apt-get"),
+    // #!/bin/bash, not env, so the process is named apt-get.
+    `#!/bin/bash
+exec 9>"${lock}"
+flock -n 9 || { echo "lock held"; exit 1; }
+[ -e "${dir}/seen" ] && exit 0
+touch "${dir}/seen"
+mkfifo "${fifo}"; exec 8<>"${fifo}"
+read -r -t 30 -u 8 || true
+`,
+  );
+  chmodSync(join(dir, "apt-get"), 0o755);
+  const r = run(["bash", "-c", "setsid apt-get & wait $!"], {
+    CI_APT_ATTEMPTS: "2",
+    PATH: dir,
+  });
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /attempt 1\/2 timed out/);
+  assert.doesNotMatch(r.stdout, /lock held/);
+  assert.ok(r.seconds < 10, `took ${r.seconds}s`);
 });
