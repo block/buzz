@@ -30,9 +30,9 @@ The client MUST generate a high-entropy handoff secret, start a loopback callbac
 GET {adapter_base}/v1/login/start?return_to={callback_url}&handoff_challenge={base64url(sha256(handoff_secret))}&handoff_challenge_method=S256
 ```
 
-The client's `callback_url` MUST be a loopback callback of the form `http://127.0.0.1:{ephemeral_port}/callback/{nonce}`.
+The client's `callback_url` MUST use the `http` scheme with a loopback IP literal host (`127.0.0.1` or `[::1]`), as defined in [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3).
 
-The adapter authenticates the user however the operator chooses, binds the completed browser login to `handoff_challenge`, and redirects to the exact `return_to` loopback callback. Adapters SHOULD accept loopback callbacks on any port, as recommended by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3), and SHOULD reject non-loopback callback hosts. Success redirects to:
+The adapter authenticates the user however the operator chooses, binds the completed browser login to `handoff_challenge`, and redirects to the exact `return_to` loopback callback. Adapters SHOULD accept loopback callbacks on any port, as recommended by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3), and MUST reject non-loopback callback hosts. Success redirects to:
 
 ```text
 {callback_url}?code={single_use_code}

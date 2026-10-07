@@ -32,6 +32,10 @@ Hosted-community Builderlab configuration is separate:
 
 ## Desktop behavior
 
+- Browser login callback: Desktop always supplies
+  `http://127.0.0.1:{ephemeral_port}/callback/{nonce}`.
+- Adapter session: Desktop checks or reuses an in-memory enterprise adapter
+  session.
 - Browser login failures: Desktop surfaces the callback's `error_description`
   when present, otherwise `error`.
 - Session check failure: Desktop clears only the enterprise adapter session.
