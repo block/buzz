@@ -3967,3 +3967,6 @@ async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
         .await
         .expect("release serving-write lease"));
 }
+
+#[path = "tests/personal_read_migration_postgres_tests.rs"]
+mod personal_read_migration_postgres_tests;

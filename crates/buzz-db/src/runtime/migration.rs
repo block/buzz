@@ -705,12 +705,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 57);
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
             .as_str()
             .contains("CREATE TABLE personal_read_accounts"));
+        assert_eq!(migrations[56].version, 57);
+        assert!(migrations[56]
+            .sql
+            .as_str()
+            .contains("idx_event_mentions_scope_received"));
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -2061,11 +2066,14 @@ mod postgres_tests {
                 .sql
                 .as_ref(),
         );
-        for (table, definition) in personal.tables {
-            assert_eq!(
-                schema.tables.get(&table),
-                Some(&definition),
-                "personal read table {table} differs"
+        // 0057 adds columns to these tables, so their textual definitions
+        // differ from schema.sql by design; column and index parity is
+        // checked against a migrated database in
+        // admin_schema_parity_between_desired_state_and_migrations.
+        for table in personal.tables.keys() {
+            assert!(
+                schema.tables.contains_key(table),
+                "schema.sql is missing personal read table {table}"
             );
         }
         expected_fences.extend(personal.fence_attachments);
@@ -2501,14 +2509,18 @@ mod postgres_tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(55, &migrated)
+            .run_to(57, &migrated)
             .await
-            .expect("apply migrations 1-55");
+            .expect("apply migrations 1-57");
 
         for table in [
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "personal_read_accounts",
+            "personal_read_frontiers",
+            "thread_metadata",
+            "event_mentions",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -2525,6 +2537,14 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
+
+        // Columns only: idx_channels_id_live already differs between
+        // schema.sql and the migrations, independent of 0057.
+        assert_eq!(
+            columns(&desired, "channels").await,
+            columns(&migrated, "channels").await,
+            "column parity mismatch for channels"
+        );
 
         desired.close().await;
         migrated.close().await;

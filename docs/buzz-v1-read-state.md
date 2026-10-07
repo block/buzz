@@ -230,12 +230,56 @@ device-local.
   shared eight-second intent-processing deadline after admission. Limits are
   containment, not a production capacity claim.
 
-Apply migration 0056 (or the equivalent desired schema). It creates two
-private tables, adds `thread_metadata.last_reply_received_at`,
+Apply migrations 0056 and 0057 (or the equivalent desired schema). 0056
+creates two private tables. 0057 adds `personal_read_accounts.started_at`
+(NULL for accounts from 0056, which start at their next read intent),
+`personal_read_frontiers.following`, `thread_metadata.last_reply_received_at`,
 `channels.last_timeline_received_at` and
 `event_mentions.received_at`/`root_id` (NULL for rows from before it, which no
-position can reach), and one index on `event_mentions`. Ingest writes the
-author's own position and follow rows in the same transaction as the message.
+position can reach), and one index on `event_mentions`. It also drops
+`idx_thread_metadata_root`, whose columns lead `idx_thread_metadata_window`
+(0049). Ingest writes the author's own position and follow rows in the same
+transaction as the message.
+
+Like 0049, 0057 bounds lock waits and statement time, so it fails
+instead of blocking `event_mentions` writes while building its index on a
+populated table. Brownfield deployments prebuild the index first. Adding
+nullable columns is a catalog-only change; `CREATE INDEX CONCURRENTLY` cannot
+run inside a transaction block:
+
+```sql
+ALTER TABLE public.event_mentions
+    ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS root_id BYTEA;
+CREATE INDEX CONCURRENTLY idx_event_mentions_scope_received
+    ON public.event_mentions (community_id, pubkey_hex, channel_id, root_id, received_at);
+```
+
+Verify it with the `pg_index` query in
+[thread-window-deployment.md](thread-window-deployment.md), using
+`idx_event_mentions_scope_received`. All flags must be `true`, and the
+definition must be exactly:
+
+```text
+CREATE INDEX idx_event_mentions_scope_received ON public.event_mentions USING btree (community_id, pubkey_hex, channel_id, root_id, received_at)
+```
+
+Migration 0057 then skips the build and validates the catalog shape again. It
+rejects an invalid or differently defined index. Recover the same way as for
+0049: `DROP INDEX CONCURRENTLY`, then prebuild again.
+
+Its transactional `DROP INDEX IF EXISTS idx_thread_metadata_root` needs a brief
+`ACCESS EXCLUSIVE` lock on `thread_metadata`, bounded by the same lock budget.
+On a busy database, drop it beforehand, also outside a transaction:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS public.idx_thread_metadata_root;
+```
+
+0057 still takes brief exclusive locks to add columns to the two read-state
+tables, `thread_metadata`, `channels` and `event_mentions`. If a long reader holds one of them past the
+lock budget, startup fails and can be retried; ingestion does not queue behind
+it.
 
 During a rolling deploy, relay processes still on the old code write
 `event_mentions` rows without `received_at`/`root_id` and do not mark posting
@@ -280,8 +324,8 @@ is no new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
 
-Migration 0056 must be applied before this relay serves, enabled or not: started
-without it and with auto-migration off, the relay stops before readiness. There
+Migrations 0056 and 0057 must be applied before this relay serves, enabled or
+not: started without them and with auto-migration off, the relay stops before readiness. There
 is no down migration, and disabling the API is not a rollback. A relay built
 before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
 refuses to start on the migrated schema. Whole-community deletion run from a

@@ -270,9 +270,14 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
         .await
         .unwrap();
 
-    // Also bind the public migrator: the advisory schema/destruction lock,
-    // ledger write and post-migration catalog checks must work with ingestion.
-    let production_result = migration::run_migrations(&pool).await;
+    // Also bind the migrator: the advisory schema/destruction lock and ledger
+    // write must work with ingestion through 0056. 0057 alters thread_metadata
+    // and so cannot finish while this writer is held; its bounded lock budget
+    // must fail it fast instead of queueing ingestion behind it.
+    let production_result = migration::run_migrations_through(&pool, 56).await;
+    let started = std::time::Instant::now();
+    let blocked_0057 = migration::run_migrations(&pool).await;
+    let blocked_for = started.elapsed();
     sqlx::query(insert)
         .bind(community)
         .bind(channel)
@@ -310,6 +315,15 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
     assert!(
         production_result.is_ok(),
         "production migrator must preserve ingestion progress: {production_result:?}"
+    );
+    let blocked_0057 = blocked_0057.expect_err("0057 cannot take thread_metadata under a writer");
+    assert!(
+        blocked_0057.to_string().contains("lock timeout"),
+        "0057 must fail on its lock budget: {blocked_0057}"
+    );
+    assert!(
+        blocked_for < std::time::Duration::from_secs(4),
+        "{blocked_for:?}"
     );
     assert_eq!(version, 56);
     assert_eq!(final_oid, oid, "prebuild must not be replaced");
