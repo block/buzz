@@ -1696,20 +1696,21 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     .execute(&mut **tx)
                     .await?;
 
-                    if let Some(root_id) = meta.root_event_id {
-                        sqlx::query(
-                            r#"
-                            UPDATE thread_metadata
-                            SET descendant_count = descendant_count + 1
-                            WHERE community_id = $1 AND event_id = $2
-                            "#,
-                        )
-                        .bind(community_id.as_uuid())
-                        .bind(root_id)
-                        .execute(&mut **tx)
-                        .await?;
-                    }
                     let root = meta.root_event_id.unwrap_or(pid);
+                    sqlx::query(
+                        r#"
+                        UPDATE thread_metadata
+                        SET descendant_count = descendant_count + $3::int,
+                            last_reply_received_at = GREATEST(last_reply_received_at, $4)
+                        WHERE community_id = $1 AND event_id = $2
+                        "#,
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(root)
+                    .bind(i32::from(meta.root_event_id.is_some()))
+                    .bind(received_at)
+                    .execute(&mut **tx)
+                    .await?;
                     crate::personal_read::record_reply(
                         tx,
                         community_id,

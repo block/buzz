@@ -154,7 +154,7 @@ async fn late_arrival_with_old_author_time_is_unread() {
         states(&db, community, &actor, channel, &[&read, &late]).await,
         ["read", "unread"]
     );
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 1);
+    assert!(sidebar(&db, community, &actor).await.unread);
 }
 
 #[tokio::test]
@@ -179,7 +179,7 @@ async fn future_dated_anchor_does_not_swallow_later_arrivals() {
         states(&db, community, &actor, channel, &[&earlier, &ahead, &later]).await,
         ["read", "read", "unread"]
     );
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 1);
+    assert!(sidebar(&db, community, &actor).await.unread);
 }
 
 /// Marking the sidebar's own latest message must clear the badge even when the
@@ -192,7 +192,7 @@ async fn mark_as_read_with_the_sidebar_anchor_clears_a_late_arrival() {
     arrive(&pool, community, &first, now - 60).await;
     post(&db, &pool, community, channel, now + 1, now - 40).await;
     post(&db, &pool, community, channel, now - 600, now - 30).await;
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 3);
+    assert!(sidebar(&db, community, &actor).await.unread);
 
     let anchor = sidebar(&db, community, &actor)
         .await
@@ -200,7 +200,7 @@ async fn mark_as_read_with_the_sidebar_anchor_clears_a_late_arrival() {
         .expect("a channel with messages has a latest message");
     apply(&db, community, &actor, mark_channel_read(channel, anchor)).await;
 
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
+    assert!(!sidebar(&db, community, &actor).await.unread);
 }
 
 #[tokio::test]
@@ -248,7 +248,7 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
         .await
         .unwrap();
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.unread_thread_count), (2, 1));
+    assert_eq!((row.unread, row.attention, row.threads.len()), (false, true, 1));
     assert_eq!(row.threads.len(), 1);
 
     let root_id = root.id.to_hex();
@@ -262,7 +262,7 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
     .await;
 
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!((row.unread, row.unread_thread_count), (0, 0));
+    assert_eq!((row.unread, row.attention, row.threads.len()), (false, false, 0));
     assert!(row.threads.is_empty());
 }
 
@@ -283,11 +283,11 @@ async fn mark_as_read_clears_a_late_arrival_behind_the_latest_probe() {
         .latest_message_id
         .unwrap();
     apply(&db, community, &actor, mark_channel_read(channel, anchor)).await;
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
+    assert!(!sidebar(&db, community, &actor).await.unread);
 
     let late = post(&db, &pool, community, channel, now - 600, now - 10).await;
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.unread, 1);
+    assert!(row.unread);
     assert_eq!(row.latest_message_id, Some(late.id.to_hex()));
     apply(
         &db,
@@ -296,7 +296,7 @@ async fn mark_as_read_clears_a_late_arrival_behind_the_latest_probe() {
         mark_channel_read(channel, late.id.to_hex()),
     )
     .await;
-    assert_eq!(sidebar(&db, community, &actor).await.unread, 0);
+    assert!(!sidebar(&db, community, &actor).await.unread);
 }
 
 /// Reactions never fill the latest probe.
@@ -321,7 +321,7 @@ async fn latest_message_behind_newer_reactions_is_found() {
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(row.latest_message_id, Some(only.id.to_hex()));
     assert_eq!(row.latest_message_at, Some((now - 600) as i64));
-    assert_eq!(row.unread, 1);
+    assert!(row.unread);
 }
 
 /// Store `event` as having arrived at exactly `seconds` plus `micros`. Built
@@ -355,7 +355,7 @@ async fn arrive_exact(
 
 /// Two messages with the same author time arriving within one second; marks
 /// the one at `pick` and returns both channel states.
-async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, u32) {
+async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, bool) {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     let second = post(&db, &pool, community, channel, now, now).await;
@@ -383,7 +383,7 @@ async fn mark_within_one_second(micros: [u32; 2], pick: usize) -> (Vec<String>, 
 async fn arrivals_one_microsecond_apart_in_the_same_second_are_ordered() {
     assert_eq!(
         mark_within_one_second([500_000, 500_001], 0).await,
-        (vec!["read".to_owned(), "unread".to_owned()], 1)
+        (vec!["read".to_owned(), "unread".to_owned()], true)
     );
 }
 
@@ -395,7 +395,7 @@ async fn marking_either_of_two_identical_arrivals_reads_both() {
     for pick in [0, 1] {
         assert_eq!(
             mark_within_one_second([500_000, 500_000], pick).await,
-            (vec!["read".to_owned(), "read".to_owned()], 0),
+            (vec!["read".to_owned(), "read".to_owned()], false),
             "marked index {pick}"
         );
     }

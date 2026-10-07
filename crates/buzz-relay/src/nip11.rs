@@ -88,8 +88,6 @@ pub struct BuzzV1Descriptor {
     pub version: u32,
     /// Relay-relative API prefix; callers retain the requesting origin.
     pub base_path: String,
-    /// Unread counts stop here: a count equal to the cap means at least it.
-    pub unread_cap: u32,
     /// Maximum joined channels per sidebar page.
     pub max_channels: usize,
     /// Maximum independent write intents per request.
@@ -391,12 +389,11 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         if state.config.buzz_v1_enabled {
             use buzz_db::personal_read::{
                 ELIGIBLE_KINDS, MAX_CHANNELS, MAX_CONTEXTS, MAX_CONTEXT_MESSAGES, MAX_INTENTS,
-                MAX_THREAD_SUMMARIES, UNREAD_CAP,
+                MAX_THREAD_SUMMARIES,
             };
             info.buzz_v1 = Some(BuzzV1Descriptor {
                 version: 1,
                 base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
-                unread_cap: UNREAD_CAP,
                 max_channels: MAX_CHANNELS,
                 max_intents: MAX_INTENTS,
                 max_contexts: MAX_CONTEXTS,

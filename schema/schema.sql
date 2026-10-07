@@ -559,6 +559,7 @@ CREATE TABLE thread_metadata (
     descendant_count        INT NOT NULL DEFAULT 0,
     last_reply_at           TIMESTAMPTZ,
     broadcast               BOOLEAN NOT NULL DEFAULT FALSE,
+    last_reply_received_at  TIMESTAMPTZ,
     PRIMARY KEY (community_id, event_created_at, event_id),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
 );

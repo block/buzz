@@ -464,7 +464,7 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     let d = &doc["buzz_v1"];
                     assert_eq!(d["version"], 1);
                     assert_eq!(d["base_path"], "/buzz/v1");
-                    assert_eq!(d["unread_cap"], 99);
+                    assert!(d.get("unread_cap").is_none());
                     assert!(d.get("retention_seconds").is_none());
                     assert_eq!(d["max_channels"], buzz_db::personal_read::MAX_CHANNELS);
                     assert_eq!(d["max_intents"], buzz_db::personal_read::MAX_INTENTS);

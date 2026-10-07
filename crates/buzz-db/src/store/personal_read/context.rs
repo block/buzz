@@ -108,9 +108,9 @@ impl Db {
                         let thread = row
                             .try_get::<Option<Vec<u8>>, _>("root_event_id")?
                             .filter(|r| r != &message_id);
-                        let on_timeline = thread.is_none()
-                            || (row.try_get::<Option<i32>, _>("depth")? == Some(1)
-                                && row.try_get::<Option<bool>, _>("broadcast")? == Some(true));
+                        let broadcast_reply = row.try_get::<Option<i32>, _>("depth")? == Some(1)
+                            && row.try_get::<Option<bool>, _>("broadcast")? == Some(true);
+                        let on_timeline = thread.is_none() || broadcast_reply;
                         // A thread context holds its replies, not its root; a
                         // broadcast reply belongs to both of its contexts.
                         let in_context = if root.is_empty() {
@@ -140,6 +140,7 @@ impl Db {
                                 &row.try_get::<String, _>("channel_type")?,
                                 &actor_hex,
                                 &tags,
+                                broadcast_reply,
                             );
                             match position {
                                 None => MessageReadState::NotCounted,
