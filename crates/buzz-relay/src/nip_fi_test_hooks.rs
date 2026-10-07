@@ -195,14 +195,28 @@ make_hook!(audio_auth_verify_hook, before_auth_verify);
 // `check_cancel!` fence. Arms cancel here → proves the cleanup branch
 // (`room.remove_peer` + `cleanup_if_empty`) runs before the handler returns.
 make_hook!(audio_membership_check_hook, before_membership_check);
+// `before_git_membership`: fires in the Git transport after NIP-FI admission,
+// immediately before the relay membership lookup. Closing the pool here makes
+// that lookup fail with the tenant already bound.
+make_hook!(git_membership_hook, before_git_membership);
 make_hook!(audio_membership_lock_hook, before_membership_lock);
 make_hook!(audio_participant_commit_hook, before_participant_commit);
+// `before_audio_refusal_frames`: fires in `audio/handler.rs` once a NIP-42
+// failure or relay-membership refusal is decided, before its frames are
+// written. `before_join_refusal_rollback`: fires in `commit_participant_join`
+// once the early archived check refuses, before `tx.rollback()`. A test holds
+// either window to prove the shadow session already retired.
+make_hook!(audio_refusal_frames_hook, before_audio_refusal_frames);
+make_hook!(join_refusal_rollback_hook, before_join_refusal_rollback);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
 make_hook!(audio_add_peer_hook, after_add_peer);
 // `before_lease_permit`: fires in `handle_active_audio_connection` immediately
 // before the effect permit that covers join-owner resolution. Cancelling here
 // proves the resolver (and its lease CAS) never runs without a permit.
 make_hook!(audio_lease_permit_hook, before_lease_permit);
+// `before_owner_permit`: fires in `handle_active_audio_connection` immediately
+// before the effect permit that covers a delegated agent's owner-link write.
+make_hook!(audio_owner_permit_hook, before_owner_permit);
 // `after_directory_cas`: fires in `SessionDirectory::acquire` once the Redis
 // CAS reply is in hand and before the serving-write guard's post-write
 // verification, so a test can stall that verification after the lease landed.
@@ -218,6 +232,23 @@ make_hook!(directory_acquire_hook, after_directory_acquire);
 // attempt a concurrent archive UPDATE here to prove it blocks (55P03) and is
 // serialized against the join commit.
 make_hook!(audio_archive_recheck_hook, before_archive_recheck);
+
+// ── Deny-set admission hooks ───────────────────────────────────────────────
+// `before_deny_set_check`: fires in both the root WS auth handler and the audio
+// handler after the proven identity is registered and before `is_denied`, so a
+// straddle witness can insert a deny entry in that window.  [FI-TRACE-DENY-SET]
+make_hook!(deny_set_check_hook, before_deny_set_check);
+
+// `after_deny_set_check_passed`: fires in the audio handler after the deny-set
+// check completes without denying.  Used by `w_audio_deny_absent`.
+make_hook!(
+    audio_after_deny_check_passed_hook,
+    after_deny_set_check_passed
+);
+
+// `handlers/auth.rs::admitted_owner`, after the stored-owner read returns and
+// before the caller records it. A test links the owner here to race admission.
+make_hook!(stored_owner_read_hook, after_stored_owner_read);
 
 // ── Publication-attempt counter ────────────────────────────────────────────
 // `before_event_publish`: fires immediately before `state.pubsub.publish_event`

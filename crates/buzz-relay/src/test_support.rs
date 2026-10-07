@@ -1,5 +1,20 @@
 const DEFAULT_DATABASE_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
+/// Serialize lib tests whose assertions depend on which tracing dispatchers
+/// are live: log-capture and callsite-interest tests, and tests that fire the
+/// callsites they assert on. tracing-core caches each callsite's interest
+/// process-wide from whichever dispatchers are live when it is first hit or
+/// rebuilt, so a parallel test's dispatcher (or a thread with none) can enable
+/// or disable another test's callsites. Not reentrant; take it once per test.
+/// Two async sites install a dispatcher without it, because the guard would be
+/// held across `.await`: `router.rs`'s otel-export test and the
+/// `pause_after_aux_page` helper in
+/// `api/bridge/thread_window/postgres_tests/failure_postgres_tests.rs`.
+pub(crate) fn tracing_dispatch_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Resolve the database URL shared by PostgreSQL-backed relay tests.
 pub(crate) fn database_url() -> String {
     std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -105,4 +120,34 @@ pub(crate) fn run_exact_test_child(test_name: &str, child_env: &str) {
         output.contains("running 1 test") && output.contains(test_name),
         "exact selector did not run the intended test {test_name}:\n{output}"
     );
+}
+
+/// A database handle on which only restriction-state reads fail: its
+/// `search_path` puts a schema first whose `community_bans` is a view that
+/// errors when read, so every other table resolves to `public` as normal.
+/// Returns the handle, an admin pool, and the schema to drop afterwards.
+#[cfg(test)]
+pub(crate) async fn restriction_lookup_failing_db() -> (buzz_db::Db, sqlx::PgPool, String) {
+    use sqlx::postgres::PgConnectOptions;
+    let url = database_url();
+    let admin = sqlx::PgPool::connect(&url)
+        .await
+        .expect("PostgreSQL must be available");
+    let schema = format!("ban_lookup_fails_{}", uuid::Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA {schema}; \
+         CREATE VIEW {schema}.community_bans AS \
+         SELECT * FROM public.community_bans WHERE 1 / (SELECT count(*) * 0 FROM public.communities) = 1;"
+    )))
+    .execute(&admin)
+    .await
+    .expect("create failing restriction schema");
+    let options = url
+        .parse::<PgConnectOptions>()
+        .expect("database url")
+        .options([("search_path", format!("{schema}, public"))]);
+    let pool = sqlx::PgPool::connect_with(options)
+        .await
+        .expect("failing restriction pool");
+    (buzz_db::Db::from_pool(pool), admin, schema)
 }

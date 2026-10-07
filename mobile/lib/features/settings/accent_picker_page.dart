@@ -24,11 +24,12 @@ class AccentPickerPage extends ConsumerWidget {
       useUtilitySurfaceTheme: true,
       appBar: const FrostedAppBar(
         centerTitle: true,
+        nativeLargeTitle: true,
         title: Text('Accent Color'),
       ),
       body: ListView(
         padding: EdgeInsets.only(
-          top: frostedAppBarHeight(context),
+          top: frostedAppBarHeight(context, nativeLargeTitle: true),
           bottom: Grid.xs,
         ),
         children: [

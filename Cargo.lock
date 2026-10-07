@@ -1067,6 +1067,7 @@ dependencies = [
  "base64 0.22.1",
  "buzz-core",
  "chrono",
+ "dashmap",
  "futures-util",
  "hex",
  "jsonwebtoken",
@@ -1240,7 +1241,7 @@ dependencies = [
  "nix 0.31.3",
  "nostr 0.44.7",
  "reqwest 0.13.4",
- "rmcp 1.8.0",
+ "rmcp 3.4.1",
  "rustls",
  "schemars 1.2.1",
  "serde",
@@ -1320,10 +1321,12 @@ dependencies = [
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
+ "buzz-core",
  "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "nostr 0.44.7",
  "parking_lot",
  "secp256k1 0.31.1",
  "serde_json",
@@ -1331,6 +1334,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
+ "zeroize",
 ]
 
 [[package]]
@@ -1342,6 +1346,7 @@ dependencies = [
  "futures-util",
  "hex",
  "nostr 0.44.7",
+ "rustls",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -1462,6 +1467,7 @@ dependencies = [
  "rand 0.10.1",
  "redis",
  "reqwest 0.13.4",
+ "ring",
  "rust-s3",
  "rustls",
  "serde",
@@ -5552,7 +5558,7 @@ dependencies = [
  "rand 0.10.1",
  "regex-lite",
  "reqwest 0.13.4",
- "rmcp 3.2.0",
+ "rmcp 3.4.1",
  "rpassword",
  "rustls",
  "same-file",
@@ -5664,7 +5670,7 @@ dependencies = [
  "prost 0.14.3",
  "prost-build 0.14.3",
  "protoc-bin-vendored",
- "rmcp 3.2.0",
+ "rmcp 3.4.1",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -7655,6 +7661,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "process-wrap"
+version = "10.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f21b97672d2dc848e7b25701ab4535618b92f4861c13cc3f7f7bed52ad3c8da"
+dependencies = [
+ "futures",
+ "indexmap 2.14.0",
+ "nix 0.31.3",
+ "tokio",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "proptest"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8563,14 +8583,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "futures",
- "pastey",
  "pin-project-lite",
- "process-wrap",
- "rmcp-macros 1.8.0",
- "schemars 1.2.1",
+ "process-wrap 9.1.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -8582,9 +8598,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.2.0"
+version = "3.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b6914fac0be956fe704a38239c3f44a9f841d1b06a5713d2f638065593f5b5"
+checksum = "5b6317cd8c13e3ec9033cf2aa5aa92cd743f0f4f8a93cddc42ea0ae6ce3b8898"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -8597,10 +8613,10 @@ dependencies = [
  "indexmap 2.14.0",
  "pastey",
  "pin-project-lite",
- "process-wrap",
+ "process-wrap 10.0.1",
  "rand 0.10.1",
  "reqwest 0.13.4",
- "rmcp-macros 3.2.0",
+ "rmcp-macros",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -8616,22 +8632,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "1.8.0"
+version = "3.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aad0035b69380782d78ea95b508327e6deaa2235909053e596eea8f27b5e1d5"
-dependencies = [
- "darling 0.23.0",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "rmcp-macros"
-version = "3.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdf1c49bd4d52014b94db0877410db273c2008f01628b0252a2e9460ad9b7fda"
+checksum = "d2ee366004e5f87c103be91c6c09337811517ae8d2f919ece9da7c21444b85c5"
 dependencies = [
  "darling 0.24.1",
  "proc-macro2",

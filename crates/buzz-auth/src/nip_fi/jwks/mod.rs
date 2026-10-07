@@ -577,7 +577,7 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
         })
     }
 
-    /// **Test-only.** Construct with an injectable clock so tests can advance
+    /// **Test/dev-only.** Construct with an injectable clock so tests can advance
     /// `now` past snapshot hard deadlines without wall-clock sleep.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_with_clock(
@@ -604,6 +604,37 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
             fetcher: Arc::new(fetcher),
             now_fn,
         })
+    }
+
+    /// **Test/dev-only.** Directly seed a pre-built JWKS snapshot for `issuer`
+    /// without making an HTTP request.  Used by route integration tests to
+    /// construct a warmed `ProductionJwksSource` in a hermetic environment.
+    ///
+    /// Panics if `issuer` is not registered in the source.
+    #[cfg(any(test, feature = "dev"))]
+    pub async fn seed_snapshot_for_test(&self, issuer: &str, jwks: jsonwebtoken::jwk::JwkSet) {
+        use sha2::{Digest, Sha256};
+        let body = serde_json::to_string(&jwks).expect("serialise test JWKS");
+        let content_digest: [u8; 32] = Sha256::digest(body.as_bytes()).into();
+        let config = self.configs.get(issuer).expect("issuer must be registered");
+        let now = (self.now_fn)();
+        let deadline_secs = i64::try_from(config.contract.key_snapshot_hard_deadline_seconds())
+            .unwrap_or(i64::MAX / 2);
+        let hard_deadline = now
+            + chrono::Duration::try_seconds(deadline_secs)
+                .unwrap_or_else(|| chrono::Duration::seconds(i64::MAX / 2));
+        let key_set =
+            super::verifier::AssertionKeySet::new(issuer.to_owned(), 1, jwks, hard_deadline)
+                .expect("valid test JWKS");
+        let snapshot = CachedSnapshot {
+            key_set,
+            fetched_at: now,
+            hard_deadline,
+            content_digest,
+        };
+        let slot = self.states.get(issuer).expect("issuer must be registered");
+        slot.refresh.lock().await.generation_counter = 1;
+        *slot.write_published() = Some(snapshot);
     }
 
     async fn fetch_fresh(

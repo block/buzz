@@ -1,5 +1,5 @@
 use crate::shim::Shim;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -161,7 +161,7 @@ pub async fn run(
 
     let bash = match &state.resolved_shell {
         Ok((path, _)) => path.clone(),
-        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
+        Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
     };
     let shell_arg = shell_flag(&bash);
     let mut cmd = Command::new(&bash);
@@ -179,7 +179,7 @@ pub async fn run(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "failed to spawn shell: {e}"
             ))]));
         }
@@ -230,7 +230,7 @@ pub async fn run(
             }
             stdout_handle.abort();
             stderr_handle.abort();
-            return Ok(CallToolResult::error(vec![Content::text("cancelled")]));
+            return Ok(CallToolResult::error(vec![ContentBlock::text("cancelled")]));
         }
         r = tokio::time::timeout(timeout_dur, child.wait()) => match r {
         Ok(Ok(s)) => (Some(s), false),
@@ -316,7 +316,7 @@ pub async fn run(
     });
     let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into());
     kill_group.disarm();
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
 /// The flag used to pass a command string to the shell.

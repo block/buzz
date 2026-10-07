@@ -79,14 +79,7 @@ class _SystemMessageRow extends HookConsumerWidget {
       }
     }
 
-    void openReactionPopover(Rect anchorRect) {
-      final spotlightRenderObject = spotlightKey.currentContext
-          ?.findRenderObject();
-      final spotlightRect =
-          spotlightRenderObject is RenderBox && spotlightRenderObject.hasSize
-          ? spotlightRenderObject.localToGlobal(Offset.zero) &
-                spotlightRenderObject.size
-          : anchorRect;
+    void openReactionPopover(MessageLongPressDetails details) {
       showMessageActions(
         context: context,
         ref: ref,
@@ -97,7 +90,8 @@ class _SystemMessageRow extends HookConsumerWidget {
         currentPubkey: currentPubkey,
         isMember: isMember,
         isArchived: isArchived,
-        anchorRect: spotlightRect,
+        anchorRect: details.anchorRect,
+        captureAnchorSnapshot: details.captureSnapshot,
         popoverSpotlightPadding: EdgeInsets.fromLTRB(
           Grid.xxs,
           Grid.xxs,
@@ -113,7 +107,8 @@ class _SystemMessageRow extends HookConsumerWidget {
       clipBehavior: Clip.antiAlias,
       child: MessageLongPressInkWell(
         key: ValueKey('system-message-row-${message.id}'),
-        onLongPress: openReactionPopover,
+        onLongPressDetails: openReactionPopover,
+        snapshotKey: spotlightKey,
         borderRadius: BorderRadius.circular(Radii.md),
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
         child: Padding(
@@ -124,7 +119,7 @@ class _SystemMessageRow extends HookConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              KeyedSubtree(
+              RepaintBoundary(
                 key: spotlightKey,
                 child: groupedMembership != null
                     ? _MembershipSystemMessageContent(

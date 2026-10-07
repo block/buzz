@@ -70,6 +70,17 @@ class ComposeNotePage extends HookConsumerWidget {
     return FrostedScaffold(
       resizeToAvoidBottomInset: true,
       appBar: FrostedAppBar(
+        nativeTitle: _isReply ? 'Reply' : 'New note',
+        nativeActions: [
+          IosNavigationAction(
+            label: isSending.value
+                ? 'Sending…'
+                : _isReply
+                ? 'Reply'
+                : 'Post',
+            onPressed: hasText && !isSending.value ? submit : null,
+          ),
+        ],
         leading: TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),

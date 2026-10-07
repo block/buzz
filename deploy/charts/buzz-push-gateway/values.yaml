@@ -10,6 +10,8 @@ existingSecret: buzz-push-gateway
 # DDL-capable credentials are used only by the pre-install/pre-upgrade migration
 # Job. Runtime DATABASE_URL in existingSecret should have DML-only privileges.
 migration:
+  # Applies only to migration Pods, independently of runtime podAnnotations.
+  podAnnotations: {}
   existingSecret: buzz-push-gateway-migrations
   databaseUrlKey: DATABASE_URL
   # Existing LOGIN role used by runtime DATABASE_URL. Migrations grant it only
@@ -35,6 +37,9 @@ appAttestRoot:
   secretKey: app-attest-root.pem
 service:
   port: 8080
+# Optional Deployment metadata, independent of runtime and migration Pods.
+# The chart owns buzz.block.xyz/release-namespace and external-network-policy.
+deploymentAnnotations: {}
 podAnnotations: {}
 httpRoute:
   # Disabled by default so a generic install cannot claim an unattached route.
@@ -49,6 +54,8 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 networkPolicy:
+  # Parent chart must supply this named replacement when enabled is false.
+  externalPolicyName: ""
   enabled: true
   # Kubernetes NetworkPolicy cannot allow DNS names. Production operators must
   # narrow these CIDRs to their PostgreSQL/NAT destinations where supported.
@@ -95,3 +102,8 @@ topologySpreadConstraints:
     labelSelector:
       matchLabels:
         app.kubernetes.io/name: buzz-push-gateway
+
+# Runtime-only mesh integration. Migration settings remain separate.
+podLabels: {}
+serviceAccountName: ""
+terminationGracePeriodSeconds: 60

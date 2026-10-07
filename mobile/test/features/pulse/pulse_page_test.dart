@@ -6,6 +6,8 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -25,6 +27,102 @@ class _UserCache extends UserCacheNotifier {
 }
 
 void main() {
+  testWidgets('iOS tab changes reset collapsed title and timeline together', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/987');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final author = '1' * 64;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(
+            () => _UserCache({
+              author: UserProfile(pubkey: author, displayName: 'Alice'),
+            }),
+          ),
+          myPubkeyProvider.overrideWithValue(null),
+          agentPubkeysProvider.overrideWith((ref) async => const []),
+          globalNotesProvider.overrideWith(
+            (ref) async => List.generate(
+              30,
+              (i) => UserNote(
+                id: 'note-$i',
+                pubkey: author,
+                createdAt: 1759233600,
+                content: 'Timeline note $i',
+                tags: const [],
+              ),
+            ),
+          ),
+          likedNotesProvider.overrideWith((ref) async => const []),
+          noteReactionsProvider.overrideWith((ref, key) async => const {}),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const PulsePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    void bindNative() => tester
+        .widget<UiKitView>(find.byType(UiKitView))
+        .onPlatformViewCreated!(987);
+    bindNative();
+    await tester.pump();
+    final expandedHeight = tester.getSize(find.byType(UiKitView)).height;
+    final expandedTabsTop = tester.getTopLeft(find.text('Everyone')).dy;
+    final row = find.text('Timeline note 1');
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView).last),
+    );
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    for (var i = 0; i < 5; i++) {
+      final before = tester.getTopLeft(row).dy;
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump();
+      expect(before - tester.getTopLeft(row).dy, closeTo(20, 1));
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView).last, const Offset(0, -400));
+    await tester.pumpAndSettle();
+    expect(calls.where((c) => c.method == 'scroll').last.arguments, 52);
+    expect(
+      tester.getSize(find.byType(UiKitView)).height,
+      lessThan(expandedHeight),
+    );
+    expect(tester.getTopLeft(find.text('Everyone')).dy, expandedTabsTop - 52);
+    await tester.tap(find.text('Liked'));
+    await tester.pumpAndSettle();
+    bindNative();
+    await tester.pump();
+    expect(calls.where((c) => c.method == 'scroll').last.arguments, 0);
+    expect(tester.getSize(find.byType(UiKitView)).height, expandedHeight);
+    expect(tester.getTopLeft(find.text('Everyone')).dy, expandedTabsTop);
+    await tester.tap(find.text('Everyone'));
+    await tester.pumpAndSettle();
+    bindNative();
+    await tester.pump();
+    expect(calls.where((c) => c.method == 'scroll').last.arguments, 0);
+    expect(find.text('Timeline note 0'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('Everyone')).dy, expandedTabsTop);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('same-name reply targets on different notes are told apart', (
     tester,
   ) async {

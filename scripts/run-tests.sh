@@ -87,6 +87,11 @@ run_unit_tests() {
   run_test_step "buzz-auth unit tests" \
     cargo test -p buzz-auth --lib -- --nocapture
 
+  # S4 cross-pod NIP-FI disconnect payload tests (infra-free). Mirrors
+  # `just test-unit`.
+  run_test_step "buzz-pubsub conn_control NIP-FI tests" \
+    cargo test -p buzz-pubsub --lib conn_control::tests::nip_fi_disconnect_ -- --nocapture
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -105,6 +110,10 @@ run_unit_tests() {
   run_test_step "buzz-acp tests" \
     cargo test -p buzz-acp -- --nocapture
 
+  # Keep MCP lifecycle coverage in step with the nextest path.
+  run_test_step "buzz-dev-mcp tests" \
+    cargo test -p buzz-dev-mcp -- --nocapture
+
 
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
   # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
@@ -114,6 +123,8 @@ run_unit_tests() {
   # separate isolated-DB gate, so --lib keeps this step infra-free.
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
+  run_test_step "buzz-db source-policy tests" \
+    cargo test -p buzz-db --test observability_source -- --nocapture
 
   run_test_step "buzz-media storage snapshot serialization test" \
     cargo test -p buzz-media --lib bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys -- --exact --nocapture
@@ -186,6 +197,25 @@ run_unit_tests() {
   run_test_step "buzz-relay NIP-FI session tests" \
     cargo test -p buzz-relay --lib nip_fi_session::tests:: -- --nocapture
 
+  run_test_step "buzz-relay NIP-FI shadow recorder tests" \
+    cargo test -p buzz-relay --lib nip_fi_shadow::tests:: -- --nocapture
+
+  run_test_step "buzz-relay NIP-FI shadow session tests" \
+    cargo test -p buzz-relay --lib nip_fi_shadow_session::tests:: -- --nocapture
+
+  run_test_step "buzz-relay startup step tests" \
+    cargo test -p buzz-relay --lib startup_steps::tests:: -- --nocapture
+
+  # telemetry and config tests mutate process env. libtest runs one process
+  # with many threads (nextest, used by `just test-unit`, isolates each test),
+  # so run them single-threaded here. `--skip` keeps the substring filter
+  # `config::tests::` from also selecting nip_fi_config, which runs above.
+  run_test_step "buzz-relay telemetry tests" \
+    cargo test -p buzz-relay --lib telemetry::tests:: -- --test-threads=1 --nocapture
+
+  run_test_step "buzz-relay config tests" \
+    cargo test -p buzz-relay --lib config::tests:: -- --skip nip_fi_config:: --test-threads=1 --nocapture
+
   # Mirror the NIP-FI (S3) stanza from `just test-unit`: module filters, then
   # each exact name. Keep this list in step with that stanza's `test(=...)`s.
   run_test_step "buzz-relay NIP-FI config tests" \
@@ -214,6 +244,9 @@ run_unit_tests() {
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
+  run_test_step "buzz-relay NIP-FI shared core tests" \
+    cargo test -p buzz-relay --lib nip_fi_core::tests:: -- --nocapture
+
   run_test_step "buzz-relay NIP-FI HTTP ingress tests" \
     cargo test -p buzz-relay --lib nip_fi_http::tests:: -- --nocapture
 
@@ -225,6 +258,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
+
+  run_test_step "buzz-relay NIP-FI admin API tests" \
+    cargo test -p buzz-relay --lib api::nip_fi:: -- --nocapture
 
   run_test_step "buzz-relay auth metrics contract tests" \
     cargo test -p buzz-relay --lib metrics::contract_tests:: -- --nocapture
@@ -249,13 +285,29 @@ run_unit_tests() {
     connection::tests::f3_root_pre_built_expired_gate_terminates_connection
     handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated
     handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable
+    handlers::auth::tests::fi_root_authorization_denied_rows_emit_identical_frames
     handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected
     handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path
+    handlers::auth::tests::shadow_root_auth_records_pairing_denial
+    handlers::auth::tests::shadow_root_invalid_nip42_retires_without_record
     handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence
-    handlers::event::tests::p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack
+    handlers::event::tests::fanout_access::owner_only_kinds_keep_only_the_owner
+    handlers::event::tests::pubsub_fanout::pubsub_owner_only_kinds_reach_only_the_owner
+    handlers::event::tests::pubsub_fanout::dispatch_owner_only_kinds_reach_only_the_owner
     handlers::req::tests::p1a_huddle_liveness_req_barrier_expiry_blocks_query_and_emission
     state::tests::f3_cancellation_during_check_terminates_socket_without_waiting_for_check
     state::tests::on_not_run_runs_once_on_each_deny_arm_and_never_on_admit
+    state::tests::conn_manager_disconnect_nip_fi_ignores_unproven_connection
+    state::tests::conn_manager_disconnect_nip_fi_is_issuer_scoped
+    state::tests::conn_manager_disconnect_nip_fi_sets_authorization_denied_reason
+    state::tests::nip_fi_disconnect_audio_is_issuer_scoped
+    state::tests::nip_fi_disconnect_closes_proven_audio_socket_and_sends_policy_close_reason
+    state::tests::nip_fi_disconnect_closes_target_audio_only_and_preserves_collocated_peer
+    state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket
+    state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket
+    state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason
+    state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame
+    state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels
   )
   local name
   for name in "${nip_fi_exact_tests[@]}"; do
@@ -265,6 +317,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
+
+  run_test_step "buzz-relay boot lifecycle tests" \
+    cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

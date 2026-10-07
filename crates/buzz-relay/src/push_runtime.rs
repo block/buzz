@@ -350,7 +350,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
-        match state.db.usage_community_hosts().await {
+        match state.db.active_community_hosts().await {
             Ok(communities) => {
                 for community in communities {
                     let community = buzz_core::CommunityId::from_uuid(community.id);

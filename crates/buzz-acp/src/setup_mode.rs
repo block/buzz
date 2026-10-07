@@ -590,7 +590,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(crate::config::default_mention_kinds);
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -953,7 +953,9 @@ mod tests {
         )
         .await
         .expect("asker should pass the setup author gate");
-        let rules = vec![mentions_rule(vec![KIND_STREAM_MESSAGE_EDIT])];
+        // Production setup rules with default kinds, so dropping kind:40003
+        // from the setup admission path fails these tests.
+        let rules = default_setup_rules();
         let (publisher, mut published) = RelayEventPublisher::test_pair();
         let payload = SetupPayload {
             agent_name: "Fizz".into(),
@@ -1034,6 +1036,45 @@ mod tests {
         assert!(setup_listener_admits(&build(&other, true), &agent));
         assert!(!setup_listener_admits(&build(&other, false), &agent));
         assert!(!setup_listener_admits(&build(&agent_keys, true), &agent));
+    }
+
+    fn default_setup_rules() -> Vec<filter::SubscriptionRule> {
+        let mut config = crate::build_mcp_servers_tests::test_config();
+        config.kinds_override = None;
+        build_setup_subscription_rules(&config)
+    }
+
+    /// The setup listener's full admission path (pre-gate plus the production
+    /// setup rules) admits an edit that newly mentions the agent and rejects
+    /// an edit that does not.
+    #[tokio::test]
+    async fn setup_rules_admit_only_edits_that_mention_the_agent() {
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let rules = default_setup_rules();
+        let channel_id = Uuid::new_v4();
+        let target = "ab".repeat(32);
+        let admitted = |event: nostr::Event| {
+            let rules = &rules;
+            let agent = agent.clone();
+            async move {
+                setup_listener_admits(&event, &agent)
+                    && filter::match_event(&event, channel_id, rules, &agent)
+                        .await
+                        .is_some()
+            }
+        };
+
+        let mentioned =
+            crate::edit_routing::test_support::edit_event(&target, &[["p", agent.as_str()]]);
+        assert!(
+            admitted(mentioned).await,
+            "a mention added by an edit must reach the setup nudge"
+        );
+        let unmentioned = crate::edit_routing::test_support::edit_event(&target, &[]);
+        assert!(
+            !admitted(unmentioned).await,
+            "an edit without the agent's p tag must not nudge"
+        );
     }
 
     #[test]

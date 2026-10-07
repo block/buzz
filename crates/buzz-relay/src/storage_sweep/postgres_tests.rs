@@ -12,7 +12,13 @@ fn observe_tick(
 ) -> (anyhow::Result<()>, HashMap<String, f64>) {
     let recorder = DebuggingRecorder::new();
     let result = metrics::with_local_recorder(&recorder, || {
-        futures::executor::block_on(run_storage_metrics_tick(db, state, mode, hosts, |_| true))
+        futures::executor::block_on(run_storage_metrics_tick(
+            db,
+            state,
+            mode,
+            Some(hosts),
+            |_| true,
+        ))
     });
     let values = recorder
         .snapshotter()

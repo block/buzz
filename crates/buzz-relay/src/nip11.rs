@@ -34,6 +34,9 @@ pub struct RelayInfo {
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
+    /// Opt-in, host-bound private accessory API; separate from legacy NIP-RS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buzz_v1: Option<BuzzV1Descriptor>,
     /// NIP-AR artifact query transport and enforced resource limits.
     pub artifacts: serde_json::Value,
     /// Relay operator's public key (hex), if published.
@@ -78,6 +81,30 @@ pub struct RelayInfo {
     pub federated_identity: Option<serde_json::Value>,
 }
 
+/// Private read-state accessory contract and enforced client request limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuzzV1Descriptor {
+    /// Accessory contract version, not a Nostr protocol number.
+    pub version: u32,
+    /// Relay-relative API prefix; callers retain the requesting origin.
+    pub base_path: String,
+    /// Author-time unread horizon; does not expire messages or frontiers.
+    pub retention_seconds: u32,
+    /// Maximum joined channels per sidebar page.
+    pub max_channels: usize,
+    /// Maximum independent write intents per request.
+    pub max_intents: usize,
+    /// Maximum explicit contexts per read request.
+    pub max_contexts: usize,
+    /// Maximum message selectors across one context request.
+    pub max_context_messages: usize,
+    /// Maximum unread-thread summaries per sidebar channel row.
+    pub max_thread_summaries: usize,
+    /// Message kinds that count as unread and as latest activity. Clients
+    /// classify live arrivals with this set instead of keeping a copy.
+    pub eligible_kinds: [i32; 4],
+}
+
 /// Public capability descriptor for relay-proxied GIF search.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GifDescriptor {
@@ -111,8 +138,9 @@ pub struct RelayLimitation {
     pub payment_required: bool,
     /// Whether writes are restricted to authorized pubkeys.
     pub restricted_writes: bool,
-    /// Whether NIP-FI federated identity assertions are required at upgrade.
-    /// Advertised `true` when the relay is in `Enforce` mode.
+    /// Whether the relay supports NIP-FI federated identity assertions.
+    /// Advertised `true` in `Enforce` and `Shadow` mode, so clients attach
+    /// evidence; in `Shadow` the relay evaluates it without requiring it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub federated_identity: bool,
     /// NIP-ER: how the relay delivers due reminders ("push" or "lazy").
@@ -249,6 +277,7 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            buzz_v1: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
@@ -345,7 +374,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
-    let advertise_fi = state.config.nip_fi.is_enforce();
+    let advertise_fi = state.config.nip_fi.mode.evaluates();
     let mut info = RelayInfo::build(
         relay_self.as_deref(),
         icon.as_deref(),
@@ -359,6 +388,23 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if state.config.buzz_v1_enabled {
+            use buzz_db::personal_read::{
+                ELIGIBLE_KINDS, MAX_CHANNELS, MAX_CONTEXTS, MAX_CONTEXT_MESSAGES, MAX_INTENTS,
+                MAX_THREAD_SUMMARIES,
+            };
+            info.buzz_v1 = Some(BuzzV1Descriptor {
+                version: 1,
+                base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
+                retention_seconds: state.config.buzz_v1_retention_seconds,
+                max_channels: MAX_CHANNELS,
+                max_intents: MAX_INTENTS,
+                max_contexts: MAX_CONTEXTS,
+                max_context_messages: MAX_CONTEXT_MESSAGES,
+                max_thread_summaries: MAX_THREAD_SUMMARIES,
+                eligible_kinds: ELIGIBLE_KINDS,
+            });
+        }
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,
             "community_id": tenant.community().as_uuid(),
@@ -474,6 +520,29 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 
 #[cfg(test)]
 mod tests {
+    // Clients attach evidence only when the relay advertises NIP-FI, so a
+    // shadow relay must serve enforce's exact document. Mutation: gating on
+    // `enforces()` makes shadow serve Off's document → RED.
+    #[tokio::test]
+    async fn shadow_serves_the_same_nip11_document_as_enforce() {
+        use buzz_auth::NipFiMode;
+        let base =
+            crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+        let mut docs = Vec::new();
+        for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
+            let mut state = (*base).clone();
+            let mut config = (*state.config).clone();
+            config.nip_fi.mode = mode;
+            state.config = std::sync::Arc::new(config);
+            docs.push(
+                serde_json::to_string(&super::nip11_document(&state, "relay.example").await)
+                    .unwrap(),
+            );
+        }
+        assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
+        assert_eq!(docs[2], docs[1]);
+    }
+
     use super::*;
 
     #[test]

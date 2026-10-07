@@ -109,14 +109,13 @@ async fn persist_command_event(
 
     let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
     let mut tx = db
-        .begin_event_write_transaction()
+        .begin_event_write_transaction(tenant.community())
         .await
-        .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
-    buzz_deletion::store(db)
-        .guard_transaction(&mut tx, tenant.community())
-        .await
-        .map_err(|error| {
-            IngestError::Rejected(format!("restricted: community writes are fenced: {error}"))
+        .map_err(|error| match error {
+            buzz_db::DbError::AccessDenied(_) => {
+                IngestError::Rejected(format!("restricted: community writes are fenced: {error}"))
+            }
+            error => IngestError::Internal(format!("error: begin transaction: {error}")),
         })?;
 
     let d_tag = buzz_db::event::extract_d_tag(event);
@@ -1599,7 +1598,7 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(tenant.community())
             .await
             .expect("begin legacy seed");
         let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(
