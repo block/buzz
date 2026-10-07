@@ -145,14 +145,20 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
 ];
 
-/// Kinds that require a result-level read gate beyond the filter-layer
-/// `#p` check: even a reader who knows an event id MUST match the event's
-/// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
-/// path for events whose existence must not be leaked.
+/// Kinds that require a result-level read gate beyond the filter layer:
+/// even a reader who knows an event id MUST be an authorized reader (the
+/// event's `#p`, or for NIP-AT attention also its author) to receive the
+/// event. This closes the kindless `{ids:[…]}` read path for events whose
+/// existence must not be leaked. The per-event predicate is
+/// `filter::reader_authorized_for_event`.
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_AGENT_ATTENTION,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.

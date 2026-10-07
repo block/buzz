@@ -67,7 +67,8 @@ A relay that supports this NIP:
 
 - MUST reject `kind:30173` unless it has exactly one `d` tag (64 lowercase hex), at most one `p` tag (64 lowercase hex), exactly one `-` tag, exactly one `alt` tag, no other tag, and NIP-44 v2 content.
 - MUST store it as a global (non-channel) addressable event.
-- MUST answer a filter that can match `kind:30173` only when `authors` contains only the authenticated pubkey, or `#p` contains only the authenticated pubkey. Filters with explicit `ids` are exempt. This applies to `REQ`, `COUNT` and search.
+- MUST answer a filter that can match `kind:30173` only when `authors` contains only the authenticated pubkey, or `#p` contains only the authenticated pubkey. Explicit `ids` do not exempt a filter: knowing an event ID is not authorization. This applies to `REQ`, `COUNT`, search and any HTTP query surface.
+- MUST deliver or count a stored `kind:30173` event only to its author or to the pubkey in its `p` tag, on every read path (history, live delivery, `COUNT`, search and HTTP), including filters with no `kinds`.
 - MUST keep a delete in effect. For each address it keeps the time of the newest delete and of the newest accepted version, and rejects:
   - an event dated at or before the newest delete, with `OK false` and the message `invalid: agent-attention address deleted at <t>`, where `<t>` is the delete's `created_at`;
   - an event that is older than the newest accepted version, or has the same `created_at` and a higher ID, with `invalid: agent-attention address has a newer version`.

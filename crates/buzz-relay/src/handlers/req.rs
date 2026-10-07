@@ -265,7 +265,7 @@ pub async fn handle_req(
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
             conn.send(RelayMessage::closed(
                 &sub_id,
-                "restricted: agent-engram reads require authors=[self] or #p=[self]",
+                AGENT_OWNER_READ_RESTRICTED_CLOSED,
             ));
             return;
         }
@@ -1547,6 +1547,10 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
     found_id
 }
 
+/// CLOSED reason when [`engram_filters_authorized`] rejects a filter.
+pub(crate) const AGENT_OWNER_READ_RESTRICTED_CLOSED: &str =
+    "restricted: agent-engram and agent-attention reads require authors=[self] or #p=[self]";
+
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
@@ -1597,9 +1601,12 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
 ///   - `#p` is non-empty and every entry equals the authed pubkey
 ///     (the owner reading engrams addressed to them).
 ///
-/// Filters with explicit `ids` are exempt — knowing the event id already
-/// implies authorization (the engram event id is itself derived from the
-/// signed envelope, which only the agent could have produced).
+/// Filters with explicit `ids` are exempt for NIP-AE engrams — knowing the
+/// event id already implies authorization (the engram event id is itself
+/// derived from the signed envelope, which only the agent could have
+/// produced). NIP-AT attention has no such exemption: a filter that names
+/// `KIND_AGENT_ATTENTION` must satisfy the gate even with `ids`, and kindless
+/// `ids` lookups are filtered per event by `reader_authorized_for_event`.
 ///
 /// Mixed-kind filters (e.g. `{kinds:[30174, 9]}`) are evaluated under this
 /// gate when one of those kinds is present; matching events of other kinds in
@@ -1608,8 +1615,13 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
 pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        // Specific-event lookups don't fish.
-        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        // Specific-event lookups don't fish — except for NIP-AT attention,
+        // where knowing an id is not authorization.
+        let names_attention = filter.kinds.as_ref().is_some_and(|ks| {
+            ks.iter()
+                .any(|k| u32::from(k.as_u16()) == buzz_core::kind::KIND_AGENT_ATTENTION)
+        });
+        if !names_attention && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
         }
 
@@ -3237,6 +3249,72 @@ mod tests {
             .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
             .id(id);
         assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_denies_attention_ids_lookup_without_reader_constraint() {
+        // NIP-AT: knowing an attention event id is not authorization. A filter
+        // naming the kind must still carry authors=[self] or #p=[self].
+        let (agent, owner, attacker) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let id = nostr::EventId::from_hex(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        )
+        .unwrap();
+        let kind = nostr::Kind::Custom(KIND_AGENT_ATTENTION as u16);
+        let by_id = Filter::new().kind(kind).id(id);
+        assert!(!engram_filters_authorized(
+            std::slice::from_ref(&by_id),
+            &attacker
+        ));
+        assert!(!engram_filters_authorized(
+            std::slice::from_ref(&by_id),
+            &agent
+        ));
+        let by_id_mixed = Filter::new()
+            .kinds([kind, nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16)])
+            .id(id);
+        assert!(!engram_filters_authorized(&[by_id_mixed], &attacker));
+        let owner_by_id = Filter::new().kind(kind).id(id).custom_tags(p_tag, [&owner]);
+        assert!(engram_filters_authorized(&[owner_by_id], &owner));
+        // A kindless ids lookup passes the filter gate; the per-event
+        // `event_visible_to_reader` check withholds the event instead.
+        let kindless = Filter::new().id(id);
+        assert!(engram_filters_authorized(&[kindless], &attacker));
+    }
+
+    #[test]
+    fn attention_event_visible_only_to_agent_and_owner() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let stranger_keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_AGENT_ATTENTION as u16),
+            "ciphertext",
+        )
+        .tags([
+            nostr::Tag::parse(["d", "opaque"]).unwrap(),
+            nostr::Tag::parse(["p", &owner_keys.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+        assert!(event_visible_to_reader(
+            &event,
+            &agent_keys.public_key().to_bytes()
+        ));
+        assert!(event_visible_to_reader(
+            &event,
+            &owner_keys.public_key().to_bytes()
+        ));
+        assert!(!event_visible_to_reader(
+            &event,
+            &stranger_keys.public_key().to_bytes()
+        ));
+        // COUNT must not use the fast SQL path for a kindless or attention
+        // filter unless #p pins the reader.
+        assert!(filter_can_match_result_gated_kinds(
+            &Filter::new().id(event.id)
+        ));
     }
 
     #[test]

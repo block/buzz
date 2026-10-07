@@ -5,6 +5,8 @@
 //! must run with `BUZZ_AGENT_ATTENTION_ENABLED=true`, as CI starts it):
 //! - only the agent (`authors=[self]`) and the owner (`#p=[self]`) can read
 //!   the kind, through `REQ` and `COUNT`;
+//! - a stranger who knows an event id still cannot read or count it, through
+//!   `REQ` history and live delivery, `COUNT`, and HTTP `/query` and `/count`;
 //! - the relay refuses a malformed envelope (no `-` tag, an extra tag) and
 //!   accepts an agent with no owner (no `p` tag);
 //! - the NIP-AT reader subscription gets the stored policy, no stored
@@ -134,6 +136,68 @@ fn reader_filters(agent: &Keys) -> Vec<Filter> {
     ]
 }
 
+fn relay_http_url() -> String {
+    relay_url()
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// POST `filters` to an HTTP bridge read endpoint as `reader`. Returns the
+/// status and the JSON body.
+async fn http_read(path: &str, reader: &Keys, filters: Vec<Filter>) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/{path}", relay_http_url()))
+        .header("X-Pubkey", reader.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .json(&filters)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .expect("http read");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.expect("parse http body"))
+}
+
+/// Expect `sid` to end in EOSE with no events, then close it.
+async fn expect_empty_eose(client: &mut BuzzTestClient, sid: &str) {
+    let events = client
+        .collect_until_eose(sid, Duration::from_secs(5))
+        .await
+        .expect("collect events");
+    assert!(
+        events.is_empty(),
+        "stranger received {} events",
+        events.len()
+    );
+}
+
+/// Expect a COUNT answer of zero (or a restricted refusal) on `sid`.
+async fn expect_zero_count(client: &mut BuzzTestClient, sid: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match client.recv_event(remaining).await.expect("relay reply") {
+            RelayMessage::Count {
+                subscription_id,
+                count,
+            } if subscription_id == sid => {
+                assert_eq!(count, 0, "stranger counted a private event");
+                return;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == sid => {
+                assert!(message.starts_with("restricted:"), "got: {message}");
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn query(client: &mut BuzzTestClient, name: &str, filter: Filter) -> Vec<nostr::Event> {
     let sid = sub_id(name);
     client
@@ -249,6 +313,118 @@ async fn test_attention_reads_are_limited_to_agent_and_owner() {
 
     agent_client.disconnect().await.expect("disconnect agent");
     owner_client.disconnect().await.expect("disconnect owner");
+    stranger_client
+        .disconnect()
+        .await
+        .expect("disconnect stranger");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_attention_known_id_does_not_authorize_a_stranger() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let stranger = Keys::generate();
+    let event = attention_event(&agent, &owner, &unique_d(), now());
+    let kind = Kind::Custom(ATTENTION_KIND);
+
+    let mut stranger_client = BuzzTestClient::connect(&relay_url(), &stranger)
+        .await
+        .expect("connect stranger");
+    // Live: the stranger subscribes by id before the agent publishes.
+    let live_sid = sub_id("stranger-live-ids");
+    stranger_client
+        .subscribe(&live_sid, vec![Filter::new().id(event.id)])
+        .await
+        .expect("subscribe live");
+    expect_empty_eose(&mut stranger_client, &live_sid).await;
+
+    let mut agent_client = connect_agent_with_owner(&agent, &owner).await;
+    let ok = agent_client
+        .send_event(event.clone())
+        .await
+        .expect("send config");
+    assert!(ok.accepted, "relay rejected config event: {}", ok.message);
+    // The agent can still read its own event by id.
+    assert_eq!(
+        query(&mut agent_client, "agent-ids", Filter::new().id(event.id))
+            .await
+            .len(),
+        1,
+        "the agent reads its own event by id"
+    );
+
+    // REQ history: a filter naming the kind is refused; a kindless one is empty.
+    let sid = sub_id("stranger-ids-kind");
+    stranger_client
+        .subscribe(&sid, vec![Filter::new().id(event.id).kind(kind)])
+        .await
+        .expect("subscribe");
+    expect_restricted(&mut stranger_client, &sid).await;
+    let sid = sub_id("stranger-ids-kindless");
+    stranger_client
+        .subscribe(&sid, vec![Filter::new().id(event.id)])
+        .await
+        .expect("subscribe");
+    expect_empty_eose(&mut stranger_client, &sid).await;
+
+    // COUNT, with and without the kind.
+    for (name, filter) in [
+        (
+            "stranger-count-ids-kind",
+            Filter::new().id(event.id).kind(kind),
+        ),
+        ("stranger-count-ids", Filter::new().id(event.id)),
+    ] {
+        let sid = sub_id(name);
+        stranger_client
+            .send_raw(&serde_json::json!(["COUNT", sid, filter]))
+            .await
+            .expect("send COUNT");
+        expect_zero_count(&mut stranger_client, &sid).await;
+    }
+
+    // Live: nothing reached the earlier id subscription. A later probe on
+    // the same connection orders the check after any fan-out to it.
+    let probe = sub_id("stranger-probe");
+    stranger_client
+        .subscribe(&probe, vec![Filter::new().id(event.id)])
+        .await
+        .expect("subscribe probe");
+    loop {
+        match stranger_client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("relay reply")
+        {
+            RelayMessage::Event {
+                subscription_id, ..
+            } => panic!("stranger received the event on {subscription_id}"),
+            RelayMessage::Eose { subscription_id } if subscription_id == probe => break,
+            _ => {}
+        }
+    }
+
+    // HTTP bridge /query and /count.
+    for filter in [
+        Filter::new().id(event.id),
+        Filter::new().id(event.id).kind(kind),
+    ] {
+        let (status, body) = http_read("query", &stranger, vec![filter.clone()]).await;
+        if status == 200 {
+            assert_eq!(body.as_array().map(Vec::len), Some(0), "HTTP query leaked");
+        } else {
+            assert_eq!(status, 403, "unexpected HTTP query status: {body}");
+        }
+        let (status, body) = http_read("count", &stranger, vec![filter]).await;
+        if status == 200 {
+            assert_eq!(body["count"].as_u64(), Some(0), "HTTP count leaked");
+        } else {
+            assert_eq!(status, 403, "unexpected HTTP count status: {body}");
+        }
+    }
+
+    agent_client.disconnect().await.expect("disconnect agent");
     stranger_client
         .disconnect()
         .await
