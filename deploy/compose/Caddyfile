@@ -1,5 +1,20 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
-  reverse_proxy relay:3000
+  # Device pairing (NIP-AB) goes to the auth-less sidecar, not the main relay:
+  # a device mid-pairing holds a fresh ephemeral key that is not a relay member
+  # yet, so BUZZ_REQUIRE_RELAY_MEMBERSHIP would refuse it.
+  #
+  # Match the two paths a client actually uses and nothing else. A `/pair*`
+  # prefix match, or `handle_path /pair*`, also swallows `/pairfoo` and any
+  # future relay route starting with "pair"; `handle /pair` on its own misses
+  # the trailing slash. Caddy proxies the WebSocket upgrade transparently.
+  @pairing path /pair /pair/*
+  handle @pairing {
+    reverse_proxy pairing-relay:5000
+  }
+
+  handle {
+    reverse_proxy relay:3000
+  }
 }
