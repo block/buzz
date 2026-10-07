@@ -66,7 +66,9 @@ jobs:
               - 'scripts/normative-corpus.json'
               - 'Justfile'
             desktop:
+              - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-desktop.yml'
+              - 'Justfile'
               - 'scripts/generate-macos-icon.py'
               - 'scripts/macos-icon.sh'
               - 'bin/uv'

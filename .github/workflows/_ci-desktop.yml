@@ -21,13 +21,15 @@ env:
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
 
 jobs:
-  # Frontend-only checks: biome, node:test, and the Vite build do not compile
-  # Rust, so they run only when desktop paths change (and on every push).
+  # Biome, node:test, and the Vite build do not compile Rust, but node:test
+  # also pins desktop constants to relay/DB crate sources (for example
+  # relayReconnectReplay.test.mjs), so Rust changes select this job too.
   desktop-js:
     name: Desktop JS
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'push' || inputs.desktop
+    # Keep in sync with JS_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
+    if: github.event_name == 'push' || inputs.desktop || inputs.rust
     permissions:
       contents: read
     steps:
@@ -66,6 +68,7 @@ jobs:
     name: Desktop Tauri (${{ matrix.lane }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Keep in sync with RUST_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop_rust || inputs.rust
     strategy:
       fail-fast: false
@@ -132,6 +135,7 @@ jobs:
     # Chromium dependency setup can take 10m; a serial smoke shard needs
     # ~25m. Leave time for the full suite and its reports to finish.
     timeout-minutes: 45
+    # Keep in sync with FRONTEND_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop
     strategy:
       fail-fast: false
@@ -206,8 +210,9 @@ jobs:
     steps:
       - name: Check desktop jobs
         env:
-          JS_SELECTED: ${{ github.event_name == 'push' || inputs.desktop }}
+          JS_SELECTED: ${{ github.event_name == 'push' || inputs.desktop || inputs.rust }}
           RUST_SELECTED: ${{ github.event_name == 'push' || inputs.desktop_rust || inputs.rust }}
+          FRONTEND_SELECTED: ${{ github.event_name == 'push' || inputs.desktop }}
           JS: ${{ needs.desktop-js.result }}
           TAURI: ${{ needs.desktop-tauri.result }}
           SMOKE: ${{ needs.desktop-smoke-e2e.result }}
@@ -225,8 +230,8 @@ jobs:
           }
           check "Desktop JS" "$JS_SELECTED" "$JS"
           check "Desktop Tauri lanes" "$RUST_SELECTED" "$TAURI"
-          check "Desktop Smoke E2E shards" "$JS_SELECTED" "$SMOKE"
-          check "Desktop Windows Build" "$JS_SELECTED" "$WINDOWS"
+          check "Desktop Smoke E2E shards" "$FRONTEND_SELECTED" "$SMOKE"
+          check "Desktop Windows Build" "$FRONTEND_SELECTED" "$WINDOWS"
           [ "$status" = 0 ] && echo "Desktop jobs passed"
           exit "$status"
 
@@ -234,6 +239,7 @@ jobs:
     name: Desktop Windows Build
     runs-on: windows-latest
     timeout-minutes: 20
+    # Keep in sync with FRONTEND_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop
     permissions:
       contents: read

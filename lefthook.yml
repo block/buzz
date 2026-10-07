@@ -15,6 +15,10 @@
 # Deliberate deviations:
 # - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
 #   is omitted; a CI-workflow-only edit doesn't need a local test run.
+# - `desktop-test` doesn't trigger on `crates/**` changes, though CI's Desktop
+#   JS job does: a few node:test cases read relay/DB crate sources to pin shared
+#   constants. Running the full desktop suite on every crate push would be
+#   expensive locally, so CI is the authoritative check for that coupling.
 # - The repository-wide `file-size-check` is deliberately unfiltered. Its own
 #   merge-base diff is the path filter; duplicating its governed roots here is
 #   the coverage drift this gate is intended to prevent.
@@ -104,7 +108,7 @@ pre-push:
       run: ./scripts/without-git-env.sh just test-unit
     desktop-check:
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
       exclude: ["desktop/src-tauri/**"]
       env: &pnpm-verify-deps
         # Warn when node_modules looks stale against the workspace (pnpm uses
@@ -116,13 +120,13 @@ pre-push:
       run: ./scripts/without-git-env.sh just desktop-check
     desktop-typecheck:
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
       exclude: ["desktop/src-tauri/**"]
       env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-typecheck
     desktop-test:
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
       exclude: ["desktop/src-tauri/**"]
       env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-test
