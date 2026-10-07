@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::Cell;
 
 use super::*;
@@ -117,4 +118,87 @@ async fn permanent_errors_fail_immediately_and_do_not_expose_connection_details(
     }
     assert_eq!(attempts.get(), 4);
     assert_eq!(started.elapsed(), Duration::ZERO);
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("sensitive server message")]
+struct ServerError(&'static str);
+
+impl sqlx::error::DatabaseError for ServerError {
+    fn message(&self) -> &str {
+        "sensitive server message"
+    }
+
+    fn code(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Borrowed(self.0))
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        sqlx::error::ErrorKind::Other
+    }
+}
+
+#[test]
+fn classifier_table_covers_every_retry_and_class_arm() {
+    let io = |kind: ErrorKind| DbError::Sqlx(sqlx::Error::Io(kind.into()));
+    let cases: Vec<(DbError, bool, &str)> = vec![
+        (DbError::Sqlx(sqlx::Error::PoolTimedOut), true, "timeout"),
+        (io(ErrorKind::ConnectionReset), true, "io"),
+        (io(ErrorKind::ConnectionRefused), true, "io"),
+        (io(ErrorKind::ConnectionAborted), true, "io"),
+        (io(ErrorKind::TimedOut), true, "io"),
+        (io(ErrorKind::UnexpectedEof), true, "io"),
+        (io(ErrorKind::Other), true, "io"),
+        (io(ErrorKind::InvalidInput), false, "io"),
+        (io(ErrorKind::InvalidData), false, "io"),
+        (io(ErrorKind::PermissionDenied), false, "io"),
+        (io(ErrorKind::NotFound), false, "io"),
+        (io(ErrorKind::Unsupported), false, "io"),
+        (DbError::Sqlx(sqlx::Error::Tls("x".into())), false, "tls"),
+        (
+            DbError::Sqlx(sqlx::Error::Configuration("x".into())),
+            false,
+            "configuration",
+        ),
+        (
+            DbError::Sqlx(sqlx::Error::Protocol("x".into())),
+            false,
+            "protocol",
+        ),
+        (
+            DbError::Sqlx(sqlx::Error::Database(Box::new(ServerError("28P01")))),
+            false,
+            "authentication",
+        ),
+        (
+            DbError::Sqlx(sqlx::Error::Database(Box::new(ServerError("28000")))),
+            false,
+            "authentication",
+        ),
+        (
+            DbError::Sqlx(sqlx::Error::Database(Box::new(ServerError("53300")))),
+            false,
+            "database",
+        ),
+        (DbError::Sqlx(sqlx::Error::RowNotFound), false, "other"),
+    ];
+    for (error, retry, class) in cases {
+        assert_eq!(
+            (retryable(&error), error_class(&error)),
+            (retry, class),
+            "{error:?}"
+        );
+    }
 }

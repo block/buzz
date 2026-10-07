@@ -5,7 +5,10 @@
 //! connection. Workers that start, do bounded work, and exit share this
 //! connector so a slow first connection is waited out and transient transport
 //! failures are retried, while configuration, authentication, TLS, and
-//! protocol errors still fail immediately.
+//! protocol errors during the dial still fail immediately. SQLx treats a
+//! failed session-setup hook (`after_connect`) as retryable until the
+//! acquire deadline, so such failures surface here as timeouts and are
+//! retried within the same bounded budget.
 //!
 //! Startup attempts are reported as JSON lines on stderr because these
 //! command-line workers do not install a tracing subscriber.
@@ -172,7 +175,9 @@ fn retryable(error: &DbError) -> bool {
                 | ErrorKind::NotFound
                 | ErrorKind::Unsupported
         ),
-        // Includes authentication, TLS, URL configuration and protocol errors.
+        // Includes authentication, TLS, URL configuration and protocol errors
+        // raised while dialing. Session-setup failures arrive as
+        // `PoolTimedOut` (see the module docs).
         _ => false,
     }
 }
