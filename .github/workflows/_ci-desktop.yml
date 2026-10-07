@@ -24,9 +24,9 @@ jobs:
   desktop-core:
     name: Desktop Core
     runs-on: ubuntu-latest
-    # The compiled-flag verification step rebuilds the workspace for each
-    # BUZZ_BUILD_* state and runs the full suite under all three compile
-    # states; the complete recipe needs ~46m, so budget 60m.
+    # The compiled-flag verification step recompiles buzz_lib for the internal
+    # and demo BUZZ_BUILD_* states and reruns its suite in each; the complete
+    # job needed ~46m before that recipe was trimmed, so budget 60m.
     timeout-minutes: 60
     if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
     permissions:
