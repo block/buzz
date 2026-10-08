@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
     is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
+    KIND_DELETION, KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
     SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
@@ -1607,8 +1607,11 @@ pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &
 /// author-only events from the aggregate count.
 pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
     filter.kinds.as_ref().is_none_or(|ks| {
-        ks.iter()
-            .any(|k| AUTHOR_ONLY_KINDS.contains(&(k.as_u16() as u32)))
+        ks.iter().any(|k| {
+            let k = k.as_u16() as u32;
+            // Deletions of author-only events inherit their privacy.
+            k == KIND_DELETION || AUTHOR_ONLY_KINDS.contains(&k)
+        })
     })
 }
 
@@ -1667,12 +1670,13 @@ pub(crate) fn result_gated_count_safe_for_pushdown(
         .is_some_and(|values| !values.is_empty() && values.iter().all(|v| v == authed_pubkey_hex))
 }
 
-/// Returns `true` if the event is an author-only kind and the requester is NOT
-/// the author. Used as a per-event filter during historical delivery and fan-out
+/// Returns `true` if the event is author-only (see
+/// [`buzz_core::kind::is_author_only_event_kind`]) and the requester is NOT the
+/// author. Used as a per-event filter during historical delivery and fan-out
 /// to silently omit unauthorized events from mixed-kind result sets.
 pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
-    let kind_u32 = event.kind.as_u16() as u32;
-    AUTHOR_ONLY_KINDS.contains(&kind_u32) && event.pubkey.to_bytes() != requester_pubkey_bytes
+    buzz_core::kind::is_author_only_event_kind(event)
+        && event.pubkey.to_bytes() != requester_pubkey_bytes
 }
 
 /// Combined per-event result-visibility check for all gated event classes.
@@ -3007,6 +3011,20 @@ mod tests {
         let owner = nostr::Keys::generate().public_key().to_hex();
         let attacker = nostr::Keys::generate().public_key().to_hex();
         (agent, owner, attacker)
+    }
+
+    #[test]
+    fn count_fallback_covers_filters_that_can_match_private_deletions() {
+        assert!(filter_can_match_author_only_kinds(&Filter::new()));
+        assert!(filter_can_match_author_only_kinds(
+            &Filter::new().id(nostr::EventId::all_zeros())
+        ));
+        assert!(filter_can_match_author_only_kinds(
+            &Filter::new().kinds([nostr::Kind::EventDeletion, nostr::Kind::TextNote])
+        ));
+        assert!(!filter_can_match_author_only_kinds(
+            &Filter::new().kind(nostr::Kind::TextNote)
+        ));
     }
 
     #[test]
