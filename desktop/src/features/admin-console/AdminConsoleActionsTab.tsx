@@ -28,7 +28,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { classifyKeyImportInput } from "@/features/onboarding/lib/keyImportInput";
+import { containsSecretKey } from "@/features/onboarding/lib/keyImportInput";
 import {
   MemberSearchResult,
   memberSearchLabel,
@@ -608,18 +608,13 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
 
 // ── Member picking ────────────────────────────────────────────────────────
 
-/** An `nsec` or NIP-49 backup, in either case. */
-function isSecretKey(input: string): boolean {
-  return classifyKeyImportInput(input.toLowerCase()) !== "unknown";
-}
-
 /**
  * The admin search source: `GET /members/search` in `communityHost`, fenced
  * like the lookups. A pasted secret key never leaves the device.
  */
 function useAdminMemberSearch(communityHost: string, query: string) {
   const c = useDirectActions();
-  const secret = isSecretKey(query);
+  const secret = containsSecretKey(query);
   const state = useFencedLoad(
     query && !secret
       ? `${c.origin}\n${c.pubkey}\n${communityHost}\n${c.generation}\nsearch\n${query}`
@@ -665,7 +660,7 @@ export function AdminMemberPicker({
   const [query, setQuery] = useState("");
   const deferred = useDeferredValue(query.trim());
   const search = useAdminMemberSearch(communityHost, deferred);
-  const secret = search.secret || isSecretKey(query);
+  const secret = search.secret || containsSecretKey(query);
   const candidates = useMemberCandidates(deferred, secret ? {} : search);
 
   if (member) {

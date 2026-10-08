@@ -106,6 +106,32 @@ async fn a_401_retry_is_signed_by_the_same_keys() {
     }
 }
 
+#[tokio::test]
+async fn a_search_carrying_a_key_backup_is_never_sent() {
+    client::init_admin_client().expect("client builds");
+    let backup = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtc";
+    for q in [
+        backup.to_string(),
+        format!("alice {backup} bob"),
+        backup.to_ascii_uppercase(),
+    ] {
+        let (port, seen) = serve_raw(vec![response("200 OK", "{}")]);
+        let query = routes::AdminQuery {
+            q: Some(q),
+            ..Default::default()
+        };
+        let url = format!(
+            "http://127.0.0.1:{port}/api/admin/v1/communities?{}",
+            query.to_query_string()
+        );
+        let err = send_admin_read(&nostr::Keys::generate(), &url, SUCCESS_JSON_CAP)
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("NIP-49 key-backup"), "{}", err.message);
+        assert!(seen.lock().unwrap().is_empty(), "request reached the relay");
+    }
+}
+
 #[test]
 fn read_urls_validate_the_explicit_host_and_encode_the_query() {
     let url = read_url(

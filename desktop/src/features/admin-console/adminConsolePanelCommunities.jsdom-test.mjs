@@ -127,6 +127,46 @@ test("communities-pin-search: the connected community stays pinned only under a 
   }
 });
 
+test("communities-secret-key: a pasted key backup anywhere in the search is never sent", async () => {
+  // Mutation: drop the containsSecretKey gate from the directory search → RED.
+  // The prefix is assembled so this file stays outside the frontend
+  // key-backup source scan's allowlist.
+  const backup = ["ncrypt", "sec1"].join("") + "q".repeat(40);
+  const queries = [];
+  setIpcHandler("admin_list_communities", ({ q: query }) => {
+    queries.push(query);
+    return Promise.resolve({ items: [community(1)], nextCursor: null });
+  });
+  const { container: c, unmount } = await mountCommunities();
+  const search = async (text) => {
+    await act(async () => {
+      fireEvent.change(q(c, "communities-search-input"), {
+        target: { value: text },
+      });
+    });
+    await settle();
+  };
+  try {
+    queries.length = 0;
+    for (const text of [backup, `team ${backup} host`, backup.toUpperCase()]) {
+      await search(text);
+      assert.ok(q(c, "communities-search-secret"), `no warning for ${text}`);
+      assert.equal(q(c, "community-row-c1.example.com"), null);
+    }
+    assert.deepEqual(
+      queries,
+      [],
+      "a key backup reached admin_list_communities",
+    );
+    await search("c1.example");
+    assert.equal(q(c, "communities-search-secret"), null);
+    assert.deepEqual(queries, ["c1.example"], "host search still runs");
+    assert.ok(q(c, "community-row-c1.example.com"));
+  } finally {
+    await unmount();
+  }
+});
+
 test("communities-stale-more: a late page from an earlier search leaves the current search's pages alone", async () => {
   // Mutation: drop either searchRef check in loadMore → RED (B's second page
   // vanishes, or B shows A's error).

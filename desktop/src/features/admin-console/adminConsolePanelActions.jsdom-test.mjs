@@ -631,7 +631,7 @@ test("actions-same-name: two same-name results are told apart and the chosen ful
 });
 
 test("actions-secret-key: a pasted secret key or key backup is never searched and is flagged", async () => {
-  // Mutation: drop the isSecretKey gate from the picker's search → RED.
+  // Mutation: drop the containsSecretKey gate from the picker's search → RED.
   // The backup prefix is assembled so this file stays outside the frontend
   // key-backup source scan's allowlist; it is only ever typed into the picker.
   const backup = ["ncrypt", "sec1"].join("");
@@ -647,6 +647,8 @@ test("actions-secret-key: a pasted secret key or key backup is never searched an
       `NSEC1${"Q".repeat(58)}`,
       `${backup}${"q".repeat(40)}`,
       `${backup.toUpperCase()}${"Q".repeat(40)}`,
+      `ban alice ${backup}${"q".repeat(40)} please`,
+      `see:${backup.toUpperCase()}${"Q".repeat(40)}`,
     ]) {
       await type(c, "direct-member-input", key);
       await settle();

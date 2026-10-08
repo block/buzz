@@ -11,6 +11,7 @@
 
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { ArrowLeft, LoaderCircle } from "lucide-react";
+import { containsSecretKey } from "@/features/onboarding/lib/keyImportInput";
 import { Button } from "@/shared/ui/button";
 import { listAdminCommunities, type AdminCommunityDto } from "./api";
 import { ActionsSection, MembersSection } from "./AdminConsoleActionsTab";
@@ -43,6 +44,8 @@ export function CommunitiesTab({
   const { open, connectedHost } = useCommunityNav();
   const [query, setQuery] = useState("");
   const q = useDeferredValue(query.trim().toLowerCase());
+  // A pasted secret key never leaves the device.
+  const secret = containsSecretKey(q);
   // One identity per search transition, so A→B→A is three searches and a
   // page requested under an earlier one can never land under a later one.
   const key = `${origin}\n${q}\n${generation}`;
@@ -62,7 +65,10 @@ export function CommunitiesTab({
   } | null>(null);
 
   const first = useAsyncLoad(
-    () => listAdminCommunities(origin, q),
+    () =>
+      secret
+        ? Promise.resolve({ items: [], nextCursor: null })
+        : listAdminCommunities(origin, q),
     [origin, q],
     generation,
   );
@@ -155,9 +161,17 @@ export function CommunitiesTab({
       {pinnedRow && (
         <ul data-testid="communities-pinned">{row(pinnedRow, true)}</ul>
       )}
+      {secret && (
+        <p
+          className="text-xs text-destructive"
+          data-testid="communities-search-secret"
+        >
+          That's a secret key. Never paste it here.
+        </p>
+      )}
       {first.status === "loading" && <LoadingSpinner />}
       {first.status === "error" && <ErrorMessage message={first.message} />}
-      {first.status === "ok" && items.length === 0 && !pinnedRow && (
+      {first.status === "ok" && items.length === 0 && !pinnedRow && !secret && (
         <p className="text-sm text-muted-foreground">No communities found.</p>
       )}
       <ul className="space-y-1">{items.map((c) => row(c, false))}</ul>
