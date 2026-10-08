@@ -307,7 +307,7 @@ An agent that is a member of no team has no team layer. The team layer is delive
 
 ### Deleting a team
 
-A client that deletes a team SHOULD also delete the team's instructions versions (see "Deletion: kind:44300"). It MUST first make the deletion of its private team record durable, so the team never appears with an older version as current while versions are being deleted.
+A client that deletes a team SHOULD also delete the team's instructions versions (see "Deletion: kind:44300"). It MUST first confirm that the relay stored the deletion of its private team record, so the team never appears with an older version as current while versions are being deleted. After that, a client MUST NOT publish a version for the deleted team, including a save that was pending when the team was deleted.
 
 At each member's next start, the client removes the deleted team's membership and resolves the team layer from the remaining teams. A running agent is not affected. Missing versions alone never mean that a team was deleted.
 
@@ -333,9 +333,9 @@ Kind `44300` records one saved version of an agent's own instructions or of a te
 - The owner authors every version. Agents do not author instructions versions.
 - An event MUST carry exactly one **subject tag**: either one `p` tag whose value is the agent's 64-character lowercase hex pubkey, or one `t` tag whose value is a team id (see "Team identity"). A subject tag MUST have exactly two elements. Tags are counted by their first element, so an event with both a `p` and a `t` tag, two `p` tags, two `t` tags, or a valueless `["p"]` or `["t"]` is invalid.
 - `t` values are case-sensitive. Clients and relays MUST NOT lowercase them, unlike [NIP-24](24.md) hashtags.
-- The event carries no `h` tag; it belongs to no channel.
+- The event MUST NOT carry an `h` tag; it belongs to no channel.
 
-Implementations MAY include a [NIP-31](31.md) `["alt", "agent instructions version"]` tag. Other tags are not defined by this NIP and have no effect on validity.
+Implementations MAY include a [NIP-31](31.md) `["alt", "agent instructions version"]` tag. Other tags are not defined by this NIP and, apart from the prohibited `h` tag, have no effect on validity.
 
 ### Content
 
@@ -366,7 +366,9 @@ Agent: {kinds: [44300], authors: [pubkey_o], "#p": [<agent-pubkey>]}
 Team:  {kinds: [44300], authors: [pubkey_o], "#t": [<team-id>]}
 ```
 
-With `limit: 1`, these filters return the current version. Clients query one subject per filter. History is the same filter, newest first, paged with `until`. Two versions of one subject share a `created_at` only after concurrent saves on different devices, but a page boundary can fall between them; clients therefore page with `until` set to the oldest `created_at` already received and discard event ids they have already seen.
+With `limit: 1`, these filters return the current version. Clients query one subject per filter.
+
+History is the same filter, ordered by `created_at` descending and then by `id` ascending, and paged with a composite cursor: the `until` and `id` of the last event on the previous page, sent as `until` and `before_id`. The next page holds events with `created_at < until`, or with `created_at = until` and `id > before_id`. `before_id` is an extension to the NIP-01 filter, not a standard field. A timestamp-only cursor is not sufficient: concurrent saves on different devices can give several versions of one subject the same `created_at`, and paging by `until` alone either repeats or skips them. A relay MAY return fewer events than `limit`, so a client has read a subject's complete history only when a page returns no events.
 
 If a subject's current version is invalid, clients MUST show the error and MUST NOT substitute an older version, a definition's prompt, or a legacy copy.
 
@@ -400,6 +402,8 @@ The team layer is resolved independently (see "Launch with teams"). The client d
 
 A version takes effect at the agent's next start; a running agent is unchanged. A client MAY restart an agent to apply a new version. A client that lets local configuration override the resolved instructions SHOULD show the owner that an override is in effect.
 
+This NIP does not define how `kind:44300` relates to the private managed-agent aggregate reserved by [NIP-PMA](NIP-PMA.md). That integration is left to NIP-PMA.
+
 ### Launch records
 
 A client SHOULD record, for each agent start, which instructions it used:
@@ -409,7 +413,7 @@ A client SHOULD record, for each agent start, which instructions it used:
 - a SHA-256 hash of each layer's text as delivered, after any local override, and the source of any override;
 - a run identifier and the start time.
 
-The record MUST be encrypted to the owner, for example as a [NIP-AE](NIP-AE.md) engram. Version ids and hashes MUST NOT appear in plaintext tags. A launch record shows what the client handed to the harness, not that the harness used it.
+A client that records launches SHOULD write the record once the agent has started and retry until the relay stores it. The record MUST be encrypted to the owner, for example as a [NIP-AE](NIP-AE.md) engram. Version ids and hashes MUST NOT appear in plaintext tags. A launch record shows what the client handed to the harness, not that the harness used it.
 
 ### Privacy
 
@@ -452,6 +456,7 @@ Kind `30178` is stored globally and its content is unvalidated, exactly as for `
 
 - The relay MUST reject, with `invalid:`, a `kind:44300` event that does not carry exactly one subject tag as defined in "Event envelope", whose `p` value is not 64-character lowercase hex, or whose `t` value does not match the team id grammar.
 - The relay MUST reject a `kind:44300` event with an empty `content` or a `content` longer than 218,548 bytes. It cannot validate the plaintext; that is a client responsibility.
+- The relay MUST reject a `kind:44300` event that carries an `h` tag.
 - The relay stores `kind:44300` events globally, outside any channel.
 
 ### Access control: kind:44300 author-only
@@ -461,6 +466,8 @@ The relay MUST withhold `kind:44300` events, and their existence, from every rea
 The relay MUST exclude `kind:44300` from full-text search results for every reader, including the author.
 
 The relay MUST apply a `#p` or `#t` filter on `kind:44300` before `ORDER BY … LIMIT`, so that `limit: 1` returns a subject's current version even when the owner has newer versions for other subjects.
+
+The relay MUST support the composite history cursor (see "Current version and history") for `kind:44300`. A filter carrying `before_id` without `until`, or a `before_id` that is not 64 hexadecimal characters, MUST be rejected rather than ignored.
 
 ### Access control: author-only-unless-shared
 
