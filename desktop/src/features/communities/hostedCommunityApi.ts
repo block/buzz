@@ -74,6 +74,14 @@ export function hostedCommunityQuotaLimit(
     : null;
 }
 
+export function hostedCommunityQuotaUsed(
+  value: number | undefined,
+): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
 export function hostedCommunityErrorMessage(
   error: HostedCommunityApiError | undefined,
   correlationId: string | undefined,

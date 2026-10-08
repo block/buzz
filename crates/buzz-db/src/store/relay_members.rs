@@ -1307,7 +1307,8 @@ mod postgres_tests {
     fn owner_limit_defaults_when_unset_or_invalid() {
         assert_eq!(
             super::effective_owner_limit(None),
-            super::MAX_COMMUNITIES_PER_OWNER
+            50,
+            "stock deployment permits 50 active communities"
         );
         assert_eq!(
             super::effective_owner_limit(Some("not-a-number")),
@@ -1329,9 +1330,6 @@ mod postgres_tests {
         let limit = super::max_communities_per_owner();
         let lifetime = super::MAX_LIFETIME_COMMUNITIES_PER_OWNER;
         assert!(quota(0, 0).admits());
-        assert_eq!(limit, 50, "stock deployment permits 50 active owners");
-        assert!(quota(49, 49).admits(), "49 to 50 is allowed");
-        assert!(!quota(50, 50).admits(), "50 to 51 is rejected");
         assert!(quota(limit - 1, lifetime - 1).admits());
         assert!(!quota(limit, limit).admits(), "active cap");
         assert!(
@@ -1763,30 +1761,57 @@ mod postgres_tests {
                 .expect("bootstrap transferee community");
         }
 
-        for (expected, label) in [(true, "fiftieth transfer"), (false, "fifty-first transfer")] {
-            let community = make_test_community(&pool).await;
-            bootstrap_owner(&pool, community, &owner)
+        let fiftieth = make_test_community(&pool).await;
+        bootstrap_owner(&pool, fiftieth, &owner)
+            .await
+            .expect("bootstrap owner");
+        assert!(matches!(
+            transfer_ownership(&pool, fiftieth, &transferee, &owner)
                 .await
-                .expect("bootstrap owner");
-            let result = transfer_ownership(&pool, community, &transferee, &owner)
+                .expect("fiftieth transfer"),
+            TransferResult::Transferred { .. }
+        ));
+        assert_eq!(
+            get_relay_member(&pool, fiftieth, &transferee)
                 .await
-                .expect(label);
-            assert_eq!(
-                matches!(result, TransferResult::Transferred { .. }),
-                expected,
-                "{label}"
-            );
-            if !expected {
-                assert_eq!(result, TransferResult::LimitReached);
-                assert_eq!(
-                    get_relay_member(&pool, community, &owner)
-                        .await
-                        .expect("get owner")
-                        .expect("exists")
-                        .role,
-                    "owner"
-                );
-            }
-        }
+                .expect("get transferee")
+                .expect("exists")
+                .role,
+            "owner"
+        );
+        assert_eq!(
+            get_relay_member(&pool, fiftieth, &owner)
+                .await
+                .expect("get previous owner")
+                .expect("exists")
+                .role,
+            "member"
+        );
+
+        let fifty_first = make_test_community(&pool).await;
+        bootstrap_owner(&pool, fifty_first, &owner)
+            .await
+            .expect("bootstrap owner");
+        assert_eq!(
+            transfer_ownership(&pool, fifty_first, &transferee, &owner)
+                .await
+                .expect("fifty-first transfer"),
+            TransferResult::LimitReached
+        );
+        assert_eq!(
+            get_relay_member(&pool, fifty_first, &owner)
+                .await
+                .expect("get owner")
+                .expect("exists")
+                .role,
+            "owner"
+        );
+        assert!(
+            get_relay_member(&pool, fifty_first, &transferee)
+                .await
+                .expect("get transferee")
+                .is_none(),
+            "rejected transfer must not add transferee"
+        );
     }
 }

@@ -16,6 +16,7 @@ import { npubEncode } from "nostr-tools/nip19";
 import {
   hostedCommunityErrorMessage,
   hostedCommunityQuotaLimit,
+  hostedCommunityQuotaUsed,
   normalizedBoundKeyHex,
   usableBoundIdentityNpub,
 } from "./hostedCommunityApi.ts";
@@ -97,6 +98,15 @@ test("the string normalizer rejects the same non-key values directly", () => {
   assert.equal(normalizedBoundKeyHex("f".repeat(63)), null);
   assert.equal(normalizedBoundKeyHex("f".repeat(65)), null);
   assert.equal(normalizedBoundKeyHex("  "), null);
+});
+
+test("quota used accepts zero but rejects missing and invalid projections", () => {
+  assert.equal(hostedCommunityQuotaUsed(undefined), null);
+  assert.equal(hostedCommunityQuotaUsed(-1), null);
+  assert.equal(hostedCommunityQuotaUsed(0), 0);
+  assert.equal(hostedCommunityQuotaUsed(49), 49);
+  assert.equal(hostedCommunityQuotaUsed(1.5), null);
+  assert.equal(hostedCommunityQuotaUsed(Number.MAX_SAFE_INTEGER + 1), null);
 });
 
 test("quota projection never invents a fixed client limit", () => {

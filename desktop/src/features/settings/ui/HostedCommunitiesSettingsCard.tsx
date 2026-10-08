@@ -18,6 +18,7 @@ import {
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
   hostedCommunityQuotaLimit,
+  hostedCommunityQuotaUsed,
   hostedCommunityRelayUrl as relayUrl,
   normalizedBoundKeyHex,
   usableBoundIdentityNpub,
@@ -116,13 +117,7 @@ export function HostedCommunitiesSettingsCard() {
     }
     setIdentity(identityResponse.identity ?? null);
     setCommunities(communitiesResponse.communities ?? []);
-    setQuotaUsed(
-      typeof communitiesResponse.quota_used === "number" &&
-        Number.isSafeInteger(communitiesResponse.quota_used) &&
-        communitiesResponse.quota_used >= 0
-        ? communitiesResponse.quota_used
-        : null,
-    );
+    setQuotaUsed(hostedCommunityQuotaUsed(communitiesResponse.quota_used));
     setQuotaLimit(hostedCommunityQuotaLimit(communitiesResponse.quota_limit));
     setCanCreate(communitiesResponse.can_create !== false);
   }, []);

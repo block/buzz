@@ -1467,7 +1467,10 @@ mod postgres_tests {
             .list_communities_owned_by(&owner)
             .await
             .expect("owner quota at fifty");
-        assert_eq!(page.quota_used, 50);
+        assert_eq!(
+            page.quota_used,
+            crate::relay_members::MAX_COMMUNITIES_PER_OWNER
+        );
         assert!(!page.can_create);
 
         let host = format!("limit-test-overflow-{}.example", Uuid::new_v4().simple());
@@ -1694,7 +1697,11 @@ mod postgres_tests {
             .await
             .expect("owner list at lifetime cap");
         assert_eq!(page.quota_used, 0, "completed deletions free active slots");
-        assert_eq!(page.quota_limit, 50, "active limit is shown separately");
+        assert_eq!(
+            page.quota_limit,
+            crate::relay_members::max_communities_per_owner(),
+            "active limit is shown separately"
+        );
         assert!(!page.can_create, "the lifetime cap still blocks creation");
 
         let host = format!("lifetime-overflow-{}.example", Uuid::new_v4().simple());
