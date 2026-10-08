@@ -102,6 +102,7 @@ anyhow    = "1"
 # Utilities
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10.4"
 
 # JWT / JWS verification (NIP-FI federated identity assertions)
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
