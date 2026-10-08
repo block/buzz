@@ -46,6 +46,9 @@ export function CommunitiesTab({
   const q = useDeferredValue(query.trim().toLowerCase());
   // A pasted secret key never leaves the device.
   const secret = containsSecretKey(q);
+  // The raw input leads the deferred query, so pagination checks both: an
+  // older page's cursor must never carry newly typed key material.
+  const blocked = secret || containsSecretKey(query);
   // One identity per search transition, so A→B→A is three searches and a
   // page requested under an earlier one can never land under a later one.
   const key = `${origin}\n${q}\n${generation}`;
@@ -116,7 +119,7 @@ export function CommunitiesTab({
       : null;
 
   const loadMore = async () => {
-    if (!nextCursor) return;
+    if (!nextCursor || blocked) return;
     setMoreState({ search, busy: true, error: null });
     try {
       const page = await listAdminCommunities(origin, q, nextCursor);
@@ -176,7 +179,7 @@ export function CommunitiesTab({
       )}
       <ul className="space-y-1">{items.map((c) => row(c, false))}</ul>
       {moreStatus?.error && <ErrorMessage message={moreStatus.error} />}
-      {nextCursor && (
+      {nextCursor && !blocked && (
         <Button
           data-testid="communities-load-more"
           disabled={moreStatus?.busy ?? false}

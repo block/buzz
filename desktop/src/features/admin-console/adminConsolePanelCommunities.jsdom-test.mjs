@@ -167,6 +167,60 @@ test("communities-secret-key: a pasted key backup anywhere in the search is neve
   }
 });
 
+test("communities-secret-more: Load more never sends key material typed over a page that has more", async () => {
+  // Mutation: drop the secret gate from Load more → RED. For one render the
+  // deferred secret query sits beside the previous page's cursor before that
+  // page clears, too briefly to click. Recording every onClick React commits
+  // to the button and invoking each afterwards drives exactly those handlers.
+  const backup = ["ncrypt", "sec1"].join("") + "q".repeat(40);
+  const nsec = ["ns", "ec1"].join("") + "q".repeat(40);
+  const calls = [];
+  setIpcHandler("admin_list_communities", ({ q: query, cursor }) => {
+    calls.push({ query, cursor });
+    return Promise.resolve({ items: [community(1)], nextCursor: "page2" });
+  });
+  const { container: c, unmount } = await mountCommunities();
+  const type = async (text) => {
+    await act(async () => {
+      fireEvent.change(q(c, "communities-search-input"), {
+        target: { value: text },
+      });
+    });
+    await settle();
+  };
+  try {
+    for (const text of [backup, `team ${nsec} host`, backup.toUpperCase()]) {
+      await type("");
+      const more = q(c, "communities-load-more");
+      assert.ok(more, "a page with more is shown");
+      const propsKey = Object.keys(more).find((k) =>
+        k.startsWith("__reactProps$"),
+      );
+      const handlers = [];
+      let props = more[propsKey];
+      Object.defineProperty(more, propsKey, {
+        configurable: true,
+        get: () => props,
+        set: (next) => {
+          props = next;
+          handlers.push(next.onClick);
+        },
+      });
+      await type(text);
+      assert.ok(q(c, "communities-search-secret"), `no warning for ${text}`);
+      assert.equal(q(c, "communities-load-more"), null);
+      await act(async () => {
+        for (const onClick of handlers) onClick?.();
+      });
+      await settle();
+    }
+    const leaked = calls.filter((x) => /sec1/i.test(x.query ?? ""));
+    assert.deepEqual(leaked, [], "key material reached admin_list_communities");
+  } finally {
+    await unmount();
+  }
+});
+
 test("communities-stale-more: a late page from an earlier search leaves the current search's pages alone", async () => {
   // Mutation: drop either searchRef check in loadMore → RED (B's second page
   // vanishes, or B shows A's error).

@@ -1316,3 +1316,63 @@ async fn save_rejects_an_unrelated_content_type() {
 
 #[path = "direct_action_tests.rs"]
 mod direct_action;
+
+// ── Key-backup guard on origin-derived URLs ───────────────────────────────
+
+/// Origins whose hostname carries NIP-49 backup text. `.localhost` resolves to
+/// the loopback stub, so without the guard each request would reach it.
+fn backup_origins(port: u16) -> [String; 2] {
+    [
+        format!("http://ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq.localhost:{port}"),
+        format!("http://NCRYPTSEC1QGG9947RLPVQU76PJ5ECREDUF9JXHSELQ.localhost:{port}"),
+    ]
+}
+
+/// A stub that records every request it receives.
+async fn recording_stub() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec = Arc::clone(&seen);
+    let addr = serve_sequence_inspect(
+        vec![("401 Unauthorized", "WWW-Authenticate: Nostr\r\n", ""); 2],
+        Some(Arc::new(move |_idx, bytes: &[u8]| {
+            rec.lock().unwrap().push(bytes.to_vec());
+        })),
+    )
+    .await;
+    (addr.port(), seen)
+}
+
+#[tokio::test]
+async fn a_probe_origin_carrying_a_key_backup_is_never_sent() {
+    let (port, seen) = recording_stub().await;
+    for origin in backup_origins(port) {
+        let sign = |_: &str| -> Result<String, String> { panic!("must not sign") };
+        let err = admin_probe_inner(&origin, Some(sign)).await.unwrap_err();
+        assert!(err.contains("NIP-49 key-backup"), "{err}");
+    }
+    assert!(seen.lock().unwrap().is_empty(), "probe reached the relay");
+}
+
+#[tokio::test]
+async fn an_attachment_origin_carrying_a_key_backup_is_never_sent() {
+    let (port, seen) = recording_stub().await;
+    for origin in backup_origins(port) {
+        let err = attachment::fetch_feedback_attachment(
+            &origin,
+            SAVE_FEEDBACK_ID,
+            &save_sha(),
+            "application/pdf",
+            14,
+            &nostr::Keys::generate(),
+            helpers::AttachmentUse::Preview,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("NIP-49 key-backup"), "{err}");
+    }
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "attachment fetch reached the relay"
+    );
+}

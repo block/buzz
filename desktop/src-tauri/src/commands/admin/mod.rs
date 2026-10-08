@@ -168,6 +168,7 @@ async fn admin_probe_inner(
 ) -> Result<AdminProbeResult, String> {
     let origin = origin::AdminOrigin::parse(origin)?;
     let url = origin.route_url(&routes::AdminRoute::Probe, &routes::AdminQuery::default());
+    crate::egress_guard::assert_no_key_backup(&url, "admin API request URL")?;
 
     let http_client = client::ADMIN_CLIENT
         .get()
