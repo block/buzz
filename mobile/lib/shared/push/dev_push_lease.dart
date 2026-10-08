@@ -44,33 +44,8 @@ class BuzzPushLeaseDescriptor {
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
   ) {
-    _requireExactKeys(
-      information,
-      required: const {},
-      allowed: const {
-        'name',
-        'description',
-        'pubkey',
-        'contact',
-        'supported_nips',
-        'supported_extensions',
-        'software',
-        'version',
-        'limitation',
-        'retention',
-        'relay_countries',
-        'language_tags',
-        'tags',
-        'posting_policy',
-        'payments_url',
-        'fees',
-        'icon',
-        'self',
-        'pairing_relay_url',
-        'push',
-      },
-      name: 'NIP-11 document',
-    );
+    // Other NIP-11 metadata belongs to independent relay capabilities.
+    // Validate the fields used for push without restricting those capabilities.
     final extensions = _stringList(
       information['supported_extensions'],
       name: 'supported_extensions',
