@@ -119,21 +119,22 @@ void main() {
     }
   }
 
-  for (final item in [
-    ('mp4', 'video/mp4'),
-    ('mov', 'video/quicktime'),
-    ('webm', 'video/webm'),
-    ('bin', 'video/mp4'),
-  ]) {
-    testWidgets(
-      '${item.$1} uses video metadata with angle destination and title',
-      (tester) async {
+  for (final title in ['(Video title)', r'"A \"preview\""']) {
+    for (final item in [
+      ('mp4', 'video/mp4'),
+      ('mov', 'video/quicktime'),
+      ('webm', 'video/webm'),
+      ('bin', 'video/mp4'),
+    ]) {
+      testWidgets('${item.$1} uses video metadata with title $title', (
+        tester,
+      ) async {
         final url = '$_base/media/clip (1).${item.$1}';
         final expected = '$_base/media/clip%20%281%29.${item.$1}';
         String? requested;
         await tester.pumpWidget(
           _app(
-            '![clip](<$url> "Video title")',
+            '![clip](<$url> $title)',
             tags: [
               ['imeta', 'url $url', 'm ${item.$2}'],
             ],
@@ -152,48 +153,48 @@ void main() {
           findsOneWidget,
         );
         expect(find.text('Image unavailable'), findsNothing);
-      },
-    );
-  }
+      });
+    }
 
-  for (final extension in ['pdf', 'txt', 'zip', 'mp3', 'svg']) {
-    testWidgets(
-      '$extension attachment link opens with auth and correct filename',
-      (tester) async {
-        final url = '$_base/media/report.$extension';
-        String? opened;
-        String? filename;
-        Map<String, String>? headers;
-        await tester.pumpWidget(
-          _app(
-            '[report.$extension](<$url>)',
-            overrides: [
-              mediaGetAuthServiceProvider.overrideWithValue(
-                MediaGetAuthService(
-                  baseUrl: _base,
-                  nsec: nostr.Keys.generate().nsec,
+    for (final extension in ['pdf', 'txt', 'zip', 'mp3', 'svg']) {
+      testWidgets(
+        '$extension attachment with title $title opens with auth and filename',
+        (tester) async {
+          final url = '$_base/media/report.$extension';
+          String? opened;
+          String? filename;
+          Map<String, String>? headers;
+          await tester.pumpWidget(
+            _app(
+              '[report.$extension](<$url> $title)',
+              overrides: [
+                mediaGetAuthServiceProvider.overrideWithValue(
+                  MediaGetAuthService(
+                    baseUrl: _base,
+                    nsec: nostr.Keys.generate().nsec,
+                  ),
                 ),
-              ),
-              openDownloadedFileProvider.overrideWithValue((
-                url,
-                auth,
-                name,
-              ) async {
-                opened = url;
-                headers = auth;
-                filename = name;
-              }),
-            ],
-          ),
-        );
-        await tester.tap(find.text('report.$extension'));
-        await tester.pump();
-        expect(opened, url);
-        expect(filename, 'report.$extension');
-        expect(headers?['Authorization'], startsWith('Nostr '));
-        expect(find.byType(MediaImage), findsNothing);
-      },
-    );
+                openDownloadedFileProvider.overrideWithValue((
+                  url,
+                  auth,
+                  name,
+                ) async {
+                  opened = url;
+                  headers = auth;
+                  filename = name;
+                }),
+              ],
+            ),
+          );
+          await tester.tap(find.text('report.$extension'));
+          await tester.pump();
+          expect(opened, url);
+          expect(filename, 'report.$extension');
+          expect(headers?['Authorization'], startsWith('Nostr '));
+          expect(find.byType(MediaImage), findsNothing);
+        },
+      );
+    }
   }
 
   testWidgets(

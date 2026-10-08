@@ -1,4 +1,4 @@
-final _markdownLinkStartPattern = RegExp(r'(!?\[[^\]\n]*\])\(');
+final _markdownLinkStartPattern = RegExp(r'(!?\[[^\[\]\n]*\])\(');
 
 /// Escapes destination characters that the mobile Markdown renderer treats as
 /// syntax. Apply the same conversion to metadata keys to preserve media types.
@@ -141,24 +141,69 @@ String _normalizeLinkSegment(String segment) {
       }
       cursor++;
     }
-    if (cursor == start || cursor >= segment.length) continue;
-    final destination = segment.substring(start, cursor);
-    if (angled) {
-      if (segment[cursor] != '>') continue;
-      cursor++;
+    final destinationEnd = cursor;
+    var valid = cursor > start && cursor < segment.length;
+    if (angled && valid) {
+      valid = segment[cursor] == '>';
+      if (valid) cursor++;
     }
-    // gpt_markdown has no title parameter. Retain the label/alt text while
-    // removing an optional Markdown title from the fetch destination.
-    final suffix = RegExp(
-      r'''\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)''',
-    ).matchAsPrefix(segment, cursor);
-    if (suffix == null) continue;
+    if (valid) {
+      // gpt_markdown has no title parameter. Consume all Markdown title
+      // delimiters and escaped delimiters before removing the title.
+      final suffix = _scanLinkSuffix(segment, cursor);
+      cursor = suffix.end;
+      valid = suffix.valid;
+    }
     result.write(_normalizeProseLinks(segment.substring(offset, match.start)));
-    result.write('${match[1]}(${normalizeMarkdownDestination(destination)})');
-    offset = suffix.end;
+    if (valid) {
+      final destination = segment.substring(start, destinationEnd);
+      result.write('${match[1]}(${normalizeMarkdownDestination(destination)})');
+    } else {
+      // Preserve malformed source, and never scan its inspected suffix again.
+      // This cursor advances on failure as well as success, bounding work even
+      // for a relay-sized message made entirely of unterminated link openers.
+      result.write(segment.substring(match.start, cursor));
+    }
+    offset = cursor;
   }
   result.write(_normalizeProseLinks(segment.substring(offset)));
   return result.toString();
+}
+
+({int end, bool valid}) _scanLinkSuffix(String segment, int cursor) {
+  final start = cursor;
+  while (cursor < segment.length && segment[cursor].trim().isEmpty) {
+    cursor++;
+  }
+  if (cursor < segment.length && segment[cursor] == ')') {
+    return (end: cursor + 1, valid: true);
+  }
+  if (cursor == start || cursor == segment.length) {
+    return (end: cursor, valid: false);
+  }
+  final opener = segment[cursor];
+  if (opener != '"' && opener != "'" && opener != '(') {
+    return (end: cursor, valid: false);
+  }
+  final closer = opener == '(' ? ')' : opener;
+  cursor++;
+  while (cursor < segment.length) {
+    final char = segment[cursor++];
+    if (char == r'\' && cursor < segment.length) {
+      cursor++;
+    } else if (char == closer) {
+      while (cursor < segment.length && segment[cursor].trim().isEmpty) {
+        cursor++;
+      }
+      if (cursor < segment.length && segment[cursor] == ')') {
+        return (end: cursor + 1, valid: true);
+      }
+      return (end: cursor, valid: false);
+    } else if (opener == '(' && char == '(') {
+      return (end: cursor, valid: false);
+    }
+  }
+  return (end: cursor, valid: false);
 }
 
 String _normalizeProseLinks(String segment) {

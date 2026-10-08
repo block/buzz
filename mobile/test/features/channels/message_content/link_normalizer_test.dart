@@ -42,6 +42,33 @@ void main() {
         }
       });
     }
+    for (final title in [
+      '(Video title)',
+      r'"A \"preview\""',
+      r"'A \'preview\''",
+      r'(A \(preview\))',
+    ]) {
+      for (final prefix in ['!', '']) {
+        test('$prefix supports title $title', () {
+          expect(
+            normalizeBareLinks('$prefix[label](<$media> $title)'),
+            '$prefix[label]($media)',
+          );
+        });
+      }
+    }
+    test('near-limit malformed openers complete without suffix rescans', () {
+      // A generous wall-clock ceiling catches the original ~20 second freeze
+      // while allowing slow CI hosts ample headroom for the linear scanner.
+      for (final unit in ['[x](', '[']) {
+        final input = unit * (256 * 1024 ~/ unit.length);
+        final watch = Stopwatch()..start();
+        final result = normalizeBareLinks(input);
+        watch.stop();
+        expect(result == input, isTrue);
+        expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+      }
+    });
     test('escapes spaces and parentheses without double-encoding URLs', () {
       const raw = 'https://relay.example/media/photo (1).png?q=a%20b&v=2';
       const encoded =
