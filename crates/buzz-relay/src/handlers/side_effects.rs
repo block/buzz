@@ -7,11 +7,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    event_kind_u32, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AGENT_PROFILE,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -383,6 +383,9 @@ pub async fn validate_standard_deletion_event(
         if parts.len() < 2 {
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
+        if let Ok(target_kind) = parts[0].parse() {
+            check_deletion_privacy_k_tag(event, target_kind)?;
+        }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
         if target_pubkey_bytes != actor_bytes
@@ -408,6 +411,7 @@ pub async fn validate_standard_deletion_event(
                 "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
             );
         }
+        check_deletion_privacy_k_tag(event, event_kind_u32(&target_event.event))?;
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
         if target_author != actor_bytes
@@ -420,6 +424,27 @@ pub async fn validate_standard_deletion_event(
         }
     }
 
+    Ok(())
+}
+
+/// A deletion's read privacy follows its `k` tag (see
+/// `buzz_core::kind::is_author_only_event_kind`), so the tag must agree with
+/// the target: required when the target is author-only, so the deletion cannot
+/// leak its existence, and otherwise forbidden, so a public deletion cannot be
+/// hidden from the readers who need it.
+fn check_deletion_privacy_k_tag(event: &Event, target_kind: u32) -> anyhow::Result<()> {
+    let target_is_author_only = AUTHOR_ONLY_KINDS.contains(&target_kind);
+    let mut names_target = false;
+    for k in buzz_core::kind::k_tag_kinds(event) {
+        if k == target_kind {
+            names_target = true;
+        } else if AUTHOR_ONLY_KINDS.contains(&k) {
+            anyhow::bail!("k tag {k} does not match the deletion target's kind {target_kind}");
+        }
+    }
+    if target_is_author_only && !names_target {
+        anyhow::bail!("deletion of an author-only kind {target_kind} event requires [\"k\",\"{target_kind}\"]");
+    }
     Ok(())
 }
 
