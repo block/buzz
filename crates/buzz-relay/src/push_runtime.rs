@@ -138,11 +138,18 @@ async fn load_match_context(
     let mut authors: Vec<Vec<u8>> = leases.iter().map(|lease| lease.author.clone()).collect();
     authors.sort_unstable();
     authors.dedup();
+    // System channels never push: drop their membership pairs, so a channel
+    // event there matches no lease (channel events require membership).
+    let system = state
+        .db
+        .system_channel_ids_among(batch.community, &channels)
+        .await?;
     let memberships = state
         .db
         .membership_pairs(batch.community, &channels, &authors)
         .await?
         .into_iter()
+        .filter(|(channel, _)| !system.contains(channel))
         .collect();
     Ok(MatchContext {
         leases,

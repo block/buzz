@@ -126,6 +126,25 @@ pub async fn handle_req(
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
+    // System channels are outside `accessible_channels`. A filter that names
+    // one adds it to its own scope only (see `system_channels`).
+    let readable_system = match super::system_channels::readable_system_channels_for_filters(
+        &state,
+        conn.tenant.community(),
+        &pubkey_bytes,
+        &filters,
+        &accessible_channels,
+        token_channel_ids.as_deref(),
+    )
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(conn_id = %conn_id, "Failed to get readable system channels: {e}");
+            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            return;
+        }
+    };
 
     // Build the conformance `AbstractState` once at request entry. The
     // `Option` only goes `None` on malformed pubkey bytes (already a
@@ -150,7 +169,12 @@ pub async fn handle_req(
             let token_allows = token_channel_ids
                 .as_deref()
                 .is_none_or(|allowed| allowed.contains(&ch_id));
-            let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
+            // A readable system channel is authorized for the filters that
+            // name it; it must not enter the request-wide vector.
+            let db_is_member = if !token_allows
+                || accessible_channels.contains(&ch_id)
+                || readable_system.contains(&ch_id)
+            {
                 None
             } else {
                 match state
@@ -191,7 +215,9 @@ pub async fn handle_req(
         requested
             .iter()
             .copied()
-            .filter(|channel_id| accessible_channels.contains(channel_id))
+            .filter(|channel_id| {
+                accessible_channels.contains(channel_id) || readable_system.contains(channel_id)
+            })
             .collect::<Vec<_>>()
     });
     // Partial authorization preserves NIP-01 OR semantics by omitting only
@@ -318,6 +344,7 @@ pub async fn handle_req(
                 owner,
                 &filters,
                 &accessible_channels,
+                &readable_system,
                 token_channel_ids.is_none(),
                 &conn.tenant,
                 &pubkey_bytes,
@@ -416,7 +443,11 @@ pub async fn handle_req(
                     &mut params,
                     filter,
                     per_filter_channel,
-                    &accessible_channels,
+                    &super::system_channels::filter_channel_scope(
+                        filter,
+                        &accessible_channels,
+                        &readable_system,
+                    ),
                 );
                 // Shared-gated visibility pushdown: set reader bytes so query_events
                 // appends the SQL visibility clause before ORDER/LIMIT, preventing
@@ -448,6 +479,11 @@ pub async fn handle_req(
         // Phase 3 — post-processing, strictly in filter order.
         while let Some((idx, per_filter_channel, filter_events)) = results.next().await {
             let filter = &filters[idx];
+            let filter_scope = super::system_channels::filter_channel_scope(
+                filter,
+                &accessible_channels,
+                &readable_system,
+            );
             let events = match filter_events {
                 Ok(evs) => evs,
                 Err(e) => {
@@ -510,7 +546,7 @@ pub async fn handle_req(
                 }
 
                 if let Some(ch_id) = stored.channel_id {
-                    if !accessible_channels.contains(&ch_id) {
+                    if !filter_scope.contains(&ch_id) {
                         continue;
                     }
                 }
@@ -684,7 +720,8 @@ async fn handle_search_req(
     sub_id: &str,
     owner: u64,
     filters: &[Filter],
-    accessible_channels: &[uuid::Uuid],
+    implicit_channels: &[uuid::Uuid],
+    readable_system: &[uuid::Uuid],
     include_global: bool,
     tenant: &TenantContext,
     reader_pubkey_bytes: &[u8],
@@ -692,17 +729,15 @@ async fn handle_search_req(
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
 ) {
-    // The community-wide channel scope (no #h tag on the filter). `None` means
-    // "no accessible channels and no global access" → EOSE, exactly as the
-    // legacy string-filter helper short-circuited.
-    let all_channels_scope =
-        match build_search_channel_scope_filter(accessible_channels, include_global) {
-            Some(scope) => scope,
-            None => {
-                conn.send(RelayMessage::eose(sub_id));
-                return;
-            }
-        };
+    // `None` means "no accessible channels and no global access" → EOSE,
+    // exactly as the legacy string-filter helper short-circuited. A filter
+    // that names a readable system channel can still match it.
+    if build_search_channel_scope_filter(implicit_channels, include_global).is_none()
+        && readable_system.is_empty()
+    {
+        conn.send(RelayMessage::eose(sub_id));
+        return;
+    }
 
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
 
@@ -711,6 +746,13 @@ async fn handle_search_req(
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
+        // Implicit channels plus the readable system channels this filter
+        // names; never another filter's.
+        let accessible_channels = &*super::system_channels::filter_channel_scope(
+            filter,
+            implicit_channels,
+            readable_system,
+        );
 
         let limit = filter
             .limit
@@ -742,7 +784,11 @@ async fn handle_search_req(
                 }
                 buzz_search::ChannelScope::Channels(valid)
             } else {
-                all_channels_scope.clone()
+                // The community-wide scope (no #h tag on the filter).
+                match build_search_channel_scope_filter(accessible_channels, include_global) {
+                    Some(scope) => scope,
+                    None => continue,
+                }
             };
 
         let kinds = filter.kinds.as_ref().and_then(|ks| {
