@@ -14,6 +14,8 @@ import test from "node:test";
 import { npubEncode } from "nostr-tools/nip19";
 
 import {
+  hostedCommunityErrorMessage,
+  hostedCommunityQuotaLimit,
   normalizedBoundKeyHex,
   usableBoundIdentityNpub,
 } from "./hostedCommunityApi.ts";
@@ -95,4 +97,19 @@ test("the string normalizer rejects the same non-key values directly", () => {
   assert.equal(normalizedBoundKeyHex("f".repeat(63)), null);
   assert.equal(normalizedBoundKeyHex("f".repeat(65)), null);
   assert.equal(normalizedBoundKeyHex("  "), null);
+});
+
+test("quota projection never invents a fixed client limit", () => {
+  assert.equal(hostedCommunityQuotaLimit(undefined), null);
+  assert.equal(hostedCommunityQuotaLimit(0), null);
+  assert.equal(hostedCommunityQuotaLimit(5), 5);
+  assert.equal(hostedCommunityQuotaLimit(20), 20);
+  assert.equal(
+    hostedCommunityErrorMessage(
+      { code: "limit_reached" },
+      undefined,
+      "fallback",
+    ),
+    "You’ve reached your hosted community creation limit.",
+  );
 });

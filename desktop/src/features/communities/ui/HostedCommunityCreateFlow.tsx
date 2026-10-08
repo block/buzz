@@ -9,7 +9,6 @@ import {
   createHostedCommunity,
   deleteBuilderlabIdentity,
   getBuilderlabAuth,
-  HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
   hostedCommunityRelayUrl,
@@ -19,7 +18,6 @@ import {
   usableBoundIdentityNpub,
   VALID_HOSTED_COMMUNITY_NAME,
   type BuilderlabAuth,
-  type HostedCommunity,
   type HostedNostrIdentity,
 } from "@/features/communities/hostedCommunityApi";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
@@ -47,7 +45,7 @@ export function HostedCommunityCreateFlow({
   const [identity, setIdentity] = React.useState<HostedNostrIdentity | null>(
     null,
   );
-  const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [canCreate, setCanCreate] = React.useState(true);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
   const [checkingName, setCheckingName] = React.useState(false);
@@ -60,7 +58,7 @@ export function HostedCommunityCreateFlow({
   const loadAccount = React.useCallback(async () => {
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
-    setCommunities(account.communities);
+    setCanCreate(account.canCreate);
   }, []);
 
   React.useEffect(() => {
@@ -147,7 +145,7 @@ export function HostedCommunityCreateFlow({
       await clearBuilderlabAuth();
       setAuth(null);
       setIdentity(null);
-      setCommunities([]);
+      setCanCreate(true);
     });
 
   // Identity rows display npubs derived from the same key the mismatch gate
@@ -209,7 +207,7 @@ export function HostedCommunityCreateFlow({
   const validName =
     normalizedName.length <= 63 &&
     VALID_HOSTED_COMMUNITY_NAME.test(normalizedName);
-  const atCommunityLimit = communities.length >= HOSTED_COMMUNITY_LIMIT;
+  const atCommunityLimit = !canCreate;
   const ready = Boolean(auth && usableBoundIdentity && !identityMismatch);
 
   React.useEffect(() => {
@@ -400,7 +398,7 @@ export function HostedCommunityCreateFlow({
   }
 
   const feedback = atCommunityLimit
-    ? `You’ve reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`
+    ? "You’ve reached your hosted community creation limit."
     : name && !validName
       ? "Use lowercase letters, numbers, and single hyphens."
       : checkingName

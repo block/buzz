@@ -255,6 +255,11 @@ type E2eConfig = {
       normalized_host?: string;
       archived_at?: string | null;
     }>;
+    builderlabQuota?: {
+      quota_used?: number;
+      quota_limit?: number;
+      can_create?: boolean;
+    };
     /** Override the community returned after hosted creation. */
     builderlabCreatedCommunity?: {
       id?: string;
@@ -12609,6 +12614,7 @@ export function maybeInstallE2eTauriMocks() {
       case "list_builderlab_communities":
         return {
           communities: activeConfig?.mock?.builderlabCommunities ?? [],
+          ...activeConfig?.mock?.builderlabQuota,
         };
       case "check_builderlab_community_name":
         return {

@@ -180,6 +180,11 @@ type MockBridgeOptions = {
     normalized_host?: string;
     archived_at?: string | null;
   }>;
+  builderlabQuota?: {
+    quota_used?: number;
+    quota_limit?: number;
+    can_create?: boolean;
+  };
   acpRuntimesCatalog?: Record<string, unknown>[];
   /** Catalog returned after a successful mocked install. */
   acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];

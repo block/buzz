@@ -564,7 +564,7 @@ pub enum ProvisionOwnerResult {
 /// Default maximum number of communities a single pubkey can own. Enforced at
 /// the relay layer — the authoritative layer — so that concurrent transfers or
 /// transfer-vs-create races cannot both pass a preflight count.
-pub const MAX_COMMUNITIES_PER_OWNER: i64 = 5;
+pub const MAX_COMMUNITIES_PER_OWNER: i64 = 20;
 
 /// Effective per-owner community limit for this deployment.
 ///
@@ -1329,6 +1329,9 @@ mod postgres_tests {
         let limit = super::max_communities_per_owner();
         let lifetime = super::MAX_LIFETIME_COMMUNITIES_PER_OWNER;
         assert!(quota(0, 0).admits());
+        assert_eq!(limit, 20, "stock deployment permits 20 active owners");
+        assert!(quota(19, 19).admits(), "19 to 20 is allowed");
+        assert!(!quota(20, 20).admits(), "20 to 21 is rejected");
         assert!(quota(limit - 1, lifetime - 1).admits());
         assert!(!quota(limit, limit).admits(), "active cap");
         assert!(
@@ -1751,34 +1754,42 @@ mod postgres_tests {
         let owner = test_pubkey();
         let transferee = test_pubkey();
 
-        // Fill the configured default ownership limit.
-        for _ in 0..MAX_COMMUNITIES_PER_OWNER {
+        // At 19 ownerships, the twentieth transfer succeeds; at 20, the
+        // twenty-first is rejected by the same transaction-side admission.
+        for _ in 0..(MAX_COMMUNITIES_PER_OWNER - 1) {
             let c = make_test_community(&pool).await;
             bootstrap_owner(&pool, c, &transferee)
                 .await
                 .expect("bootstrap transferee community");
         }
 
-        // Create a community owned by `owner` and try to transfer to `transferee`.
-        let community = make_test_community(&pool).await;
-        bootstrap_owner(&pool, community, &owner)
-            .await
-            .expect("bootstrap owner");
-
-        let result = transfer_ownership(&pool, community, &transferee, &owner)
-            .await
-            .expect("transfer to maxed transferee");
-
-        assert_eq!(result, TransferResult::LimitReached);
-
-        // Owner is still owner — transfer did not happen.
-        assert_eq!(
-            get_relay_member(&pool, community, &owner)
+        for (expected, label) in [
+            (true, "twentieth transfer"),
+            (false, "twenty-first transfer"),
+        ] {
+            let community = make_test_community(&pool).await;
+            bootstrap_owner(&pool, community, &owner)
                 .await
-                .expect("get owner")
-                .expect("exists")
-                .role,
-            "owner"
-        );
+                .expect("bootstrap owner");
+            let result = transfer_ownership(&pool, community, &transferee, &owner)
+                .await
+                .expect(label);
+            assert_eq!(
+                matches!(result, TransferResult::Transferred { .. }),
+                expected,
+                "{label}"
+            );
+            if !expected {
+                assert_eq!(result, TransferResult::LimitReached);
+                assert_eq!(
+                    get_relay_member(&pool, community, &owner)
+                        .await
+                        .expect("get owner")
+                        .expect("exists")
+                        .role,
+                    "owner"
+                );
+            }
+        }
     }
 }
