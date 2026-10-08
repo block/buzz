@@ -16,7 +16,7 @@
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgConnection, PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -580,6 +580,19 @@ pub async fn restriction_state(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    restriction_state_with_connection(&mut connection, community, pubkey).await
+}
+
+/// Read effective restrictions using the caller's transaction connection.
+///
+/// Invite admission uses this helper while holding its community-scoped
+/// admission lock so a restriction lookup and membership insert share one
+/// transaction boundary.
+pub(crate) async fn restriction_state_with_connection(
+    connection: &mut PgConnection,
+    community: CommunityId,
+    pubkey: &[u8],
+) -> Result<RestrictionState> {
     let row = sqlx::query(
         r#"
         SELECT

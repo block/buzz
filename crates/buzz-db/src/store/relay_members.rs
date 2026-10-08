@@ -165,50 +165,6 @@ pub async fn add_relay_member(
     Ok(result.rows_affected() > 0)
 }
 
-/// Claims relay membership via an invite and atomically persists policy evidence.
-///
-/// Returns `true` when membership was inserted, or `false` when the pubkey was
-/// already a member. A configured `policy_version` is recorded in the same
-/// transaction, so membership cannot be granted without its acceptance record.
-pub async fn claim_relay_membership(
-    pool: &PgPool,
-    community: CommunityId,
-    pubkey: &str,
-    role: &str,
-    policy_version: Option<&str>,
-) -> Result<bool> {
-    let connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    let inserted = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, 'invite') \
-         ON CONFLICT (community_id, pubkey) DO NOTHING",
-    )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .bind(role)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
-
-    if let Some(version) = policy_version {
-        sqlx::query(
-            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(community.as_uuid())
-        .bind(pubkey)
-        .bind(version)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
-    Ok(inserted)
-}
-
 /// Returns whether a member has persisted acceptance evidence for a policy version.
 pub async fn has_join_policy_acceptance(
     pool: &PgPool,
@@ -930,19 +886,6 @@ impl Db {
         add_relay_member(&self.pool, community, pubkey, role, added_by).await
     }
 
-    /// Claims relay membership via an invite and atomically persists the
-    /// accepted policy version when a policy is configured.
-    #[datastore_span(name = "claim_relay_membership", system = "postgresql")]
-    pub async fn claim_relay_membership(
-        &self,
-        community: CommunityId,
-        pubkey: &str,
-        role: &str,
-        policy_version: Option<&str>,
-    ) -> Result<bool> {
-        claim_relay_membership(&self.pool, community, pubkey, role, policy_version).await
-    }
-
     /// Returns whether a member has persisted acceptance evidence for a policy version.
     #[datastore_span(name = "has_join_policy_acceptance", system = "postgresql")]
     pub async fn has_join_policy_acceptance(
@@ -1391,38 +1334,6 @@ mod postgres_tests {
             .await
             .expect("bootstrap owner");
         (community, owner)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn invite_claim_persists_policy_version_and_legacy_claim_does_not() {
-        let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let policy_member = test_pubkey();
-        let legacy_member = test_pubkey();
-        let version = "a".repeat(64);
-
-        assert!(
-            claim_relay_membership(&pool, community, &policy_member, "member", Some(&version),)
-                .await
-                .expect("claim membership with policy")
-        );
-        assert!(
-            has_join_policy_acceptance(&pool, community, &policy_member, &version)
-                .await
-                .expect("policy acceptance lookup")
-        );
-
-        assert!(
-            claim_relay_membership(&pool, community, &legacy_member, "member", None)
-                .await
-                .expect("legacy claim membership")
-        );
-        assert!(
-            !has_join_policy_acceptance(&pool, community, &legacy_member, &version)
-                .await
-                .expect("legacy acceptance lookup")
-        );
     }
 
     /// NIP-43 admission confinement: a pubkey admitted to community A is *not*

@@ -351,14 +351,22 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .split_once("pub async fn restriction_state(")
         .expect("moderation store must expose restriction_state")
         .1
+        .split_once("/// Read effective restrictions using the caller's transaction connection.")
+        .expect("restriction_state must delegate through its writer connection")
+        .0;
+    assert!(restriction_state.contains("WriterOperation::Authorization"));
+    assert!(restriction_state.contains("acquire_writer("));
+    assert!(restriction_state.contains("restriction_state_with_connection("));
+
+    let restriction_state_with_connection = moderation
+        .split_once("pub(crate) async fn restriction_state_with_connection(")
+        .expect("moderation store must expose the transaction-bound helper")
+        .1
         .split_once("/// Fetch the full ban/timeout row")
         .expect("restriction state must precede full ban reads")
         .0;
-    assert!(restriction_state.contains("WriterOperation::Authorization"));
-    // The single aggregate row is read on the attributed writer connection,
-    // never directly on the pool.
-    assert!(restriction_state.contains("fetch_one(&mut *connection)"));
-    assert!(!restriction_state.contains("(pool)"));
+    assert!(restriction_state_with_connection.contains("fetch_one(&mut *connection)"));
+    assert!(!restriction_state_with_connection.contains("fetch_one(pool)"));
 
     let community_store = include_str!("../src/store/community.rs");
     let ensure_community = community_store
