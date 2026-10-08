@@ -123,7 +123,10 @@ test("pinned script source check rejects broad sources", () => {
     "https:",
     "*",
   ]) {
-    assert.ok(!isPinnedScriptSource(rejected), `${rejected} should be rejected`);
+    assert.ok(
+      !isPinnedScriptSource(rejected),
+      `${rejected} should be rejected`,
+    );
   }
 });
 
