@@ -1414,6 +1414,24 @@ schema before handing off credentials. Older providers ignore unknown fields.
 PVCs remain outside this binding. Operator kubectl diagnostics and residue
 cleanup remain separate from the desktop provider protocol.
 
+The optional eleventh field, `identity_policy`, contains approved public
+`agent_pubkey` and `owner_pubkey` values. Before cluster access, the provider
+derives the agent key, rejects the owner key as an agent, and verifies the
+owner attestation and launch owner against that policy. Attestation time
+conditions are checked at local validation time; relay admission remains
+authoritative for its own signed authentication event.
+
+Without this policy, existing identity behavior is unchanged. The policy is
+an admission check, not Pod configuration; it does not change create intent.
+Launchers requiring it must check the `info` schema before handing off
+credentials. An older provider silently ignoring the field is insufficient.
+
+The same binary accepts `--check-identity` for local preflight of a deploy
+request on stdin. This mode requires `identity_policy`, contacts no cluster,
+and returns only the public agent Pod name or a sanitized refusal. It adds
+no operation to the two-operation provider protocol. Normal deployment repeats
+the check before cluster access; preflight does not authorize deployment.
+
 ### Distribution
 
 Its own release workflow (macOS arm64/x64 + Linux musl; the sprig workflow's

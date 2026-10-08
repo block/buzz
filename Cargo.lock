@@ -1088,6 +1088,7 @@ dependencies = [
 name = "buzz-backend-kubernetes"
 version = "0.1.0"
 dependencies = [
+ "buzz-sdk",
  "chrono",
  "hex",
  "http",

@@ -11,6 +11,7 @@ name = "buzz-backend-kubernetes"
 path = "src/main.rs"
 
 [dependencies]
+buzz-sdk = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 nostr = { workspace = true }

@@ -310,6 +310,16 @@ pub fn config_schema() -> serde_json::Value {
                 "type": "string",
                 "title": "Service account",
                 "description": "Scheduling/RBAC identity only. No API token is mounted."
+            },
+            "identity_policy": {
+                "type": "object",
+                "description": "Optional approved agent and owner public keys, cryptographically checked before cluster access. Also enables local --check-identity preflight.",
+                "additionalProperties": false,
+                "required": ["agent_pubkey", "owner_pubkey"],
+                "properties": {
+                    "agent_pubkey": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "owner_pubkey": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
             }
         },
         "required": ["namespace", "image"]
@@ -513,7 +523,7 @@ mod tests {
         );
     }
 
-    /// Ten fields (§`provider_config` v1 fields). The cap is 20; the
+    /// Eleven fields (§`provider_config` v1 fields). The cap is 20; the
     /// count is pinned so a field added without a spec change is caught here.
     #[test]
     fn schema_declares_scalar_fields_and_optional_pod_controls() {
@@ -527,6 +537,7 @@ mod tests {
                 "context",
                 "cpu_limit",
                 "cpu_request",
+                "identity_policy",
                 "image",
                 "inactivity_seconds",
                 "memory_limit",

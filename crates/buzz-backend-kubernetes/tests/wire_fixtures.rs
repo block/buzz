@@ -17,7 +17,12 @@ fn fixtures() -> PathBuf {
 
 /// Feed one request to the binary; return `(stdout, exit code)`.
 fn run(request: &str) -> (String, i32) {
+    run_with_args(request, &[])
+}
+
+fn run_with_args(request: &str, args: &[&str]) -> (String, i32) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_buzz-backend-kubernetes"))
+        .args(args)
         // A kubeconfig that does not exist, so a fixture that accidentally
         // reaches the cluster fails loudly here instead of depending on
         // whatever cluster the developer is pointed at.
@@ -37,6 +42,44 @@ fn run(request: &str) -> (String, i32) {
         String::from_utf8(out.stdout).expect("stdout was not UTF-8"),
         out.status.code().unwrap_or(-1),
     )
+}
+
+#[test]
+fn built_binary_preflights_and_repeats_identity_policy_before_cluster_access() {
+    use nostr::nips::nip19::ToBech32;
+    let agent = nostr::Keys::generate();
+    let owner = nostr::Keys::generate();
+    let nsec = agent.secret_key().to_bech32().unwrap();
+    let mut request: serde_json::Value =
+        serde_json::from_str(&read("deploy-full-launch.request.json")).unwrap();
+    request["agent"]["private_key_nsec"] = serde_json::json!(nsec);
+    request["agent"]["auth_tag"] =
+        serde_json::json!(
+            buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap()
+        );
+    request["agent"]["launch"]["owner_pubkey"] = serde_json::json!(owner.public_key().to_hex());
+    request["provider_config"]["identity_policy"] = serde_json::json!({
+        "agent_pubkey": agent.public_key().to_hex(), "owner_pubkey": owner.public_key().to_hex()
+    });
+    let (stdout, code) = run_with_args(&request.to_string(), &["--check-identity"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains(&nsec));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap(),
+        serde_json::json!({
+            "ok": true, "agent_id": format!("buzz-agent-{}", &agent.public_key().to_hex()[..12])
+        })
+    );
+    request["agent"]["auth_tag"] = serde_json::json!("synthetic-secret-invalid-attestation");
+    for args in [vec![], vec!["--check-identity"]] {
+        let (stdout, code) = run_with_args(&request.to_string(), &args);
+        assert_eq!(code, 0);
+        assert!(!stdout.contains("synthetic-secret"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stdout).unwrap()["error"],
+            "owner attestation verification failed"
+        );
+    }
 }
 
 fn read(name: &str) -> String {
