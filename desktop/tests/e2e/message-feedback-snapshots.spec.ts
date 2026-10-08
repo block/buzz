@@ -27,7 +27,7 @@ async function waitForMockLiveSubscription(
     .toBe(true);
 }
 
-test("pending continuation keeps Sending next to its timestamp", async ({
+test("pending continuation stays grouped through its acknowledgement", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -38,60 +38,67 @@ test("pending continuation keeps Sending next to its timestamp", async ({
 
   const sentMessage = `Message before pending state ${Date.now()}`;
   const pendingMessage = `Pending message status ${Date.now()}`;
+  const pendingId = `${"a".repeat(63)}1`;
   const createdAt = Math.floor(Date.now() / 1_000);
-  await page.evaluate(
-    ({ firstMessage, secondMessage, timestamp }) => {
-      const emit = (
-        window as Window & {
-          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
-            channelName: string;
-            content: string;
-            createdAt: number;
-            pending?: boolean;
-          }) => unknown;
+  const emit = (pending: boolean) =>
+    page.evaluate(
+      ({ firstMessage, secondMessage, timestamp, id, isPending }) => {
+        const emitMessage = (
+          window as Window & {
+            __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+              channelName: string;
+              content: string;
+              createdAt: number;
+              id?: string;
+              pending?: boolean;
+            }) => unknown;
+          }
+        ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        if (isPending) {
+          emitMessage?.({
+            channelName: "general",
+            content: firstMessage,
+            createdAt: timestamp - 1,
+          });
         }
-      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
-      emit?.({
-        channelName: "general",
-        content: firstMessage,
-        createdAt: timestamp - 1,
-      });
-      emit?.({
-        channelName: "general",
-        content: secondMessage,
-        createdAt: timestamp,
-        pending: true,
-      });
-    },
-    {
-      firstMessage: sentMessage,
-      secondMessage: pendingMessage,
-      timestamp: createdAt,
-    },
+        emitMessage?.({
+          channelName: "general",
+          content: secondMessage,
+          createdAt: timestamp,
+          id,
+          pending: isPending,
+        });
+      },
+      {
+        firstMessage: sentMessage,
+        secondMessage: pendingMessage,
+        timestamp: createdAt,
+        id: pendingId,
+        isPending: pending,
+      },
+    );
+
+  await emit(true);
+  const pendingRow = page.locator(`[data-message-id="${pendingId}"]`);
+  // The status is announced, but the grouped row carries no header for it.
+  await expect(pendingRow.getByTestId("message-send-status")).toHaveText(
+    "Sending…",
   );
-
-  const pendingRow = page
-    .getByTestId("message-row")
-    .filter({ hasText: pendingMessage });
-  const status = pendingRow.getByTestId("message-send-status");
-  await expect(status).toHaveText("Sending…");
-  await expect(pendingRow.getByTestId("message-author")).toHaveCount(1);
-
-  const timestamp = status.locator("xpath=../p[1]");
-  const [timestampBox, statusBox] = await Promise.all([
-    timestamp.boundingBox(),
-    status.boundingBox(),
-  ]);
-  expect(timestampBox).not.toBeNull();
-  expect(statusBox).not.toBeNull();
-  if (!timestampBox || !statusBox) {
-    throw new Error("Pending message metadata is missing its inline layout.");
-  }
-  expect(statusBox.x).toBeGreaterThan(timestampBox.x);
-  expect(Math.abs(statusBox.y - timestampBox.y)).toBeLessThanOrEqual(1);
-
+  await expect(pendingRow.getByTestId("message-author")).toHaveCount(0);
   await waitForAnimations(page);
-  await pendingRow.screenshot({ path: `${SHOTS}/pending-message-inline.png` });
+  const pendingBox = await pendingRow.boundingBox();
+  await pendingRow.screenshot({ path: `${SHOTS}/pending-message-grouped.png` });
+
+  await emit(false);
+  await expect(pendingRow.getByTestId("message-send-status")).toHaveCount(0);
+  await expect(pendingRow.getByTestId("message-author")).toHaveCount(0);
+  await waitForAnimations(page);
+  const sentBox = await pendingRow.boundingBox();
+
+  expect(pendingBox).not.toBeNull();
+  expect(sentBox).not.toBeNull();
+  // Acknowledgement must not resize the row, or the timeline jumps per send.
+  expect(sentBox?.height).toBe(pendingBox?.height);
 });
 
 test("profile hover uses the channel hover surface", async ({ page }) => {
