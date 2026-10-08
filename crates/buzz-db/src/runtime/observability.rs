@@ -28,6 +28,7 @@ enum PoolOperation {
     ReaderSubscriptionHistory,
     WriterEventWrite,
     WriterMaintenance,
+    ReaderMaintenance,
 }
 
 /// Writer-pool operations. Reader-only combinations cannot be constructed.
@@ -76,14 +77,17 @@ pub(crate) enum ReaderOperation {
     Bootstrap,
     Authorization,
     SubscriptionHistory,
+    /// Leader-only background reads such as fleet usage telemetry.
+    Maintenance,
 }
 
 impl ReaderOperation {
     #[cfg(test)]
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::Bootstrap,
         Self::Authorization,
         Self::SubscriptionHistory,
+        Self::Maintenance,
     ];
 
     const fn pair(self) -> PoolOperation {
@@ -91,12 +95,26 @@ impl ReaderOperation {
             Self::Bootstrap => PoolOperation::ReaderBootstrap,
             Self::Authorization => PoolOperation::ReaderAuthorization,
             Self::SubscriptionHistory => PoolOperation::ReaderSubscriptionHistory,
+            Self::Maintenance => PoolOperation::ReaderMaintenance,
         }
+    }
+
+    /// Whether a dropped checkout must close the connection under SQLx's
+    /// bounded `close_on_drop` instead of returning it to the pool.
+    ///
+    /// Maintenance reads run under relay-side deadlines that drop them
+    /// mid-query when a reader goes dark. SQLx's return-to-pool path pings
+    /// that connection with no timeout while still holding a pool slot, and
+    /// the reader pool is shared with serving reads, so each abandoned read
+    /// would strand a serving slot until the kernel gives up on the socket.
+    /// Serving reads keep pooled reuse.
+    pub(crate) const fn bounded_release(self) -> bool {
+        matches!(self, Self::Maintenance)
     }
 }
 
 impl PoolOperation {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::WriterBootstrap,
         Self::ReaderBootstrap,
         Self::WriterReadiness,
@@ -108,13 +126,15 @@ impl PoolOperation {
         Self::ReaderSubscriptionHistory,
         Self::WriterEventWrite,
         Self::WriterMaintenance,
+        Self::ReaderMaintenance,
     ];
 
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
-            Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
-                DbPoolRole::Reader.as_str()
-            }
+            Self::ReaderBootstrap
+            | Self::ReaderAuthorization
+            | Self::ReaderSubscriptionHistory
+            | Self::ReaderMaintenance => DbPoolRole::Reader.as_str(),
             _ => DbPoolRole::Writer.as_str(),
         }
     }
@@ -130,7 +150,7 @@ impl PoolOperation {
                 "subscription_history"
             }
             Self::WriterEventWrite => "event_write",
-            Self::WriterMaintenance => "maintenance",
+            Self::WriterMaintenance | Self::ReaderMaintenance => "maintenance",
         }
     }
 
@@ -139,7 +159,7 @@ impl PoolOperation {
     }
 }
 
-pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
+pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
     (DbPoolRole::Writer.as_str(), "bootstrap"),
     (DbPoolRole::Reader.as_str(), "bootstrap"),
     (DbPoolRole::Writer.as_str(), "readiness"),
@@ -151,9 +171,10 @@ pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
     (DbPoolRole::Reader.as_str(), "subscription_history"),
     (DbPoolRole::Writer.as_str(), "event_write"),
     (DbPoolRole::Writer.as_str(), "maintenance"),
+    (DbPoolRole::Reader.as_str(), "maintenance"),
 ];
 
-/// Eleven valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+/// Twelve valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
 pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,17 +247,21 @@ pub(crate) enum TransactionOperation {
     AcceptPushLeaseEvent,
     BeginCommunityDeletionQuiescing,
     FenceCommunityDeletion,
+    CommunityArchiveFence,
+    InactiveCommunityFence,
 }
 
 impl TransactionOperation {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::ReplaceParameterizedEvent,
         Self::ReplaceAddressableEvent,
         Self::PublishNip43MembershipLocked,
         Self::AcceptPushLeaseEvent,
         Self::BeginCommunityDeletionQuiescing,
         Self::FenceCommunityDeletion,
+        Self::CommunityArchiveFence,
+        Self::InactiveCommunityFence,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -247,6 +272,24 @@ impl TransactionOperation {
             Self::AcceptPushLeaseEvent => "accept_push_lease_event",
             Self::BeginCommunityDeletionQuiescing => "begin_community_deletion_quiescing",
             Self::FenceCommunityDeletion => "fence_community_deletion",
+            Self::CommunityArchiveFence => "community_archive_fence",
+            Self::InactiveCommunityFence => "inactive_community_fence",
+        }
+    }
+
+    /// Whether this transaction's writer checkout also feeds the legacy
+    /// `buzz_db_pool_acquire_wait_seconds` / `buzz_db_pool_acquisitions_total`
+    /// families. Only seams that predate operation-labelled pool metrics do;
+    /// later seams must not change those families' observed population.
+    const fn emits_legacy_pool_metrics(self) -> bool {
+        match self {
+            Self::ReplaceParameterizedEvent
+            | Self::ReplaceAddressableEvent
+            | Self::PublishNip43MembershipLocked
+            | Self::AcceptPushLeaseEvent
+            | Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion => true,
+            Self::CommunityArchiveFence | Self::InactiveCommunityFence => false,
         }
     }
 
@@ -256,9 +299,10 @@ impl TransactionOperation {
             | Self::ReplaceAddressableEvent
             | Self::PublishNip43MembershipLocked
             | Self::AcceptPushLeaseEvent => WriterOperation::EventWrite,
-            Self::BeginCommunityDeletionQuiescing | Self::FenceCommunityDeletion => {
-                WriterOperation::Maintenance
-            }
+            Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion
+            | Self::CommunityArchiveFence
+            | Self::InactiveCommunityFence => WriterOperation::Maintenance,
         }
     }
 }
@@ -504,7 +548,12 @@ pub(crate) async fn begin_transaction(
     pool: &sqlx::PgPool,
     operation: TransactionOperation,
 ) -> sqlx::Result<(sqlx::Transaction<'static, sqlx::Postgres>, TransactionTimer)> {
-    let connection = acquire_writer_with_legacy_metrics(pool, operation.writer_operation()).await?;
+    let writer = operation.writer_operation();
+    let connection = if operation.emits_legacy_pool_metrics() {
+        acquire_writer_with_legacy_metrics(pool, writer).await?
+    } else {
+        acquire_writer(pool, writer).await?
+    };
     let transaction = sqlx::Transaction::begin(connection, None).await?;
     Ok((transaction, TransactionTimer::start(operation)))
 }
@@ -576,9 +625,9 @@ impl Drop for TransactionTimer {
 mod tests {
     use super::{
         acquire_reader_with_legacy_metrics, acquire_writer, acquire_writer_with_legacy_metrics,
-        observe_advisory_lock, record_pool_acquire, refresh_pool_waiters, LockType, Outcome,
-        PoolAcquireAttempt, PoolOperation, ReaderOperation, TransactionOperation, TransactionTimer,
-        WriterOperation,
+        begin_transaction, observe_advisory_lock, record_pool_acquire, refresh_pool_waiters,
+        LockType, Outcome, PoolAcquireAttempt, PoolOperation, ReaderOperation,
+        TransactionOperation, TransactionTimer, WriterOperation,
     };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use std::collections::{BTreeMap, BTreeSet};
@@ -610,9 +659,10 @@ mod tests {
                 PoolOperation::ReaderBootstrap,
                 PoolOperation::ReaderAuthorization,
                 PoolOperation::ReaderSubscriptionHistory,
+                PoolOperation::ReaderMaintenance,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 198);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 216);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
@@ -636,6 +686,8 @@ mod tests {
                 "accept_push_lease_event",
                 "begin_community_deletion_quiescing",
                 "fence_community_deletion",
+                "community_archive_fence",
+                "inactive_community_fence",
             ]
         );
     }
@@ -985,6 +1037,21 @@ mod tests {
             0
         );
 
+        for operation in [
+            TransactionOperation::CommunityArchiveFence,
+            TransactionOperation::InactiveCommunityFence,
+        ] {
+            let Err(error) = begin_transaction(&pool, operation).await else {
+                panic!("closed newly instrumented transaction seam errors");
+            };
+            assert!(matches!(error, sqlx::Error::PoolClosed));
+        }
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            0,
+            "community lifecycle fences must not expand the legacy pool families"
+        );
+
         let error = acquire_writer_with_legacy_metrics(&pool, WriterOperation::EventWrite)
             .await
             .expect_err("closed legacy seam errors");
@@ -992,6 +1059,20 @@ mod tests {
         assert_eq!(
             legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
             1
+        );
+
+        let Err(error) =
+            begin_transaction(&pool, TransactionOperation::FenceCommunityDeletion).await
+        else {
+            panic!("closed legacy transaction seam errors");
+        };
+        assert!(matches!(error, sqlx::Error::PoolClosed));
+        // `snapshot()` drains counters, so each assertion sees only the
+        // acquisitions recorded since the previous snapshot.
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            1,
+            "pre-existing deletion fences keep their legacy pool population"
         );
     }
 
@@ -1483,7 +1564,7 @@ mod tests {
         // writer acquisition has been attributed to `event_write`.
         let _ = writer_db.begin_event_write_transaction(test_scope).await;
         let _ = writer_db
-            .is_community_active_for_maintenance(test_scope)
+            .with_inactive_community_fence(test_scope, |_| ())
             .await;
         let _ = writer_db.usage_community_count().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
@@ -1494,6 +1575,7 @@ mod tests {
         let _ = routed_db
             .query_events_routed("pool_operation_matrix_reader", &query)
             .await;
+        let _ = routed_db.usage_fleet_stock_snapshot().await;
         routed_db.refresh_pool_waiter_metrics();
 
         let snapshot = snapshotter.snapshot().into_vec();

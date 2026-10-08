@@ -76,6 +76,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
@@ -495,6 +496,7 @@ double? effectiveFontSizeForText(
 void main() {
   _loadingReviewTests();
   threadReplyRefreshTests();
+  threadTitleCapsuleTests();
   presenceTests();
   actionRowTests();
   setUp(() async {

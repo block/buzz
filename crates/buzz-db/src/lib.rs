@@ -31,12 +31,12 @@ pub mod error;
 mod test_support;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbConnectionOutcome, DbConnectionStep,
-    DbPoolRole, DbPoolStats, DbReadinessOutcome, ReadSession,
+    insert_mentions, migration, replica_fence, AdmittedTx, Db, DbConfig, DbConnectionOutcome,
+    DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome, ReadSession,
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
-pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] =
     runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
 
 /// Raw Prometheus series ceiling per relay pod for the operation-aware contract.

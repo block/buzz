@@ -3065,30 +3065,13 @@ async fn commit_participant_join(
     //    transaction commits or rolls back before it can proceed — closing the
     //    READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
     //
-    //    The channels row is a single row identified
-    //    by primary key; the lock is held only for the duration of the join
-    //    transaction (typically sub-millisecond).
-    //
-    //    `FOR NO KEY UPDATE` vs `FOR UPDATE`: using `FOR UPDATE` here inverts
-    //    the lock order against the normal `add_member` path, which takes the
-    //    advisory membership lock first and then its membership INSERT needs a
-    //    `KEY SHARE` on `channels` for the FK (`channel_members.community_id`
-    //    references `channels.community_id`). `FOR UPDATE` blocks `KEY SHARE`
-    //    → deadlock when a normal `add_member` is in-flight concurrently.
-    //    `FOR NO KEY UPDATE` still conflicts with archive's non-key row update
-    //    (`archived_at` is not a FK key column) and blocks it correctly, but is
-    //    compatible with `KEY SHARE`, closing the lock-inversion window.
-    let channel_archived_early: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT archived_at FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
-         FOR NO KEY UPDATE",
-    )
-    .bind(tenant.community().as_uuid())
-    .bind(channel_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(buzz_db::DbError::from)?
-    .flatten();
+    //    The channels row is a single row identified by primary key; the lock
+    //    is held only for the duration of the join transaction (typically
+    //    sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
+    //    the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
+    let channel_archived_early =
+        buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
+            .await?;
 
     // Test hook: fires after the FOR UPDATE lock is acquired but before the
     // archived check / any write. A test can attempt a concurrent archive here
@@ -3123,9 +3106,7 @@ async fn commit_participant_join(
         crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
 
         buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(
-            &mut tx,
-            tenant.community(),
-            channel_id,
+            &mut tx, channel_id,
         )
         .await?;
 
@@ -3133,16 +3114,9 @@ async fn commit_participant_join(
         // could be archived in the window between check_membership_for_admission
         // and now; committing a join into an archived channel violates the
         // "no admission after archive" invariant.
-        let channel_archived: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT archived_at FROM channels \
-             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-        )
-        .bind(tenant.community().as_uuid())
-        .bind(channel_id)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(buzz_db::DbError::from)?
-        .flatten();
+        let channel_archived =
+            buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
+                .await?;
 
         if channel_archived.is_some() {
             retire_shadow();
@@ -3153,13 +3127,9 @@ async fn commit_participant_join(
         // IMPORTANT 4b: Re-read parent membership under the lock. A parent
         // membership revocation in the same window would make the auto-add
         // unjustified; reject rather than grant access from stale authority.
-        let parent_still_member = buzz_db::channel_members::is_member_in_transaction(
-            &mut tx,
-            tenant.community(),
-            *parent_id,
-            pubkey_bytes,
-        )
-        .await?;
+        let parent_still_member =
+            buzz_db::channel_members::is_member_in_transaction(&mut tx, *parent_id, pubkey_bytes)
+                .await?;
 
         if !parent_still_member {
             retire_shadow();
@@ -3175,7 +3145,6 @@ async fn commit_participant_join(
         // an unlinked channel violates the "creator authority" invariant.
         let link_still_exists = buzz_db::event::huddle_started_link_exists_in_transaction(
             &mut tx,
-            tenant.community(),
             *parent_id,
             channel_id,
             channel_created_by.as_slice(),
@@ -3190,18 +3159,13 @@ async fn commit_participant_join(
 
         // Re-read child membership — a concurrent legitimate add may have
         // already provided access; do not overwrite role/provenance.
-        let still_absent = !buzz_db::channel_members::is_member_in_transaction(
-            &mut tx,
-            tenant.community(),
-            channel_id,
-            pubkey_bytes,
-        )
-        .await?;
+        let still_absent =
+            !buzz_db::channel_members::is_member_in_transaction(&mut tx, channel_id, pubkey_bytes)
+                .await?;
 
         if still_absent {
             buzz_db::channel_members::insert_auto_membership_in_transaction(
                 &mut tx,
-                tenant.community(),
                 channel_id,
                 pubkey_bytes,
                 channel_created_by.as_slice(),
@@ -3212,13 +3176,9 @@ async fn commit_participant_join(
     }
 
     // 5. Insert kind `48101` uncommitted.
-    let (stored, was_inserted) = buzz_db::event::insert_event_in_transaction(
-        &mut tx,
-        tenant.community(),
-        &event,
-        Some(parent_channel_id),
-    )
-    .await?;
+    let (stored, was_inserted) =
+        buzz_db::event::insert_event_in_transaction(&mut tx, &event, Some(parent_channel_id))
+            .await?;
 
     // 6. Acquire effect permit or rollback.
     //
@@ -3240,7 +3200,7 @@ async fn commit_participant_join(
 
     // 7. Commit while holding the permit.
     if let Err(e) = tx.commit().await {
-        return Err(JoinCommitError::Db(e.into()));
+        return Err(JoinCommitError::Db(e));
     }
     if let Some(shadow) = shadow {
         shadow.admit();
@@ -3763,7 +3723,7 @@ mod tests {
         let registry = crate::state::CommunityConnectionRegistry::new();
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let _guard = registry.register(Uuid::new_v4(), community, control);
-        assert_eq!(registry.disconnect_community(community), 1);
+        assert_eq!(registry.disconnect_deleted_community(community), 1);
         let messages = Arc::new(Mutex::new(Vec::new()));
         let sink = MockSink {
             messages: Arc::clone(&messages),
@@ -10061,7 +10021,8 @@ mod tests {
         //
         // Mutation oracle:
         //   Change `FOR NO KEY UPDATE` back to `FOR UPDATE` in
-        //   `commit_participant_join` → `add_member`'s FK KEY SHARE blocks on
+        //   `buzz_db::channel_members::lock_channel_archived_at_in_transaction`
+        //   → `add_member`'s FK KEY SHARE blocks on
         //   FOR UPDATE → the 3-second tokio::time::timeout fires → synthesized
         //   error → `add_member_completed` is false → assertion panics.
 

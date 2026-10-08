@@ -39,16 +39,17 @@ pub enum ConfigError {
 /// - `Moderator/Db` from the `relay_operators` table otherwise
 /// - `None` → 403 (no fall-through role, ever)
 ///
-/// Disabled mode is always read-only. NIP-98 mode is read-write per resolved
-/// principal.
+/// Disabled mode serves every moderation read and refuses writes and staffing.
+/// NIP-98 mode is read-write per resolved principal.
 #[derive(Debug, Clone)]
 pub enum AdminAuth {
     /// Authentication disabled. The operator has explicitly asserted
     /// that the admin API is protected at the network layer (reverse proxy,
     /// VPN, firewall). `Host`/`Origin` checks remain active as defense-in-depth.
     /// Selected by `BUZZ_ADMIN_AUTH=disabled`.
-    /// Always read-only: `authorize()` resolves no principal for this mode, so
-    /// mutation and staffing routes always 403.
+    /// Every moderation read is served to anyone who can reach the relay;
+    /// `authorize()` returns `NetworkTrusted` with no identity, so write and
+    /// staffing routes always 403.
     Disabled,
     /// NIP-98 HTTP Auth. Every request must carry an `Authorization: Nostr`
     /// header containing a signed kind-27235 event. The authenticated pubkey
@@ -60,8 +61,7 @@ pub enum AdminAuth {
 }
 
 /// Deny-by-default deployment-admin configuration. Mutation and staffing routes
-/// require a resolved principal (NIP-98 only); disabled mode is always
-/// read-only.
+/// require a resolved principal (NIP-98 only); disabled mode serves reads only.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
     /// Exact admin HTTP authority.
@@ -127,6 +127,10 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
+    /// Replica freshness budget for fleet usage telemetry
+    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
+    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
+    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -644,6 +648,16 @@ impl Config {
             })?,
             Err(_) => 0,
         };
+        let usage_metrics_replica_max_age_ms =
+            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
+                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
+                    ConfigError::InvalidValue(
+                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
+                            .to_string(),
+                    )
+                })?,
+                Err(_) => 30_000,
+            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -1273,9 +1287,13 @@ impl Config {
                     None | Some("") | Some("nip98") => AdminAuth::Nip98,
                     Some("disabled") => {
                         tracing::warn!(
-                            "BUZZ_ADMIN_AUTH=disabled — the admin API is \
-                             unauthenticated; the operator has asserted that access is \
-                             controlled at the network layer (reverse proxy, VPN, firewall)"
+                            "BUZZ_ADMIN_AUTH=disabled — the admin API serves every \
+                             moderation read without authentication to anyone who can \
+                             reach the relay: reports, feedback and attachments, \
+                             restrictions, the community directory, member profiles and \
+                             any stored message by ID, in every community. Writes and \
+                             staffing are refused. Keep the whole relay port private to \
+                             people allowed to see all of that"
                         );
                         AdminAuth::Disabled
                     }
@@ -1350,6 +1368,7 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
+            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
             redis_pool_size,
@@ -1626,6 +1645,8 @@ mod tests {
         values: &[(&str, Option<&str>)],
     ) -> (Result<Config, ConfigError>, String) {
         use std::sync::{Arc, Mutex};
+
+        let _tracing = crate::test_support::tracing_dispatch_lock();
 
         #[derive(Clone)]
         struct CapturingMakeWriter {
@@ -2260,6 +2281,35 @@ mod tests {
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
+
+        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        let defaults = Config::from_env().expect("config");
+
+        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
+        let disabled = Config::from_env().expect("config");
+
+        if let Some(value) = previous_usage {
+            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        }
+        if let Some(value) = previous_serving {
+            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        }
+
+        assert_eq!(defaults.replica_read_max_age_ms, 0);
+        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
+        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
     }
 
     #[test]

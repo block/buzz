@@ -23,7 +23,9 @@ shared tables, so tests may run concurrently without coordinating cleanup.
 
 ## Choose the schema intentionally
 
-Most tests use the committed desired-state schema from `schema/schema.sql`.
+Most tests use the committed desired-state schema from `schema/schema.sql`,
+a manifest that includes one `schema/tables/public/<table>.sql` per table plus
+its types, functions, partitions, triggers, and seed rows.
 That is the default and is appropriate for data-access behavior.
 
 Tests in `migration::postgres_tests` receive an empty database and own the

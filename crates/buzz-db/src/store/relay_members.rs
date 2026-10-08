@@ -1201,7 +1201,7 @@ impl Db {
             observability::LockType::Membership,
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(lock_key)
-                .execute(&mut *tx),
+                .execute(tx.conn()),
         )
         .await?;
 
@@ -1211,7 +1211,7 @@ impl Db {
              WHERE community_id = $1 ORDER BY created_at ASC",
         )
         .bind(community_id.as_uuid())
-        .fetch_all(&mut *tx)
+        .fetch_all(tx.conn())
         .await?;
 
         let member_count = rows.len();
@@ -1255,7 +1255,7 @@ impl Db {
         .bind(community_id.as_uuid())
         .bind(kind_i32)
         .bind(pubkey_bytes.as_slice())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         let insert_result = sqlx::query(
@@ -1274,7 +1274,7 @@ impl Db {
         .bind(received_at)
         .bind::<Option<Uuid>>(None)
         .bind(d_tag.as_deref())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         let was_inserted = insert_result.rows_affected() > 0;

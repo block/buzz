@@ -23,15 +23,12 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
 }
 
 final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate {
-  var maximumWidth: CGFloat = 240 {
-    didSet { if maximumWidth != oldValue { invalidateIntrinsicContentSize() } }
-  }
   var onActivate: (() -> Void)?
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
-  private var avatarView: UIImageView?
-  private var presenceView: UIView?
-  private var subtitlePresenceView: UIView?
+  private let contentStack = UIStackView()
+  private let textStack = UIStackView()
+  private let subtitleStack = UIStackView()
 
   init(title: String?, subtitle: String, color: UIColor) {
     if #available(iOS 26.0, *) {
@@ -42,17 +39,36 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     clipsToBounds = true
     layer.cornerCurve = .continuous
     titleLabel.text = title
-    titleLabel.font = .preferredFont(forTextStyle: .headline)
     titleLabel.textColor = color
     subtitleLabel.text = subtitle
-    subtitleLabel.font = .preferredFont(forTextStyle: .caption1)
     subtitleLabel.textColor = .secondaryLabel
     for label in [titleLabel, subtitleLabel] {
       label.textAlignment = .center
       label.lineBreakMode = .byTruncatingTail
       label.adjustsFontForContentSizeCategory = false
-      contentView.addSubview(label)
+      label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
+    subtitleStack.axis = .horizontal
+    subtitleStack.alignment = .center
+    subtitleStack.spacing = 6
+    subtitleStack.addArrangedSubview(subtitleLabel)
+    textStack.axis = .vertical
+    textStack.alignment = .center
+    textStack.addArrangedSubview(titleLabel)
+    textStack.addArrangedSubview(subtitleStack)
+    contentStack.axis = .horizontal
+    contentStack.alignment = .center
+    contentStack.spacing = 8
+    contentStack.addArrangedSubview(textStack)
+    contentStack.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(contentStack)
+    NSLayoutConstraint.activate([
+      contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+      contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+      contentStack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+    ])
+    translatesAutoresizingMaskIntoConstraints = false
+    updateFonts()
     // Flutter creates platform views with a zero frame. Keep a nonzero
     // intrinsic width and let UINavigationBar compress it between its items.
     setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -64,11 +80,23 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   func setAvatar(_ image: UIImage?, presence: UIColor?) {
-    let avatar = UIImageView(image: image)
+    // Bar-item images carry alignment insets; the title owns its 32pt layout.
+    let avatar = UIImageView(image: image?.withAlignmentRectInsets(.zero))
     avatar.accessibilityIdentifier = "dm-navigation-avatar"
     avatar.contentMode = .scaleAspectFit
-    contentView.addSubview(avatar)
-    avatarView = avatar
+    let avatarContainer = UIView()
+    avatar.translatesAutoresizingMaskIntoConstraints = false
+    avatarContainer.addSubview(avatar)
+    contentStack.insertArrangedSubview(avatarContainer, at: 0)
+    NSLayoutConstraint.activate([
+      avatarContainer.widthAnchor.constraint(equalToConstant: 32),
+      avatarContainer.heightAnchor.constraint(equalToConstant: 32),
+      avatar.leadingAnchor.constraint(equalTo: avatarContainer.leadingAnchor),
+      avatar.trailingAnchor.constraint(equalTo: avatarContainer.trailingAnchor),
+      avatar.topAnchor.constraint(equalTo: avatarContainer.topAnchor),
+      avatar.bottomAnchor.constraint(equalTo: avatarContainer.bottomAnchor),
+    ])
+    textStack.alignment = .leading
     for label in [titleLabel, subtitleLabel] { label.textAlignment = .natural }
     if let presence {
       let badge = UIView()
@@ -77,9 +105,16 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
       badge.layer.borderWidth = 1.5
       badge.layer.borderColor = UIColor.systemBackground.cgColor
       badge.accessibilityIdentifier = "dm-navigation-presence"
-      contentView.addSubview(badge)
-      presenceView = badge
+      badge.translatesAutoresizingMaskIntoConstraints = false
+      avatarContainer.addSubview(badge)
+      NSLayoutConstraint.activate([
+        badge.widthAnchor.constraint(equalToConstant: 8),
+        badge.heightAnchor.constraint(equalToConstant: 8),
+        badge.trailingAnchor.constraint(equalTo: avatarContainer.trailingAnchor),
+        badge.bottomAnchor.constraint(equalTo: avatarContainer.bottomAnchor),
+      ])
     }
+    invalidateIntrinsicContentSize()
   }
 
   func setSubtitlePresence(_ color: UIColor) {
@@ -88,8 +123,11 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     dot.layer.cornerRadius = 3
     dot.isAccessibilityElement = false
     dot.accessibilityIdentifier = "dm-navigation-status-dot"
-    contentView.addSubview(dot)
-    subtitlePresenceView = dot
+    subtitleStack.insertArrangedSubview(dot, at: 0)
+    NSLayoutConstraint.activate([
+      dot.widthAnchor.constraint(equalToConstant: 6),
+      dot.heightAnchor.constraint(equalToConstant: 6),
+    ])
     invalidateIntrinsicContentSize()
   }
 
@@ -125,13 +163,25 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   override var intrinsicContentSize: CGSize {
-    CGSize(width: min(maximumWidth, max(titleLabel.intrinsicContentSize.width, subtitleLabel.intrinsicContentSize.width + (subtitlePresenceView == nil ? 0 : 12)) + 24 + (avatarView == nil ? 0 : 40)),
-           height: max(44, titleLabel.intrinsicContentSize.height + subtitleLabel.intrinsicContentSize.height))
+    let contentSize = contentStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+    return CGSize(width: contentSize.width + 24, height: max(44, contentSize.height))
   }
 
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    layer.cornerRadius = bounds.height / 2
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+      updateFonts()
+      invalidateIntrinsicContentSize()
+      setNeedsLayout()
+    }
+  }
+
+  override func sizeThatFits(_ size: CGSize) -> CGSize {
+    let desired = intrinsicContentSize
+    return CGSize(width: min(size.width, desired.width), height: desired.height)
+  }
+
+  private func updateFonts() {
     // Compact navigation remains a 44pt toolbar. Scale within that budget;
     // the complete title/subtitle remains available as one VoiceOver label.
     titleLabel.font = UIFontMetrics(forTextStyle: .headline).scaledFont(
@@ -140,26 +190,11 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     subtitleLabel.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
       for: .systemFont(ofSize: 12), maximumPointSize: 14,
       compatibleWith: traitCollection)
-    let titleHeight = titleLabel.intrinsicContentSize.height
-    let subtitleHeight = subtitleLabel.intrinsicContentSize.height
-    let top = (bounds.height - titleHeight - subtitleHeight) / 2
-    let hasAvatar = avatarView != nil
-    let rtl = effectiveUserInterfaceLayoutDirection == .rightToLeft
-    let textX: CGFloat = hasAvatar && !rtl ? 52 : 12
-    let textWidth = max(0, bounds.width - 24 - (hasAvatar ? 40 : 0))
-    titleLabel.frame = CGRect(x: textX, y: top, width: textWidth, height: titleHeight)
-    subtitleLabel.frame = CGRect(x: textX, y: top + titleHeight, width: textWidth, height: subtitleHeight)
-    if let dot = subtitlePresenceView {
-      let labelWidth = min(subtitleLabel.intrinsicContentSize.width, max(0, textWidth - 12))
-      let groupX = textX + (textWidth - labelWidth - 12) / 2
-      dot.frame = CGRect(x: rtl ? groupX + labelWidth + 6 : groupX,
-                         y: top + titleHeight + (subtitleHeight - 6) / 2, width: 6, height: 6)
-      subtitleLabel.frame = CGRect(x: rtl ? groupX : groupX + 12,
-                                   y: top + titleHeight, width: labelWidth, height: subtitleHeight)
-    }
-    let avatarX: CGFloat = rtl ? bounds.width - 44 : 12
-    avatarView?.frame = CGRect(x: avatarX, y: (bounds.height - 32) / 2, width: 32, height: 32)
-    presenceView?.frame = CGRect(x: avatarX + (rtl ? 0 : 24), y: (bounds.height - 32) / 2 + 24, width: 8, height: 8)
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    layer.cornerRadius = bounds.height / 2
   }
 }
 
