@@ -18,21 +18,73 @@ use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
+    let identity = channel_identity(e);
     serde_json::json!({
         "channel_id": extract_d_tag(e),
         "name": extract_tag_value(e, "name"),
         "description": extract_tag_value(e, "about"),
+        "labels": identity.labels,
+        "created_by": identity.created_by,
         "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
+}
+
+/// Channel type, labels and creator from a group-state event's JSON tags.
+fn channel_identity(e: &serde_json::Value) -> buzz_sdk::ChannelIdentity {
+    let tags = e
+        .get("tags")
+        .and_then(|tags| tags.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    buzz_sdk::ChannelIdentity::from_tag_pairs(tags.iter().filter_map(|tag| {
+        let tag = tag.as_array()?;
+        Some((tag.first()?.as_str()?, tag.get(1)?.as_str()?))
+    }))
+}
+
+/// Server-side `#t` (labels) and `#P` (creator) constraints for a kind:39000
+/// query. Several labels match a channel with any one of them.
+fn apply_identity_filters(
+    filter: &mut serde_json::Value,
+    labels: &[String],
+    creator: Option<&str>,
+) {
+    if !labels.is_empty() {
+        filter["#t"] = serde_json::json!(labels);
+    }
+    if let Some(creator) = creator {
+        filter["#P"] = serde_json::json!([creator]);
+    }
+}
+
+/// Parse `--creator` (npub or hex) into lowercase hex.
+fn parse_creator(creator: &str) -> Result<String, CliError> {
+    nostr::PublicKey::parse(creator.trim())
+        .map(|pubkey| pubkey.to_hex())
+        .map_err(|e| CliError::Usage(format!("--creator must be an npub or hex pubkey: {e}")))
+}
+
+/// Validate `--label` values with the relay's rules before signing.
+fn validate_labels(labels: &[String]) -> Result<(), CliError> {
+    if labels.iter().any(String::is_empty) {
+        return Err(CliError::Usage("--label cannot be empty".into()));
+    }
+    buzz_sdk::parse_channel_labels(labels.iter().map(String::as_str))
+        .map(|_| ())
+        .map_err(|e| CliError::Usage(format!("--label: {e}")))
 }
 
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
     member: Option<bool>,
+    labels: &[String],
+    creator: Option<&str>,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    validate_labels(labels)?;
+    let creator = creator.map(parse_creator).transpose()?;
     let effective_limit = limit.unwrap_or(500);
     let events = if member == Some(true) {
         // Step 1: find channel IDs where we're a member (kind:39002)
@@ -54,17 +106,19 @@ pub async fn cmd_list_channels(
             return Ok(());
         }
         // Step 2: fetch kind:39000 metadata for those channels.
-        let metadata_filter = serde_json::json!({
+        let mut metadata_filter = serde_json::json!({
             "kinds": [39000],
             "#d": channel_ids,
         });
+        apply_identity_filters(&mut metadata_filter, labels, creator.as_deref());
         client
             .query_paginated(metadata_filter, effective_limit)
             .await?
     } else {
-        let filter = serde_json::json!({
+        let mut filter = serde_json::json!({
             "kinds": [39000],
         });
+        apply_identity_filters(&mut filter, labels, creator.as_deref());
         client.query_paginated(filter, effective_limit).await?
     };
 
@@ -160,6 +214,8 @@ struct ChannelSummary {
     channel_id: String,
     name: String,
     channel_type: Option<String>,
+    labels: Vec<String>,
+    created_by: Option<String>,
     visibility: Option<String>,
     archived: bool,
     about: Option<String>,
@@ -175,7 +231,7 @@ impl ChannelSummary {
         let tags = event.get("tags")?.as_array()?;
         let mut channel_id: Option<String> = None;
         let mut name: Option<String> = None;
-        let mut channel_type: Option<String> = None;
+        let identity = channel_identity(event);
         let mut visibility: Option<String> = None;
         let mut archived = false;
         let mut about: Option<String> = None;
@@ -192,8 +248,6 @@ impl ChannelSummary {
             match key {
                 "d" => channel_id = val.map(str::to_string),
                 "name" => name = val.map(str::to_string),
-                // The first `t` is the channel type; later `t` tags are labels.
-                "t" if channel_type.is_none() => channel_type = val.map(str::to_string),
                 // NIP-29 emits both `private` and `public` (Buzz adds the latter).
                 // The presence of either tag is the source of truth; tag value is unused.
                 "private" => visibility = Some("private".to_string()),
@@ -210,7 +264,9 @@ impl ChannelSummary {
         Some(ChannelSummary {
             channel_id: channel_id?,
             name: name?,
-            channel_type,
+            channel_type: identity.channel_type,
+            labels: identity.labels,
+            created_by: identity.created_by,
             visibility,
             archived,
             about,
@@ -660,6 +716,7 @@ pub async fn cmd_create_channel(
     visibility: &str,
     description: Option<&str>,
     ttl: Option<i64>,
+    labels: &[String],
 ) -> Result<(), CliError> {
     match channel_type {
         "stream" | "forum" => {}
@@ -679,6 +736,8 @@ pub async fn cmd_create_channel(
     }
 
     let ttl = ttl.map(validate_ttl_seconds).transpose()?;
+    validate_labels(labels)?;
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
 
     let channel_uuid = Uuid::new_v4();
 
@@ -692,9 +751,16 @@ pub async fn cmd_create_channel(
         "forum" => buzz_sdk::ChannelKind::Forum,
         _ => unreachable!(),
     };
-    let builder =
-        buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description, ttl)
-            .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+    let builder = buzz_sdk::build_create_channel(
+        channel_uuid,
+        name,
+        Some(vis),
+        Some(ct),
+        description,
+        ttl,
+        &labels,
+    )
+    .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1421,7 +1487,9 @@ pub async fn cmd_create_channel_from_template(
     visibility_override: Option<&str>,
     description: Option<&str>,
     ttl: Option<i64>,
+    labels: &[String],
 ) -> Result<(), CliError> {
+    validate_labels(labels)?;
     let templates_path = channel_templates::resolve_templates_path(templates_file)?;
     let template: ChannelTemplateRecord =
         channel_templates::find_template(&templates_path, template_name)?;
@@ -1475,6 +1543,7 @@ pub async fn cmd_create_channel_from_template(
         Some(ct),
         effective_description,
         ttl,
+        &labels.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
     let event = client.sign_event(builder)?;
@@ -1596,16 +1665,26 @@ fn validate_update_channel_fields(
     description: Option<&str>,
     visibility: Option<&str>,
     ttl_change: Option<Option<i32>>,
+    labels_change: Option<&[String]>,
 ) -> Result<(), CliError> {
-    if name.is_none() && description.is_none() && visibility.is_none() && ttl_change.is_none() {
+    if name.is_none()
+        && description.is_none()
+        && visibility.is_none()
+        && ttl_change.is_none()
+        && labels_change.is_none()
+    {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl)"
+            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl, --label, --no-labels)"
                 .into(),
         ));
+    }
+    if let Some(labels) = labels_change {
+        validate_labels(labels)?;
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_update_channel(
     client: &BuzzClient,
     channel_id: &str,
@@ -1614,6 +1693,8 @@ pub async fn cmd_update_channel(
     visibility: Option<&str>,
     ttl: Option<i64>,
     no_ttl: bool,
+    labels: &[String],
+    no_labels: bool,
 ) -> Result<(), CliError> {
     // Outer Option: None leaves TTL unchanged. Inner: Some(secs) sets it,
     // None (from --no-ttl) clears it, making the channel permanent.
@@ -1623,12 +1704,29 @@ pub async fn cmd_update_channel(
         (None, false) => None,
     };
 
-    validate_update_channel_fields(name, description, visibility, ttl_change)?;
-    let channel_uuid = parse_uuid(channel_id)?;
+    // None leaves labels unchanged; an empty set (from --no-labels) clears them.
+    let labels_change: Option<&[String]> = if no_labels {
+        Some(&[])
+    } else if labels.is_empty() {
+        None
+    } else {
+        Some(labels)
+    };
 
-    let builder =
-        buzz_sdk::build_update_channel(channel_uuid, name, description, visibility, ttl_change)
-            .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+    validate_update_channel_fields(name, description, visibility, ttl_change, labels_change)?;
+    let channel_uuid = parse_uuid(channel_id)?;
+    let label_refs: Option<Vec<&str>> =
+        labels_change.map(|labels| labels.iter().map(String::as_str).collect());
+
+    let builder = buzz_sdk::build_update_channel(
+        channel_uuid,
+        name,
+        description,
+        visibility,
+        ttl_change,
+        label_refs.as_deref(),
+    )
+    .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1871,10 +1969,21 @@ pub async fn dispatch(
         ChannelsCmd::List {
             visibility,
             member,
+            label,
+            creator,
             limit,
         } => {
             let vis_str = visibility.as_ref().map(|v| v.to_string());
-            cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
+            cmd_list_channels(
+                client,
+                vis_str.as_deref(),
+                Some(member),
+                &label,
+                creator.as_deref(),
+                limit,
+                format,
+            )
+            .await
         }
         ChannelsCmd::Get { channel } => cmd_get_channel(client, &channel).await,
         ChannelsCmd::Search {
@@ -1889,6 +1998,7 @@ pub async fn dispatch(
             visibility,
             description,
             ttl,
+            label,
             template,
             templates_file,
         } => {
@@ -1902,6 +2012,7 @@ pub async fn dispatch(
                     visibility.as_ref().map(|v| v.to_string()).as_deref(),
                     description.as_deref(),
                     ttl,
+                    &label,
                 )
                 .await
             } else {
@@ -1918,6 +2029,7 @@ pub async fn dispatch(
                     &visibility.to_string(),
                     description.as_deref(),
                     ttl,
+                    &label,
                 )
                 .await
             }
@@ -1929,6 +2041,8 @@ pub async fn dispatch(
             visibility,
             ttl,
             no_ttl,
+            label,
+            no_labels,
         } => {
             let visibility = visibility.as_ref().map(|v| v.to_string());
             cmd_update_channel(
@@ -1939,6 +2053,8 @@ pub async fn dispatch(
                 visibility.as_deref(),
                 ttl,
                 no_ttl,
+                &label,
+                no_labels,
             )
             .await
         }
@@ -1983,9 +2099,10 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
+        apply_cardinality_rule, apply_identity_filters, assemble_roster_resolution, build_hint_map,
+        build_template_report, cmd_set_add_policy, extract_channel_metadata, fetch_candidate_hints,
+        finalize_roster_resolution, format_candidate, hints_from_results, join_bounded_queries,
+        name_matches, parse_creator, resolve_roster_with_archive_filter, validate_labels,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
         ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
@@ -2020,6 +2137,52 @@ mod tests {
         ]));
         let s = ChannelSummary::from_event(&ev).expect("parse");
         assert_eq!(s.channel_type.as_deref(), Some("forum"));
+        assert_eq!(s.labels, vec!["workspace".to_string()]);
+        assert_eq!(s.created_by, Some("ab".repeat(32)));
+        let listed = extract_channel_metadata(&ev);
+        assert_eq!(listed["labels"], json!(["workspace"]));
+        assert_eq!(listed["created_by"], json!("ab".repeat(32)));
+    }
+
+    #[test]
+    fn list_filters_push_labels_and_creator_to_the_relay() {
+        let mut filter = json!({"kinds": [39000]});
+        apply_identity_filters(&mut filter, &[], None);
+        assert_eq!(filter, json!({"kinds": [39000]}));
+
+        let creator = "ab".repeat(32);
+        apply_identity_filters(
+            &mut filter,
+            &["workspace".to_string(), "team:core".to_string()],
+            Some(&creator),
+        );
+        assert_eq!(
+            filter,
+            json!({"kinds": [39000], "#t": ["workspace", "team:core"], "#P": [creator]})
+        );
+    }
+
+    #[test]
+    fn creator_accepts_npub_and_hex_and_refuses_junk() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = nostr::ToBech32::to_bech32(&keys.public_key()).unwrap();
+        assert_eq!(parse_creator(&npub).unwrap(), hex);
+        assert_eq!(parse_creator(&hex.to_uppercase()).unwrap(), hex);
+        assert!(matches!(parse_creator("nope"), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn labels_are_checked_before_signing() {
+        assert!(validate_labels(&["agent-attention".to_string()]).is_ok());
+        for bad in ["", "Upper", "forum"] {
+            assert!(
+                matches!(validate_labels(&[bad.to_string()]), Err(CliError::Usage(_))),
+                "{bad:?} must be refused"
+            );
+        }
+        let clear: &[String] = &[];
+        assert!(validate_update_channel_fields(None, None, None, None, Some(clear)).is_ok());
     }
 
     #[test]
@@ -2128,7 +2291,7 @@ mod tests {
 
     #[test]
     fn update_channel_fields_rejects_empty_update() {
-        let result = validate_update_channel_fields(None, None, None, None);
+        let result = validate_update_channel_fields(None, None, None, None, None);
         assert!(matches!(result, Err(CliError::Usage(_))));
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("at least one field required"));
@@ -2137,7 +2300,7 @@ mod tests {
 
     #[test]
     fn update_channel_fields_accepts_visibility_only_update() {
-        let result = validate_update_channel_fields(None, None, Some("open"), None);
+        let result = validate_update_channel_fields(None, None, Some("open"), None, None);
         assert!(result.is_ok(), "visibility-only update should be accepted");
     }
 

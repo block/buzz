@@ -81,8 +81,13 @@ pub use buzz_core::channel::canonical_channel_name;
 pub use buzz_core::channel::ChannelType as ChannelKind;
 /// Channel visibility.
 pub use buzz_core::channel::ChannelVisibility as Visibility;
+/// Channel type, labels and creator read from a relay-signed group-state
+/// event (kinds 39000–39003). See [`ChannelIdentity::from_tags`].
+pub use buzz_core::channel::GroupStateIdentity as ChannelIdentity;
 /// Member role.
 pub use buzz_core::channel::MemberRole;
+/// Validate channel labels with the relay's rules.
+pub use buzz_core::channel::{parse_channel_labels, ChannelLabelError};
 
 /// Errors returned by SDK builder functions.
 #[derive(Debug, thiserror::Error)]

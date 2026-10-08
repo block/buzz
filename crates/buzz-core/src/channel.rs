@@ -132,6 +132,48 @@ pub fn channel_created_at_tag(unix_seconds: i64) -> Result<nostr::Tag, nostr::ev
     nostr::Tag::parse([CHANNEL_CREATED_AT_TAG, &unix_seconds.to_string()])
 }
 
+/// The identity tags of a relay-signed group-state event, as written by
+/// [`group_state_identity_tags`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupStateIdentity {
+    /// The first `t` value: the channel type.
+    pub channel_type: Option<String>,
+    /// Every later `t` value, in tag order: the channel labels.
+    pub labels: Vec<String>,
+    /// The first `P` value: the hex key that created the channel. Trust it
+    /// only when the relay key signed the event.
+    pub created_by: Option<String>,
+}
+
+impl GroupStateIdentity {
+    /// Read the channel type, labels and creator from `(name, value)` tag
+    /// pairs. Tags without a value are skipped.
+    pub fn from_tag_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut identity = Self::default();
+        for (name, value) in pairs {
+            match name {
+                "t" if identity.channel_type.is_none() => {
+                    identity.channel_type = Some(value.to_owned());
+                }
+                "t" => identity.labels.push(value.to_owned()),
+                "P" if identity.created_by.is_none() => {
+                    identity.created_by = Some(value.to_owned());
+                }
+                _ => {}
+            }
+        }
+        identity
+    }
+
+    /// Read the channel type, labels and creator from Nostr tags.
+    pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a nostr::Tag>) -> Self {
+        Self::from_tag_pairs(tags.into_iter().filter_map(|tag| {
+            let slice = tag.as_slice();
+            Some((slice.first()?.as_str(), slice.get(1)?.as_str()))
+        }))
+    }
+}
+
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
@@ -297,7 +339,7 @@ impl FromStr for MemberRole {
 mod tests {
     use super::{
         canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
-        parse_channel_labels, ChannelLabelError, MAX_CHANNEL_LABELS,
+        parse_channel_labels, ChannelLabelError, GroupStateIdentity, MAX_CHANNEL_LABELS,
     };
 
     #[test]
@@ -315,6 +357,27 @@ mod tests {
                 vec!["t".to_string(), "team:core".to_string()],
                 vec!["P".to_string(), "ab".repeat(32)],
             ]
+        );
+    }
+
+    #[test]
+    fn group_state_identity_reads_back_what_the_relay_writes() {
+        let creator = [0xab; 32];
+        let labels = vec!["workspace".to_string(), "team:core".to_string()];
+        let mut tags = vec![nostr::Tag::parse(["d", "channel"]).unwrap()];
+        tags.extend(group_state_identity_tags("forum", &labels, &creator).unwrap());
+        tags.push(nostr::Tag::parse(["p", &"cd".repeat(32), "", "member"]).unwrap());
+        assert_eq!(
+            GroupStateIdentity::from_tags(&tags),
+            GroupStateIdentity {
+                channel_type: Some("forum".to_string()),
+                labels,
+                created_by: Some("ab".repeat(32)),
+            }
+        );
+        assert_eq!(
+            GroupStateIdentity::from_tag_pairs([("name", "x")]),
+            GroupStateIdentity::default()
         );
     }
 

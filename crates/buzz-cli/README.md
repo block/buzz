@@ -46,6 +46,9 @@ buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
+buzz channels create --name "notes" --type stream --visibility private --label agent-attention
+buzz channels list --label agent-attention --creator <npub>
+buzz channels update --channel <uuid> --label workspace   # replace labels; --no-labels clears them
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
 
