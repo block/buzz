@@ -488,8 +488,8 @@ pub async fn lock_member_snapshot(
 /// Add a member to a channel.
 ///
 /// Role enforcement:
-/// - Open channels: `invited_by` is optional; role is forced to `Member` regardless of
-///   what the caller passes — callers cannot self-assign elevated roles.
+/// - Open channels: `invited_by` is optional, and the caller's ordinary role is kept.
+///   Callers cannot self-assign elevated roles (see below).
 /// - Private channels: requires an `invited_by` who is an active member, or the channel
 ///   creator bootstrapping their own first membership. Any active member may add an
 ///   ordinary member, guest, or bot; only owners/admins may grant elevated roles.
@@ -558,7 +558,7 @@ pub async fn add_member(
         role
     } else {
         // Open channel: anyone may join, but only existing owners/admins may grant
-        // elevated roles. Self-join always gets Member.
+        // elevated roles. A kind:9021 self-join passes Guest.
         if role.is_elevated() {
             let granter_role = match invited_by {
                 Some(inv) => get_active_role_tx(&mut tx, community_id, channel_id, inv).await?,
@@ -588,11 +588,11 @@ pub async fn add_member(
     // Deliberately keyed on the *active* role. A soft-removed row's stored role
     // is history, not live authority: `removed_at` says it is no longer in
     // force. Reactivation therefore lands at whatever `effective_role` the
-    // checks above already authorized — `Member` for any unprivileged caller,
+    // checks above already authorized — an ordinary role for any unprivileged caller,
     // elevated only when a currently-elevated granter asked for it. Inferring
     // current authority from a removed row would make soft-deleted ownership a
     // resurrection token: an owner removed by another owner could self-rejoin
-    // via kind:9021 (`Member, None`) and silently regain ownership.
+    // via kind:9021 (`Guest, None`) and silently regain ownership.
     let current_role = get_active_role_tx(&mut tx, community_id, channel_id, pubkey).await?;
     if let Some(current_role) = current_role.filter(|r| r != effective_role.as_str()) {
         let actor_role = match invited_by {

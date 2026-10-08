@@ -507,12 +507,7 @@ pub async fn validate_admin_event(
             if buzz_db::channel::ChannelPosting::parse_fail_closed(&channel.posting)
                 == buzz_db::channel::ChannelPosting::Members
             {
-                channel_authz::decide_announce_put_user(
-                    actor_role,
-                    requested_role,
-                    &target_pubkey,
-                    &actor_bytes,
-                )?;
+                channel_authz::decide_announce_put_user(actor_role, &target_pubkey, &actor_bytes)?;
             }
 
             // Authorization policy — visibility gate, elevated-grant gate,
@@ -1441,9 +1436,18 @@ async fn handle_put_user(
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-    // No role tag = no role change: preserve an existing member's current role and
-    // fall back to Member only for a new member. Unconditionally defaulting to
-    // Member let a bare PUT_USER silently demote an existing owner/admin.
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
+
+    // No role tag = no role change: preserve an existing member's current
+    // role. A new member defaults to Member when someone else adds them, and
+    // to Guest when they add themselves, because joining always gives the
+    // guest role. Unconditionally defaulting to Member let a bare PUT_USER
+    // silently demote an existing owner/admin.
+    let new_member_role = if target_pubkey == actor_bytes {
+        MemberRole::Guest
+    } else {
+        MemberRole::Member
+    };
     let role: MemberRole = match extract_tag_value(event, "role") {
         Some(role_str) => role_str
             .parse()
@@ -1455,10 +1459,8 @@ async fn handle_put_user(
             .iter()
             .find(|m| m.pubkey == target_pubkey)
             .and_then(|m| m.role.parse().ok())
-            .unwrap_or(MemberRole::Member),
+            .unwrap_or(new_member_role),
     };
-
-    let actor_bytes = event.pubkey.to_bytes().to_vec();
 
     state
         .db
@@ -2149,16 +2151,18 @@ async fn handle_join_request(
         return Ok(());
     }
 
-    // Add as member, or as guest in an announce channel (idempotent —
-    // add_member handles duplicates). Only owners/admins/members can turn a
-    // guest into a writer.
-    let role = match buzz_db::channel::ChannelPosting::parse_fail_closed(&channel.posting) {
-        buzz_db::channel::ChannelPosting::Everyone => buzz_db::channel::MemberRole::Member,
-        buzz_db::channel::ChannelPosting::Members => buzz_db::channel::MemberRole::Guest,
-    };
+    // Joining always gives the guest role, whatever the posting rule
+    // (idempotent — add_member handles duplicates). In a normal channel a
+    // guest can post; in an announce channel a member must promote them.
     state
         .db
-        .add_member(tenant.community(), channel_id, &actor_bytes, role, None)
+        .add_member(
+            tenant.community(),
+            channel_id,
+            &actor_bytes,
+            buzz_db::channel::MemberRole::Guest,
+            None,
+        )
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
 

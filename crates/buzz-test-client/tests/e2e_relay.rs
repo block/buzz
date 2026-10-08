@@ -3157,6 +3157,79 @@ async fn test_nip29_announce_channel_wire() {
     );
 }
 
+/// Joining always gives the guest role, also in a normal (`posting =
+/// everyone`) channel, and a guest there can post. A non-member cannot
+/// self-add as a member; a self-add with no role tag gives guest.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_join_gives_guest_in_normal_channel() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let joiner = Keys::generate();
+    let self_adder = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let mut joiner_client = BuzzTestClient::connect(&url, &joiner)
+        .await
+        .expect("connect joiner");
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&joiner)
+        .unwrap();
+    let ok = joiner_client.send_event(join).await.expect("send join");
+    assert!(ok.accepted, "join: {}", ok.message);
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &joiner.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("guest"),
+        "kind:9021 join must give guest"
+    );
+    let ok = joiner_client
+        .send_text_message(&joiner, &channel_id, "guest post", 9)
+        .await
+        .expect("send guest post");
+    assert!(
+        ok.accepted,
+        "a guest can post in a normal channel: {}",
+        ok.message
+    );
+    joiner_client.disconnect().await.ok();
+
+    let self_hex = self_adder.public_key().to_hex();
+    let mut self_client = BuzzTestClient::connect(&url, &self_adder)
+        .await
+        .expect("connect self-adder");
+    for role in ["member", "bot"] {
+        let (accepted, msg) =
+            add_member_with_role_ws(&mut self_client, &channel_id, &self_hex, role, &self_adder)
+                .await;
+        assert!(!accepted, "non-member must not self-add as {role}");
+        assert!(msg.contains("joining gives the guest role"), "{msg}");
+    }
+    let bare = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &self_hex]).unwrap(),
+        ])
+        .sign_with_keys(&self_adder)
+        .unwrap();
+    let ok = self_client
+        .send_event(bare)
+        .await
+        .expect("send bare self-add");
+    assert!(ok.accepted, "bare self-add: {}", ok.message);
+    self_client.disconnect().await.ok();
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &self_hex)
+            .await
+            .as_deref(),
+        Some("guest"),
+        "a self-add with no role tag must give guest"
+    );
+}
+
 /// SECURITY REPRO (Dawn): can an unprivileged NON-MEMBER demote the owner of an
 /// OPEN channel to `member` with a single kind:9000? Asserts the reported
 /// vulnerability is FIXED; it fails on vulnerable code.
@@ -3449,22 +3522,15 @@ async fn test_nip29_relay_rejects_role_change_by_unprivileged_actor() {
     ws.disconnect().await.ok();
     assert!(ok.accepted, "promote rejected: {}", ok.message);
 
-    // The attacker joins the open channel as a plain member.
-    let mut ws = BuzzTestClient::connect(&url, &attacker)
+    // The attacker is a plain member. Joining gives the guest role, so
+    // owner_a adds them as a member.
+    let mut ws = BuzzTestClient::connect(&url, &owner_a)
         .await
-        .expect("connect as attacker");
-    let join = EventBuilder::new(Kind::Custom(9000), "")
-        .allow_self_tagging()
-        .tags([
-            Tag::parse(["h", &channel_id]).unwrap(),
-            Tag::parse(["p", &attacker_hex]).unwrap(),
-            Tag::parse(["role", "member"]).unwrap(),
-        ])
-        .sign_with_keys(&attacker)
-        .expect("sign self-join");
-    let ok = ws.send_event(join).await.expect("send self-join");
+        .expect("connect as owner_a");
+    let (accepted, msg) =
+        add_member_with_role_ws(&mut ws, &channel_id, &attacker_hex, "member", &owner_a).await;
     ws.disconnect().await.ok();
-    assert!(ok.accepted, "self-join rejected: {}", ok.message);
+    assert!(accepted, "add attacker as member: {msg}");
     assert_eq!(
         member_role(&url, &owner_a, &channel_id, &attacker_hex)
             .await

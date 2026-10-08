@@ -53,9 +53,13 @@ pub enum ChannelAuthzError {
     #[error("policy:nobody — this agent has disabled external channel additions")]
     PolicyNobody,
     /// In a `posting = members` channel, a guest or non-member may only add
-    /// themselves, and only as a guest.
+    /// themselves.
     #[error("only members can add people in this channel; you may join as a guest")]
     AnnounceGuestOnly,
+    /// A non-member adding themselves asked for a role other than guest.
+    /// Joining always gives the guest role; a member can make you a member.
+    #[error("joining gives the guest role; ask a member to make you a member")]
+    SelfJoinGuestOnly,
 }
 
 /// Whether `pubkey` is the channel's only remaining `owner`.
@@ -136,6 +140,17 @@ pub fn decide_put_user(
         }
     }
 
+    // Joining always gives the guest role. A non-member adding themselves
+    // (possible only in an open channel; private ones refused above) may ask
+    // for guest or for no role, which the applier resolves to guest. A member
+    // must promote them.
+    if target == actor
+        && actor_role.is_none()
+        && requested_role.is_some_and(|role| role != MemberRole::Guest)
+    {
+        return Err(ChannelAuthzError::SelfJoinGuestOnly);
+    }
+
     // Changing an ACTIVE existing member's role is privileged in both
     // directions, on every visibility. `members` comes from a `removed_at IS
     // NULL` read, so a soft-removed row is deliberately not an "existing
@@ -174,27 +189,19 @@ pub fn decide_put_user(
 /// checked before [`decide_put_user`].
 ///
 /// An actor whose role may post (owner, admin, member, bot) keeps the normal
-/// rules. Anyone else (no role, or guest) may only add themselves as a guest,
-/// or repeat a no-op self-add while already a member. Without this, a
-/// non-member could self-add as a member and bypass the posting rule, and a
-/// guest could add a friend as a member.
+/// rules. Anyone else (no role, or guest) may only add themselves. Without
+/// this, a guest or non-member could add a friend as a member and so grant
+/// posting.
+///
+/// The role of a self-add is decided by [`decide_put_user`] for every
+/// channel: a non-member gets guest only, and a guest cannot change their own
+/// role.
 pub fn decide_announce_put_user(
     actor_role: Option<MemberRole>,
-    requested_role: Option<MemberRole>,
     target: &[u8],
     actor: &[u8],
 ) -> Result<(), ChannelAuthzError> {
-    if actor_role.is_some_and(|role| role.can_post()) {
-        return Ok(());
-    }
-    let self_add_as_guest = target == actor
-        && match requested_role {
-            Some(role) => role == MemberRole::Guest,
-            // No role tag: no change for an existing member, but a new
-            // member would default to `member`.
-            None => actor_role.is_some(),
-        };
-    if self_add_as_guest {
+    if actor_role.is_some_and(|role| role.can_post()) || target == actor {
         Ok(())
     } else {
         Err(ChannelAuthzError::AnnounceGuestOnly)
@@ -365,7 +372,7 @@ mod tests {
     #[test]
     fn put_user_table() {
         use ChannelAuthzError as E;
-        use MemberRole::{Admin, Member, Owner};
+        use MemberRole::{Admin, Bot, Guest, Member, Owner};
         use PutUserDecision::{Allow, CheckAddPolicy};
 
         // (visibility, roster, actor, actor_role, target, requested_role, expected)
@@ -570,7 +577,56 @@ mod tests {
                 Ok(CheckAddPolicy),
             ),
             // ── Self-add short-circuits the agent channel-add policy ──
-            ("open", &[(1, "owner")], 9, None, 9, Some(Member), Ok(Allow)),
+            ("open", &[(1, "owner")], 9, None, 9, Some(Guest), Ok(Allow)),
+            ("open", &[(1, "owner")], 9, None, 9, None, Ok(Allow)),
+            // ── Joining always gives the guest role ──
+            (
+                "open",
+                &[(1, "owner")],
+                9,
+                None,
+                9,
+                Some(Member),
+                Err(E::SelfJoinGuestOnly),
+            ),
+            (
+                "open",
+                &[(1, "owner")],
+                9,
+                None,
+                9,
+                Some(Bot),
+                Err(E::SelfJoinGuestOnly),
+            ),
+            (
+                "open",
+                &[(1, "owner")],
+                9,
+                None,
+                9,
+                Some(Admin),
+                Err(E::SelfJoinGuestOnly),
+            ),
+            // A non-member may still add someone else with an ordinary role.
+            (
+                "open",
+                &[(1, "owner")],
+                9,
+                None,
+                5,
+                Some(Member),
+                Ok(CheckAddPolicy),
+            ),
+            // A guest cannot promote themselves.
+            (
+                "open",
+                &[(1, "owner"), (2, "guest")],
+                2,
+                Some(Guest),
+                2,
+                Some(Member),
+                Err(E::RoleChangeDenied),
+            ),
             (
                 "open",
                 &[(1, "owner"), (2, "member")],
@@ -609,42 +665,31 @@ mod tests {
     }
 
     /// Announce channels: only roles that may post keep the normal 9000
-    /// rules; everyone else may only add themselves as a guest.
+    /// rules; everyone else may only add themselves.
     #[test]
     fn announce_put_user_table() {
         use MemberRole::*;
         let denied = Err(ChannelAuthzError::AnnounceGuestOnly);
-        // (actor_role, requested_role, target, expected); actor is always 1.
-        type AnnounceCase = (
-            Option<MemberRole>,
-            Option<MemberRole>,
-            u8,
-            Result<(), ChannelAuthzError>,
-        );
+        // (actor_role, target, expected); actor is always 1.
+        type AnnounceCase = (Option<MemberRole>, u8, Result<(), ChannelAuthzError>);
         let cases: &[AnnounceCase] = &[
             // Writers keep today's rules (decide_put_user decides the rest).
-            (Some(Owner), Some(Member), 2, Ok(())),
-            (Some(Admin), Some(Member), 2, Ok(())),
-            (Some(Member), Some(Member), 2, Ok(())),
-            (Some(Bot), Some(Guest), 2, Ok(())),
-            // Non-member: self-add as guest only.
-            (None, Some(Guest), 1, Ok(())),
-            (None, None, 1, denied.clone()),
-            (None, Some(Member), 1, denied.clone()),
-            (None, Some(Bot), 1, denied.clone()),
-            (None, Some(Guest), 2, denied.clone()),
-            // Guest: no-op self-add, but no promotion and no adding others.
-            (Some(Guest), Some(Guest), 1, Ok(())),
-            (Some(Guest), None, 1, Ok(())),
-            (Some(Guest), Some(Member), 1, denied.clone()),
-            (Some(Guest), Some(Guest), 2, denied.clone()),
-            (Some(Guest), Some(Member), 2, denied.clone()),
+            (Some(Owner), 2, Ok(())),
+            (Some(Admin), 2, Ok(())),
+            (Some(Member), 2, Ok(())),
+            (Some(Bot), 2, Ok(())),
+            // Guests and non-members may only add themselves; the role is
+            // decided by decide_put_user (guest only).
+            (None, 1, Ok(())),
+            (None, 2, denied.clone()),
+            (Some(Guest), 1, Ok(())),
+            (Some(Guest), 2, denied.clone()),
         ];
-        for (actor_role, requested_role, target, expected) in cases {
+        for (actor_role, target, expected) in cases {
             assert_eq!(
-                decide_announce_put_user(*actor_role, *requested_role, &pk(*target), &pk(1)),
+                decide_announce_put_user(*actor_role, &pk(*target), &pk(1)),
                 *expected,
-                "actor {actor_role:?} requested {requested_role:?} target {target}"
+                "actor {actor_role:?} target {target}"
             );
         }
     }
@@ -760,6 +805,14 @@ mod tests {
             (
                 ChannelAuthzError::PolicyNobody,
                 "policy:nobody — this agent has disabled external channel additions",
+            ),
+            (
+                ChannelAuthzError::AnnounceGuestOnly,
+                "only members can add people in this channel; you may join as a guest",
+            ),
+            (
+                ChannelAuthzError::SelfJoinGuestOnly,
+                "joining gives the guest role; ask a member to make you a member",
             ),
         ];
 
