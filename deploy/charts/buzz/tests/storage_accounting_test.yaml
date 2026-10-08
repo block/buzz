@@ -113,7 +113,7 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
-            value: 0.1.0
+            value: main
         template: templates/storage-accounting-cronjob.yaml
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
