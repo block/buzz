@@ -1,0 +1,212 @@
+suite: chart-owned Datadog version label on every workload
+# Regression: wrappers pinned tags.datadoghq.com/version beside image.tag on
+# each workload, so every image promotion had to edit several copies of one
+# identity and a missed copy reported the wrong version to Datadog. The chart
+# now owns the label everywhere it renders a Pod (storage accounting is covered
+# in storage_accounting_test.yaml).
+templates:
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+  - templates/pairing-relay.yaml
+  - templates/deletion-drain-cronjob.yaml
+tests:
+  - it: derives the relay version label from image.tag over a stale pin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: sha-abcdef1
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      relay.podLabels:
+        tags.datadoghq.com/env: staging
+        tags.datadoghq.com/service: buzz-example
+        tags.datadoghq.com/version: sha-stale00
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deployment.yaml
+      # Deployment-describing labels still pass through.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-example
+        template: templates/deployment.yaml
+  - it: stamps the relay version label with no podLabels configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: sha-abcdef1
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deployment.yaml
+  - it: renders a label-safe relay version from a digest-only image
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "222222222222222222222222222222222222222222222222222222222222222"
+        template: templates/deployment.yaml
+  - it: derives the pairing relay version label from image.tag over a stale pin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      image.tag: sha-abcdef1
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      pairingRelay.podLabels:
+        tags.datadoghq.com/env: staging
+        tags.datadoghq.com/service: buzz-example
+        tags.datadoghq.com/version: sha-stale00
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+      # Deployment-describing labels still pass through.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-example
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+  - it: stamps the pairing relay version label with no podLabels configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      image.tag: sha-abcdef1
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+  - it: renders a label-safe pairing relay version from a digest-only image
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "222222222222222222222222222222222222222222222222222222222222222"
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+  - it: derives the deletion drain version label from image.tag over a stale pin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+      image.tag: sha-abcdef1
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      operatorJobs.deletionDrain.podLabels:
+        tags.datadoghq.com/env: staging
+        tags.datadoghq.com/service: buzz-example
+        tags.datadoghq.com/version: sha-stale00
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deletion-drain-cronjob.yaml
+      # Deployment-describing labels still pass through.
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/deletion-drain-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-example
+        template: templates/deletion-drain-cronjob.yaml
+  - it: stamps the deletion drain version label with no podLabels configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+      image.tag: sha-abcdef1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deletion-drain-cronjob.yaml
+  - it: renders a label-safe deletion drain version from a digest-only image
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "222222222222222222222222222222222222222222222222222222222222222"
+        template: templates/deletion-drain-cronjob.yaml

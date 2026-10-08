@@ -88,15 +88,20 @@ When `image.digest` is set, the chart renders `repository@digest` and ignores
 
 ## Derived deployment labels
 
-The storage-accounting CronJob has no runtime `/_status` surface to interrogate,
-so the chart stamps its Pods with the deployed image identity instead of asking
-an operator to restate it. `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` (persisted as
-`code_sha` on every snapshot row) and the Pod's `tags.datadoghq.com/version`
-label are both derived from `image.digest` — or `image.tag`, or
-`Chart.AppVersion` — so a snapshot's telemetry version and its recorded version
-cannot drift apart.
+Every chart-managed Pod — the relay, the pairing relay, the storage-accounting
+CronJob, and operator jobs such as the deletion drain — carries a
+chart-owned `tags.datadoghq.com/version` label derived from the deployed image,
+so a wrapper never restates the image identity once per workload. The label
+names `image.tag` when it is set (the readable `sha-<commit>` build name that
+promotion writes together with `image.digest`), otherwise `image.digest`,
+otherwise `Chart.AppVersion`.
 
-The environment variable always keeps the exact revision. The label cannot: a
+The exact runtime identity stays exact elsewhere: the Pod's image reference is
+`repository@digest` when a digest is pinned, and the storage-accounting
+`BUZZ_STORAGE_SNAPSHOT_CODE_SHA` (persisted as `code_sha` on every snapshot
+row) is the digest when set, otherwise the tag, otherwise `Chart.AppVersion`.
+
+The label value has to be sanitized: a
 label value is capped at 63 bytes, must begin and end with an alphanumeric, and
 may otherwise contain only `[-._a-zA-Z0-9]`, while `image.tag` accepts any OCI
 tag. Because that domain is larger than the label codomain, no mapping onto it
@@ -112,5 +117,5 @@ forms: a tag of that shape is hashed instead of preserved, so a rendered label
 cannot be copied into `image.tag` to make two revisions report one version.
 Shorter hex tags and 40-character git SHAs pass through unchanged.
 
-Any `tags.datadoghq.com/version` supplied through `storageAccounting.podLabels`
-is ignored; see the chart README's "Storage accounting worker" section.
+Any `tags.datadoghq.com/version` supplied through a workload's `podLabels` is
+ignored; see the chart README's "Datadog version label" section.

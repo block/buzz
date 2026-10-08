@@ -471,28 +471,33 @@ durable snapshot row, keeping the expensive object walk off the relay Pods.
 Every snapshot row records the code that produced it in `code_sha`, taken from
 the `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` environment variable the chart derives
 from the deployed image identity (`image.digest` when set, otherwise
-`image.tag`, otherwise `Chart.AppVersion`).
+`image.tag`, otherwise `Chart.AppVersion`). The value is never hashed or
+sanitized.
 
-The Pod's Datadog version tag is derived from that **same** image identity, so
-the version a snapshot reports to telemetry can never disagree with the version
-recorded in the database:
+## Datadog version label
+
+Every Pod the chart renders — relay, pairing relay, storage accounting, and the
+deletion drain operator job — carries a chart-owned
+`tags.datadoghq.com/version` label derived from the deployed image:
+`image.tag` when set, otherwise `image.digest`, otherwise `Chart.AppVersion`.
+The tag is preferred because it is the readable build name (`sha-<commit>`)
+dashboards already use; promotion tooling writes it together with the digest
+that actually pins the image.
 
 ```yaml
-storageAccounting:
-  enabled: true
+relay:
   podLabels:
     tags.datadoghq.com/env: production
-    tags.datadoghq.com/service: buzz-storage-accounting
+    tags.datadoghq.com/service: buzz
     # tags.datadoghq.com/version: NOT set here — the chart owns it.
 ```
 
-Precedence is explicit: `tags.datadoghq.com/version` is chart-owned and always
-renders from the image identity, so a value supplied under
-`storageAccounting.podLabels` for that one key is ignored. Every other label —
-including `tags.datadoghq.com/env` and `tags.datadoghq.com/service`, which
-describe the deployment rather than the image — passes through unchanged.
-Remove any wrapper-maintained `tags.datadoghq.com/version` pin when upgrading;
-leaving it in place is harmless but dead.
+Precedence is explicit: a `tags.datadoghq.com/version` supplied under any
+workload's `podLabels` is ignored. Every other label — including
+`tags.datadoghq.com/env` and `tags.datadoghq.com/service`, which describe the
+deployment rather than the image — passes through unchanged. Remove any
+wrapper-maintained version pins when upgrading; a pin equal to `image.tag`
+renders identically, so the upgrade does not roll Pods for that label.
 
 A Kubernetes label value is capped at 63 bytes, must begin and end with an
 alphanumeric, and may otherwise contain only `[-._a-zA-Z0-9]` — a far narrower
@@ -521,10 +526,9 @@ colliding tag pair was brute-forced in about a second), and one let a
 passthrough tag reproduce a hashed label with no hash work at all, by copying a
 rendered label into `image.tag`.
 
-`BUZZ_STORAGE_SNAPSHOT_CODE_SHA` is never hashed or sanitized: it always
-carries the exact revision, so the snapshot row stays the precise record while
-the label is the joinable telemetry key. The image reference in the Pod spec is
-exact too. See `docs/deployment-identity.md`.
+The image reference in the Pod spec and `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` always
+keep the exact revision; the label is the joinable telemetry key. See
+`docs/deployment-identity.md`.
 
 ## Device pairing relay
 

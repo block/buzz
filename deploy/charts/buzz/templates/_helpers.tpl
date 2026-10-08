@@ -77,11 +77,27 @@ app.kubernetes.io/component: relay
 {{- end -}}
 
 {{/*
-Kubernetes-label-safe rendering of "buzz.imageRevision", used for Datadog
-unified-service-tagging's version tag on chart-managed Pods. The label is
-always derived from the same revision the Pod reports verbatim in
-BUZZ_STORAGE_SNAPSHOT_CODE_SHA — one identity, rendered twice, never a second
-value an operator has to keep in sync.
+Datadog unified-service-tagging version for every chart-managed Pod (relay,
+pairing relay, storage accounting, operator jobs). It names the deployed image:
+image.tag when set — the readable build name operators and dashboards already
+use, which promotion tooling writes together with image.digest — otherwise the
+digest, otherwise Chart.AppVersion. The chart owns this label so a wrapper never
+has to pin a second copy of the image identity that silently drifts; the exact
+runtime identity stays in the image reference and in
+BUZZ_STORAGE_SNAPSHOT_CODE_SHA ("buzz.imageRevision").
+*/}}
+{{- define "buzz.imageVersionSource" -}}
+{{- if .Values.image.tag -}}
+{{- .Values.image.tag -}}
+{{- else if .Values.image.digest -}}
+{{- .Values.image.digest -}}
+{{- else -}}
+{{- .Chart.AppVersion -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Kubernetes-label-safe rendering of "buzz.imageVersionSource".
 
 A label value is at most 63 bytes, must begin and end with an alphanumeric,
 and may otherwise contain only [-._a-zA-Z0-9]. image.tag is an unconstrained
@@ -113,10 +129,10 @@ helper kept a sanitized prefix plus 10 hex characters of SHA-256, and that
 "b"x52 + "-collision-22356" and "b"x52 + "-collision-914141" both rendered
 "b"x52 + "-430be57931" (see tests/storage_accounting_test.yaml). Readability
 is not worth a forgeable telemetry identity when the exact revision is always
-available in BUZZ_STORAGE_SNAPSHOT_CODE_SHA and in the image reference itself.
+available in the image reference itself.
 */}}
 {{- define "buzz.imageVersionLabel" -}}
-{{- $revision := include "buzz.imageRevision" . -}}
+{{- $revision := include "buzz.imageVersionSource" . -}}
 {{- if regexMatch "^sha256:[0-9a-f]{64}$" $revision -}}
 {{- $revision | trimPrefix "sha256:" | trunc 63 -}}
 {{- else if and (le (len $revision) 63) (regexMatch "^[a-zA-Z0-9]([-._a-zA-Z0-9]*[a-zA-Z0-9])?$" $revision) (not (regexMatch "^[0-9a-f]{63}$" $revision)) -}}
@@ -124,6 +140,17 @@ available in BUZZ_STORAGE_SNAPSHOT_CODE_SHA and in the image reference itself.
 {{- else -}}
 {{- sha256sum $revision | trunc 63 -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Pod-template labels for a chart-managed workload: the caller's podLabels with
+the chart-owned Datadog version merged on top. Every other key, including
+tags.datadoghq.com/env and tags.datadoghq.com/service, passes through.
+Usage: include "buzz.podLabelsWithVersion" (dict "root" $ "labels" $podLabels)
+*/}}
+{{- define "buzz.podLabelsWithVersion" -}}
+{{- $labels := merge (dict "tags.datadoghq.com/version" (include "buzz.imageVersionLabel" .root)) (.labels | default dict) -}}
+{{- toYaml $labels -}}
 {{- end -}}
 
 {{/*

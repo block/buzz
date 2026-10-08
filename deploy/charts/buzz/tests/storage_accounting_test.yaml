@@ -235,7 +235,9 @@ tests:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
           value: 2.0.0
         template: templates/storage-accounting-cronjob.yaml
-  - it: renders a label-safe version from a pinned image digest
+  # Promotion writes image.tag and image.digest together; the tag is the
+  # readable build name Datadog already uses, the digest the runtime identity.
+  - it: names the image tag in the version label while the digest pins the image
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -244,7 +246,33 @@ tests:
       s3.endpoint: https://s3.example.com
       s3.accessKey: test
       s3.secretKey: test
-      image.tag: ignored-when-digest-set
+      image.tag: sha-1234567
+      image.digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      storageAccounting:
+        enabled: true
+        podLabels:
+          tags.datadoghq.com/version: stale-operator-sha
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-1234567
+        template: templates/storage-accounting-cronjob.yaml
+      # The snapshot row still records the exact digest that ran.
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
+            value: sha256:1111111111111111111111111111111111111111111111111111111111111111
+        template: templates/storage-accounting-cronjob.yaml
+  - it: renders a label-safe version from a digest when no tag is set
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.accessKey: test
+      s3.secretKey: test
       image.digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
       storageAccounting:
         enabled: true

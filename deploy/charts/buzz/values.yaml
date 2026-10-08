@@ -172,6 +172,7 @@ relay:
       memory: "2Gi"
 
   podAnnotations: {}
+  # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
   podLabels: {}
   nodeSelector: {}
   tolerations: []
@@ -222,6 +223,7 @@ pairingRelay:
     port: 5000
     annotations: {}
   podAnnotations: {}
+  # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
   podLabels: {}
   resources:
     requests:
@@ -381,10 +383,8 @@ storageAccounting:
   relayMode: external            # external | off; inline is a legacy alias
   serviceAccountName: ""         # defaults to the main Buzz service account
   # Extra Pod labels, e.g. Datadog unified service tagging. The chart owns
-  # `tags.datadoghq.com/version` and derives it from image.digest/image.tag so
-  # the telemetry version always names the binary that wrote the snapshot rows
-  # (the same identity as BUZZ_STORAGE_SNAPSHOT_CODE_SHA). A value supplied
-  # here for that one key is ignored; every other key passes through.
+  # `tags.datadoghq.com/version` on every workload (see README "Datadog version
+  # label"); a value supplied here for that one key is ignored.
   podLabels: {}
   podAnnotations:
     sidecar.istio.io/inject: "false"
@@ -410,6 +410,7 @@ operatorJobs:
     # Empty inherits the relay service account, and with it any cloud IAM
     # binding on that account. Name a dedicated account to narrow the executor.
     serviceAccountName: ""
+    # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
     podLabels: {}
     podAnnotations:
       sidecar.istio.io/inject: "false"
