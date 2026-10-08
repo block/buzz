@@ -8,6 +8,7 @@ import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_status.dart';
@@ -358,25 +359,11 @@ class _MemberTile extends ConsumerWidget {
                     ),
                     onTap: () async {
                       Navigator.of(context).pop();
-                      final confirmed = await showBuzzDialog<bool>(
+                      final confirmed = await showDestructiveConfirmation(
                         context: context,
-                        builder: (context) => AlertDialog(
-                          title: const Text('Remove member'),
-                          content: Text('Remove $label from this channel?'),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.of(context).pop(false),
-                              child: const Text('Cancel'),
-                            ),
-                            TextButton(
-                              onPressed: () => Navigator.of(context).pop(true),
-                              child: Text(
-                                'Remove',
-                                style: TextStyle(color: context.colors.error),
-                              ),
-                            ),
-                          ],
-                        ),
+                        title: 'Remove member',
+                        message: 'Remove $label from this channel?',
+                        confirmLabel: 'Remove',
                       );
                       if (confirmed == true) {
                         await ref

@@ -224,7 +224,7 @@ final mentionCandidatesProvider = Provider.family
       return rankMentionCandidates(
         [
           for (final candidate in candidates)
-            candidate.withContextLabel(names.resolve(candidate.pubkey)?.name),
+            candidate.withContextLabel(names.labelFor(candidate.pubkey)),
         ],
         args.query,
         viewer: currentPubkey,

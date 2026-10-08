@@ -589,7 +589,9 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
          pageBuilder: (context, animation, secondaryAnimation) =>
              builder(context),
          transitionsBuilder: _buildSettingsTransition,
-         opaque: false,
+         // Stop compositing Home's UIKit controls once Settings has settled.
+         // Opaque routes still paint the previous page during both transitions.
+         opaque: defaultTargetPlatform == TargetPlatform.iOS,
          allowSnapshotting: false,
          transitionDuration: const Duration(milliseconds: 150),
          reverseTransitionDuration: const Duration(milliseconds: 150),

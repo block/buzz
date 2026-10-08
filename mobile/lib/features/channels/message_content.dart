@@ -32,6 +32,7 @@ import 'channels_provider.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
+import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
 import 'message_media_geometry.dart';
@@ -873,7 +874,7 @@ class _MentionMd extends InlineMd {
       RegExp(r'\(([0-9a-f]{64})\)'),
       (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
     );
-    final pill = _MentionPill(
+    final pill = MessageMentionPill(
       label: visibleLabel,
       semanticsLabel: fullLabel,
       isAgent: isAgent,
@@ -886,70 +887,6 @@ class _MentionMd extends InlineMd {
       child: pubkey != null && onMentionTap != null
           ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
           : pill,
-    );
-  }
-}
-
-class _MentionPill extends StatelessWidget {
-  final String label;
-  final String? semanticsLabel;
-  final bool isAgent;
-  final TextStyle? textStyle;
-
-  const _MentionPill({
-    required this.label,
-    this.semanticsLabel,
-    required this.isAgent,
-    this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final style =
-        (textStyle ?? context.textTheme.bodyMedium)?.copyWith(
-          color: context.colors.primary,
-          fontWeight: FontWeight.w500,
-          height: 1,
-        ) ??
-        TextStyle(
-          color: context.colors.primary,
-          fontWeight: FontWeight.w500,
-          height: 1,
-        );
-    final fontSize = style.fontSize ?? 16;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(
-        Grid.half,
-        Grid.quarter + 1,
-        Grid.half,
-        Grid.quarter,
-      ),
-      decoration: BoxDecoration(
-        color: context.colors.primary.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(Radii.sm),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          if (isAgent) ...[
-            Icon(
-              LucideIcons.bot,
-              size: fontSize * 0.95,
-              color: context.colors.primary,
-            ),
-            const SizedBox(width: Grid.quarter + 1),
-          ] else
-            Transform.translate(
-              offset: const Offset(0, -Grid.quarter),
-              child: Text('@', style: style),
-            ),
-          Flexible(
-            child: Text(label, style: style, semanticsLabel: semanticsLabel),
-          ),
-        ],
-      ),
     );
   }
 }

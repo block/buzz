@@ -119,9 +119,9 @@ class SystemEvent {
         return '$actor removed $target from the channel';
       }(),
       SystemEventType.topicChanged =>
-        '$actor ${_describeTextFieldChange('topic', topic)}',
+        '$actor ${describeChannelTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
-        '$actor ${_describeTextFieldChange('purpose', purpose)}',
+        '$actor ${describeChannelTextFieldChange('purpose', purpose)}',
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
@@ -142,7 +142,7 @@ class SystemEvent {
 ///
 /// Mirrors `describeChannelTextFieldChange` in
 /// `desktop/src/features/messages/lib/systemEventCopy.ts`.
-String _describeTextFieldChange(String field, String? value) {
+String describeChannelTextFieldChange(String field, String? value) {
   final trimmed = value?.trim();
   if (trimmed == null || trimmed.isEmpty) {
     return 'cleared the $field';

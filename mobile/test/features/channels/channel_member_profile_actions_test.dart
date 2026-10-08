@@ -7,6 +7,8 @@ import 'package:buzz/features/channels/channel_member_profile_actions.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -113,6 +115,49 @@ Future<ProviderContainer> _pump(
 }
 
 void main() {
+  for (final confirmed in [false, true]) {
+    testWidgets('iOS removal uses native confirmation: $confirmed', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const bridge = MethodChannel('buzz/confirmation_dialog');
+      final response = Completer<bool>();
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(bridge, (call) {
+            calls.add(call);
+            return response.future;
+          });
+      try {
+        final actions = _Actions();
+        await _pump(tester, actions: actions, inSheet: true);
+        await tester.tap(find.text('Remove from channel'));
+        await tester.pumpAndSettle();
+        expect(calls, hasLength(1));
+        expect(calls.single.method, 'present');
+        expect(
+          calls.single.arguments,
+          containsPair('title', 'Remove from channel?'),
+        );
+        expect(calls.single.arguments, containsPair('confirmLabel', 'Remove'));
+        expect(calls.single.arguments, containsPair('cancelLabel', 'Cancel'));
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(actions.calls, isEmpty);
+        response.complete(confirmed);
+        await tester.pumpAndSettle();
+        expect(actions.calls, confirmed ? ['test:alice:remove'] : isEmpty);
+        expect(
+          find.byType(ChannelMemberProfileActions),
+          confirmed ? findsNothing : findsOneWidget,
+        );
+      } finally {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(bridge, null);
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  }
+
   testWidgets('successful removal closes the member sheet', (tester) async {
     final actions = _Actions();
     await _pump(tester, actions: actions, inSheet: true);

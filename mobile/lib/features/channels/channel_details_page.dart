@@ -212,41 +212,21 @@ class ChannelDetailsPage extends HookConsumerWidget {
     );
 
     Future<void> openAddMembers() async {
-      final mediaQuery = MediaQuery.of(context);
-      await showBuzzModalBottomSheet<bool>(
+      await showAddChannelMembersSheet(
         context: context,
-        title: 'Add members',
-        isScrollControlled: true,
-        showDragHandle: true,
-        constraints: BoxConstraints(
-          maxWidth: 640,
-          maxHeight:
-              mediaQuery.size.height - mediaQuery.viewPadding.top - Grid.xs,
-        ),
-        builder: (_) => AddChannelMembersSheet(
-          channelId: resolvedChannel.id,
-          existingPubkeys: {
-            for (final member in members) member.pubkey.toLowerCase(),
-          },
-        ),
+        channelId: resolvedChannel.id,
+        existingPubkeys: {
+          for (final member in members) member.pubkey.toLowerCase(),
+        },
       );
     }
 
     Future<void> openManageChannel() async {
-      final shouldClose = await showBuzzModalBottomSheet<bool>(
+      final shouldClose = await showManageChannelSheet(
         context: context,
-        title: 'Manage channel',
-        isScrollControlled: true,
-        showDragHandle: true,
-        constraints: BoxConstraints(
-          maxWidth: 640,
-          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-        ),
-        builder: (_) => ManageChannelSheet(
-          channel: resolvedChannel,
-          canEditDetails: canEdit,
-          onChannelUpdated: (updated) => displayedChannel.value = updated,
-        ),
+        channel: resolvedChannel,
+        canEditDetails: canEdit,
+        onChannelUpdated: (updated) => displayedChannel.value = updated,
       );
       if (shouldClose == true && context.mounted) {
         Navigator.of(context).pop(true);

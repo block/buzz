@@ -218,26 +218,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
                       leading: const Icon(LucideIcons.settings),
                       title: const Text('Manage channel'),
                       onTap: () async {
-                        final shouldClose =
-                            await showBuzzModalBottomSheet<bool>(
-                              context: context,
-                              title: 'Manage channel',
-                              isScrollControlled: true,
-                              showDragHandle: true,
-                              constraints: BoxConstraints(
-                                maxWidth: 640,
-                                maxHeight:
-                                    MediaQuery.sizeOf(context).height * 0.9,
-                              ),
-                              builder: (_) => ManageChannelSheet(
-                                channel: currentChannel,
-                                canEditDetails:
-                                    canManageLifecycle &&
-                                    !currentChannel.isArchived,
-                                onChannelUpdated: (updated) =>
-                                    displayedChannel.value = updated,
-                              ),
-                            );
+                        final shouldClose = await showManageChannelSheet(
+                          context: context,
+                          channel: currentChannel,
+                          canEditDetails:
+                              canManageLifecycle && !currentChannel.isArchived,
+                          onChannelUpdated: (updated) =>
+                              displayedChannel.value = updated,
+                        );
                         if (shouldClose == true && context.mounted) {
                           Navigator.of(context).pop(true);
                         }

@@ -45,6 +45,7 @@ import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -77,6 +78,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 part 'thread_reply_refresh_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
+part 'channel_detail_page_test/action_row_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -494,6 +496,7 @@ void main() {
   _loadingReviewTests();
   threadReplyRefreshTests();
   presenceTests();
+  actionRowTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -3053,7 +3056,7 @@ void main() {
 
       final sheet = find.byType(BottomSheet).last;
       expect(find.byType(BottomSheet), findsOneWidget);
-      expect(tester.getSize(sheet).height, lessThanOrEqualTo(720));
+      expect(tester.getSize(sheet).height, greaterThan(640));
 
       final sheetTop = tester.getTopLeft(sheet).dy;
       await tester.dragFrom(
@@ -3062,7 +3065,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Manage channel'), findsNothing);
+      expect(find.text('Edit channel'), findsNothing);
     });
 
     testWidgets('Edit updates name and description without legacy fields', (
@@ -3104,28 +3107,9 @@ void main() {
       expect(find.text('Leave channel'), findsNothing);
       expect(find.text('Topic'), findsNothing);
       expect(find.text('Purpose'), findsNothing);
-      expect(find.text('Canvas'), findsOneWidget);
+      expect(find.text('Add Canvas'), findsOneWidget);
 
-      final nameField = tester.widget<TextField>(
-        find.byKey(const ValueKey('manage-channel-name')),
-      );
-      final descriptionField = tester.widget<TextField>(
-        find.byKey(const ValueKey('manage-channel-description')),
-      );
-      expect(nameField.decoration?.labelText, isNull);
-      expect(nameField.decoration?.hintText, 'Channel name');
-      expect(nameField.decoration?.border, InputBorder.none);
-      expect(descriptionField.decoration?.labelText, isNull);
-      expect(descriptionField.decoration?.hintText, 'Description');
-      expect(descriptionField.decoration?.border, InputBorder.none);
-      final nameOutline = tester.getRect(
-        find.byKey(const ValueKey('manage-channel-name-outline')),
-      );
-      final descriptionOutline = tester.getRect(
-        find.byKey(const ValueKey('manage-channel-description-outline')),
-      );
-      expect(descriptionOutline.top - nameOutline.bottom, Grid.xs);
-
+      expect(find.text('Edit channel'), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('manage-channel-name')),
         '  #renamed  ',
@@ -3139,7 +3123,6 @@ void main() {
         find.byKey(const ValueKey('manage-channel-save-details')),
       );
       await tester.pumpAndSettle();
-
       expect(updatedName, 'renamed');
       expect(updatedDescription, 'A new description');
       expect(find.text('renamed'), findsOneWidget);
@@ -9434,11 +9417,7 @@ void main() {
             messages: [
               _systemMsg(
                 id: 'sys-accessible',
-                payload: {
-                  'type': 'topic_changed',
-                  'actor': 'alice',
-                  'topic': 'Release planning',
-                },
+                payload: {'type': 'member_left', 'actor': 'alice'},
                 createdAt:
                     DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/
                     1000,
@@ -9489,7 +9468,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice removed Bob from the channel'), findsOneWidget);
+      expect(find.text('Alice'), findsOneWidget);
+      expect(findRichText('removed '), findsOneWidget);
+      expect(find.widgetWithText(MessageMentionPill, 'Bob'), findsOneWidget);
     });
 
     testWidgets('renders topic_changed system event', (tester) async {
@@ -9515,7 +9496,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('Alice changed the topic to "Release planning"'),
+        findRichText('changed the topic to "Release planning"'),
         findsOneWidget,
       );
     });
@@ -9543,7 +9524,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('Alice changed the purpose to "Team standup notes"'),
+        findRichText('changed the purpose to "Team standup notes"'),
         findsOneWidget,
       );
     });

@@ -35,6 +35,76 @@ IdentityNameSources _sources() => IdentityNameSources(
 );
 
 void main() {
+  for (final source in ['directory', 'channel role', 'profile owner']) {
+    test('agent suffixes from $source appear only in profile labels', () {
+      final keys = [_mine, _wesAgent];
+      final names = IdentityNameSources(
+        agentPubkeys: source == 'directory' ? keys.toSet() : {},
+        profiles: {
+          for (final key in keys)
+            key: UserProfile(
+              pubkey: key,
+              displayName: 'Scout',
+              ownerPubkey: source == 'profile owner' ? _wes : null,
+            ),
+        },
+      ).scope(keys, agentPubkeys: source == 'channel role' ? keys.toSet() : {});
+      for (final key in keys) {
+        expect(names.labelFor(key.toUpperCase()), 'Scout');
+        final resolved = names.resolve(key)!;
+        expect(resolved.qualifier, isNotNull);
+        expect(
+          names.labelFor(key, includeAgentQualifier: true),
+          'Scout · ${resolved.qualifier}',
+        );
+      }
+      expect(names.resolve(_mine)!.name, isNot(names.resolve(_wesAgent)!.name));
+    });
+  }
+
+  test('agent display keeps readable owners and literal name punctuation', () {
+    final names = IdentityNameSources(
+      viewer: _logan,
+      profiles: {
+        _wes: UserProfile(pubkey: _wes, displayName: 'Wes'),
+        for (final key in [_mine, _wesAgent])
+          key: UserProfile(
+            pubkey: key,
+            displayName: 'Scout · 1234',
+            ownerPubkey: _wes,
+          ),
+      },
+    ).scope([_mine, _wesAgent]);
+    for (final key in [_mine, _wesAgent]) {
+      expect(names.labelFor(key), 'Wes’s Scout · 1234');
+      expect(names.resolve(key)!.qualifier, isNotNull);
+      expect(
+        names.labelFor(key, includeAgentQualifier: true),
+        startsWith('Wes’s Scout · 1234 · '),
+      );
+    }
+    expect(
+      IdentityNameSources(
+        agentDisplayNames: {_mine: 'Scout · 1234'},
+        agentPubkeys: {_mine},
+      ).scope([_mine]).labelFor(_mine),
+      'Scout · 1234',
+    );
+  });
+
+  test('human identity suffixes remain visible', () {
+    final names = IdentityNameSources(
+      profiles: {
+        for (final key in [_mine, _wesAgent])
+          key: UserProfile(pubkey: key, displayName: 'Scout'),
+      },
+    ).scope([_mine, _wesAgent]);
+    for (final key in [_mine, _wesAgent]) {
+      expect(names.resolve(key)!.qualifier, isNotNull);
+      expect(names.labelFor(key), names.resolve(key)!.name);
+    }
+  });
+
   test('channel context: human, then mine, then owner-qualified others', () {
     // Wes is not a member: his profile is only an owner lookup fact.
     final names = _sources().scope([_logan, _human, _mine, _wesAgent]);
@@ -114,8 +184,7 @@ void main() {
     ];
     final names = mentionPickerNames(_sources(), candidates);
     final labeled = [
-      for (final c in candidates)
-        c.withContextLabel(names.resolve(c.pubkey)?.name),
+      for (final c in candidates) c.withContextLabel(names.labelFor(c.pubkey)),
     ];
     // A query that matches only the agent still shows its contextual label.
     final ranked = rankMentionCandidates(labeled, 'hon');
@@ -154,7 +223,8 @@ void main() {
     expect(candidates.map((c) => c.pubkey), [scout, myScout]);
     final names = mentionPickerNames(sources, candidates);
     expect(names.labelFor(myScout), 'Scout');
-    expect(names.labelFor(scout), isNot('Scout'));
+    expect(names.labelFor(scout), 'Scout');
+    expect(names.labelFor(scout, includeAgentQualifier: true), isNot('Scout'));
     // The owner is the viewer, whose profile is cached: nothing to load.
     expect(names.missingOwnerProfiles(), isEmpty);
   });

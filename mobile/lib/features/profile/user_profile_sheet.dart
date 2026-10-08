@@ -117,12 +117,12 @@ class UserProfileSheet extends HookConsumerWidget {
     // never placed on the clipboard.
     final npub = fullNpub(pubkey);
 
-    // The contextual label from the opening surface, so the sheet names the
-    // identity exactly as the row that was tapped.
+    // Keep the opening surface's comparison context, expanding agent key
+    // suffixes here so identically named agents can be distinguished.
     final opener = names;
     final displayName =
         (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
-            .labelFor(pk);
+            .labelFor(pk, includeAgentQualifier: true);
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =

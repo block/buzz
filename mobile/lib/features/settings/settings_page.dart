@@ -71,71 +71,68 @@ class SettingsPage extends HookConsumerWidget {
       bottomHeight: Grid.xxs,
     );
 
-    return FrostedScaffold(
-      useUtilitySurfaceTheme: true,
-      appBar: FrostedAppBar(
-        nativeTitle: 'Settings',
-        nativeLeading: IosNavigationAction(
-          label: 'Close settings',
-          symbol: 'xmark',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        automaticallyImplyLeading: false,
-        horizontalInset: Grid.gutter,
-        showBottomDivider: false,
-        leading: Theme.of(context).platform == TargetPlatform.iOS
-            ? IosGlassNavigationButton(
-                key: const ValueKey('settings-ios-glass-close'),
-                icon: IosGlassNavigationIcon.close,
-                semanticLabel: 'Close settings',
-                onPressed: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(context).pop();
-                },
-                foregroundColor: navigationPrimaryForeground(context),
-              )
-            : SizedBox(
-                width: Grid.xl,
-                height: Grid.xl,
-                child: IconButton(
-                  tooltip: 'Close settings',
+    // Keep feedback local even while Home is mounted during the transition.
+    return ScaffoldMessenger(
+      child: FrostedScaffold(
+        useUtilitySurfaceTheme: true,
+        appBar: FrostedAppBar(
+          nativeTitle: 'Settings',
+          nativeLeading: IosNavigationAction(
+            label: 'Close settings',
+            symbol: 'xmark',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          automaticallyImplyLeading: false,
+          horizontalInset: Grid.gutter,
+          showBottomDivider: false,
+          leading: Theme.of(context).platform == TargetPlatform.iOS
+              ? IosGlassNavigationButton(
+                  key: const ValueKey('settings-ios-glass-close'),
+                  icon: IosGlassNavigationIcon.close,
+                  semanticLabel: 'Close settings',
                   onPressed: () {
                     unawaited(HapticFeedback.lightImpact());
                     Navigator.of(context).pop();
                   },
-                  color: navigationPrimaryForeground(context),
-                  icon: const Icon(LucideIcons.x),
+                  foregroundColor: navigationPrimaryForeground(context),
+                )
+              : SizedBox(
+                  width: Grid.xl,
+                  height: Grid.xl,
+                  child: IconButton(
+                    tooltip: 'Close settings',
+                    onPressed: () {
+                      unawaited(HapticFeedback.lightImpact());
+                      Navigator.of(context).pop();
+                    },
+                    color: navigationPrimaryForeground(context),
+                    icon: const Icon(LucideIcons.x),
+                  ),
                 ),
+          bottomHeight: Grid.xxs,
+          bottom: const SizedBox.expand(),
+        ),
+        body: ListView(
+          padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
+          children: [
+            profileHeader,
+            _StatusSection(onSetStatus: onSetStatus),
+            _ProfileSection(
+              profileEditPageBuilder: profileEditPageBuilder,
+              onEditDisplayName: onEditDisplayName,
+              onEditProfileDescription: onEditProfileDescription,
+            ),
+            const _NotificationsSection(),
+            _ConnectionSection(
+              identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+            ),
+            if (packageInfo.hasData)
+              _VersionFooter(
+                version: packageInfo.data!.version,
+                buildNumber: packageInfo.data!.buildNumber,
               ),
-        bottomHeight: Grid.xxs,
-        bottom: const SizedBox.expand(),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
-              children: [
-                profileHeader,
-                _StatusSection(onSetStatus: onSetStatus),
-                _ProfileSection(
-                  profileEditPageBuilder: profileEditPageBuilder,
-                  onEditDisplayName: onEditDisplayName,
-                  onEditProfileDescription: onEditProfileDescription,
-                ),
-                const _NotificationsSection(),
-                _ConnectionSection(
-                  identityRecoveryPageBuilder: identityRecoveryPageBuilder,
-                ),
-              ],
-            ),
-          ),
-          if (packageInfo.hasData)
-            _VersionFooter(
-              version: packageInfo.data!.version,
-              buildNumber: packageInfo.data!.buildNumber,
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
