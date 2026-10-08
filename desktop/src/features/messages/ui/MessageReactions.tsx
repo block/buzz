@@ -12,12 +12,7 @@ import {
   isPositiveEmojiParticle,
   useEmojiBurst,
 } from "@/shared/ui/EmojiBurstProvider";
-import {
-  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/shared/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const REACTION_PILL_BASE_CLASSES =
@@ -29,6 +24,12 @@ const REACTION_NATIVE_COUNT_CLASSES =
   "text-muted-foreground translate-y-[0.5px]";
 const REACTION_PILL_HOVER_CLASSES =
   "hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
+// Reaction pills sit below the message body, so pointer transit rarely crosses
+// them by accident. Showing who reacted is the pill's primary purpose and users
+// scan several pills in a row, so hover answers quickly (like Slack) instead of
+// inheriting the shared 500 ms Popover dwell meant for incidental inspection UI.
+export const REACTION_HOVER_OPEN_DELAY_MS = 100;
+const REACTION_HOVER_CLOSE_DELAY_MS = 150;
 const BADGE_BURST_STABLE_FRAMES = 2;
 const BADGE_BURST_MAX_FRAMES = 12;
 const BADGE_BURST_RECT_EPSILON = 0.5;
@@ -386,13 +387,16 @@ function ReactionPill({
     clearTimers();
     openTimeout.current = setTimeout(
       () => setOpen(true),
-      DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+      REACTION_HOVER_OPEN_DELAY_MS,
     );
   }, [reaction.users.length, clearTimers]);
 
   const scheduleClose = React.useCallback(() => {
     clearTimers();
-    closeTimeout.current = setTimeout(() => setOpen(false), 150);
+    closeTimeout.current = setTimeout(
+      () => setOpen(false),
+      REACTION_HOVER_CLOSE_DELAY_MS,
+    );
   }, [clearTimers]);
 
   const handleFocus = React.useCallback(() => {
