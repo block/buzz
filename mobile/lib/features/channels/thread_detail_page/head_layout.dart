@@ -45,6 +45,8 @@ class _ThreadHeadScrollInput extends HookWidget {
   final ScrollPosition? Function() scrollPosition;
   final ValueListenable<Iterable<ItemPosition>> positions;
   final double viewportTopEdge;
+  final VoidCallback onUserScrollStart;
+  final VoidCallback onUserScrollEnd;
   final Widget child;
 
   const _ThreadHeadScrollInput({
@@ -52,6 +54,8 @@ class _ThreadHeadScrollInput extends HookWidget {
     required this.scrollPosition,
     required this.positions,
     required this.viewportTopEdge,
+    required this.onUserScrollStart,
+    required this.onUserScrollEnd,
     required this.child,
   });
 
@@ -74,12 +78,20 @@ class _ThreadHeadScrollInput extends HookWidget {
     );
     final position = scrollPosition();
     useListenable(position);
+    void userScroll(VoidCallback action) {
+      onUserScrollStart();
+      action();
+      onUserScrollEnd();
+    }
+
     void scrollPage(double direction) {
       final current = scrollPosition();
       if (current != null) {
-        current.moveTo(
-          current.pixels + direction * current.viewportDimension * 0.8,
-        );
+        userScroll(() {
+          current.moveTo(
+            current.pixels + direction * current.viewportDimension * 0.8,
+          );
+        });
       }
     }
 
@@ -110,7 +122,12 @@ class _ThreadHeadScrollInput extends HookWidget {
                       GestureBinding.instance.pointerSignalResolver.register(
                         event,
                         (_) {
-                          scrollPosition()?.pointerScroll(event.scrollDelta.dy);
+                          final current = scrollPosition();
+                          if (current != null && event.scrollDelta.dy != 0) {
+                            userScroll(() {
+                              current.pointerScroll(event.scrollDelta.dy);
+                            });
+                          }
                         },
                       );
                     }

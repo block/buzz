@@ -312,6 +312,8 @@ class _ThreadMessageList extends HookWidget {
                     showWhenUnlinked: false,
                     child: _ThreadHeadScrollInput(
                       enabled: visible,
+                      onUserScrollStart: onUserScrollStart,
+                      onUserScrollEnd: onUserScrollEnd,
                       scrollPosition: () => headScrollPosition.value,
                       positions: itemPositionsListener.itemPositions,
                       viewportTopEdge:

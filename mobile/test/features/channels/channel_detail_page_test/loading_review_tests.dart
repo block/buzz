@@ -173,6 +173,93 @@ void _loadingReviewTests() {
     );
   }
 
+  for (final useSemantics in [false, true]) {
+    testWidgets(
+      'head non-drag scroll detaches hydration tail follow semantics=$useSemantics',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final root = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Original message',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 65; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final query = Completer<List<NostrEvent>>();
+        final provisional = formatTimeline([root, ...replies.take(60)]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            pendingThreadReplies: {'thread-root': query.future},
+            home: ThreadDetailPage(
+              threadHead: provisional.first,
+              allMessages: provisional,
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final semantics = tester.ensureSemantics();
+        await tester.pump();
+        if (useSemantics) {
+          final node = tester.getSemantics(
+            find.byKey(const ValueKey('thread-head-scroll-semantics')),
+          );
+          node.owner!.performAction(node.id, SemanticsAction.scrollDown);
+        } else {
+          await tester.sendEventToBinding(
+            PointerScrollEvent(
+              position: tester.getCenter(
+                find.text('Original message').hitTestable(),
+              ),
+              scrollDelta: const Offset(0, 50),
+            ),
+          );
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('Reply 59').hitTestable(), findsNothing);
+        final list = tester.widget<ScrollablePositionedList>(
+          find.byKey(const ValueKey('thread-message-list')),
+        );
+        final visibleReply = list.itemPositionsNotifier!.itemPositions.value
+            .firstWhere(
+              (item) =>
+                  item.index > 0 &&
+                  item.itemLeadingEdge > 0 &&
+                  item.itemTrailingEdge < 1,
+            );
+        final anchor = find.byKey(
+          ValueKey('thread-message-group-reply-${visibleReply.index - 1}'),
+        );
+        final top = tester.getTopLeft(anchor).dy;
+        query.complete(replies);
+        await tester.pumpAndSettle();
+        expect(anchor, findsOneWidget);
+        expect(tester.getTopLeft(anchor).dy, closeTo(top, 0.5));
+        tester.view.physicalSize = const Size(400, 720);
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(anchor).dy, closeTo(top, 0.5));
+        semantics.dispose();
+      },
+    );
+  }
+
   testWidgets('tall original message remains scrollable after hydration', (
     tester,
   ) async {
