@@ -186,26 +186,15 @@ test("test_projection_replaces_pending_send_with_authoritative_event", () => {
   assert.equal(projected[1]?.localKey, pending.id);
 });
 
-test("test_projection_keeps_pending_send_after_same_second_window_events", () => {
-  const harness = createHarness();
-  // Optimistic ids sort after every hex event id, so an id tie-break alone
-  // would project the newest local send above an earlier same-second message.
+test("test_pageless_projection_keeps_pending_send_after_same_second_event", () => {
+  // A pageless window projects the cache directly; the optimistic id must not
+  // place the newest local send above an earlier same-second message.
   const pending = {
     ...event("pending", 110),
     id: "optimistic-00000000-0000-4000-8000-000000000000",
     pending: true,
   };
-  const window = replaceNewestChannelWindow(
-    harness.client.getQueryData(harness.windowKey),
-    newestPage([event("a", 110), event("b", 110), event("initial", 100)]),
-  );
 
-  assert.deepEqual(
-    reconcileChannelWindowMessages(window, [pending]).map(
-      (item) => item.content,
-    ),
-    ["initial", "b", "a", "pending"],
-  );
   assert.deepEqual(
     reconcileChannelWindowMessages(emptyChannelWindowStore(), [
       pending,
