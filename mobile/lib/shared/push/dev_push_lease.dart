@@ -44,8 +44,6 @@ class BuzzPushLeaseDescriptor {
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
   ) {
-    // Other NIP-11 metadata belongs to independent relay capabilities.
-    // Validate the fields used for push without restricting those capabilities.
     final extensions = _stringList(
       information['supported_extensions'],
       name: 'supported_extensions',
