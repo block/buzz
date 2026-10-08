@@ -9,12 +9,12 @@ ignore = [
     # quick-xml < 0.41: quadratic runtime on duplicate-attribute check (0194) and
     # unbounded namespace-declaration allocation in NsReader (0195). Both DoS-class,
     # requiring attacker-controlled XML. Our two locked versions only parse trusted
-    # input: 0.38.4 (rust-s3/aws-creds — responses from our own S3/MinIO endpoint)
+    # input: 0.38.4 (buzz-media — responses from our own S3/MinIO endpoint)
     # and 0.39.4 (mesh-llm → iroh → netdev → plist — local macOS system plists).
-    # Patched release (>= 0.41.0) is unreachable until rust-s3 and plist/netdev bump;
-    # remove these when upstream catches up.
-    { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
-    { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # rust-s3 0.38 / aws-creds 0.40 already use the patched 0.41; remove these once
+    # buzz-media's own quick-xml dependency and plist/netdev bump.
+    { id = "RUSTSEC-2026-0194", reason = "via buzz-media and mesh-llm→plist; trusted-input XML only; not yet bumped to 0.41" },
+    { id = "RUSTSEC-2026-0195", reason = "via buzz-media and mesh-llm→plist; trusted-input XML only; not yet bumped to 0.41" },
 ]
 
 [licenses]
