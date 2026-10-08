@@ -988,7 +988,10 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
                 // #e is fully pushed (any count) via JSONB containment.
             }
             _ => {
-                // Any other generic tag (#t, #a, etc.) is not pushed.
+                // Any other generic tag (#t, #a, etc.) is not pushed exactly.
+                // #t/#P on group-state kinds reach SQL only as an over-matching
+                // candidate filter (`group_state_tag_values`), so COUNT must
+                // still post-filter them.
                 if !tag_values.is_empty() {
                     return false;
                 }
@@ -1161,6 +1164,8 @@ fn filter_to_query_params(
         .filter(|values| !values.is_empty())
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
+    let tag_values = group_state_tag_values(filter, kinds.as_deref());
+
     EventQuery {
         channel_id,
         kinds,
@@ -1175,8 +1180,47 @@ fn filter_to_query_params(
         ids,
         e_tags,
         d_tag_values,
+        tag_values,
         ..EventQuery::for_community(community)
     }
+}
+
+/// `#t` (channel type and labels) and `#P` (creator) values to match in SQL
+/// before `LIMIT`, when every filter kind is a relay-signed group-state kind
+/// (39000–39003). Without this, a page of the newest group-state events is
+/// read first and the tag match runs after it, so a selective
+/// `{kinds:[39000], #t:[<label>], limit:n}` can return fewer than `n`
+/// matches, or none, while older matches exist.
+///
+/// The SQL match is a candidate filter (see [`EventQuery::tag_values`]); the
+/// caller's NIP-01 post-filter still decides each event.
+fn group_state_tag_values(filter: &Filter, kinds: Option<&[i32]>) -> Vec<(String, Vec<String>)> {
+    let group_state_only = kinds.is_some_and(|ks| {
+        !ks.is_empty()
+            && ks.iter().all(|&k| {
+                (buzz_core::kind::KIND_NIP29_GROUP_METADATA as i32
+                    ..=buzz_core::kind::KIND_NIP29_GROUP_ROLES as i32)
+                    .contains(&k)
+            })
+    });
+    if !group_state_only {
+        return Vec::new();
+    }
+    [
+        nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+        nostr::SingleLetterTag::uppercase(nostr::Alphabet::P),
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let values = filter.generic_tags.get(&key)?;
+        (!values.is_empty()).then(|| {
+            (
+                key.to_string(),
+                values.iter().map(|value| value.to_string()).collect(),
+            )
+        })
+    })
+    .collect()
 }
 
 /// Push channel constraints into SQL before `LIMIT`.
@@ -2562,6 +2606,48 @@ mod tests {
         assert!(!filters_are_nip43_membership_only(&[
             Filter::new().kinds([nostr::Kind::Custom(13_534), nostr::Kind::TextNote]),
         ]));
+    }
+
+    #[test]
+    fn group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        let creator = "ab".repeat(32);
+        let filter = |kinds: serde_json::Value| -> Filter {
+            serde_json::from_value(serde_json::json!({
+                "kinds": kinds,
+                "#t": ["workspace", "team:core"],
+                "#P": [creator],
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            filter_to_query_params(&filter(serde_json::json!([39000, 39002])), None, community)
+                .tag_values,
+            vec![
+                (
+                    "t".to_string(),
+                    // Filter tag values are a set, so they arrive sorted.
+                    vec!["team:core".to_string(), "workspace".to_string()]
+                ),
+                ("P".to_string(), vec![creator.clone()]),
+            ]
+        );
+        for kinds in [serde_json::json!([39000, 1]), serde_json::json!([30023])] {
+            assert!(
+                filter_to_query_params(&filter(kinds.clone()), None, community)
+                    .tag_values
+                    .is_empty(),
+                "kinds {kinds} must keep #t/#P as a post-filter"
+            );
+        }
+        let kindless: Filter = serde_json::from_value(serde_json::json!({"#t": ["x"]})).unwrap();
+        assert!(filter_to_query_params(&kindless, None, community)
+            .tag_values
+            .is_empty());
+        assert!(
+            !filter_fully_pushable(&filter(serde_json::json!([39000]))),
+            "containment can over-match, so COUNT must still post-filter"
+        );
     }
 
     #[test]
