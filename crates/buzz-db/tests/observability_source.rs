@@ -1130,7 +1130,7 @@ fn serving_table_policy_requires_admitted_tx_not_raw_transactions() {
     let source = r#"
 pub(crate) async fn raw_transaction_writer(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
@@ -1143,7 +1143,7 @@ pub(crate) async fn raw_connection_writer(conn: &mut sqlx::PgConnection) {
 pub(crate) async fn admitted_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
         .bind(tx.community().as_uuid())
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
@@ -1564,23 +1564,23 @@ fn event_insert_follow_up_policy_rejects_writers_without_the_hook() {
     let source = r##"
 pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
 pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events \
                  (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
-    crate::store::event_follow_up::enqueue_push_match(&mut **tx, community, id, kind)
+    crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
         .await
         .expect("enqueue");
 }
 pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
     crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
@@ -1589,17 +1589,17 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
 }
 pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
-    crate::store::event_follow_up::enqueue_push_match(&mut **tx, community, id, kind)
+    crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
         .await
         .expect("enqueue");
     tx.record_channel_event(channel, kind);
 }
 pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO event_mentions (community_id, event_id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
@@ -1612,34 +1612,34 @@ pub async fn verify_floor_guard_behavior(pool: &PgPool) {
 pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {
     sqlx::query("insert into
         public.events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
 pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO \
                  events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
 /// Kept at module scope, not `#[cfg(test)]`, because production calls it.
 pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
 // see `#[cfg(test)] mod x {`
 pub(crate) async fn writer_under_brace_mention(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
 pub(crate) async fn writer_with_escaped_newline(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO\nevents (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }
@@ -1650,7 +1650,7 @@ fn test_only_helper() -> (&'static str, char, &'static str, char) {
 }
 pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await
         .expect("write");
 }

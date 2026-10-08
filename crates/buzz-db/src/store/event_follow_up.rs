@@ -51,7 +51,7 @@ pub(crate) async fn after_admitted_insert(
     channel_id: Option<Uuid>,
 ) -> Result<()> {
     let community = tx.community();
-    enqueue_push_match(tx, community, event_id, kind).await?;
+    enqueue_push_match(tx.conn(), community, event_id, kind).await?;
     tx.record_channel_event(channel_id, kind);
     Ok(())
 }

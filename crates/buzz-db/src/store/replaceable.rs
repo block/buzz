@@ -336,7 +336,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         // Inside the savepoint, so a later failure here also drops the job.
         // The TTL refresh is recorded only once the savepoint is released.
         crate::store::event_follow_up::enqueue_push_match(
-            tx,
+            tx.conn(),
             community_id,
             incoming_id,
             kind_i32,
