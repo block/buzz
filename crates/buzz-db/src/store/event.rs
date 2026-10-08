@@ -92,6 +92,11 @@ pub struct EventQuery {
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Restrict results to events with a `t` tag of this value. Uses JSONB
+    /// containment against `tags` before SQL `LIMIT`, so a per-subject read
+    /// (e.g. a kind:44300 team's current version) is not starved by newer
+    /// events with other `t` values.
+    pub t_tag: Option<String>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -152,6 +157,7 @@ impl EventQuery {
             e_tags: None,
             d_tag_values: None,
             custom_tag: None,
+            t_tag: None,
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -727,6 +733,11 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         let containment = serde_json::json!([[name, value]]);
         qb.push(format!(" AND {col_prefix}tags @> "))
             .push_bind(containment);
+    }
+
+    if let Some(ref t) = q.t_tag {
+        qb.push(format!(" AND {col_prefix}tags @> "))
+            .push_bind(serde_json::json!([["t", t]]));
     }
 
     if let Some(s) = q.since {
