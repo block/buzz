@@ -1419,8 +1419,8 @@ const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
 
 /// `source` with every `#[cfg(test)]` item removed, wherever it sits in the
 /// file. Each item runs to the `;` that ends it or to the brace that closes
-/// its body. Braces inside string, raw string, and char literals and in line
-/// comments are not counted. Unlike cutting the file at the first
+/// its body. Braces inside comments and literals are not counted (see
+/// [`mask_comments_and_literals`]). Unlike cutting the file at the first
 /// `#[cfg(test)]`, this keeps production code that follows a test-only item.
 /// The marker counts as an attribute only when it is the first non-whitespace
 /// text on its line, so a mention in a comment or string strips nothing.
@@ -1459,6 +1459,19 @@ fn cfg_test_item_len(item: &str) -> usize {
         }
     }
     item.len()
+}
+
+/// Whether the `r` at `index` begins a raw literal token: `r"`, or the `br"` /
+/// `cr"` raw byte and C strings, rather than ending an identifier such as `for"`.
+fn raw_literal_prefix_starts_token(bytes: &[u8], index: usize) -> bool {
+    let is_ident = |at: Option<usize>| {
+        at.and_then(|at| bytes.get(at))
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    };
+    let before = index.checked_sub(1);
+    !is_ident(before)
+        || (matches!(before.map(|at| bytes[at]), Some(b'b' | b'c'))
+            && !is_ident(index.checked_sub(2)))
 }
 
 /// `source` with every comment (`//`, `///`, nested `/* */`) and every string,
@@ -1503,9 +1516,7 @@ fn mask_comments_and_literals(source: &str) -> String {
                 }
             }
             b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
-                && !bytes
-                    .get(index.wrapping_sub(1))
-                    .is_some_and(|prev| prev.is_ascii_alphanumeric() || *prev == b'_')
+                && raw_literal_prefix_starts_token(bytes, index)
                 && bytes.get(
                     index
                         + 1
@@ -1718,10 +1729,24 @@ pub(crate) async fn writer_with_hook_in_string(tx: &mut AdmittedTx) {
         .expect("write");
     tracing::debug!("skipped event_follow_up::after_admitted_insert(tx, ..)");
 }
+pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel) */
+}
+pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    tracing::debug!("\"event_follow_up::after_admitted_insert(\"");
+}
 #[cfg(test)]
-fn test_only_helper() -> (&'static str, char, &'static str, char) {
+fn test_only_helper() -> (&'static str, char, &'static str, char, &'static [u8]) {
     // an unbalanced { in a comment
-    ("{", '{', r#"}"} {"#, '"')
+    ("{", '{', r#"}"} {"#, '"', br#"\"#)
 }
 pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1753,6 +1778,8 @@ mod tests {
             "pub(crate) async fn writer_with_commented_out_hook(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_block_commented_hook(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_hook_in_string(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
