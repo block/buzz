@@ -1192,47 +1192,6 @@ fn admitted_tx_is_constructed_only_by_admitting_constructors() {
     }
 }
 
-/// Remove each top-level `#[cfg(test)]` item and keep the production code
-/// around it. Truncating at the first `#[cfg(test)]` would hide production
-/// functions that follow a test-only item. Tracks brace depth: the item ends
-/// on the first line that leaves depth at or below zero and ends with `;` or
-/// `}`, ignoring a trailing `//` comment. A column-0 `}` line (rustfmt's
-/// top-level close) always ends it. Braces inside string or char literals are
-/// still counted, so a test-only item with unbalanced literal braces (for
-/// example `"{"`) runs on to the next column-0 `}`; no such item exists today.
-fn strip_cfg_test_items(source: &str) -> String {
-    let mut kept = String::with_capacity(source.len());
-    let mut lines = source.lines();
-    while let Some(line) = lines.next() {
-        if line != "#[cfg(test)]" {
-            kept.push_str(line);
-            kept.push('\n');
-            continue;
-        }
-        let mut depth = 0_isize;
-        for line in lines.by_ref().skip_while(|line| line.starts_with("#[")) {
-            depth += line.matches('{').count() as isize - line.matches('}').count() as isize;
-            // Any `//` may start the trailing comment (an earlier one can sit
-            // inside a string such as `"https://…"`), so try every prefix. A
-            // false match inside a string only ends the item early, which
-            // scans more lines and can never hide production code.
-            let item_end = depth <= 0
-                && line
-                    .match_indices("//")
-                    .map(|(at, _)| &line[..at])
-                    .chain([line])
-                    .any(|text| {
-                        let text = text.trim_end();
-                        text.ends_with(';') || text.ends_with('}')
-                    });
-            if item_end || line == "}" || line == "};" {
-                break;
-            }
-        }
-    }
-    kept
-}
-
 #[test]
 fn cfg_test_items_are_skipped_without_hiding_later_production_code() {
     let source = "pub fn before() {}\n\
