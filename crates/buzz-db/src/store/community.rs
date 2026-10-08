@@ -1452,7 +1452,7 @@ mod postgres_tests {
         let db = setup_db().await;
         let owner = format!("{:064x}", Uuid::new_v4().as_u128());
 
-        // The twentieth create succeeds, then the twenty-first is rejected.
+        // The fiftieth create succeeds, then the fifty-first is rejected.
         for i in 0..crate::relay_members::MAX_COMMUNITIES_PER_OWNER {
             let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
             assert!(matches!(
@@ -1466,8 +1466,8 @@ mod postgres_tests {
         let page = db
             .list_communities_owned_by(&owner)
             .await
-            .expect("owner quota at twenty");
-        assert_eq!(page.quota_used, 20);
+            .expect("owner quota at fifty");
+        assert_eq!(page.quota_used, 50);
         assert!(!page.can_create);
 
         let host = format!("limit-test-overflow-{}.example", Uuid::new_v4().simple());
@@ -1694,7 +1694,7 @@ mod postgres_tests {
             .await
             .expect("owner list at lifetime cap");
         assert_eq!(page.quota_used, 0, "completed deletions free active slots");
-        assert_eq!(page.quota_limit, 20, "active limit is shown separately");
+        assert_eq!(page.quota_limit, 50, "active limit is shown separately");
         assert!(!page.can_create, "the lifetime cap still blocks creation");
 
         let host = format!("lifetime-overflow-{}.example", Uuid::new_v4().simple());

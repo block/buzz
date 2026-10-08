@@ -326,11 +326,11 @@ test("server quota controls the create gate, not the visible list length", async
       name: `Community ${index}`,
       normalized_host: `community-${index}.communities.buzz.xyz`,
     })),
-    builderlabQuota: { quota_used: 5, quota_limit: 20, can_create: true },
+    builderlabQuota: { quota_used: 5, quota_limit: 50, can_create: true },
   });
   await page.goto("/");
   await openSettings(page, "hosted-communities");
-  await expect(page.getByText("5 of 20 used")).toBeVisible();
+  await expect(page.getByText("5 of 50 used")).toBeVisible();
   await expect(page.getByLabel("Community address")).toBeEnabled();
 
   // A lifetime tombstone can exhaust creation even when active usage is low.
@@ -341,11 +341,11 @@ test("server quota controls the create gate, not the visible list length", async
     },
     builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
     builderlabCommunities: [],
-    builderlabQuota: { quota_used: 0, quota_limit: 20, can_create: false },
+    builderlabQuota: { quota_used: 0, quota_limit: 50, can_create: false },
   });
   await page.reload();
   await expect(page.getByTestId("hosted-communities-settings")).toBeVisible();
-  await expect(page.getByText("0 of 20 used")).toBeVisible();
+  await expect(page.getByText("0 of 50 used")).toBeVisible();
   await expect(page.getByLabel("Community address")).toBeDisabled();
   await expect(
     page.getByText(/reached your hosted community creation limit/),

@@ -132,7 +132,7 @@ test("create flow follows server permission with five owned communities", async 
       builderlabCommunities: Array.from({ length: 5 }, (_, index) => ({
         id: `owned-${index}`,
       })),
-      builderlabQuota: { quota_used: 5, quota_limit: 20, can_create: true },
+      builderlabQuota: { quota_used: 5, quota_limit: 50, can_create: true },
     },
     { skipCommunitySeed: true },
   );
@@ -157,7 +157,7 @@ test("create flow blocks when lifetime quota is exhausted", async ({
       },
       builderlabIdentity: { pubkey_hex: DEFAULT_MOCK_PUBKEY },
       builderlabCommunities: [],
-      builderlabQuota: { quota_used: 0, quota_limit: 20, can_create: false },
+      builderlabQuota: { quota_used: 0, quota_limit: 50, can_create: false },
     },
     { skipCommunitySeed: true },
   );

@@ -103,7 +103,7 @@ test("quota projection never invents a fixed client limit", () => {
   assert.equal(hostedCommunityQuotaLimit(undefined), null);
   assert.equal(hostedCommunityQuotaLimit(0), null);
   assert.equal(hostedCommunityQuotaLimit(5), 5);
-  assert.equal(hostedCommunityQuotaLimit(20), 20);
+  assert.equal(hostedCommunityQuotaLimit(50), 50);
   assert.equal(
     hostedCommunityErrorMessage(
       { code: "limit_reached" },
