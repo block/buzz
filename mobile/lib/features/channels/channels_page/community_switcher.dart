@@ -279,7 +279,7 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
                 IconButton(
                   tooltip: 'Close community switcher',
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(LucideIcons.x),
+                  icon: const Icon(BuzzIcons.x),
                 ),
                 const Spacer(),
                 TextButton(
@@ -676,7 +676,7 @@ class _CommunityGridAdd extends StatelessWidget {
               height: _communityGridAvatarSize,
               color: context.colors.primaryContainer.withValues(alpha: 0.5),
               child: Icon(
-                LucideIcons.plus,
+                BuzzIcons.plus,
                 size: 32,
                 color: context.colors.onSurfaceVariant,
               ),

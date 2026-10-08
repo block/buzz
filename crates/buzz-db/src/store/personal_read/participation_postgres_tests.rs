@@ -34,11 +34,13 @@ impl World {
             .await
             .unwrap()
             .id;
+        let actor = Keys::generate();
+        super::postgres_tests::start_before_everything(&pool, community, &actor.public_key()).await;
         Self {
             db,
             pool,
             community,
-            actor: Keys::generate(),
+            actor,
             peer: Keys::generate(),
             now: Timestamp::now().as_secs(),
         }

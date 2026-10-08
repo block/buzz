@@ -8,7 +8,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/error_haptic.dart';
@@ -148,7 +148,7 @@ class PairingPage extends HookConsumerWidget {
                           ),
                         )
                       : IconButton(
-                          icon: const Icon(LucideIcons.arrowLeft),
+                          icon: const Icon(BuzzIcons.arrowLeft),
                           tooltip: 'Back',
                           onPressed: () => Navigator.of(context).pop(),
                         ),

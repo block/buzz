@@ -43,16 +43,16 @@ class _CommunityMenuSheet extends StatelessWidget {
                 children: [
                   if (canInvite && invitePageBuilder != null)
                     AppListRow(
-                      icon: LucideIcons.userPlus,
+                      icon: BuzzIcons.userPlus,
                       title: 'Invite',
-                      trailing: const Icon(LucideIcons.chevronRight, size: 18),
+                      trailing: const Icon(BuzzIcons.chevronRight, size: 18),
                       onTap: () => openPage(invitePageBuilder!),
                     ),
                   if (appearancePageBuilder != null)
                     AppListRow(
-                      icon: LucideIcons.sunMoon,
+                      icon: BuzzIcons.sunMoon,
                       title: 'Appearance',
-                      trailing: const Icon(LucideIcons.chevronRight, size: 18),
+                      trailing: const Icon(BuzzIcons.chevronRight, size: 18),
                       onTap: () => openPage(appearancePageBuilder!),
                     ),
                 ],
@@ -61,9 +61,9 @@ class _CommunityMenuSheet extends StatelessWidget {
               children: [
                 AppListRow(
                   key: const Key('community-menu-switch'),
-                  icon: LucideIcons.arrowLeftRight,
+                  icon: BuzzIcons.arrowLeftRight,
                   title: 'Switch Community',
-                  trailing: const Icon(LucideIcons.chevronRight, size: 18),
+                  trailing: const Icon(BuzzIcons.chevronRight, size: 18),
                   onTap: openSwitcher,
                 ),
               ],

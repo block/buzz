@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/identity_names/identity_names.dart';
@@ -274,7 +274,7 @@ class UserProfileSheet extends HookConsumerWidget {
                             child: BuzzActionTile(
                               icon: isOpeningDirectMessage.value
                                   ? null
-                                  : LucideIcons.messageSquare,
+                                  : BuzzIcons.messageSquare,
                               label: isOpeningDirectMessage.value
                                   ? 'Opening…'
                                   : 'Message',
@@ -288,8 +288,8 @@ class UserProfileSheet extends HookConsumerWidget {
                         Expanded(
                           child: BuzzActionTile(
                             icon: copied.value
-                                ? LucideIcons.check
-                                : LucideIcons.key,
+                                ? BuzzIcons.check
+                                : BuzzIcons.key,
                             label: copied.value ? 'Copied' : 'Copy public key',
                             isEnabled: npub != null,
                             onTap: copyPublicKey,
@@ -337,7 +337,7 @@ void _showProfileCopyToast(BuildContext context) {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(LucideIcons.check, size: 18, color: colors.onInverseSurface),
+              Icon(BuzzIcons.check, size: 18, color: colors.onInverseSurface),
               const SizedBox(width: Grid.xxs),
               Text('Public key copied', style: textStyle),
             ],

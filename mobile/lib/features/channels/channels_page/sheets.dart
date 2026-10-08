@@ -421,7 +421,7 @@ class _CreateChannelSettingMenu<T> extends StatelessWidget {
               ),
               const SizedBox(width: Grid.half),
               Icon(
-                LucideIcons.chevronDown,
+                BuzzIcons.chevronDown,
                 size: 16,
                 color: context.colors.onSurfaceVariant,
               ),
@@ -769,7 +769,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                           trailing: Icon(
-                            LucideIcons.plus,
+                            BuzzIcons.plus,
                             size: 18,
                             color: context.colors.onSurfaceVariant,
                           ),

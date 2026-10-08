@@ -4,7 +4,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list_card_item.dart';
@@ -313,7 +313,7 @@ class _AddReactionPill extends StatelessWidget {
           child: Center(
             widthFactor: 1,
             child: Icon(
-              LucideIcons.smilePlus,
+              BuzzIcons.smilePlus,
               size: _pillGlyphSize,
               color: context.colors.onSurfaceVariant,
             ),

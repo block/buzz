@@ -364,7 +364,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     child: BuzzActionTile(
                       key: const ValueKey('channel-details-star-action'),
                       icon: null,
-                      iconWidget: LucideStarIcon(
+                      iconWidget: TablerStarIcon(
                         filled: isStarred,
                         color: isStarred
                             ? context.colors.primary
@@ -378,7 +378,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   Expanded(
                     child: BuzzActionTile(
                       key: const ValueKey('channel-details-mute-action'),
-                      icon: isMuted ? LucideIcons.bell : LucideIcons.bellOff,
+                      icon: isMuted ? BuzzIcons.bell : BuzzIcons.bellOff,
                       iconColor: isMuted ? context.colors.primary : null,
                       label: isMuted ? 'Unmute' : 'Mute',
                       onTap: toggleMute,
@@ -389,7 +389,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     Expanded(
                       child: BuzzActionTile(
                         key: const ValueKey('channel-details-edit-action'),
-                        icon: LucideIcons.pencil,
+                        icon: BuzzIcons.pencil,
                         label: 'Edit',
                         isEnabled: canEdit,
                         onTap: openManageChannel,
@@ -418,7 +418,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        LucideIcons.plus,
+                        BuzzIcons.plus,
                         color: context.colors.onSurfaceVariant,
                       ),
                     ),
@@ -432,7 +432,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   ),
                 if (membersAsync.isLoading && members.isEmpty)
                   const AppListRow(
-                    icon: LucideIcons.loaderCircle,
+                    icon: BuzzIcons.loaderCircle,
                     title: 'Loading members…',
                     trailing: BuzzLoadingIndicator(
                       size: 20,
@@ -441,7 +441,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   )
                 else if (membersAsync.hasError && members.isEmpty)
                   const AppListRow(
-                    icon: LucideIcons.triangleAlert,
+                    icon: BuzzIcons.triangleAlert,
                     title: 'Members unavailable',
                   )
                 else ...[
@@ -478,7 +478,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
             verticalPadding: _channelDetailsSectionPadding,
             children: [
               AppListRow(
-                icon: LucideIcons.folderInput,
+                icon: BuzzIcons.folderInput,
                 title: 'Move to section…',
                 trailing: const _ChannelDetailsChevron(),
                 onTap: () async {
@@ -491,7 +491,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 },
               ),
               AppListRow(
-                icon: LucideIcons.copy,
+                icon: BuzzIcons.copy,
                 title: 'Copy channel name',
                 onTap: () {
                   copyToClipboard(
@@ -502,7 +502,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 },
               ),
               AppListRow(
-                icon: LucideIcons.hash,
+                icon: BuzzIcons.hash,
                 title: 'Copy channel ID',
                 onTap: () {
                   copyToClipboard(
@@ -527,7 +527,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
               children: [
                 if (canJoin)
                   AppListRow(
-                    icon: LucideIcons.logIn,
+                    icon: BuzzIcons.logIn,
                     title: isJoining.value
                         ? 'Joining channel…'
                         : 'Join channel',
@@ -535,7 +535,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   ),
                 if (resolvedChannel.isMember && !resolvedChannel.isArchived)
                   AppListRow(
-                    icon: LucideIcons.logOut,
+                    icon: BuzzIcons.logOut,
                     title: 'Leave channel',
                     titleColor: context.colors.error,
                     onTap: () => _confirmAndRun(
@@ -551,7 +551,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   ),
                 if (lifecycleCapabilitiesLoading)
                   const AppListRow(
-                    icon: LucideIcons.loaderCircle,
+                    icon: BuzzIcons.loaderCircle,
                     title: 'Loading channel actions…',
                     trailing: BuzzLoadingIndicator(
                       size: 20,
@@ -560,13 +560,13 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   )
                 else if (lifecycleCapabilitiesUnavailable)
                   const AppListRow(
-                    icon: LucideIcons.triangleAlert,
+                    icon: BuzzIcons.triangleAlert,
                     title: 'Channel actions unavailable',
                   )
                 else ...[
                   if (canArchive)
                     AppListRow(
-                      icon: LucideIcons.archive,
+                      icon: BuzzIcons.archive,
                       title: 'Archive channel',
                       onTap: () => _confirmAndRun(
                         context,
@@ -581,7 +581,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     ),
                   if (canUnarchive)
                     AppListRow(
-                      icon: LucideIcons.archiveRestore,
+                      icon: BuzzIcons.archiveRestore,
                       title: 'Unarchive channel',
                       onTap: () => _confirmAndRun(
                         context,
@@ -596,7 +596,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     ),
                   if (canDelete)
                     AppListRow(
-                      icon: LucideIcons.trash2,
+                      icon: BuzzIcons.trash2,
                       title: 'Delete channel',
                       titleColor: context.colors.error,
                       onTap: () => _confirmAndRun(
@@ -768,9 +768,9 @@ String _channelMemberRoleLabel(String role) {
 }
 
 IconData _channelDetailsIcon(Channel channel) {
-  if (channel.isPrivate) return LucideIcons.lock;
-  if (channel.isForum) return LucideIcons.messageSquareText;
-  return LucideIcons.hash;
+  if (channel.isPrivate) return BuzzIcons.lock;
+  if (channel.isForum) return BuzzIcons.messageSquareText;
+  return BuzzIcons.hash;
 }
 
 class _ChannelDetailsChevron extends StatelessWidget {
@@ -778,7 +778,7 @@ class _ChannelDetailsChevron extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Icon(
-    LucideIcons.chevronRight,
+    BuzzIcons.chevronRight,
     size: 18,
     color: context.colors.onSurfaceVariant,
   );

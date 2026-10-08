@@ -119,7 +119,7 @@ void actionRowTests() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Someone ${scenario.action}'), findsOneWidget);
-        expect(find.byIcon(LucideIcons.arrowLeftRight), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.arrowLeftRight), findsOneWidget);
         expect(
           find.byKey(const ValueKey('system-message-timestamp-fallback')),
           findsOneWidget,
@@ -215,7 +215,7 @@ void actionRowTests() {
         expect(pill, findsOneWidget);
         expect(tester.widget<MessageMentionPill>(pill).isAgent, isTrue);
         expect(
-          find.descendant(of: pill, matching: find.byIcon(LucideIcons.bot)),
+          find.descendant(of: pill, matching: find.byIcon(BuzzIcons.bot)),
           findsOneWidget,
         );
         expect(

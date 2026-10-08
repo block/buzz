@@ -395,20 +395,20 @@ class _MarkdownEditingController extends TextEditingController {
     final link = parseBuzzDeepLink(uri) ?? parseEntityDeepLink(uri);
     return switch (link) {
       ChannelDeepLink(:final channelId) => (
-        LucideIcons.hash,
+        BuzzIcons.hash,
         _resolvedChannelName(channelId),
         'Channel ${_resolvedChannelName(channelId)}',
       ),
       MessageDeepLink(:final channelId, :final messageId) => (
-        LucideIcons.messageSquare,
+        BuzzIcons.messageSquare,
         '${_resolvedChannelName(channelId)} · ${messageId.substring(0, 8)}',
         'Message ${messageId.substring(0, 8)} in channel ${_resolvedChannelName(channelId)}',
       ),
       EntityDeepLink(:final type, :final repository, :final eventId) => (
         switch (type) {
-          'repo' => LucideIcons.folderGit2,
-          'pr' => LucideIcons.gitPullRequest,
-          _ => LucideIcons.circleDot,
+          'repo' => BuzzIcons.folderGit2,
+          'pr' => BuzzIcons.gitPullRequest,
+          _ => BuzzIcons.circleDot,
         },
         type == 'repo'
             ? repository
@@ -591,7 +591,7 @@ class _ComposerAgentMentionChip extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Icon(
-              LucideIcons.bot,
+              BuzzIcons.bot,
               size: fontSize * 0.95,
               color: context.colors.primary,
             ),

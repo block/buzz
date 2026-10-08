@@ -175,8 +175,12 @@ _ensure-sidecar-stubs:
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
+    # Create missing stubs only: tauri-build reruns build.rs (and recompiles
+    # buzz-desktop) whenever an externalBin's mtime changes, so touching
+    # existing files would invalidate every cached desktop test build.
     for bin in "${SIDECARS[@]}"; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        stub="desktop/src-tauri/binaries/${bin}-${TARGET}"
+        [[ -e "$stub" ]] || : > "$stub"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
@@ -227,52 +231,82 @@ desktop-tauri-check: _ensure-sidecar-stubs
 desktop-tauri-test: _ensure-sidecar-stubs
     cd desktop/src-tauri && cargo test --workspace
 
+# Run the desktop Tauri lib tests with the mesh-llm feature graph
+desktop-tauri-test-mesh: _ensure-sidecar-stubs
+    cargo test --manifest-path {{desktop_tauri_manifest}} --features mesh-llm --lib
+
 # Run the native terminal latency gate explicitly on a known-idle host.
 # This is intentionally excluded from shared CI: scheduler contention makes a
 # wall-clock assertion flaky, and the release profile is the shipped shape.
 desktop-terminal-performance-test:
     cargo test --manifest-path desktop/src-tauri/crates/buzz-terminal/Cargo.toml --release --test latency g3_renderer_acquire_stays_within_frame_budget -- --ignored --exact --nocapture
 
-# Verify compiled-flag behavior under both compile states (clean + capability set).
-# Runs the auto-connect and owner-only access focused tests twice with
-# independently supplied expected values; build.rs rerun-if-env-changed
-# triggers recompilation.
+# Verify compiled-flag behavior in each compile state.
+# The clean (OSS) state's full suite already runs in desktop-tauri-test, so
+# only its flag assertions run here. The internal state sets both release
+# capabilities together, as internal release packaging does, and reruns the
+# buzz_lib suite. An auto-connect-only state asserts the two capabilities stay
+# independent (a swapped build.rs variable fails it). The demo state sets only
+# the demo slug, asserts neither capability leaks on, and reruns the suite.
+# Every invocation uses --lib so each state compiles a single test harness;
+# build.rs rerun-if-env-changed triggers the recompile between states. The
+# workspace member crates and integration tests do not read these build
+# variables, so they are not rerun.
 desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     cd desktop/src-tauri
+    unset BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY BUZZ_BUILD_DEMO_SLUG
+    unset BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY BUZZ_TEST_EXPECTED_DEMO_SLUG
+    # Run ignored assertions by name; libtest passes a filter that matches
+    # nothing, so require exactly one passing test per filter.
+    run_ignored() {
+      local out
+      out="$(cargo test --lib -- --ignored --nocapture "$@" 2>&1 | tee >(cat >&2))"
+      if ! grep -qE "^test result: ok\. $# passed;" <<<"$out"; then
+        echo "expected exactly $# ignored compiled-flag assertions to pass: $*" >&2
+        exit 1
+      fi
+    }
+    flag_tests=(compiled_flag_matches_expected compiled_policy_matches_expected)
     echo "=== Clean build (no flag) → expect false ==="
-    env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
-      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
-      cargo test compiled_flag_matches_expected -- --ignored --nocapture
-    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
-      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
-      cargo test --lib
-    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
-      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
-      cargo test compiled_policy_matches_expected -- --ignored --nocapture
+    (
+      export BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false
+      export BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false
+      run_ignored "${flag_tests[@]}"
+    )
     echo "=== Internal build (flags set) → expect true ==="
-    BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
-      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
-      cargo test compiled_flag_matches_expected -- --ignored --nocapture
-    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
-      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+    (
+      export BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1
+      export BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1
+      export BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true
+      export BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true
+      run_ignored "${flag_tests[@]}"
       cargo test --lib
-    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
-      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
-      cargo test compiled_policy_matches_expected -- --ignored --nocapture
+    )
+    echo "=== Auto-connect only → capabilities stay independent ==="
+    (
+      export BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1
+      export BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true
+      export BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false
+      run_ignored "${flag_tests[@]}"
+    )
     echo "=== Maximum accepted demo name reaches Rust build validation ==="
     DEMO_CONFIG="$(node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..31})" /dev/null 1234567812345678)"
     DEMO_SLUG="$(node -e 'console.log(JSON.parse(process.argv[1]).slug)' "$DEMO_CONFIG")"
-    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" \
-      BUZZ_TEST_EXPECTED_DEMO_SLUG="$DEMO_SLUG" \
-      cargo test compiled_demo_slug_matches_expected -- --ignored --nocapture
-    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" cargo test --workspace
+    (
+      export BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG"
+      export BUZZ_TEST_EXPECTED_DEMO_SLUG="$DEMO_SLUG"
+      export BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false
+      export BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false
+      run_ignored compiled_demo_slug_matches_expected "${flag_tests[@]}"
+      cargo test --lib
+    )
     if node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..32})" /dev/null 1234567812345678; then
       echo "A 32-character demo name unexpectedly passed JavaScript validation" >&2
       exit 1
     fi
-    echo "Both compiled states and the accepted/rejected demo-name boundary verified."
+    echo "All compiled states and the accepted/rejected demo-name boundary verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.

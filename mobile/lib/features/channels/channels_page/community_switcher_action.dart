@@ -76,9 +76,9 @@ class _CommunityGridAction extends HookWidget {
                         painter: _CommunityActionGlyphPainter(t, foreground),
                       )
                     : isActive && t == 0
-                    ? Icon(LucideIcons.check, color: foreground, size: 14)
+                    ? Icon(BuzzIcons.check, color: foreground, size: 14)
                     : t > 0
-                    ? Icon(LucideIcons.trash2, color: foreground, size: 18)
+                    ? Icon(BuzzIcons.trash2, color: foreground, size: 18)
                     : const SizedBox.shrink(),
               ),
             ),

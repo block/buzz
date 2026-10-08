@@ -222,7 +222,18 @@ const scenarios = [
   ["Tauri", ["desktop/src-tauri/src/main.rs"], ["desktop", "desktop-rust"]],
   ["relay", ["crates/buzz-relay/src/main.rs"], ["rust"]],
   ["migration", ["migrations/123.sql"], ["rust"]],
-  ["shared workflow", [".github/workflows/ci.yml"], ["rust", "mobile"]],
+  [
+    "shared workflow",
+    [".github/workflows/ci.yml"],
+    ["desktop", "mobile", "rust"],
+  ],
+  [
+    "desktop workflow",
+    [".github/workflows/_ci-desktop.yml"],
+    ["desktop", "mobile", "rust"],
+  ],
+  ["Justfile", ["Justfile"], ["desktop", "rust"]],
+  ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["desktop", "rust"]],
   ["integration services", ["docker-compose.yml"], ["rust"]],
   ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
   [

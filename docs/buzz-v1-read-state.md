@@ -229,9 +229,12 @@ examined: the 4,096 most recent events by author time inside the horizon. So
 marking through it reads everything counted. When the horizon holds no message,
 it is the last to arrive among the channel's 256 most recent events.
 
-There is no import of earlier client read state: an account starts with no
-frontiers, and the horizon bounds what that can show as unread. Manual unread
-remains device-local.
+There is no import of earlier client read state. The relay records the
+account's `started_at` at its first applied read intent and never moves it.
+Every frontier is floored at `started_at`: until the account starts nothing
+counts as unread, and from then it starts caught up, so a context it has never
+marked counts only arrivals after the start. Manual unread remains
+device-local.
 
 ## Bounds and deployment
 
@@ -251,10 +254,11 @@ remains device-local.
   shared eight-second intent-processing deadline after admission. Limits are
   containment, not a production capacity claim.
 
-Apply migration 0056 (or the equivalent desired schema). It creates two empty
-private tables and no index on `events`: both sidebar scans are served by the
-existing `idx_events_community_channel_created`. No new per-message ingest write
-path or stored unread counters are introduced.
+Apply migrations 0056 and 0057 (or the equivalent desired schema). 0056
+creates two empty private tables and no index on `events`, and 0057 adds the
+nullable `personal_read_accounts.started_at` column. Both sidebar scans are
+served by the existing `idx_events_community_channel_created`. No new
+per-message ingest write path or stored unread counters are introduced.
 
 Use existing HTTP route/status/latency metrics for `/buzz/v1/me/sidebar` and
 `/buzz/v1/me/read-state`, plus database pool/statement metrics. Inspect exact /
@@ -292,10 +296,8 @@ is no new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
 
-Migration 0056 must be applied before this relay serves, enabled or not: started
-without it and with auto-migration off, the relay stops before readiness. There
-is no down migration, and disabling the API is not a rollback. A relay built
-before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
+There is no down migration, and disabling the API is not a rollback. A relay
+built before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
 refuses to start on the migrated schema. Whole-community deletion run from a
 build before 0056 rejects the two new tables. A deletion approved on the
 earlier schema and not yet fenced fails structural revalidation after 0056:

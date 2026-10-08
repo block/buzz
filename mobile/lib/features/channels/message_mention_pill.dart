@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../../shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 
@@ -58,7 +58,7 @@ class MessageMentionPill extends StatelessWidget {
         children: [
           if (isAgent) ...[
             Icon(
-              LucideIcons.bot,
+              BuzzIcons.bot,
               size: fontSize * 0.95,
               color: context.colors.primary,
             ),

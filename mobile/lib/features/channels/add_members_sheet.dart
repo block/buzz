@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list_card_item.dart';
@@ -281,7 +281,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                 onChanged: (value) => query.value = value,
                 decoration: const InputDecoration(
                   hintText: 'Search for people or agents',
-                  prefixIcon: Icon(LucideIcons.search),
+                  prefixIcon: Icon(BuzzIcons.search),
                 ),
               ),
               if (selectedUsers.value.isNotEmpty) ...[
@@ -360,8 +360,8 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                                   ),
                                   trailing: Icon(
                                     selected
-                                        ? LucideIcons.circleCheck
-                                        : LucideIcons.plus,
+                                        ? BuzzIcons.circleCheck
+                                        : BuzzIcons.plus,
                                     color: selected
                                         ? context.colors.primary
                                         : context.colors.onSurfaceVariant,

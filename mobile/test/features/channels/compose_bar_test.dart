@@ -11,7 +11,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -707,7 +707,7 @@ void main() {
 
       expect(find.byType(TextField), findsNothing);
       expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
       expect(find.byKey(const ValueKey('composer-footer-gradient')), findsOne);
       final composerBackdrop = find.descendant(
         of: find.byKey(const ValueKey('composer-footer-gradient')),
@@ -762,10 +762,10 @@ void main() {
         BorderRadius.circular(Radii.dialog),
       );
       expect(find.byType(TextField), findsOneWidget);
-      expect(find.byIcon(LucideIcons.atSign), findsOneWidget);
-      expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-      expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
-      expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.atSign), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.smilePlus), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.aLargeSmall), findsOneWidget);
     });
 
     testWidgets('notifies focus intent before attaching the focused field', (
@@ -1133,7 +1133,7 @@ void main() {
 
       final sendButton = find
           .ancestor(
-            of: find.byIcon(LucideIcons.arrowUp),
+            of: find.byIcon(BuzzIcons.arrowUp),
             matching: find.byType(IconButton),
           )
           .hitTestable();
@@ -1160,7 +1160,7 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'hello');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       for (var i = 0; i < 20; i++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (tester
@@ -1197,7 +1197,7 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'retry me');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       for (var i = 0; i < 20; i++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (tester
@@ -1236,7 +1236,7 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'first draft');
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       for (var i = 0; i < 20; i++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (tester
@@ -1466,9 +1466,9 @@ void main() {
         offset: 6,
       );
 
-      await tester.tap(find.byIcon(LucideIcons.smilePlus));
+      await tester.tap(find.byIcon(BuzzIcons.smilePlus));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.sparkles));
+      await tester.tap(find.byIcon(BuzzIcons.sparkles));
       await tester.pump();
       await tester.tap(find.byTooltip(':meow:'));
       await tester.pumpAndSettle();
@@ -1599,14 +1599,14 @@ void main() {
       await _expandComposer(tester);
       hapticCalls.clear();
 
-      await tester.tap(find.byIcon(LucideIcons.atSign));
+      await tester.tap(find.byIcon(BuzzIcons.atSign));
       tester.widget<TextField>(find.byType(TextField)).controller!.clear();
       await tester.pump();
-      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.tap(find.byIcon(BuzzIcons.hash));
       await tester.pump();
-      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.bold));
+      await tester.tap(find.byIcon(BuzzIcons.bold));
       await tester.pump();
       await tester.tap(find.byTooltip('Close formatting'));
       await tester.pumpAndSettle();
@@ -1638,7 +1638,7 @@ void main() {
         ),
       );
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.tap(find.byIcon(BuzzIcons.hash));
       await tester.pumpAndSettle();
 
       final surface = find.byKey(const ValueKey('channel-suggestions-popover'));
@@ -1704,7 +1704,7 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.atSign));
+      await tester.tap(find.byIcon(BuzzIcons.atSign));
       await tester.pump();
 
       expect(pendingMembers.isCompleted, isFalse);
@@ -2643,7 +2643,7 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
       await tester.pumpAndSettle();
 
@@ -2714,7 +2714,7 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsNWidgets(2));
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(
@@ -3203,7 +3203,7 @@ void main() {
         );
 
         await _expandComposer(tester);
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pump();
 
         expect(
@@ -3336,7 +3336,7 @@ void main() {
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
 
@@ -3469,7 +3469,7 @@ void main() {
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pump();
 
@@ -3697,10 +3697,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
       await tester.pumpAndSettle();
 
-      final boldFinder = find.byIcon(LucideIcons.bold);
+      final boldFinder = find.byIcon(BuzzIcons.bold);
       final boldIcon = tester.widget<Icon>(boldFinder);
       final colors = tester.element(boldFinder).colors;
       expect(boldIcon.color, colors.primary);
@@ -3784,7 +3784,7 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(uploadedBytes, _pngBytes);
@@ -4215,7 +4215,7 @@ void main() {
       await tester.pumpAndSettle();
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'Keep this draft');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -4260,7 +4260,7 @@ void main() {
         await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
         await _expandComposer(tester);
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
 
         expect(
@@ -4369,13 +4369,13 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
       expect(
         find.byKey(const ValueKey('composer-agent-mention-chip')),
         findsOneWidget,
       );
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
 
@@ -4444,7 +4444,7 @@ void main() {
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pump();
 
@@ -4554,7 +4554,7 @@ void main() {
         await tester.tap(find.text('Mary Jane'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Mary Jane');
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
       }
 
@@ -4824,7 +4824,7 @@ void main() {
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
 
       expect(didSend, isFalse);
@@ -4900,7 +4900,7 @@ void main() {
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pumpAndSettle();
 
@@ -4989,11 +4989,11 @@ void main() {
       await tester.tap(find.text('Video'));
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(LucideIcons.video), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.video), findsOneWidget);
 
       final sendButton = find
           .ancestor(
-            of: find.byIcon(LucideIcons.arrowUp),
+            of: find.byIcon(BuzzIcons.arrowUp),
             matching: find.byType(IconButton),
           )
           .hitTestable();
@@ -5064,7 +5064,7 @@ void main() {
       );
       expect(find.byKey(const ValueKey('voice-note-waveform')), findsOneWidget);
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowUp), findsNothing);
+      expect(find.byIcon(BuzzIcons.arrowUp), findsNothing);
       expect(find.byTooltip('Add attachment'), findsNothing);
 
       final recordingWidth = tester
@@ -5215,7 +5215,7 @@ void main() {
       );
       final sendButton = find
           .ancestor(
-            of: find.byIcon(LucideIcons.arrowUp),
+            of: find.byIcon(BuzzIcons.arrowUp),
             matching: find.byType(IconButton),
           )
           .hitTestable();
@@ -5529,7 +5529,7 @@ void main() {
         await tester.pumpAndSettle();
         final sendButton = find
             .ancestor(
-              of: find.byIcon(LucideIcons.arrowUp),
+              of: find.byIcon(BuzzIcons.arrowUp),
               matching: find.byType(IconButton),
             )
             .hitTestable();
@@ -5963,7 +5963,7 @@ Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-  await tester.tap(find.byIcon(LucideIcons.arrowUp));
+  await tester.tap(find.byIcon(BuzzIcons.arrowUp));
   await tester.pumpAndSettle();
 }
 

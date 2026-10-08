@@ -1,39 +1,86 @@
-//! Bounded cold database startup for the run-once storage accounting worker.
+//! Bounded cold database startup for run-once operator workers.
+//!
+//! A freshly scheduled worker pod (no mesh sidecar, cold DNS) can need more
+//! than the relay's three-second acquisition budget to open its first
+//! connection. Workers that start, do bounded work, and exit share this
+//! connector so a slow first connection is waited out and transient transport
+//! failures are retried, while configuration, authentication, TLS, and
+//! protocol errors during the dial still fail immediately. SQLx treats a
+//! failed session-setup hook (`after_connect`) as retryable until the
+//! acquire deadline, so such failures surface here as timeouts and are
+//! retried within the same bounded budget.
+//!
+//! Startup attempts are reported as JSON lines on stderr because these
+//! command-line workers do not install a tracing subscriber.
 
 use std::future::Future;
 use std::io::ErrorKind;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use buzz_db::{Db, DbConfig, DbError};
 use tokio::time::{sleep, timeout, Instant};
+
+use super::{Db, DbConfig};
+use crate::DbError;
 
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
-/// Establish the worker's database pool before it acquires its accounting lease.
-pub(super) async fn connect_db() -> Result<Db> {
-    let config = worker_config(crate::db_config_from_env());
-    connect_with_retry(|| Db::new(&config)).await
+/// A run-once worker could not establish its database pool.
+///
+/// The message carries only a bounded classification: driver messages and
+/// URLs can contain credentials. The driver error stays available as the
+/// [`std::error::Error::source`].
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{worker} database startup failed after {attempts} attempt(s) and {elapsed_ms}ms ({class})"
+)]
+pub struct ColdStartError {
+    worker: &'static str,
+    attempts: usize,
+    elapsed_ms: u128,
+    class: &'static str,
+    #[source]
+    source: DbError,
 }
 
-fn worker_config(config: DbConfig) -> DbConfig {
+impl Db {
+    /// Connect a run-once worker's pool with a bounded cold-start budget.
+    ///
+    /// The pool keeps the caller's size and session policy, opens no idle
+    /// spare connections, and waits up to 30 seconds per acquisition. Startup
+    /// timeouts and transient transport failures are retried at most twice,
+    /// after two and five seconds, so startup waits at most 97 seconds.
+    /// `worker` prefixes the stderr startup events, for example
+    /// `deletion_db_connect_failed`.
+    ///
+    /// Only initial connection establishment is retried. Once a caller holds
+    /// a session-bound lock or lease, reconnecting would lose that fence.
+    pub async fn connect_cold_start(
+        config: DbConfig,
+        worker: &'static str,
+    ) -> std::result::Result<Self, ColdStartError> {
+        let config = cold_start_config(config);
+        connect_with_retry(worker, || Db::new(&config)).await
+    }
+}
+
+fn cold_start_config(config: DbConfig) -> DbConfig {
     DbConfig {
-        max_connections: 1,
-        // The worker detaches its lock-owning session. Do not open idle
-        // replacements while that session scans S3 and publishes the result.
+        // A run-once worker only needs connections it actually uses; idle
+        // replacements would also contend with a slow cold start.
         min_connections: 0,
         acquire_timeout_secs: ACQUIRE_TIMEOUT.as_secs(),
         ..config
     }
 }
 
-// Only initial connection establishment is retried. Once the command owns
-// the advisory lock, reconnecting would lose its publication fence.
-async fn connect_with_retry<T, Connect, Attempt>(mut connect: Connect) -> Result<T>
+async fn connect_with_retry<T, Connect, Attempt>(
+    worker: &'static str,
+    mut connect: Connect,
+) -> std::result::Result<T, ColdStartError>
 where
     Connect: FnMut() -> Attempt,
-    Attempt: Future<Output = buzz_db::Result<T>>,
+    Attempt: Future<Output = crate::Result<T>>,
 {
     let started = Instant::now();
     // Three attempts of at most 30s, plus 2s and 5s backoffs: at most 97s.
@@ -42,7 +89,7 @@ where
         eprintln!(
             "{}",
             serde_json::json!({
-                "event": "storage_snapshot_db_connect_started",
+                "event": format!("{worker}_db_connect_started"),
                 "stage": "db_connect",
                 "attempt": attempt + 1,
                 "timeout_ms": ACQUIRE_TIMEOUT.as_millis(),
@@ -57,7 +104,7 @@ where
                 eprintln!(
                     "{}",
                     serde_json::json!({
-                        "event": "storage_snapshot_db_connect_completed",
+                        "event": format!("{worker}_db_connect_completed"),
                         "stage": "db_connect",
                         "attempt": attempt + 1,
                         "attempt_elapsed_ms": attempt_started.elapsed().as_millis(),
@@ -78,7 +125,7 @@ where
                 eprintln!(
                     "{}",
                     serde_json::json!({
-                        "event": "storage_snapshot_db_connect_failed",
+                        "event": format!("{worker}_db_connect_failed"),
                         "stage": "db_connect",
                         "attempt": attempt + 1,
                         "attempt_elapsed_ms": attempt_started.elapsed().as_millis(),
@@ -98,12 +145,12 @@ where
                 match delay {
                     Some(delay) => sleep(delay).await,
                     None => {
-                        return Err(error).with_context(|| {
-                            format!(
-                                "storage snapshot database startup failed after {} attempt(s) and {}ms ({class})",
-                                attempt + 1,
-                                started.elapsed().as_millis(),
-                            )
+                        return Err(ColdStartError {
+                            worker,
+                            attempts: attempt + 1,
+                            elapsed_ms: started.elapsed().as_millis(),
+                            class,
+                            source: error,
                         });
                     }
                 }
@@ -128,7 +175,9 @@ fn retryable(error: &DbError) -> bool {
                 | ErrorKind::NotFound
                 | ErrorKind::Unsupported
         ),
-        // Includes authentication, TLS, URL configuration and protocol errors.
+        // Includes authentication, TLS, URL configuration and protocol errors
+        // raised while dialing. Session-setup failures arrive as
+        // `PoolTimedOut` (see the module docs).
         _ => false,
     }
 }
