@@ -8,9 +8,13 @@
 # deadline, stops any apt-get/dpkg the attempt left behind, and retries.
 # Downloaded .debs stay in /var/cache/apt/archives, so a retry resumes where
 # the last attempt stopped. It retries the same mirror, so
-# against a mirror that stays degraded this bounds the step (about 25m with
-# the defaults) rather than recovering it. Size job timeouts to fit that bound
-# plus the job's real work.
+# against a mirror that stays degraded this bounds each invocation (about 25m
+# with the defaults) rather than recovering it. Size job timeouts to fit the
+# bound of every invocation in the job plus the job's real work.
+#
+# Ephemeral hosted runners only: between attempts it stops every apt-get/dpkg
+# on the machine, not just the ones it started. Don't use it on a self-hosted
+# runner or a developer machine.
 #
 # It also writes the apt retry/timeout options to apt.conf.d, so commands that
 # call apt-get themselves (e.g. `playwright install-deps`) pick them up too.
@@ -44,6 +48,7 @@ printf '%s\n' \
   'DPkg::Lock::Timeout "120";' |
   sudo tee /etc/apt/apt.conf.d/80-ci-timeouts >/dev/null
 
+# Intentionally machine-wide: any other apt-get/dpkg would hold the same lock.
 reap_package_managers() {
   sudo pkill -TERM -x 'apt-get|dpkg' || true
   for _ in $(seq 1 15); do

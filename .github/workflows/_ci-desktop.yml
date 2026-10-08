@@ -67,9 +67,10 @@ jobs:
   desktop-tauri:
     name: Desktop Tauri (${{ matrix.lane }})
     runs-on: ubuntu-latest
-    # A lane needs ~12m; the apt step is bounded by ci-apt-retry.sh (~35m worst
-    # case for update + install), so a degraded mirror fails with its own error.
-    timeout-minutes: 45
+    # A lane needs up to ~15m. ci-apt-retry.sh bounds the apt step at ~34m worst
+    # case (update ~8.5m + install ~25m); 55m fits both, so a degraded mirror
+    # fails with the wrapper's error instead of the job timeout.
+    timeout-minutes: 55
     # Keep in sync with RUST_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop_rust || inputs.rust
     strategy:

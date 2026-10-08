@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 
 const script = fileURLToPath(new URL("./ci-apt-retry.sh", import.meta.url));
 
+// The wrapper and these fakes rely on GNU timeout, util-linux flock/setsid and
+// procps pkill/pgrep. CI runs this suite on Ubuntu; skip it elsewhere.
+const skip =
+  process.platform !== "linux" &&
+  "needs Linux (GNU timeout, flock, setsid, procps)";
+
 // Run the wrapper with a fake `sudo` on PATH that records each call instead
 // of touching the system's apt or dpkg state.
 function run(args, { PATH: extraPath, ...env } = {}) {
@@ -53,14 +59,14 @@ esac
   };
 }
 
-test("success runs the command once and writes apt options", () => {
+test("success runs the command once and writes apt options", { skip }, () => {
   const r = run(["sudo", "true"]);
   assert.equal(r.status, 0);
   assert.deepEqual(r.calls, ["cmd"]);
   assert.match(r.conf, /Acquire::https::Timeout "30";/);
 });
 
-test("a failed attempt is repaired and retried", () => {
+test("a failed attempt is repaired and retried", { skip }, () => {
   const dir = mkdtempSync(join(tmpdir(), "ci-apt-retry-flaky-"));
   const marker = join(dir, "seen");
   const r = run([
@@ -73,14 +79,14 @@ test("a failed attempt is repaired and retried", () => {
   assert.deepEqual(r.calls, ["cmd", "repair", "cmd"]);
 });
 
-test("persistent failure stops after the attempt budget, without a final repair", () => {
+test("persistent failure stops after the attempt budget, without a final repair", { skip }, () => {
   const r = run(["sudo", "false"]);
   assert.equal(r.status, 1);
   assert.deepEqual(r.calls, ["cmd", "repair", "cmd", "repair", "cmd"]);
   assert.match(r.stdout, /::error::all 3 attempts failed/);
 });
 
-test("a stalled attempt is killed at its deadline and retried", () => {
+test("a stalled attempt is killed at its deadline and retried", { skip }, () => {
   const r = run(["sudo", "sleep", "30"], { CI_APT_ATTEMPTS: "2" });
   assert.equal(r.status, 1);
   assert.deepEqual(r.calls, ["cmd", "repair", "cmd"]);
@@ -88,7 +94,7 @@ test("a stalled attempt is killed at its deadline and retried", () => {
   assert.ok(r.seconds < 10, `took ${r.seconds}s`);
 });
 
-test("a stalled dpkg repair is bounded and the next attempt still runs", () => {
+test("a stalled dpkg repair is bounded and the next attempt still runs", { skip }, () => {
   const r = run(["sudo", "bash", "-c", "exit 23"], {
     CI_APT_ATTEMPTS: "2",
     STALL_REPAIR: "1",
@@ -98,7 +104,7 @@ test("a stalled dpkg repair is bounded and the next attempt still runs", () => {
   assert.ok(r.seconds < 10, `took ${r.seconds}s`);
 });
 
-test("no command is a usage error", () => {
+test("no command is a usage error", { skip }, () => {
   assert.equal(run([]).status, 2);
 });
 
@@ -130,7 +136,7 @@ read -r -t 30 -u 8 || true
   return { dir, lockIsFree };
 }
 
-test("a package manager that escapes the attempt's process group is stopped before the retry", () => {
+test("a package manager that escapes the attempt's process group is stopped before the retry", { skip }, () => {
   const { dir } = escapingAptGet();
   const r = run(["bash", "-c", "setsid apt-get & wait $!"], {
     CI_APT_ATTEMPTS: "2",
@@ -142,7 +148,7 @@ test("a package manager that escapes the attempt's process group is stopped befo
   assert.ok(r.seconds < 10, `took ${r.seconds}s`);
 });
 
-test("a package manager that escapes the final attempt is stopped before the wrapper exits", () => {
+test("a package manager that escapes the final attempt is stopped before the wrapper exits", { skip }, () => {
   const { dir, lockIsFree } = escapingAptGet();
   const r = run(["bash", "-c", "setsid apt-get & wait $!"], {
     CI_APT_ATTEMPTS: "1",
