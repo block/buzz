@@ -43,6 +43,16 @@ class AddMembersException implements Exception {
   String toString() => 'AddMembersException($message)';
 }
 
+/// The keys in a DM. Current membership is authoritative. The channel
+/// metadata's `p` tags can lag membership changes, so they count only when
+/// the membership snapshot is unavailable or empty.
+Iterable<String> dmParticipantPubkeys(
+  Channel channel,
+  List<ChannelMember>? members,
+) => members != null && members.isNotEmpty
+    ? members.map((member) => member.pubkey)
+    : channel.participantPubkeys;
+
 @immutable
 class ChannelMember {
   final String pubkey;

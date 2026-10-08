@@ -89,6 +89,15 @@ pub fn init_nest_dir(is_dev: bool) {
     let _ = NEST_DIR.set(path);
 }
 
+/// Pin the nest root for a child-process test so background nest work cannot
+/// reach the user's real nest.
+#[cfg(test)]
+pub(crate) fn pin_nest_dir_for_test(path: PathBuf) {
+    NEST_DIR
+        .set(Some(path))
+        .expect("nest dir pinned before first use");
+}
+
 /// Returns the nest root path (`~/.buzz` for prod, `~/.buzz-dev` for dev),
 /// or `None` if the home directory cannot be resolved.
 ///

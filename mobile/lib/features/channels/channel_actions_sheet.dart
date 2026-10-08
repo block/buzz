@@ -20,7 +20,7 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/lucide_star_icon.dart';
+import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import 'channel.dart';
 import 'add_members_sheet.dart';
@@ -383,7 +383,11 @@ class _ChannelQuickActionsRow extends StatelessWidget {
     children: [
       Expanded(
         child: _ChannelQuickAction(
-          icon: isStarred ? BuzzIcons.starOff : BuzzIcons.star,
+          icon: BuzzIcons.star,
+          iconWidget: TablerStarIcon(
+            color: context.colors.onSurface,
+            filled: isStarred,
+          ),
           label: isStarred ? 'Unstar' : 'Star',
           onTap: onToggleStar,
         ),
@@ -403,11 +407,13 @@ class _ChannelQuickActionsRow extends StatelessWidget {
 class _ChannelQuickAction extends StatelessWidget {
   const _ChannelQuickAction({
     required this.icon,
+    this.iconWidget,
     required this.label,
     required this.onTap,
   });
 
   final IconData icon;
+  final Widget? iconWidget;
   final String label;
   final VoidCallback onTap;
 
@@ -431,7 +437,8 @@ class _ChannelQuickAction extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 22, color: context.colors.onSurface),
+              iconWidget ??
+                  Icon(icon, size: 22, color: context.colors.onSurface),
               const SizedBox(height: Grid.xxs),
               Text(
                 label,

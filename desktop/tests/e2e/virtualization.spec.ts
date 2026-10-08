@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 const WATERCOOLER_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
 const FORUM_THREAD_ID = "mock-forum-release-thread";
@@ -866,16 +867,47 @@ test("live tail arrivals stay buffered while reading and release on jump", async
   );
   await page.getByTestId("channel-deep-history").click();
 
+  await waitForMockChannelHeadReady(
+    page,
+    "deep-history",
+    "feedf00d-0000-4000-8000-000000000007",
+  );
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await timeline.evaluate((element) => {
+    // Reader input retires the virtualizer's bottom-follow intent before
+    // moving into history; a scrollTop write alone leaves it armed.
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     element.scrollTop = Math.max(500, element.scrollHeight / 2);
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
   await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
-  const frozenHeight = await timeline.evaluate(
-    (element) => element.scrollHeight,
-  );
+  const frozenHeight = await timeline.evaluate(async (element) => {
+    // Entering history renders and measures new virtual rows. Capture the
+    // baseline only after that layout has stopped changing across frames.
+    let previousHeight = element.scrollHeight;
+    let previousOffset = element.scrollTop;
+    let stableFrames = 0;
+    for (let frame = 0; frame < 120; frame += 1) {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      const height = element.scrollHeight;
+      const offset = element.scrollTop;
+      stableFrames =
+        height === previousHeight && offset === previousOffset
+          ? stableFrames + 1
+          : 0;
+      if (stableFrames >= 3) return height;
+      previousHeight = height;
+      previousOffset = offset;
+    }
+    throw new Error(
+      "virtual timeline layout did not settle before live arrival",
+    );
+  });
 
   await page.evaluate(() => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({

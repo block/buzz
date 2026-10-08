@@ -295,8 +295,7 @@ void main() {
           await tester.runAsync(() async {
             for (final font in {
               'Inter': 'assets/fonts/InterVariable.ttf',
-              'packages/lucide_icons_flutter/Lucide':
-                  'packages/lucide_icons_flutter/assets/lucide.ttf',
+              'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
             }.entries) {
               await (FontLoader(
                 font.key,

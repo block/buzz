@@ -67,7 +67,6 @@ import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
-import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
@@ -285,7 +284,6 @@ class ChannelDetailPage extends HookConsumerWidget {
     final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final didCaptureInitialReadAt = useRef(false);
     if (readState.isReady && !didCaptureInitialReadAt.value) {
-      final channelReadAt = readState.effectiveTimestamp(channel.id);
       final ordinaryUnreadEvents = [
         for (final event
             in channelsNotifier
@@ -296,13 +294,8 @@ class ChannelDetailPage extends HookConsumerWidget {
               event.createdAt >
                   (observedUnreadEventReadAt(
                         event,
-                        channelReadAt,
-                        (rootId) => readState.effectiveTimestamp(
-                          threadContextKey(rootId),
-                        ),
-                        (messageId) => readState.effectiveTimestamp(
-                          msgContextKey(messageId),
-                        ),
+                        channel.id,
+                        readState.effectiveTimestamp,
                       ) ??
                       0))
             event,

@@ -56,7 +56,6 @@ import 'channel_sort/channel_sort_storage.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
-import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -151,9 +150,8 @@ _UnreadChannelState _computeUnreadChannelState({
     int? readAtForObservedEvent(ObservedUnreadEvent event) =>
         observedUnreadEventReadAt(
           event,
-          channelReadAt,
-          (rootId) => readState.effectiveTimestamp(threadContextKey(rootId)),
-          (messageId) => readState.effectiveTimestamp(msgContextKey(messageId)),
+          channel.id,
+          readState.effectiveTimestamp,
         );
 
     final unreadCount = countUnreadObservedEvents(

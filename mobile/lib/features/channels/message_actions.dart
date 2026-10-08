@@ -30,6 +30,7 @@ import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
+import 'channels_provider.dart';
 import 'emoji_picker.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_actions/native_message_action_selection.dart';
@@ -41,6 +42,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
+import 'unread_badge/is_high_priority_event.dart';
 
 part 'message_actions/reaction_popover.dart';
 part 'message_actions/quick_reaction_row.dart';
@@ -194,6 +196,7 @@ Future<void> showMessageActions({
                         _MarkReadUnreadTile(
                           message: message,
                           channelId: channelId,
+                          currentPubkey: currentPubkey,
                         ),
                         _FollowThreadTile(message: message),
                       ],
@@ -489,6 +492,41 @@ Future<void> _shareImage(
   }
 }
 
+/// Whether the actions menu should offer **Mark read** for `message`.
+///
+/// This is the one decision every menu presentation (sheet, popover, native)
+/// uses. Mentions are classified with the signing key, not the optional
+/// profile, so a user without a published profile sees the same read state
+/// as the badge and the channel list. `activity:<channel>` reads only
+/// ordinary top-level messages in a known non-DM channel; an unknown channel
+/// or reader counts as not read, because a DM or mention needs its own mark.
+bool messageActionShowsUnread(
+  WidgetRef ref,
+  ReadStateState readState, {
+  required String channelId,
+  required TimelineMessage message,
+}) {
+  final readerPubkey = ref.read(myPubkeyProvider);
+  final channels = ref.read(channelsProvider).asData?.value;
+  final channel = channels?.where((c) => c.id == channelId).firstOrNull;
+  final channelCatchUp =
+      readerPubkey != null &&
+      channel != null &&
+      readByChannelCatchUp(
+        isDm: channel.isDm,
+        isReply: message.parentId != null,
+        highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+      );
+  return isMessageUnread(
+    readState,
+    channelId: channelId,
+    messageId: message.id,
+    createdAt: message.createdAt,
+    threadRootId: message.rootId,
+    channelCatchUp: channelCatchUp,
+  );
+}
+
 /// Canonical `buzz://message` link for a timeline message, including thread
 /// context when the message is a reply.
 String messageLinkFor({
@@ -505,20 +543,24 @@ String messageLinkFor({
 class _MarkReadUnreadTile extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
+  final String? currentPubkey;
 
-  const _MarkReadUnreadTile({required this.message, required this.channelId});
+  const _MarkReadUnreadTile({
+    required this.message,
+    required this.channelId,
+    required this.currentPubkey,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final readState = ref.watch(readStateProvider);
     if (!readState.isReady) return const SizedBox.shrink();
 
-    final unread = isMessageUnread(
+    final unread = messageActionShowsUnread(
+      ref,
       readState,
       channelId: channelId,
-      messageId: message.id,
-      createdAt: message.createdAt,
-      threadRootId: message.rootId,
+      message: message,
     );
 
     return ListTile(

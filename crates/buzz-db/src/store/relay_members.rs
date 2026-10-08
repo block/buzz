@@ -1181,11 +1181,15 @@ impl Db {
             None,
         );
 
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            observability::TransactionOperation::PublishNip43MembershipLocked,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer = observability::TransactionTimer::start(
+            observability::TransactionOperation::PublishNip43MembershipLocked,
+        );
         let (event, received_at, was_inserted, member_count) = transaction_timer
             .observe(async {
 
@@ -1197,7 +1201,7 @@ impl Db {
             observability::LockType::Membership,
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(lock_key)
-                .execute(&mut *tx),
+                .execute(tx.conn()),
         )
         .await?;
 
@@ -1207,7 +1211,7 @@ impl Db {
              WHERE community_id = $1 ORDER BY created_at ASC",
         )
         .bind(community_id.as_uuid())
-        .fetch_all(&mut *tx)
+        .fetch_all(tx.conn())
         .await?;
 
         let member_count = rows.len();
@@ -1251,7 +1255,7 @@ impl Db {
         .bind(community_id.as_uuid())
         .bind(kind_i32)
         .bind(pubkey_bytes.as_slice())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         let insert_result = sqlx::query(
@@ -1270,7 +1274,7 @@ impl Db {
         .bind(received_at)
         .bind::<Option<Uuid>>(None)
         .bind(d_tag.as_deref())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         let was_inserted = insert_result.rows_affected() > 0;

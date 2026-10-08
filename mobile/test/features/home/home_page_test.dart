@@ -1,4 +1,5 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -130,13 +131,29 @@ void main() {
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('Activity, unread'), findsNothing);
+    final semantics = tester.ensureSemantics();
+    expect(find.byType(SearchPage), findsNothing);
+    expect(
+      tester
+          .getSemantics(find.bySemanticsLabel('Search'))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isFalse',
+    );
     await tester.tap(find.byTooltip('Search'));
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pump();
+    expect(find.byType(SearchPage), findsOneWidget);
     expect(
-      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.search500)),
-      findsOneWidget,
+      tester
+          .getSemantics(find.bySemanticsLabel('Search'))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isTrue',
     );
+    semantics.dispose();
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     debugDefaultTargetPlatformOverride = null;

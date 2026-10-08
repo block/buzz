@@ -304,12 +304,11 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
 
     final readState = ref.read(readStateProvider);
     if (readState.isReady) {
-      final unread = isMessageUnread(
+      final unread = messageActionShowsUnread(
+        ref,
         readState,
         channelId: channelId,
-        messageId: message.id,
-        createdAt: message.createdAt,
-        threadRootId: message.rootId,
+        message: message,
       );
       actions.add(
         _PopoverMessageAction(

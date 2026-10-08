@@ -122,7 +122,9 @@ jobs:
   desktop-smoke-e2e:
     name: Desktop Smoke E2E (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Chromium dependency setup can take 10m; a serial smoke shard needs
+    # ~25m. Leave time for the full suite and its reports to finish.
+    timeout-minutes: 45
     if: github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust
     strategy:
       fail-fast: false

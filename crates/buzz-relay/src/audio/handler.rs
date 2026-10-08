@@ -3050,8 +3050,12 @@ async fn commit_participant_join(
         })?;
     let event_id_hex = event.id.to_hex();
 
-    // 2. Begin a caller-owned DB transaction.
-    let mut tx = state.db.begin_event_write_transaction().await?;
+    // 2. Begin a caller-owned DB transaction admitted for this community,
+    //    before any channel-row or huddle-link lock below.
+    let mut tx = state
+        .db
+        .begin_event_write_transaction(tenant.community())
+        .await?;
 
     // 3. Archive re-check (ALL paths): re-read archived_at inside the
     //    transaction before any write, taking a row-level write lock
@@ -3061,30 +3065,13 @@ async fn commit_participant_join(
     //    transaction commits or rolls back before it can proceed — closing the
     //    READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
     //
-    //    The channels row is a single row identified
-    //    by primary key; the lock is held only for the duration of the join
-    //    transaction (typically sub-millisecond).
-    //
-    //    `FOR NO KEY UPDATE` vs `FOR UPDATE`: using `FOR UPDATE` here inverts
-    //    the lock order against the normal `add_member` path, which takes the
-    //    advisory membership lock first and then its membership INSERT needs a
-    //    `KEY SHARE` on `channels` for the FK (`channel_members.community_id`
-    //    references `channels.community_id`). `FOR UPDATE` blocks `KEY SHARE`
-    //    → deadlock when a normal `add_member` is in-flight concurrently.
-    //    `FOR NO KEY UPDATE` still conflicts with archive's non-key row update
-    //    (`archived_at` is not a FK key column) and blocks it correctly, but is
-    //    compatible with `KEY SHARE`, closing the lock-inversion window.
-    let channel_archived_early: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT archived_at FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
-         FOR NO KEY UPDATE",
-    )
-    .bind(tenant.community().as_uuid())
-    .bind(channel_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(buzz_db::DbError::from)?
-    .flatten();
+    //    The channels row is a single row identified by primary key; the lock
+    //    is held only for the duration of the join transaction (typically
+    //    sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
+    //    the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
+    let channel_archived_early =
+        buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
+            .await?;
 
     // Test hook: fires after the FOR UPDATE lock is acquired but before the
     // archived check / any write. A test can attempt a concurrent archive here
@@ -3119,9 +3106,7 @@ async fn commit_participant_join(
         crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
 
         buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(
-            &mut tx,
-            tenant.community(),
-            channel_id,
+            &mut tx, channel_id,
         )
         .await?;
 
@@ -3129,16 +3114,9 @@ async fn commit_participant_join(
         // could be archived in the window between check_membership_for_admission
         // and now; committing a join into an archived channel violates the
         // "no admission after archive" invariant.
-        let channel_archived: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT archived_at FROM channels \
-             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-        )
-        .bind(tenant.community().as_uuid())
-        .bind(channel_id)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(buzz_db::DbError::from)?
-        .flatten();
+        let channel_archived =
+            buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
+                .await?;
 
         if channel_archived.is_some() {
             retire_shadow();
@@ -3149,13 +3127,9 @@ async fn commit_participant_join(
         // IMPORTANT 4b: Re-read parent membership under the lock. A parent
         // membership revocation in the same window would make the auto-add
         // unjustified; reject rather than grant access from stale authority.
-        let parent_still_member = buzz_db::channel_members::is_member_in_transaction(
-            &mut tx,
-            tenant.community(),
-            *parent_id,
-            pubkey_bytes,
-        )
-        .await?;
+        let parent_still_member =
+            buzz_db::channel_members::is_member_in_transaction(&mut tx, *parent_id, pubkey_bytes)
+                .await?;
 
         if !parent_still_member {
             retire_shadow();
@@ -3171,7 +3145,6 @@ async fn commit_participant_join(
         // an unlinked channel violates the "creator authority" invariant.
         let link_still_exists = buzz_db::event::huddle_started_link_exists_in_transaction(
             &mut tx,
-            tenant.community(),
             *parent_id,
             channel_id,
             channel_created_by.as_slice(),
@@ -3186,18 +3159,13 @@ async fn commit_participant_join(
 
         // Re-read child membership — a concurrent legitimate add may have
         // already provided access; do not overwrite role/provenance.
-        let still_absent = !buzz_db::channel_members::is_member_in_transaction(
-            &mut tx,
-            tenant.community(),
-            channel_id,
-            pubkey_bytes,
-        )
-        .await?;
+        let still_absent =
+            !buzz_db::channel_members::is_member_in_transaction(&mut tx, channel_id, pubkey_bytes)
+                .await?;
 
         if still_absent {
             buzz_db::channel_members::insert_auto_membership_in_transaction(
                 &mut tx,
-                tenant.community(),
                 channel_id,
                 pubkey_bytes,
                 channel_created_by.as_slice(),
@@ -3208,13 +3176,9 @@ async fn commit_participant_join(
     }
 
     // 5. Insert kind `48101` uncommitted.
-    let (stored, was_inserted) = buzz_db::event::insert_event_in_transaction(
-        &mut tx,
-        tenant.community(),
-        &event,
-        Some(parent_channel_id),
-    )
-    .await?;
+    let (stored, was_inserted) =
+        buzz_db::event::insert_event_in_transaction(&mut tx, &event, Some(parent_channel_id))
+            .await?;
 
     // 6. Acquire effect permit or rollback.
     //
@@ -3236,7 +3200,7 @@ async fn commit_participant_join(
 
     // 7. Commit while holding the permit.
     if let Err(e) = tx.commit().await {
-        return Err(JoinCommitError::Db(e.into()));
+        return Err(JoinCommitError::Db(e));
     }
     if let Some(shadow) = shadow {
         shadow.admit();
@@ -3759,7 +3723,7 @@ mod tests {
         let registry = crate::state::CommunityConnectionRegistry::new();
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let _guard = registry.register(Uuid::new_v4(), community, control);
-        assert_eq!(registry.disconnect_community(community), 1);
+        assert_eq!(registry.disconnect_deleted_community(community), 1);
         let messages = Arc::new(Mutex::new(Vec::new()));
         let sink = MockSink {
             messages: Arc::clone(&messages),
@@ -7760,6 +7724,112 @@ mod tests {
             );
         }
 
+        /// A quiescing community rejects the 48101 join at transaction entry,
+        /// before the channels-row lock the join takes next.
+        ///
+        /// A second transaction holds that row lock for the whole call. If the
+        /// join took the row lock (or any write) before community admission,
+        /// it would queue behind the holder and the bounded call would time
+        /// out instead of returning the admission rejection.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn quiescing_community_rejects_join_at_admission_before_channel_row_lock() {
+            use chrono::{Duration, Utc};
+            use uuid::Uuid;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, member_key) = seed_audio_fixture(&pool).await;
+            let community_id = tenant.community();
+
+            // Quiesce inside the deletion executor's scope; the database
+            // rejects ad-hoc lifecycle changes outside it.
+            let mut quiesce = pool.begin().await.expect("begin quiesce");
+            sqlx::query(
+                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                 set_config('buzz.deletion_fence_generation', \
+                     (SELECT deletion_fence_generation::text FROM communities WHERE id = $2), true)",
+            )
+            .bind(community_id.to_string())
+            .bind(community_id.as_uuid())
+            .execute(&mut *quiesce)
+            .await
+            .expect("enter deletion executor scope");
+            sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+                .bind(community_id.as_uuid())
+                .execute(&mut *quiesce)
+                .await
+                .expect("quiesce community");
+            quiesce.commit().await.expect("commit quiesce");
+
+            let mut holder = pool.begin().await.expect("begin row-lock holder");
+            sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR UPDATE")
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .execute(&mut *holder)
+                .await
+                .expect("hold channels row lock");
+
+            let member_bytes = member_key.public_key().to_bytes().to_vec();
+            let member_hex = member_key.public_key().to_hex();
+            let membership = MembershipAdmission::Existing {
+                parent_channel_id: channel_id,
+            };
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                Utc::now() + Duration::hours(1),
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let room = std::sync::Arc::new(crate::audio::room::Room::new(
+                tenant.community(),
+                channel_id,
+            ));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                commit_participant_join(
+                    &state,
+                    &tenant,
+                    channel_id,
+                    channel_id,
+                    &member_hex,
+                    &member_bytes,
+                    Uuid::new_v4(),
+                    0u8,
+                    0u8,
+                    1u64,
+                    "1",
+                    &membership,
+                    &gate,
+                    &room,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .expect("admission must reject before waiting on the channels row lock");
+            holder.rollback().await.expect("release channels row lock");
+
+            assert!(
+                matches!(
+                    &result,
+                    Err(JoinCommitError::Db(buzz_db::DbError::AccessDenied(message)))
+                        if message.contains("write-fenced (quiescing)")
+                ),
+                "a quiescing community must reject the join at admission; got: {result:?}"
+            );
+            let row_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM events \
+                 WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .expect("row count query");
+            assert_eq!(row_count, 0, "a rejected join must persist no 48101 row");
+        }
+
         /// F2b: join holds the FOR UPDATE lock (Existing path) — concurrent
         /// archive blocks until `commit_participant_join` commits.
         ///
@@ -9951,7 +10021,8 @@ mod tests {
         //
         // Mutation oracle:
         //   Change `FOR NO KEY UPDATE` back to `FOR UPDATE` in
-        //   `commit_participant_join` → `add_member`'s FK KEY SHARE blocks on
+        //   `buzz_db::channel_members::lock_channel_archived_at_in_transaction`
+        //   → `add_member`'s FK KEY SHARE blocks on
         //   FOR UPDATE → the 3-second tokio::time::timeout fires → synthesized
         //   error → `add_member_completed` is false → assertion panics.
 

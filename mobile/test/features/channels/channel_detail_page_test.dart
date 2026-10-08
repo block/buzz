@@ -70,11 +70,12 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
-import 'package:buzz/shared/widgets/lucide_star_icon.dart';
+import 'package:buzz/shared/widgets/tabler_star_icon.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 
@@ -493,6 +494,7 @@ double? effectiveFontSizeForText(
 void main() {
   _loadingReviewTests();
   threadReplyRefreshTests();
+  threadTitleCapsuleTests();
   presenceTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -568,7 +570,7 @@ void main() {
               };
               final keys = [
                 first,
-                second.toUpperCase(),
+                second,
                 sibling,
                 if (bystander != null) 'd' * 64,
               ];
@@ -2447,7 +2449,7 @@ void main() {
           const ValueKey('channel-details-mute-action'),
         );
         expect(find.text('Star'), findsOneWidget);
-        var star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        var star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
         expect(star.filled, isFalse);
         expect(find.text('Mute'), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
@@ -2456,7 +2458,7 @@ void main() {
         await tester.pump();
 
         expect(find.text('Unstar'), findsOneWidget);
-        star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
         expect(star.filled, isTrue);
         expect(star.color, AppTheme.light().colorScheme.primary);
 
@@ -2473,7 +2475,7 @@ void main() {
 
         expect(find.text('Star'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
-        star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
         expect(star.filled, isFalse);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
       },
@@ -4000,6 +4002,62 @@ void main() {
       expect(summaryText.maxLines, 2);
       expect(summaryText.overflow, TextOverflow.ellipsis);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('channel catch-up hides the oldest unread jump', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      // The channel mark is older than msg21, but the web app's catch-up
+      // mark covers it.
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020, 'activity:$_channelId': 1039},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
     });
 
     testWidgets('jumps to the oldest unread with compact inverse controls', (

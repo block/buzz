@@ -1,23 +1,26 @@
 //! Private deployment moderation API.
 //!
-//! Read routes are available in both auth modes (nip98, disabled).
-//! Mutation and staffing routes require an authenticated `nip98` principal
-//! (per-person, attributed to the resolved operator).
+//! Every route is a view (moderation read), act (mutation) or operator
+//! (`/operators`) route; see [`auth`] for the rule. In `nip98` mode every route
+//! needs a signed, rostered staff member. In `disabled` mode every moderation
+//! read is served to whoever can reach the relay, and act and operator routes
+//! answer 403.
 
 mod auth;
 mod direct;
 mod error;
+mod reads;
 
 use std::sync::Arc;
 
 use auth::{
-    admin_role_str, admin_source_str, authorize, require_mutation_principal, require_operator,
-    AdminRole, AdminSource,
+    admin_role_str, admin_source_str, authorize_read, authorize_write, AdminAccess, AdminRole,
+    AdminSource,
 };
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, Uri},
+    http::{header, HeaderMap, HeaderValue, Method, Uri},
     middleware::{self, Next},
     response::Response,
     routing::{delete, get, patch, put},
@@ -40,9 +43,8 @@ pub(crate) use auth::admin_api_origin;
 
 /// Build the deployment-admin routes.
 ///
-/// Read routes are available in all auth modes.
-/// Mutation routes (/reports/{id}/resolve, /feedback/{id}) and staffing routes
-/// (/operators) require an authenticated `nip98` principal.
+/// Moderation reads (GET) are served in both auth modes. Mutations and the
+/// staffing routes (/operators) require an authenticated `nip98` principal.
 pub fn router(state: Arc<crate::state::AppState>) -> Router {
     Router::new()
         .route("/probe", get(probe))
@@ -61,6 +63,10 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/operators", get(list_operators))
         .route("/operators/{pubkey}", put(upsert_operator))
         .route("/operators/{pubkey}", delete(delete_operator))
+        .route("/communities", get(reads::communities))
+        .route("/members/search", get(reads::search_members))
+        .route("/members/{pubkey}", get(reads::lookup_member))
+        .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))
         .route("/members/{pubkey}/ban", delete(unban_member))
         .route("/members/{pubkey}/timeout", delete(untimeout_member))
@@ -116,12 +122,14 @@ struct ReportQuery {
     limit: Option<i64>,
 }
 
-fn limit(value: Option<i64>) -> Result<i64, ApiError> {
-    match value.unwrap_or(50) {
-        value @ 1..=200 => Ok(value),
+/// A page size: `default` when absent, otherwise 1 to `max`, else 400
+/// `invalid_limit`.
+fn limit(value: Option<i64>, default: i64, max: i64) -> Result<i64, ApiError> {
+    match value.unwrap_or(default) {
+        value if (1..=max).contains(&value) => Ok(value),
         _ => Err(ApiError::bad_request(
             "invalid_limit",
-            "limit must be between 1 and 200",
+            &format!("limit must be between 1 and {max}"),
         )),
     }
 }
@@ -158,26 +166,13 @@ struct ProbeResponse {
 async fn probe(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ProbeResponse>, ApiError> {
-    let principal = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
-
-    let (auth_mode, role, source, can_act, can_staff) = match &state.config.admin {
-        Some(config) => match &config.auth {
-            crate::config::AdminAuth::Disabled => ("disabled", None, None, false, false),
-            crate::config::AdminAuth::Nip98 => {
-                // principal is Some in nip98 mode (authorize returns Ok(Some(_)))
-                let p = principal
-                    .as_ref()
-                    .expect("nip98 mode always resolves principal");
+    let (auth_mode, role, source, can_act, can_staff) =
+        match authorize_read(&state, &headers, &method, &uri).await? {
+            AdminAccess::NetworkTrusted => ("disabled", None, None, false, false),
+            AdminAccess::Staff(p) => {
                 let can_staff = p.role == AdminRole::Operator;
                 (
                     "nip98",
@@ -187,9 +182,7 @@ async fn probe(
                     can_staff,
                 )
             }
-        },
-        None => return Err(ApiError::not_found()),
-    };
+        };
 
     Ok(Json(ProbeResponse {
         status: "ok",
@@ -204,18 +197,11 @@ async fn probe(
 async fn reports(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<ReportQuery>,
 ) -> Result<Json<Vec<buzz_db::admin_moderation::AdminReport>>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     validate(
         query.status.as_deref(),
         REPORT_STATUS_ALLOWLIST,
@@ -246,7 +232,7 @@ async fn reports(
             query.after,
             query.before,
             None,
-            limit(query.limit)?,
+            limit(query.limit, 50, 200)?,
         )
         .await?;
     Ok(Json(items))
@@ -255,18 +241,11 @@ async fn reports(
 async fn report_detail(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminReportDetail>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_report(id)
@@ -294,17 +273,10 @@ struct FeedbackSummary {
 async fn feedback(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FeedbackSummary>>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     let items = state
         .db
         .admin_list_feedback(100)
@@ -330,18 +302,11 @@ async fn feedback(
 async fn feedback_detail(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminFeedback>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_feedback(id)
@@ -353,18 +318,11 @@ async fn feedback_detail(
 async fn feedback_attachment(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Path((id, sha256)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
     if !is_sha256(&sha256) {
         return Err(ApiError::not_found());
     }
@@ -485,6 +443,7 @@ fn compute_timeout_until(secs: u64) -> Result<DateTime<Utc>, ApiError> {
 /// - delete/kick/ban/timeout: server-side enforcement state machine.
 async fn resolve_report(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
@@ -495,17 +454,9 @@ async fn resolve_report(
         resolve_report_with_enforcement, ResolutionError,
     };
 
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "POST",
-        Some(&body_bytes),
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     let body: ResolveReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_e| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -516,10 +467,11 @@ async fn resolve_report(
         return Err(ApiError::bad_request("invalid_action", "unknown action"));
     }
 
-    // Load report globally to derive target provenance.
+    // Load report globally to derive target provenance. Enforcement needs the
+    // real target author, so this read is unfiltered and never returned.
     let report_detail = state
         .db
-        .admin_get_report(report_id)
+        .admin_get_report_for_enforcement(report_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
 
@@ -713,6 +665,7 @@ struct ReopenReportBody {
 /// records a durable `reopen` audit row. `409` if the report is not terminal.
 async fn reopen_report(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
@@ -720,17 +673,9 @@ async fn reopen_report(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use buzz_db::relay_admin_actions::ReopenResult;
 
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "POST",
-        Some(&body_bytes),
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     let body: ReopenReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -799,22 +744,15 @@ struct CancelReportBody {
 /// `activeAction: null`.
 async fn cancel_report(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<axum::http::Response<axum::body::Body>, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "POST",
-        Some(&body_bytes),
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     let body: CancelReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -875,22 +813,15 @@ async fn cancel_report(
 /// Update product_feedback status. Requires nip98 auth.
 async fn update_feedback_status(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "PATCH",
-        Some(&body_bytes),
-    )
-    .await?;
-
-    let _principal = require_mutation_principal(principal_opt)?;
+    let _principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -938,20 +869,12 @@ struct OperatorEntry {
 async fn list_operators(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
-    require_operator(&principal)?;
+    authorize_read(&state, &headers, &method, &uri)
+        .await?
+        .operator()?;
 
     let config = state
         .config
@@ -1020,23 +943,15 @@ struct UpsertOperatorBody {
 /// Requires nip98 auth + Operator role.
 async fn upsert_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
 ) -> Result<Json<OperatorEntry>, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "PUT",
-        Some(&body_bytes),
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
-    require_operator(&principal)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .operator()?;
 
     // Canonicalize the path param once: validate it decodes to 32 bytes, then
     // lowercase it. Config-backed pubkeys are lowercased at parse, so the 409
@@ -1099,22 +1014,14 @@ async fn upsert_operator(
 /// Requires nip98 auth + Operator role.
 async fn delete_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "DELETE",
-        None,
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
-    require_operator(&principal)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, None)
+        .await?
+        .operator()?;
 
     // Canonicalize the path param once (validate + lowercase) so the 409 check
     // and the DB delete use the same form config-backed pubkeys are stored in;
@@ -1244,7 +1151,7 @@ fn decode_cursor(token: &str) -> Result<(DateTime<Utc>, Vec<u8>), ApiError> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommunityQuery {
     community_host: String,
 }
@@ -1295,20 +1202,13 @@ struct RestrictionsQuery {
 async fn list_member_restrictions(
     State(state): State<Arc<crate::state::AppState>>,
     uri: Uri,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<RestrictionsQuery>,
 ) -> Result<Json<RestrictionsPage>, ApiError> {
-    authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "GET",
-        None,
-    )
-    .await?;
+    authorize_read(&state, &headers, &method, &uri).await?;
 
-    let page_limit = limit(Some(query.limit.unwrap_or(200)))?;
+    let page_limit = limit(query.limit, 200, 200)?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1338,22 +1238,15 @@ async fn list_member_restrictions(
 /// Requires nip98 auth.
 async fn unban_member(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "DELETE",
-        None,
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, None)
+        .await?
+        .act()?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1386,22 +1279,15 @@ async fn unban_member(
 /// Requires nip98 auth.
 async fn untimeout_member(
     State(state): State<Arc<crate::state::AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal_opt = authorize(
-        &state,
-        &headers,
-        uri.path_and_query()
-            .map_or_else(|| uri.path(), |pq| pq.as_str()),
-        "DELETE",
-        None,
-    )
-    .await?;
-
-    let principal = require_mutation_principal(principal_opt)?;
+    let principal = authorize_write(&state, &headers, &method, &uri, None)
+        .await?
+        .act()?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1592,7 +1478,7 @@ mod postgres_tests {
     /// Rostered as a config operator in `test_state()` so `authorized()` can
     /// mint NIP-98 credentials that resolve to an Operator principal without a
     /// DB lookup.
-    fn test_operator_keys() -> nostr::Keys {
+    pub(super) fn test_operator_keys() -> nostr::Keys {
         nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
             .expect("valid test secret key")
     }
@@ -1606,7 +1492,7 @@ mod postgres_tests {
         nip98_state(vec![test_operator_keys().public_key().to_hex()]).await
     }
 
-    async fn disabled_mode_state() -> Arc<crate::state::AppState> {
+    pub(super) async fn disabled_mode_state() -> Arc<crate::state::AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
@@ -1662,6 +1548,10 @@ mod postgres_tests {
             "/feedback".to_string(),
             format!("/feedback/{id}"),
             format!("/feedback/{id}/attachments/{HASH}"),
+            "/communities".to_string(),
+            "/members/search?communityHost=a.example&q=a".to_string(),
+            format!("/members/{HASH}?communityHost=a.example"),
+            format!("/events/{HASH}?communityHost=a.example"),
         ]
     }
 
@@ -2236,7 +2126,9 @@ mod postgres_tests {
 
     /// Build an AppState that uses a real Postgres connection pool so HTTP
     /// routes that hit the DB can commit and read back results.
-    async fn nip98_state_with_real_pool(pool: sqlx::PgPool) -> Arc<crate::state::AppState> {
+    pub(super) async fn nip98_state_with_real_pool(
+        pool: sqlx::PgPool,
+    ) -> Arc<crate::state::AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
@@ -3031,7 +2923,7 @@ mod postgres_tests {
 
     /// Build a test AppState in nip98 mode with the given operator pubkeys
     /// (populated in relay_operator_pubkeys config) and an AlwaysFreshReplayGuard.
-    async fn nip98_state(pubkeys: Vec<String>) -> Arc<crate::state::AppState> {
+    pub(super) async fn nip98_state(pubkeys: Vec<String>) -> Arc<crate::state::AppState> {
         nip98_state_with_replay(pubkeys, Arc::new(AlwaysFreshReplayGuard)).await
     }
 
@@ -3092,7 +2984,7 @@ mod postgres_tests {
     /// on `admin.example` (the test host). The path should be the handler-level
     /// path (e.g. `/reports`); this helper prefixes it with `ADMIN_API_PREFIX`
     /// to match the canonical URL the auth layer constructs in production.
-    fn make_nostr_auth(keys: &nostr::Keys, path: &str) -> String {
+    pub(super) fn make_nostr_auth(keys: &nostr::Keys, path: &str) -> String {
         use nostr::{EventBuilder, Kind, Tag};
         let url = format!("https://admin.example{ADMIN_API_PREFIX}{path}");
         let tags = vec![
@@ -3889,7 +3781,7 @@ mod postgres_tests {
     /// Build a NIP-98 `Authorization: Nostr` header from an explicit raw tag
     /// list, so a test can inject duplicate `u`/`method`/`payload` tags that the
     /// typed helpers can't express. Signs a real kind-27235 event.
-    fn make_nostr_auth_raw_tags(keys: &nostr::Keys, tags: Vec<nostr::Tag>) -> String {
+    pub(super) fn make_nostr_auth_raw_tags(keys: &nostr::Keys, tags: Vec<nostr::Tag>) -> String {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine as _;
         use nostr::{EventBuilder, Kind};
@@ -4024,8 +3916,8 @@ mod postgres_tests {
     }
 
     /// POST /reports/{id}/resolve in disabled mode → 403. Disabled mode is
-    /// always read-only: `authorize()` resolves no principal, so
-    /// `require_mutation_principal` rejects every mutation with 403.
+    /// read-only: `authorize()` returns `NetworkTrusted`, so the act check
+    /// rejects every mutation with 403.
     #[tokio::test]
     async fn mutation_routes_in_disabled_mode_return_403() {
         let state = disabled_mode_state().await;
@@ -4096,12 +3988,112 @@ mod postgres_tests {
         );
     }
 
-    /// Moderator cannot access staffing endpoints.
+    /// Staffing is Operator-only for signed callers: a DB-rostered Moderator
+    /// gets 403 on every `/operators` route and writes neither the target's
+    /// roster row nor its audit log, while a config Operator succeeds on the
+    /// same requests. This is the only
+    /// test that tells `.operator()` apart from `.act()`; unsigned and
+    /// disabled-mode requests are refused by both.
     #[tokio::test]
     #[ignore = "requires Postgres — moderator DB lookup"]
     async fn moderator_cannot_access_staffing_endpoints() {
-        // This test needs DB to resolve moderator role.
-        // Covered by negative-matrix integration test suite.
+        let operator_keys = nostr::Keys::generate();
+        let state = nip98_state(vec![operator_keys.public_key().to_hex()]).await;
+        let pool = sqlx::PgPool::connect(&database_url())
+            .await
+            .expect("connect to test DB");
+        let moderator_keys = nostr::Keys::generate();
+        let target_keys = nostr::Keys::generate();
+        let target_hex = target_keys.public_key().to_hex();
+        let target_bytes = target_keys.public_key().to_bytes().to_vec();
+        let grant_body = r#"{"role":"moderator"}"#.as_bytes();
+
+        let send = |keys: &nostr::Keys, method: &str, path: &str| {
+            let auth = match method {
+                "GET" => make_nostr_auth(keys, path),
+                "PUT" => make_nostr_auth_put(keys, path, grant_body),
+                "DELETE" => make_nostr_auth_delete(keys, path),
+                other => unreachable!("unexpected method {other}"),
+            };
+            let body = if method == "PUT" {
+                Body::from(grant_body.to_vec())
+            } else {
+                Body::empty()
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, auth)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .expect("request");
+            status_for(state.clone(), request)
+        };
+        let target_rows = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM relay_operators WHERE pubkey = $1")
+                .bind(&target_bytes)
+                .fetch_one(&pool)
+                .await
+                .expect("count roster rows")
+        };
+        // The target's full roster row plus its audit-row count. The target is
+        // a fresh key, so scoping the audit count to it ignores concurrent tests.
+        let target_snapshot = || async {
+            sqlx::query_as::<_, (Option<String>, i64)>(
+                "SELECT (SELECT r::text FROM relay_operators r WHERE r.pubkey = $1), \
+                        (SELECT COUNT(*) FROM relay_operator_audit WHERE target_pubkey = $1)",
+            )
+            .bind(&target_bytes)
+            .fetch_one(&pool)
+            .await
+            .expect("snapshot target roster and audit")
+        };
+
+        // Roster the Moderator in the DB, and the target too so DELETE has a row.
+        for keys in [&moderator_keys, &target_keys] {
+            let path = format!("/operators/{}", keys.public_key().to_hex());
+            let granted = send(&operator_keys, "PUT", &path).await;
+            assert_eq!(granted.status(), StatusCode::OK, "seed grant {path}");
+        }
+
+        let target_path = format!("/operators/{target_hex}");
+        for (method, path) in [
+            ("GET", "/operators"),
+            ("PUT", target_path.as_str()),
+            ("DELETE", target_path.as_str()),
+        ] {
+            let before = target_snapshot().await;
+            let denied = send(&moderator_keys, method, path).await;
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "Moderator {method} {path} must be refused"
+            );
+            assert_eq!(
+                target_snapshot().await,
+                before,
+                "refused Moderator {method} {path} must not write the roster or audit log"
+            );
+        }
+
+        for (method, path) in [
+            ("GET", "/operators"),
+            ("PUT", target_path.as_str()),
+            ("DELETE", target_path.as_str()),
+        ] {
+            let allowed = send(&operator_keys, method, path).await;
+            assert_eq!(allowed.status(), StatusCode::OK, "Operator {method} {path}");
+        }
+        assert_eq!(
+            target_rows().await,
+            0,
+            "Operator DELETE must remove the row"
+        );
+
+        let moderator_path = format!("/operators/{}", moderator_keys.public_key().to_hex());
+        let cleanup = send(&operator_keys, "DELETE", &moderator_path).await;
+        assert_eq!(cleanup.status(), StatusCode::OK, "cleanup revoke");
     }
 
     /// Config-backed pubkey upsert → 409 Conflict.
@@ -7314,6 +7306,197 @@ mod postgres_tests {
         .await
         .expect("ban existence");
         assert!(banned, "the stored author must be banned");
+    }
+
+    /// Seed an event report in the `admin.example` community whose target is a
+    /// hidden (shared-gated) kind authored by `author`. Returns the report id.
+    async fn seed_hidden_kind_event_report(pool: &sqlx::PgPool, author: &[u8]) -> Uuid {
+        let host_report = seed_admin_host_report(pool, "open").await;
+        let community_id: Uuid =
+            sqlx::query_scalar("SELECT community_id FROM moderation_reports WHERE id = $1")
+                .bind(host_report)
+                .fetch_one(pool)
+                .await
+                .expect("admin.example community");
+        cleanup_admin_host_report(pool, host_report).await;
+        let (report_id, _channel_id, target_event_id) =
+            e2e_event_report_with_author(pool, community_id, author).await;
+        sqlx::query(
+            r#"UPDATE events SET kind = $3, tags = '[["shared","true"]]'::jsonb
+               WHERE community_id = $1 AND id = $2"#,
+        )
+        .bind(community_id)
+        .bind(target_event_id.as_slice())
+        .bind(buzz_core::kind::SHARED_GATED_KINDS[0] as i32)
+        .execute(pool)
+        .await
+        .expect("make target a hidden kind");
+        report_id
+    }
+
+    /// Ban through the real resolve route on a report whose target is a hidden
+    /// kind: the real author is banned, and report detail still hides it.
+    #[tokio::test]
+    #[ignore = "requires Postgres — resolve ban on a hidden-kind target bans the author, detail stays hidden"]
+    async fn resolve_ban_on_hidden_kind_target_bans_author_without_revealing_it() {
+        let keys = nostr::Keys::generate();
+        let state = nip98_state(vec![keys.public_key().to_hex()]).await;
+        let pool = e2e_pool().await;
+        let author = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let report_id = seed_hidden_kind_event_report(&pool, &author).await;
+
+        let path = format!("/reports/{report_id}/resolve");
+        let body = serde_json::json!({ "action": "ban", "requestId": Uuid::new_v4() }).to_string();
+        let response = status_for(
+            state.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth_post(&keys, &path, body.as_bytes()),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "ban must be accepted");
+        let resolved: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        let mut keys_seen: Vec<&str> = resolved
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys_seen.sort_unstable();
+        assert_eq!(
+            keys_seen,
+            ["activeAction", "status"],
+            "resolve returns only status/action"
+        );
+        assert!(
+            !resolved.to_string().contains(&hex::encode(&author)),
+            "resolve response must not reveal the hidden target's author"
+        );
+
+        let banned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM community_bans b JOIN moderation_reports r \
+             ON r.community_id = b.community_id WHERE r.id = $1 AND b.pubkey = $2)",
+        )
+        .bind(report_id)
+        .bind(&author)
+        .fetch_one(&pool)
+        .await
+        .expect("ban existence");
+        assert!(banned, "the hidden target's author must be banned");
+
+        let detail_path = format!("/reports/{report_id}");
+        let response = status_for(
+            state,
+            Request::builder()
+                .uri(&detail_path)
+                .header(header::HOST, "admin.example")
+                .header(header::AUTHORIZATION, make_nostr_auth(&keys, &detail_path))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert!(detail["message"].is_null(), "detail must hide the target");
+        assert!(detail["targetAuthorPubkey"].is_null());
+    }
+
+    /// An accepted-but-unfinished ban on a hidden-kind target converges in the
+    /// recovery worker, which re-derives the author from the report.
+    #[tokio::test]
+    #[ignore = "requires Postgres — stranded ban on a hidden-kind target recovers"]
+    async fn stranded_ban_on_hidden_kind_target_recovers_via_worker() {
+        let pool = e2e_pool().await;
+        let author = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let report_id = seed_hidden_kind_event_report(&pool, &author).await;
+        let (community_id, channel_id): (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT community_id, channel_id FROM moderation_reports WHERE id = $1")
+                .bind(report_id)
+                .fetch_one(&pool)
+                .await
+                .expect("report row");
+        let actor = vec![0x61u8; 32];
+
+        let action_id = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            buzz_core::CommunityId::from_uuid(community_id),
+            report_id,
+            Uuid::new_v4(),
+            &actor,
+            "operator",
+            "ban",
+            None,
+            None,
+            "resolve:ban",
+            "relay_operator",
+            Some(author.as_slice()),
+            None,
+            channel_id,
+        )
+        .await
+        .expect("claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let _ = buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        sqlx::query(
+            "UPDATE relay_admin_actions SET action_lease_expires_at = $2, action_lease_token = NULL WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(300))
+        .execute(&pool)
+        .await
+        .expect("expire lease");
+
+        let claim = buzz_db::relay_admin_actions::claim_stranded_action_batch(
+            &pool,
+            "e2e-stranded-ban-hidden",
+            chrono::Utc::now() + chrono::Duration::seconds(120),
+            1000,
+        )
+        .await
+        .expect("claim_stranded_action_batch")
+        .into_iter()
+        .find(|c| c.record.id == action_id)
+        .expect("stranded action must appear in batch");
+        let state = state_from_pool(pool.clone()).await;
+        crate::handlers::admin_action_worker::recover_one(&state, claim).await;
+
+        let final_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("exists");
+        assert_eq!(final_rec.state, "succeeded", "stranded ban must converge");
+        let banned: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM community_bans WHERE community_id = $1 AND pubkey = $2)",
+        )
+        .bind(community_id)
+        .bind(&author)
+        .fetch_one(&pool)
+        .await
+        .expect("ban existence");
+        assert!(banned, "the hidden target's author must be banned");
     }
 
     #[tokio::test]

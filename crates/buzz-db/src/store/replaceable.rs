@@ -3,10 +3,10 @@
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::{Acquire, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::observability::{self, LockType, TransactionOperation};
+use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
 /// Result category for a parameterized-replaceable event write.
@@ -103,13 +103,13 @@ pub(crate) fn event_replacement_lock_key(
 /// current live head to have an exact event ID or restrict the operation to an
 /// idempotent replay.
 async fn replace_parameterized_event_in_transaction_impl(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &nostr::Event,
     d_tag: &str,
     channel_id: Option<Uuid>,
     precondition: ParameterizedReplacePrecondition<'_>,
 ) -> Result<ParameterizedReplaceResult> {
+    let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     let pubkey_bytes = event.pubkey.to_bytes();
     let created_at_secs = event.created_at.as_secs() as i64;
@@ -127,7 +127,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         LockType::Replacement,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
-            .execute(&mut **tx),
+            .execute(tx.conn()),
     )
     .await?;
 
@@ -175,7 +175,7 @@ async fn replace_parameterized_event_in_transaction_impl(
     .bind(kind_i32)
     .bind(pubkey_bytes.as_slice())
     .bind(d_tag)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.conn())
     .await?;
     let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs {
         sqlx::query_as(
@@ -186,7 +186,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         .bind(kind_i32)
         .bind(pubkey_bytes.as_slice())
         .bind(d_tag)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.conn())
         .await?
     } else {
         None
@@ -251,114 +251,141 @@ async fn replace_parameterized_event_in_transaction_impl(
         ));
     }
 
-    let mut savepoint = tx.begin().await?;
-    if existing.is_some() {
-        let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
-            sqlx::query_scalar(
-                "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
-            )
-            .fetch_one(&mut *savepoint)
-            .await?
-        } else {
-            None
-        };
-        if is_nip_rs {
-            sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-                .execute(&mut *savepoint)
+    // Everything from the supersede through the mention index runs under one
+    // savepoint on the admitted transaction. A duplicate insert or any failure
+    // (including mention indexing) rolls the whole replacement back and leaves
+    // the caller's transaction usable with the previous live head restored.
+    sqlx::query("SAVEPOINT parameterized_replace")
+        .execute(tx.conn())
+        .await?;
+    let written: Result<bool> = async {
+        if existing.is_some() {
+            let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
+                sqlx::query_scalar(
+                    "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
+                )
+                .fetch_one(tx.conn())
+                .await?
+            } else {
+                None
+            };
+            if is_nip_rs {
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .execute(tx.conn())
+                    .await?;
+            }
+            let statement = if hard_delete_superseded {
+                "DELETE FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            } else {
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            };
+            sqlx::query(statement)
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(d_tag)
+                .execute(tx.conn())
                 .await?;
+
+            if is_nip_rs {
+                let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
+                    .bind(previous_value)
+                    .execute(tx.conn())
+                    .await?;
+            }
+
+            if hard_delete_superseded {
+                if let Some((_, existing_id)) = &existing {
+                    sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
+                        .bind(community_id.as_uuid())
+                        .bind(existing_id)
+                        .execute(tx.conn())
+                        .await?;
+                }
+            }
         }
-        let statement = if hard_delete_superseded {
-            "DELETE FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-        } else {
-            "UPDATE events SET deleted_at = NOW() \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-        };
-        sqlx::query(statement)
+
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(incoming_id)
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(d_tag)
+        .bind(crate::event::extract_not_before(event))
+        .execute(tx.conn())
+        .await?;
+
+        if insert_result.rows_affected() == 0 {
+            return Ok(false);
+        }
+
+        if is_nip_rs {
+            sqlx::query(
+                "INSERT INTO parameterized_event_watermarks \
+                     (community_id, kind, pubkey, d_tag, created_at, event_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                     created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+            )
             .bind(community_id.as_uuid())
             .bind(kind_i32)
             .bind(pubkey_bytes.as_slice())
             .bind(d_tag)
-            .execute(&mut *savepoint)
+            .bind(created_at)
+            .bind(incoming_id)
+            .execute(tx.conn())
             .await?;
+        }
 
-        if is_nip_rs {
-            let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
-            sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
-                .bind(previous_value)
-                .execute(&mut *savepoint)
+        crate::insert_mentions_in_transaction(&mut *tx, event, channel_id).await?;
+        Ok(true)
+    }
+    .await;
+
+    let status = match written {
+        Ok(true) => ParameterizedReplaceStatus::Inserted,
+        Ok(false) => {
+            sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
+                .execute(tx.conn())
                 .await?;
+            ParameterizedReplaceStatus::Duplicate
         }
-
-        if hard_delete_superseded {
-            if let Some((_, existing_id)) = &existing {
-                sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
-                    .bind(community_id.as_uuid())
-                    .bind(existing_id)
-                    .execute(&mut *savepoint)
-                    .await?;
+        Err(error) => {
+            // Restore the caller's transaction; the original error is the
+            // one worth reporting if the rollback itself also fails.
+            if let Err(rollback_error) = sqlx::query("ROLLBACK TO SAVEPOINT parameterized_replace")
+                .execute(tx.conn())
+                .await
+            {
+                tracing::warn!(error = %rollback_error, "parameterized replacement savepoint rollback failed");
             }
+            return Err(error);
         }
-    }
-
-    let sig_bytes = event.sig.serialize();
-    let tags_json = serde_json::to_value(&event.tags)?;
-    let insert_result = sqlx::query(
-        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(community_id.as_uuid())
-    .bind(incoming_id)
-    .bind(pubkey_bytes.as_slice())
-    .bind(created_at)
-    .bind(kind_i32)
-    .bind(&tags_json)
-    .bind(&event.content)
-    .bind(sig_bytes.as_slice())
-    .bind(received_at)
-    .bind(channel_id)
-    .bind(d_tag)
-    .bind(crate::event::extract_not_before(event))
-    .execute(&mut *savepoint)
-    .await?;
-
-    if insert_result.rows_affected() == 0 {
-        savepoint.rollback().await?;
-        return Ok(ParameterizedReplaceResult::new(
-            event,
-            received_at,
-            channel_id,
-            ParameterizedReplaceStatus::Duplicate,
-        ));
-    }
-
-    if is_nip_rs {
-        sqlx::query(
-            "INSERT INTO parameterized_event_watermarks \
-                 (community_id, kind, pubkey, d_tag, created_at, event_id) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
-                 created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .bind(created_at)
-        .bind(incoming_id)
-        .execute(&mut *savepoint)
+    };
+    sqlx::query("RELEASE SAVEPOINT parameterized_replace")
+        .execute(tx.conn())
         .await?;
-    }
-
-    crate::insert_mentions_in_transaction(&mut savepoint, community_id, event, channel_id).await?;
-    savepoint.commit().await?;
 
     Ok(ParameterizedReplaceResult::new(
         event,
         received_at,
         channel_id,
-        ParameterizedReplaceStatus::Inserted,
+        status,
     ))
 }
 
@@ -391,11 +418,15 @@ impl Db {
             channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
         );
 
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            observability::TransactionOperation::ReplaceAddressableEvent,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer = observability::TransactionTimer::start(
+            observability::TransactionOperation::ReplaceAddressableEvent,
+        );
 
         transaction_timer
             .observe(async {
@@ -405,7 +436,7 @@ impl Db {
                     observability::LockType::Replacement,
                     sqlx::query("SELECT pg_advisory_xact_lock($1)")
                         .bind(lock_key)
-                        .execute(&mut *tx),
+                        .execute(tx.conn()),
                 )
                 .await?;
 
@@ -423,7 +454,7 @@ impl Db {
                     .bind(kind_i32)
                     .bind(pubkey_bytes.as_slice())
                     .bind(channel_id)
-                    .fetch_optional(&mut *tx)
+                    .fetch_optional(tx.conn())
                     .await?;
 
                 // Stale-write protection: reject if incoming is not newer.
@@ -460,7 +491,7 @@ impl Db {
                 .bind(kind_i32)
                 .bind(pubkey_bytes.as_slice())
                 .bind(channel_id)
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
 
                 // Insert the new event inside the same transaction.
@@ -485,7 +516,7 @@ impl Db {
                 .bind(received_at)
                 .bind(channel_id)
                 .bind(d_tag.as_deref())
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
 
                 let was_inserted = insert_result.rows_affected() > 0;
@@ -507,7 +538,7 @@ impl Db {
                 // The replaceable event and its denormalized mention index are one
                 // authoritative discovery write. An indexing error must roll back the
                 // new event and restore the previously-live event.
-                crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id)
+                crate::insert_mentions_in_transaction(&mut tx, event, channel_id)
                     .await?;
 
                 tx.commit().await?;
@@ -522,26 +553,23 @@ impl Db {
 
     /// Replace a NIP-33 event inside a caller-owned transaction.
     ///
-    /// The caller owns commit or rollback. Requiring [`Transaction`] here and
+    /// The caller owns commit or rollback. Requiring [`AdmittedTx`] here and
     /// in the internal state machine makes the advisory-lock contract explicit.
+    ///
+    /// On a duplicate or an error the replacement rolls back to its own
+    /// savepoint and the caller's transaction stays usable. This future is not
+    /// cancel-safe: if it is dropped before completing, drop the transaction
+    /// too rather than continuing to write on it.
     pub async fn replace_parameterized_event_in_transaction(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
-        community_id: CommunityId,
+        tx: &mut AdmittedTx,
         event: &nostr::Event,
         d_tag: &str,
         channel_id: Option<Uuid>,
         precondition: ParameterizedReplacePrecondition<'_>,
     ) -> Result<ParameterizedReplaceResult> {
-        replace_parameterized_event_in_transaction_impl(
-            tx,
-            community_id,
-            event,
-            d_tag,
-            channel_id,
-            precondition,
-        )
-        .await
+        replace_parameterized_event_in_transaction_impl(tx, event, d_tag, channel_id, precondition)
+            .await
     }
 
     /// Atomically replace a NIP-33 parameterized replaceable event.
@@ -556,17 +584,19 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            TransactionOperation::ReplaceParameterizedEvent,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer =
+            observability::TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
         transaction_timer
             .observe(async {
                 let result = self
                     .replace_parameterized_event_in_transaction(
                         &mut tx,
-                        community_id,
                         event,
                         d_tag,
                         channel_id,
@@ -866,7 +896,7 @@ mod postgres_tests {
         );
         assert!(
             snapshot
-                .replace_member_event(community, channel, &fresh_b)
+                .replace_member_event(&fresh_b)
                 .await
                 .expect("new writer publishes B")
                 .1
@@ -999,6 +1029,111 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn replaceable_writes_fail_closed_when_community_is_fenced() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let store = db.deletion_store();
+        let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .expect("load community host");
+        let submitted = store
+            .submit(&host, "test-operator", Some("replaceable fence regression"))
+            .await
+            .expect("submit deletion request");
+        let empty_digest = crate::deletion::KeyStreamDigest::new().finish().0;
+        let empty_storage = crate::deletion::StorageManifest {
+            version: 4,
+            prefixes: vec![
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_meta/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("_uploads/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest.clone(),
+                },
+                crate::deletion::PrefixManifest {
+                    prefix: format!("repos/{community}/"),
+                    object_count: 0,
+                    total_bytes: 0,
+                    keys_digest: empty_digest,
+                },
+            ],
+        };
+        let inventory = crate::deletion::FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("inventory schema"),
+            storage: empty_storage,
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "test-approver", Some("approved"))
+            .await
+            .expect("approve request");
+        let claim = store
+            .claim_specific(
+                request.id,
+                "test-executor",
+                crate::deletion::DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect("claim request")
+            .expect("claim winner");
+        store
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("begin quiescing");
+        store.fence(&claim.lease).await.expect("fence community");
+
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+        let addressable = EventBuilder::new(Kind::Custom(0), "fenced-addressable")
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign addressable event");
+        let addressable_error = db
+            .replace_addressable_event(community, &addressable, None)
+            .await
+            .expect_err("fenced community must reject addressable replacement");
+        assert!(
+            matches!(&addressable_error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {addressable_error:#}"
+        );
+
+        let d_tag = format!("read-state:{}", "f".repeat(32));
+        let parameterized = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "fenced-parameterized",
+        )
+        .tags(vec![Tag::parse(["d", d_tag.as_str()]).expect("d tag")])
+        .custom_created_at(Timestamp::from(base + 1))
+        .sign_with_keys(&keys)
+        .expect("sign parameterized event");
+        let parameterized_error = db
+            .replace_parameterized_event(community, &parameterized, &d_tag, None)
+            .await
+            .expect_err("fenced community must reject parameterized replacement");
+        assert!(
+            matches!(&parameterized_error, DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected write-fenced access denial, got: {parameterized_error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn migration_schema_nip_rs_transaction_operation_restores_hard_delete_opt_in() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -1039,13 +1174,12 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &replace_d_tag,
                 None,
@@ -1061,7 +1195,7 @@ mod postgres_tests {
         let leaked: Option<String> = sqlx::query_scalar(
             "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .expect("read hard-delete opt-in after replacement");
         assert_ne!(leaked.as_deref(), Some("on"));
@@ -1073,7 +1207,7 @@ mod postgres_tests {
         .bind(community.as_uuid())
         .bind(keys.public_key().to_bytes())
         .bind(&victim_d_tag)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await;
         assert!(
             unauthorized.is_err(),
@@ -1110,13 +1244,12 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin replacement tx");
         let outcome = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &d_tag,
                 None,
@@ -1146,13 +1279,12 @@ mod postgres_tests {
         assert_eq!(live_id, old.id.as_bytes().to_vec());
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin stale revision tx");
         let mismatch = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &d_tag,
                 None,
@@ -1180,13 +1312,12 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign missing project");
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin missing revision tx");
         let missing_result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &missing,
                 &missing_d_tag,
                 None,
@@ -1258,13 +1389,12 @@ mod postgres_tests {
         .expect("install failure injection");
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let error = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &new,
                 &d_tag,
                 None,
@@ -1275,7 +1405,7 @@ mod postgres_tests {
         assert!(error.to_string().contains("injected mention failure"));
 
         let probe: i32 = sqlx::query_scalar("SELECT 1")
-            .fetch_one(&mut *tx)
+            .fetch_one(tx.conn())
             .await
             .expect("inner failure must leave caller transaction usable");
         assert_eq!(probe, 1);
@@ -1288,7 +1418,7 @@ mod postgres_tests {
         .bind(buzz_core::kind::KIND_PROJECT as i32)
         .bind(keys.public_key().to_bytes())
         .bind(&d_tag)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .expect("load live project after failed indexing");
         assert_eq!(live_id, old.id.as_bytes().to_vec());
@@ -1296,7 +1426,7 @@ mod postgres_tests {
             sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
                 .bind(community.as_uuid())
                 .bind(new.id.as_bytes().as_slice())
-                .fetch_one(&mut *tx)
+                .fetch_one(tx.conn())
                 .await
                 .expect("count rolled-back project");
         assert_eq!(new_rows, 0);
@@ -1339,24 +1469,22 @@ mod postgres_tests {
             .expect("soft-delete duplicate row");
 
         let mut seed_tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin seed transaction");
-        let (_, was_inserted) =
-            event::insert_event_in_transaction(&mut seed_tx, community, &old, None)
-                .await
-                .expect("insert older live head");
+        let (_, was_inserted) = event::insert_event_in_transaction(&mut seed_tx, &old, None)
+            .await
+            .expect("insert older live head");
         assert!(was_inserted);
         seed_tx.commit().await.expect("commit older live head");
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(community)
             .await
             .expect("begin caller transaction");
         let result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                community,
                 &duplicate,
                 &d_tag,
                 None,
@@ -1377,7 +1505,7 @@ mod postgres_tests {
         .bind(buzz_core::kind::KIND_PROJECT as i32)
         .bind(keys.public_key().to_bytes())
         .bind(&d_tag)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .expect("caller transaction remains usable after duplicate");
         assert_eq!(live_id, old.id.as_bytes().to_vec());
@@ -1758,5 +1886,485 @@ mod postgres_tests {
             .expect("read GUC after transaction");
             assert_ne!(leaked.as_deref(), Some("on"));
         }
+    }
+
+    /// NIP-09 deletion of a retention-free coordinate (NIP-RS read state, mesh
+    /// status) is physical in application code, so it holds on desired-state
+    /// databases that never installed the migration 0009/0019 purge triggers.
+    /// Ordinary addressable events, and look-alikes that fail classification,
+    /// keep the soft-delete contract.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip09_deletion_purges_retention_free_rows_and_mentions() {
+        assert_nip09_deletion_purges_retention_free_rows_and_mentions(false).await;
+    }
+
+    /// The same contract on a migration-built database, where the 0009/0011/
+    /// 0019 purge and hard-delete fence triggers are still installed. Each row
+    /// shape is also soft-deleted the way a pre-0009 writer would, so the
+    /// table proves the app classification agrees with the triggers.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_nip09_deletion_purges_retention_free_rows_and_mentions() {
+        assert_nip09_deletion_purges_retention_free_rows_and_mentions(true).await;
+    }
+
+    async fn assert_nip09_deletion_purges_retention_free_rows_and_mentions(migration: bool) {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Delete {
+            Coordinate,
+            Id,
+        }
+
+        let db = setup_db().await;
+        let triggers_installed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_trigger \
+             WHERE tgname = 'trg_events_purge_soft_deleted_nip_rs')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("inspect purge trigger");
+        assert_eq!(
+            triggers_installed, migration,
+            "schema mode must match the test variant (run through the Postgres wrapper)"
+        );
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let nip_rs = buzz_core::kind::KIND_READ_STATE as u16;
+        let mesh = buzz_core::kind::KIND_BOOKMARK_SET as u16;
+        let read_state_d = format!("read-state:{}", "b".repeat(32));
+        let mesh_d = "buzz-mesh-member-status:purge-test".to_string();
+        let tag = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let t_read_state = tag(&["t", "read-state"]);
+        let k_mesh = tag(&["k", "buzz-mesh-status"]);
+        // (label, kind, column d_tag, tags, physically purged)
+        type Case = (&'static str, u16, String, Vec<Vec<String>>, bool);
+        let cases: Vec<Case> = vec![
+            (
+                "nip-rs",
+                nip_rs,
+                read_state_d.clone(),
+                vec![tag(&["d", &read_state_d]), t_read_state.clone()],
+                true,
+            ),
+            (
+                "nip-rs without t tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![tag(&["d", &read_state_d])],
+                false,
+            ),
+            (
+                "nip-rs uppercase hex slot",
+                nip_rs,
+                format!("read-state:{}", "B".repeat(32)),
+                vec![
+                    tag(&["d", &format!("read-state:{}", "B".repeat(32))]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs 31-char slot",
+                nip_rs,
+                format!("read-state:{}", "b".repeat(31)),
+                vec![
+                    tag(&["d", &format!("read-state:{}", "b".repeat(31))]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs duplicate d tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &read_state_d]),
+                    tag(&["d", &read_state_d]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs duplicate t tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &read_state_d]),
+                    t_read_state.clone(),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "nip-rs d tag differs from column",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &format!("read-state:{}", "c".repeat(32))]),
+                    t_read_state.clone(),
+                ],
+                false,
+            ),
+            (
+                "mesh-status",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), k_mesh.clone()],
+                true,
+            ),
+            (
+                // Containment semantics (`tags @>`), shared by trigger and app.
+                "mesh-status k tag with extra element",
+                mesh,
+                mesh_d.clone(),
+                vec![
+                    tag(&["d", &mesh_d]),
+                    tag(&["k", "buzz-mesh-status", "extra"]),
+                ],
+                true,
+            ),
+            (
+                "mesh-status wrong d prefix",
+                mesh,
+                "buzz-mesh-member:purge-test".into(),
+                vec![tag(&["d", "buzz-mesh-member:purge-test"]), k_mesh.clone()],
+                false,
+            ),
+            (
+                "mesh-status without k tag",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d])],
+                false,
+            ),
+            (
+                "mesh-status wrong k value",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), tag(&["k", "buzz-mesh-other"])],
+                false,
+            ),
+            (
+                "ordinary addressable",
+                buzz_core::kind::KIND_PROJECT as u16,
+                "retained-project".into(),
+                vec![tag(&["d", "retained-project"])],
+                false,
+            ),
+        ];
+
+        // Store one event of this shape with one mention; return
+        // (keys, id, created_at secs).
+        let store = |label: &'static str, kind: u16, d_tag: String, tags: Vec<Vec<String>>| {
+            let db = &db;
+            async move {
+                let keys = Keys::generate();
+                let created_at = Timestamp::now().as_secs();
+                let event = EventBuilder::new(Kind::Custom(kind), label)
+                    .tags(
+                        tags.iter()
+                            .map(|tag| Tag::parse(tag.clone()).expect("tag"))
+                            .collect::<Vec<_>>(),
+                    )
+                    .custom_created_at(Timestamp::from(created_at))
+                    .sign_with_keys(&keys)
+                    .expect("sign event");
+                assert!(
+                    db.replace_parameterized_event(community, &event, &d_tag, None)
+                        .await
+                        .expect("store event")
+                        .1,
+                    "{label}: event must be stored"
+                );
+                let id = event.id.as_bytes().to_vec();
+                sqlx::query(
+                    "INSERT INTO event_mentions \
+                     (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+                     SELECT community_id, $3, id, created_at, NULL, kind \
+                     FROM events WHERE community_id = $1 AND id = $2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .bind("c".repeat(64))
+                .execute(&db.pool)
+                .await
+                .expect("index mention");
+                (keys, id, created_at)
+            }
+        };
+        // (event rows, live event rows, mention rows) for one id.
+        let state = |id: Vec<u8>| {
+            let pool = db.pool.clone();
+            async move {
+                let (rows, live): (i64, i64) = sqlx::query_as(
+                    "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) \
+                     FROM events WHERE community_id=$1 AND id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("count event rows");
+                let mentions: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("count mentions");
+                (rows, live, mentions)
+            }
+        };
+        let expected = |purged: bool| -> (i64, i64, i64) {
+            if purged {
+                (0, 0, 0)
+            } else {
+                (1, 0, 1)
+            }
+        };
+
+        for (label, kind, d_tag, tags, purged) in cases {
+            if migration {
+                // Trigger half of the parity table: a pre-0009 writer's plain
+                // soft delete, classified only by the 0009/0011/0019 triggers.
+                let (_, id, _) = store(label, kind, d_tag.clone(), tags.clone()).await;
+                sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id=$1 AND id=$2")
+                    .bind(community.as_uuid())
+                    .bind(&id)
+                    .execute(&db.pool)
+                    .await
+                    .expect("legacy soft delete");
+                assert_eq!(
+                    state(id).await,
+                    expected(purged),
+                    "{label}: trigger classification"
+                );
+            }
+
+            for mode in [Delete::Coordinate, Delete::Id] {
+                let (keys, id, created_at) = store(label, kind, d_tag.clone(), tags.clone()).await;
+                let delete = || async {
+                    match mode {
+                        Delete::Coordinate => event::soft_delete_by_coordinate(
+                            &db.pool,
+                            community,
+                            i32::from(kind),
+                            &keys.public_key().to_bytes(),
+                            &d_tag,
+                            (created_at + 1) as i64,
+                        )
+                        .await
+                        .expect("coordinate delete"),
+                        Delete::Id => event::soft_delete_event_and_update_thread(
+                            &db.pool, community, &id, None, None,
+                        )
+                        .await
+                        .expect("id delete"),
+                    }
+                };
+                assert!(
+                    delete().await,
+                    "{label}/{mode:?}: deletion must report success"
+                );
+                assert_eq!(
+                    state(id.clone()).await,
+                    expected(purged),
+                    "{label}/{mode:?}: app classification"
+                );
+                assert!(
+                    !delete().await,
+                    "{label}/{mode:?}: repeated deletion is a no-op"
+                );
+            }
+        }
+
+        // A mesh-status-shaped row whose `d_tag` column was never backfilled:
+        // `kind = 30003 AND NULL LIKE … AND tags @> …` makes the purge
+        // predicate NULL (a read-state row cannot: its tag/column EXISTS is
+        // false), which the triggers treat as false. The id path must still
+        // soft-delete it (the `COALESCE` in the generic soft delete), not
+        // silently skip it. Coordinate deletes key on `d_tag`, so only the id
+        // path can reach this row.
+        let null_d_tag_row = || async {
+            let (_, id, _) = store(
+                "mesh-status with NULL d_tag column",
+                mesh,
+                mesh_d.clone(),
+                vec![tag(&["d", &mesh_d]), k_mesh.clone()],
+            )
+            .await;
+            sqlx::query("UPDATE events SET d_tag = NULL WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(&id)
+                .execute(&db.pool)
+                .await
+                .expect("clear d_tag column");
+            id
+        };
+        if migration {
+            let id = null_d_tag_row().await;
+            sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(&id)
+                .execute(&db.pool)
+                .await
+                .expect("legacy soft delete");
+            assert_eq!(
+                state(id).await,
+                expected(false),
+                "NULL d_tag: trigger classification"
+            );
+        }
+        let id = null_d_tag_row().await;
+        assert!(
+            event::soft_delete_event_and_update_thread(&db.pool, community, &id, None, None)
+                .await
+                .expect("id delete"),
+            "NULL d_tag/Id: deletion must report success"
+        );
+        assert_eq!(
+            state(id).await,
+            expected(false),
+            "NULL d_tag/Id: app classification"
+        );
+    }
+
+    /// A coordinate deletion racing a NIP-RS replacement must never leave a
+    /// soft-deleted read-state row behind. The purge waits on the old head's
+    /// row lock; the replacement commits a newer head that the purge's snapshot
+    /// cannot see; the generic soft delete then runs on a fresh snapshot and
+    /// must spare that head rather than soft-delete it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn coordinate_deletion_racing_nip_rs_replacement_never_soft_deletes_read_state() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("read-state:{}", "d".repeat(32));
+        let created_at = Timestamp::now().as_secs();
+        let old_head = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "old head",
+        )
+        .tags([
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ])
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(&keys)
+        .expect("sign old head");
+        assert!(
+            db.replace_parameterized_event(community, &old_head, &d_tag, None)
+                .await
+                .expect("store old head")
+                .1
+        );
+        let old_id = old_head.id.as_bytes().to_vec();
+        let new_id = vec![0x5a_u8; 32];
+
+        // The replacement: insert a newer head (still at or before the
+        // tombstone), hard-delete the old head, and hold the transaction open.
+        let mut replacement = db.pool.begin().await.expect("begin replacement");
+        sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+            .execute(&mut *replacement)
+            .await
+            .expect("opt in to hard delete");
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag) \
+             SELECT community_id, $3, pubkey, created_at + interval '1 second', kind, tags, \
+                    'new head', sig, channel_id, d_tag \
+             FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&old_id)
+        .bind(&new_id)
+        .execute(&mut *replacement)
+        .await
+        .expect("insert new head");
+        sqlx::query("DELETE FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(&old_id)
+            .execute(&mut *replacement)
+            .await
+            .expect("delete old head");
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let application_name = format!("nip-rs-race-{}", Uuid::new_v4().simple());
+        let deleter_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                PgConnectOptions::from_str(&database_url)
+                    .expect("parse test database URL")
+                    .application_name(&application_name),
+            )
+            .await
+            .expect("connect deleter pool");
+        let pubkey = keys.public_key().to_bytes();
+        let deletion = tokio::spawn({
+            let d_tag = d_tag.clone();
+            async move {
+                event::soft_delete_by_coordinate(
+                    &deleter_pool,
+                    community,
+                    buzz_core::kind::KIND_READ_STATE as i32,
+                    &pubkey,
+                    &d_tag,
+                    (created_at + 5) as i64,
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND application_name = $1 \
+                       AND wait_event_type = 'Lock')",
+                )
+                .bind(&application_name)
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect deleter lock");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deletion reached the old head's row lock");
+
+        replacement.commit().await.expect("commit replacement");
+        deletion
+            .await
+            .expect("join deletion")
+            .expect("coordinate delete");
+
+        let rows: Vec<(Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT id, deleted_at IS NOT NULL FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_READ_STATE as i32)
+        .bind(keys.public_key().to_bytes().as_slice())
+        .bind(&d_tag)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read coordinate rows");
+        assert_eq!(
+            rows,
+            vec![(new_id, false)],
+            "the racing head is spared and no soft-deleted read-state row remains"
+        );
     }
 }

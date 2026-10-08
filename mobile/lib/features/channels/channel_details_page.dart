@@ -384,7 +384,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     child: BuzzActionTile(
                       key: const ValueKey('channel-details-star-action'),
                       icon: null,
-                      iconWidget: LucideStarIcon(
+                      iconWidget: TablerStarIcon(
                         filled: isStarred,
                         color: isStarred
                             ? context.colors.primary

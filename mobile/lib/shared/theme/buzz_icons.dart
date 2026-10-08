@@ -14,8 +14,8 @@ abstract final class BuzzIcons {
   /// Tabler `archive`.
   static const archive = IconData(0xea0b, fontFamily: 'BuzzTabler');
 
-  /// Tabler `archive-off`.
-  static const archiveRestore = IconData(0xf0ad, fontFamily: 'BuzzTabler');
+  /// Tabler `restore`.
+  static const archiveRestore = IconData(0xfafd, fontFamily: 'BuzzTabler');
 
   /// Tabler `arrow-down`.
   static const arrowDown = IconData(0xea16, fontFamily: 'BuzzTabler');
@@ -104,8 +104,8 @@ abstract final class BuzzIcons {
   /// Tabler `clock-hour-3`.
   static const clock3 = IconData(0xf318, fontFamily: 'BuzzTabler');
 
-  /// Tabler `clock-hour-3`.
-  static const clockFading = IconData(0xf318, fontFamily: 'BuzzTabler');
+  /// Tabler `hourglass`: a channel with a limited lifetime.
+  static const clockFading = IconData(0xef93, fontFamily: 'BuzzTabler');
 
   /// Tabler `code`.
   static const code = IconData(0xea77, fontFamily: 'BuzzTabler');
