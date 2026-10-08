@@ -12,7 +12,7 @@ Federated Identity Adapter
 
 This NIP defines a provider-neutral HTTP contract between a Nostr client and an enterprise identity adapter. The adapter authenticates a user through a browser login, holds an adapter session for that user, and issues short-lived [NIP-FI](NIP-FI.md) assertions that bind the user to a Nostr key the client proves it controls with [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md).
 
-The adapter MAY use Auth0, Okta, SAML, LDAP, or any other upstream identity system behind this boundary. Clients do not implement or depend on that upstream protocol. Discovery of which relays require enterprise identity, and of which adapter serves them, is outside this NIP.
+The adapter MAY use an OIDC or SAML provider, LDAP, or any other upstream identity system behind this boundary. Clients do not implement or depend on that upstream protocol. Discovery of which relays require enterprise identity, and of which adapter serves them, is outside this NIP.
 
 ## Terminology
 
@@ -95,7 +95,7 @@ The success response uses the same shape as the exchange response, except `sessi
 }
 ```
 
-The adapter MUST return 401 `session_required` or `session_expired`, with the same body shape and meaning as in [Denials](#denials), when the token is missing, invalid, or expired. The client MUST discard the adapter session, and only the adapter session, on those responses. Clients MUST handle 429, 5xx, and network failures as in [Denials](#denials): keep the session and retry with bounded backoff. Any other response is a failed check that does not discard the session.
+The adapter MUST return 401 `session_required` or `session_expired`, with the same body shape and meaning as in [Denials](#denials), when the token is missing, invalid, or expired. The client MUST discard the adapter session, and only the adapter session, on those responses. Clients MUST handle 429, 5xx, and network failures as in [Denials](#denials): keep the session and retry with bounded backoff. Any other non-success response is a failed check that does not discard the session.
 
 ## Relay assertion
 
@@ -113,7 +113,7 @@ Content-Type: application/json
 }
 ```
 
-- `relay_url` selects an adapter-configured relay; the adapter MUST NOT fetch it. Clients MUST send it in the canonical form `wss://host[:port]`, with the scheme in lowercase, a DNS host as its lowercase ASCII (A-label) form with no trailing dot, an IPv4 host in dotted-decimal form, an IPv6 host in brackets in its [RFC 5952](https://www.rfc-editor.org/rfc/rfc5952) text form (for example `wss://[2001:db8::1]:8443`), the default port omitted, and no trailing slash, path, query, or fragment. Adapters MUST configure relays in this canonical form and MUST compare `relay_url` against it exactly. An unknown relay MUST be rejected with 403 `authorization_denied`.
+- `relay_url` selects an adapter-configured relay; the adapter MUST NOT fetch it. Clients MUST send it in the canonical form `wss://host[:port]`, with the scheme in lowercase, a DNS host as its lowercase ASCII (A-label) form with no trailing dot, an IPv4 host in dotted-decimal form, an IPv6 host in brackets in its [RFC 5952](https://www.rfc-editor.org/rfc/rfc5952) text form (for example `wss://[2001:db8::1]:8443`), the default port omitted, and no trailing slash, path, query, or fragment. Relay authorities on port 80 are not supported: clients MUST NOT send, and adapters MUST NOT configure, a `relay_url` with port 80. Adapters MUST configure relays in this canonical form and MUST compare `relay_url` against it exactly. An unknown relay MUST be rejected with 403 `authorization_denied`.
 - `nostr_pubkey` is the lowercase hex key the client will authenticate to the relay with. The NIP-98 event MUST be signed by this key, use kind `27235`, carry exactly one `u` tag equal to the absolute URL of this endpoint, exactly one `method` tag of `POST`, and exactly one `payload` tag equal to the lowercase hex SHA-256 of the exact request body bytes. Its `created_at` MUST be no more than 60 seconds old and MUST NOT be more than 5 seconds in the future.
 - The request body is limited to 4096 bytes and MUST NOT be content-encoded. A content-encoded body, such as a gzipped body, MUST be rejected with 400 `invalid_request`. Unknown fields MUST be rejected with 400 `invalid_request`.
 - Credential handling is covered in [Security Considerations](#security-considerations).
@@ -150,9 +150,9 @@ Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`.
 | 429 | `rate_limited` | Too many requests | Keep the session, retry with bounded backoff |
 | 503 | `issuance_unavailable` | The adapter could not issue an assertion | Keep the session, retry with bounded backoff |
 
-Clients MUST retry 429 and 503 with bounded backoff whatever the `error` code. Clients MUST treat any other status, or a 400/401/403/413 with a code this NIP does not define, as a refusal: keep the session, show it as refused, and not retry automatically.
+Clients MUST keep the session and retry 429 and any 5xx status with bounded backoff, whatever the `error` code. Clients MUST treat any other status, or a 400/401/403/413 with a code this NIP does not define, as a refusal: keep the session, show it as refused, and not retry automatically.
 
-A missing session MUST be reported as 401 `session_required`, never 400. Clients MUST handle network failures like 429 and 503: keep the session and retry with bounded backoff. Clients SHOULD honor `Retry-After` when present, and SHOULD show the failure to the user after a bounded number of attempts.
+A missing session MUST be reported as 401 `session_required`, never 400. Clients MUST handle network failures like 429 and 5xx: keep the session and retry with bounded backoff. Clients SHOULD honor `Retry-After` when present, and SHOULD show the failure to the user after a bounded number of attempts.
 
 An adapter MAY return `session_required` for an invalid, expired, or revoked credential; adapters that distinguish ended sessions MAY return `session_expired`. Clients MUST handle both identically.
 

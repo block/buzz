@@ -5,7 +5,7 @@ NIP-11 `federated_identity` advertisement. Discovery deliberately contains no
 issuer URL, tenant ID, audience, or vendor-specific login details; those stay in
 operator-controlled Desktop build configuration.
 
-When a trusted build connects to a trusted enterprise relay, Desktop speaks the
+When a trusted build connects to a trusted enterprise relay, Desktop is planned to speak the
 HTTP contract defined in [NIP-FA](nips/NIP-FA.md) (Federated Identity Adapter)
 to the configured adapter. This guide covers only Desktop build configuration
 and Desktop behavior; the wire contract lives in the NIP.
@@ -32,7 +32,8 @@ Buzz Desktop's client is implemented in
 
 ### Implemented
 
-- Build configuration: the variables above.
+- Build configuration: `BUZZ_BUILD_ENTERPRISE_AUTH_RELAYS` and
+  `BUZZ_BUILD_ENTERPRISE_AUTH_ADAPTER_BASE_URL`.
 - Discovery gate: Desktop honors a relay's NIP-11 `federated_identity`
   advertisement only for relays in `BUZZ_BUILD_ENTERPRISE_AUTH_RELAYS`.
 
@@ -47,7 +48,8 @@ Buzz Desktop's client is implemented in
 - Session check failure: on 401 `session_required` or `session_expired`,
   Desktop clears only the enterprise adapter session; other failures keep it.
   Builderlab hosted-community state is not affected.
-- `profile_projection` is ignored unless
+- `BUZZ_BUILD_ENTERPRISE_PROFILE_PROJECTION` is not read yet. Once it is,
+  `profile_projection` is ignored unless
   `BUZZ_BUILD_ENTERPRISE_PROFILE_PROJECTION` opts into publishing those fields
   as the user's public Buzz profile.
 - Assertion fetch: Desktop requests a NIP-FA assertion before connecting to an
