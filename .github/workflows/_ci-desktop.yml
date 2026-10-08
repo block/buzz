@@ -129,7 +129,7 @@ jobs:
     name: Desktop Smoke E2E (${{ matrix.shard }})
     runs-on: ubuntu-latest
     # A smoke shard needs ~12m, and Chromium dependency setup is bounded by
-    # ci-apt-retry.sh (3 attempts of up to 7m). Leave time for the full suite
+    # ci-apt-retry.sh (~25m worst case). Leave time for the full suite
     # and its reports to finish.
     timeout-minutes: 45
     # Keep in sync with FRONTEND_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
