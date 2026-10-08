@@ -1743,6 +1743,13 @@ pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {
         .expect("write");
     tracing::debug!("\"event_follow_up::after_admitted_insert(\"");
 }
+pub(crate) async fn writer_with_hook_in_raw_string(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    tracing::debug!(r#""event_follow_up::after_admitted_insert(""#);
+}
 #[cfg(test)]
 fn test_only_helper() -> (&'static str, char, &'static str, char, &'static [u8]) {
     // an unbalanced { in a comment
@@ -1780,6 +1787,7 @@ mod tests {
             "pub(crate) async fn writer_with_hook_in_string(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_hook_in_raw_string(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
