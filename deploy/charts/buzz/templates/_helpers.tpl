@@ -107,12 +107,23 @@ injective; what the chart provides is a total mapping that is collision
 
   1. A "sha256:<64 hex>" digest drops its algorithm prefix and keeps 63 hex
      characters — the behaviour this chart has always had for digests.
-  2. A revision that is already a valid label value, and is not of the reserved
-     shape below, is emitted byte for byte, so ordinary tags like 1.2.3-rc.4
-     are preserved exactly.
-  3. Anything else — a leading "_", a byte outside the label alphabet, or more
-     than 63 bytes — is replaced by the first 63 hex characters of its SHA-256,
-     the same shape and the same 252 retained bits as case 1.
+  2. A revision that is already a valid label value *and* already in Datadog's
+     normal form — no uppercase, no "__" — and is not of the reserved shape
+     below, is emitted byte for byte, so ordinary tags like 1.2.3-rc.4 and
+     sha-1a2b3c4 are preserved exactly.
+  3. Anything else — a leading "_", an uppercase letter, a "__" run, a byte
+     outside the label alphabet, or more than 63 bytes — is replaced by the
+     first 63 hex characters of its SHA-256, the same shape and the same 252
+     retained bits as case 1.
+
+Case 2 is restricted to Datadog's normal form because the label's consumer is
+Datadog, which lowercases tag values and collapses runs of "_". A passthrough
+of "ReleaseA" would report the same version as "releasea", and "release__a"
+the same as "release_a"; an uppercased 63-hex value would also slip past the
+reserved-shape check below and then normalize onto a hashed or digest label.
+Hashing everything not already in normal form means every value this helper
+emits is a fixed point of Datadog's normalization, so distinct outputs stay
+distinct where they are read.
 
 Exactly 63 lowercase hex characters is the reserved shape: it is what cases 1
 and 3 emit, so case 2 must not also be able to emit it. Without that exclusion
@@ -135,7 +146,7 @@ available in the image reference itself.
 {{- $revision := include "buzz.imageVersionSource" . -}}
 {{- if regexMatch "^sha256:[0-9a-f]{64}$" $revision -}}
 {{- $revision | trimPrefix "sha256:" | trunc 63 -}}
-{{- else if and (le (len $revision) 63) (regexMatch "^[a-zA-Z0-9]([-._a-zA-Z0-9]*[a-zA-Z0-9])?$" $revision) (not (regexMatch "^[0-9a-f]{63}$" $revision)) -}}
+{{- else if and (le (len $revision) 63) (regexMatch "^[a-z0-9]([-._a-z0-9]*[a-z0-9])?$" $revision) (not (contains "__" $revision)) (not (regexMatch "^[0-9a-f]{63}$" $revision)) -}}
 {{- $revision -}}
 {{- else -}}
 {{- sha256sum $revision | trunc 63 -}}

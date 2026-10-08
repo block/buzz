@@ -107,8 +107,9 @@ may otherwise contain only `[-._a-zA-Z0-9]`, while `image.tag` accepts any OCI
 tag. Because that domain is larger than the label codomain, no mapping onto it
 is injective; the chart provides a deterministic, collision-resistant one. A
 digest keeps the first 63 characters of its hex, a revision that is already a
-valid label value is preserved byte for byte, and anything else (a leading `_`,
-a byte outside the label alphabet, more than 63 bytes) is replaced by the first
+valid label value in Datadog's normal form (lowercase, no `__`) is preserved
+byte for byte, and anything else (a leading `_`, an uppercase letter, a `__`
+run, a byte outside the label alphabet, more than 63 bytes) is replaced by the first
 63 hex characters of its SHA-256 — 252 retained bits, the same margin as the
 digest case, and no readable prefix.
 

@@ -508,8 +508,17 @@ a tag the chart used to accept:
 | Revision | Label |
 |---|---|
 | `sha256:<64 hex>` digest | the hex without `sha256:`, first 63 characters |
-| already a valid label value, and not exactly 63 lowercase hex characters | emitted byte for byte (e.g. `1.2.3-rc.4`) |
+| already a valid label value, lowercase, no `__`, and not exactly 63 lowercase hex characters | emitted byte for byte (e.g. `1.2.3-rc.4`, `sha-1a2b3c4`) |
 | anything else | the first 63 hex characters of the revision's SHA-256 |
+
+The passthrough row requires Datadog's normal form because Datadog lowercases
+tag values and collapses `__`: passing `ReleaseA` and `releasea` through
+unchanged would report one version for two revisions. Every emitted label is
+therefore already normalized, so distinct labels stay distinct in Datadog.
+
+When both `image.tag` and `image.digest` are set, the label names the tag —
+even if the tag and digest disagree. The digest still pins what actually runs
+(`repository@digest`), so keep the two in step when promoting.
 
 Exactly 63 lowercase hex characters is a **reserved shape** — it is what the
 first and third rows emit, so the passthrough row must not be able to emit it
