@@ -12,9 +12,9 @@ use crate::naming::{
     AgentIdentity, ANNOTATION_CREATE_INTENT, ANNOTATION_IMAGE, ANNOTATION_PUBKEY_FULL,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, Pod, PodSecurityContext, PodSpec,
-    ResourceRequirements, SeccompProfile, Secret, SecretEnvSource, SecurityContext, Volume,
-    VolumeMount,
+    Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource,
+    ObjectFieldSelector, Pod, PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile,
+    Secret, SecretEnvSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -125,6 +125,20 @@ pub fn build_pod(
             }),
             ..Default::default()
         }]),
+        // Explicit env wins over envFrom, so a Secret cannot spoof the UID.
+        env: cfg.pod_options.setup_pending.then(|| {
+            vec![EnvVar {
+                name: "BUZZ_PILOT_POD_UID".into(),
+                value_from: Some(EnvVarSource {
+                    field_ref: Some(ObjectFieldSelector {
+                        api_version: Some("v1".into()),
+                        field_path: "metadata.uid".into(),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]
+        }),
         resources: Some(ResourceRequirements {
             requests: Some(requests),
             limits: Some(limits),
@@ -336,6 +350,34 @@ mod tests {
     }
 
     #[test]
+    fn setup_uid_is_opt_in_and_comes_from_the_api_not_the_secret() {
+        let mut cfg = provider_config();
+        let fp = intent_template(&cfg, ["A".into()]).fingerprint();
+        assert!(spec(&build_pod(&identity(), &cfg, "g", &fp)).containers[0]
+            .env
+            .is_none());
+        cfg.pod_options.setup_pending = true;
+        let changed = intent_template(&cfg, ["A".into()]).fingerprint();
+        assert_ne!(fp, changed);
+        let pod = build_pod(&identity(), &cfg, "g", &changed);
+        let env = spec(&pod).containers[0].env.as_ref().unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].name, "BUZZ_PILOT_POD_UID");
+        assert!(env[0].value.is_none());
+        assert_eq!(
+            env[0]
+                .value_from
+                .as_ref()
+                .unwrap()
+                .field_ref
+                .as_ref()
+                .unwrap()
+                .field_path,
+            "metadata.uid"
+        );
+    }
+
+    #[test]
     fn each_optional_pod_control_changes_intent() {
         let cfg = provider_config();
         let baseline = intent_template(&cfg, ["A".into()]).fingerprint();
@@ -346,6 +388,7 @@ mod tests {
             serde_json::json!({"ephemeral_storage_request": "3Gi"}),
             serde_json::json!({"ephemeral_storage_limit": "4Gi"}),
             serde_json::json!({"active_deadline_seconds": 28800}),
+            serde_json::json!({"setup_pending": true}),
         ] {
             let mut changed = cfg.clone();
             changed.pod_options = serde_json::from_value(value).unwrap();

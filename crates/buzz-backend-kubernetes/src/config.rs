@@ -88,6 +88,9 @@ pub struct PodOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Positive absolute Pod lifetime, including startup.
     pub active_deadline_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Expose the server-assigned Pod UID to a bounded owner setup gate.
+    pub setup_pending: bool,
 }
 
 impl PodOptions {
@@ -303,7 +306,8 @@ pub fn config_schema() -> serde_json::Value {
                     "workspace_size_limit": {"type": "string", "minLength": 1},
                     "ephemeral_storage_request": {"type": "string", "minLength": 1},
                     "ephemeral_storage_limit": {"type": "string", "minLength": 1},
-                    "active_deadline_seconds": {"type": "integer", "minimum": 1}
+                    "active_deadline_seconds": {"type": "integer", "minimum": 1},
+                    "setup_pending": {"type": "boolean", "default": false}
                 }
             },
             "service_account": {

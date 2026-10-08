@@ -1809,3 +1809,15 @@ Everything else — status, control,
 memory — was already on the relay, which is why the design holds: the relay
 was the management plane all along, and the desktop was only ever one of
 its doors.
+
+### Optional owner setup gate binding
+
+`pod_options.setup_pending=true` adds one explicit container environment field,
+`BUZZ_PILOT_POD_UID`, sourced from the Kubernetes downward API `metadata.uid`.
+The explicit field takes precedence over `envFrom` values. Its optional Pod
+control participates in create intent; omitted or false preserves the prior
+Pod shape and fingerprint. It does not change capabilities, seccomp, lifetime,
+or restart policy, and does not implement account readiness itself. An image
+with a separately reviewed bounded setup gate must consume this binding before
+starting the account runtime. Provider deployment completion only proves its
+existing Pod lifecycle contract, not account authentication.
