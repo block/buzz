@@ -391,3 +391,123 @@ async fn system_channels_send_no_membership_notifications() {
     }
     assert_eq!(sorted(notified), vec![ordinary.to_string()]);
 }
+
+/// A group-state filter with `#t:["system"]` or any `#P` finds the system
+/// channels the reader can read, and still matches as usual: a creator plus
+/// a label finds that creator's one labeled channel.
+/// Mutation: make `filter_opts_in` return false → RED (discovery finds
+/// nothing). Drop the readability check from the opt-in → RED (an outsider
+/// finds the private channel).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn system_channels_are_found_by_type_or_creator() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let label = "agent-attention";
+
+    let private = create_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        &[&["channel_type", "system"], &["t", label]],
+    )
+    .await;
+    let open = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        open,
+        &[&["visibility", "open"]],
+    )
+    .await
+    .expect("open the system channel");
+    let ordinary = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    // Another creator's channel with the same label: #P must exclude it.
+    let lookalike = create_channel(&f.state, &f.tenant, &outsider, &[&["t", label]]).await;
+
+    let meta = |channel| group_state_id(&f, channel, 39000);
+    let (private_meta, open_meta, ordinary_meta, lookalike_meta) = (
+        meta(private).await,
+        meta(open).await,
+        meta(ordinary).await,
+        meta(lookalike).await,
+    );
+
+    // #t:["system"]: members find both; outsiders find only the open one.
+    assert_eq!(
+        sorted(req(&f, &owner, json!({"kinds": [39000], "#t": ["system"]})).await),
+        sorted(vec![private_meta.clone(), open_meta.clone()]),
+        "member #t:system"
+    );
+    assert_eq!(
+        req(&f, &outsider, json!({"kinds": [39000], "#t": ["system"]})).await,
+        vec![open_meta.clone()],
+        "outsider #t:system"
+    );
+    // A member lists its own system channels from kind:39002.
+    assert_eq!(
+        sorted(
+            req(
+                &f,
+                &owner,
+                json!({"kinds": [39002], "#p": [owner_hex], "#t": ["system"]})
+            )
+            .await
+        ),
+        sorted(vec![
+            group_state_id(&f, private, 39002).await,
+            group_state_id(&f, open, 39002).await,
+        ]),
+        "member 39002 #p:[me] #t:system"
+    );
+    // #P opts in, so a creator's channels include its system channels.
+    assert_eq!(
+        sorted(req(&f, &owner, json!({"kinds": [39000], "#P": [owner_hex]})).await),
+        sorted(vec![private_meta.clone(), open_meta.clone(), ordinary_meta]),
+        "member #P"
+    );
+    // Creator plus label finds exactly the one channel, in SQL.
+    let lookup = json!({"kinds": [39000], "#P": [owner_hex], "#t": [label], "limit": 1});
+    assert_eq!(
+        req(&f, &owner, lookup.clone()).await,
+        vec![private_meta.clone()],
+        "creator + label"
+    );
+    assert!(
+        req(&f, &outsider, lookup.clone()).await.is_empty(),
+        "an outsider cannot find a private system channel"
+    );
+    // A label alone is not an opt-in.
+    assert_eq!(
+        req(&f, &owner, json!({"kinds": [39000], "#t": [label]})).await,
+        vec![lookalike_meta],
+        "label alone"
+    );
+    // The same opt-in on COUNT and the HTTP bridge.
+    assert_eq!(
+        count(&f, &owner, json!({"kinds": [39000], "#t": ["system"]})).await,
+        2,
+        "COUNT #t:system"
+    );
+    assert_eq!(
+        bridge_ids(bridge(&f, &owner, "/query", json!([lookup])).await),
+        vec![private_meta],
+        "bridge creator + label"
+    );
+    assert_eq!(
+        bridge_count(
+            bridge(
+                &f,
+                &outsider,
+                "/count",
+                json!([{"kinds": [39000], "#t": ["system"]}])
+            )
+            .await
+        ),
+        1,
+        "bridge /count outsider #t:system"
+    );
+}
