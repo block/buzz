@@ -833,6 +833,13 @@ pub async fn validate_admin_event(
 /// the same Nostr event ID — the existing `ON CONFLICT DO NOTHING` in
 /// `insert_event` then provides DB-enforced delivery idempotency.
 ///
+/// A genuinely new event is fed to the workflow engine (channel `member_joined`
+/// triggers). The feed is gated on `was_inserted` from `insert_event`: an
+/// idempotent re-emission (same event id) must not re-fire triggers — a
+/// retried join would otherwise double-post greetings. System messages signed
+/// here are relay-authored by construction; client-submitted kind:40099 events
+/// never reach the workflow engine (see the feed gate in `handlers/event.rs`).
+///
 /// Returns `Err` if the event could not be durably inserted; fanout remains
 /// best-effort.
 pub async fn emit_system_message(
@@ -852,7 +859,7 @@ pub async fn emit_system_message(
         .map_err(|e| anyhow::anyhow!("failed to sign system message: {e}"))?;
 
     // Durable insert is the completion boundary — propagate failure.
-    state
+    let (stored, was_inserted) = state
         .db
         .insert_event(tenant.community(), &event, Some(channel_id))
         .await
@@ -865,6 +872,37 @@ pub async fn emit_system_message(
         .await
     {
         warn!("System message fan-out failed: {e}");
+    }
+
+    // Feed the workflow engine only for a genuinely new event. Mirrors the
+    // client-event feed in `handlers/event.rs` (which never sees kind:40099 —
+    // system messages bypass ingest, and the client feed now excludes the
+    // kind so forged system messages cannot fire triggers).
+    if was_inserted {
+        let workflow_engine = Arc::clone(&state.workflow_engine);
+        let workflow_event = stored.clone();
+        let trigger_kind = event_kind_u32(&workflow_event.event).to_string();
+        let workflow_community_host = tenant.host().to_owned();
+        // The event was stored under `tenant.community()`; `StoredEvent` does
+        // not carry the community, so pass it explicitly (same rationale as
+        // the client-event feed: a colliding channel id in community B must
+        // not trigger community A's workflows).
+        let workflow_community = tenant.community();
+        tokio::spawn(async move {
+            if let Err(e) = workflow_engine
+                .on_event(workflow_community, &workflow_event)
+                .await
+            {
+                tracing::error!(event_id = ?workflow_event.event.id, "Workflow trigger failed: {e}");
+            } else {
+                metrics::counter!(
+                    "buzz_workflow_runs_total",
+                    "trigger" => trigger_kind,
+                    "community" => workflow_community_host
+                )
+                .increment(1);
+            }
+        });
     }
 
     Ok(())

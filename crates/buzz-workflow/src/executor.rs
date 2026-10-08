@@ -41,6 +41,16 @@ pub struct TriggerContext {
     /// NIP-10 `reply`/`root` marker e-tag). Lets a `message_posted` filter
     /// select only top-level messages via `trigger_is_reply == false`.
     pub is_reply: bool,
+    /// System-message discriminator (kind:40099 triggers). The content JSON's
+    /// `type` field, e.g. `member_joined`, `member_left`, `topic_changed`.
+    /// Empty for non-40099 events.
+    #[serde(default)]
+    pub system_type: String,
+    /// System-message target (kind:40099 triggers). The content JSON's
+    /// `target` field — for `member_joined`, the joining pubkey (hex).
+    /// Empty for non-40099 events or system types with no target.
+    #[serde(default)]
+    pub target: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
 }
@@ -58,6 +68,8 @@ impl TriggerContext {
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
+            "system_type" => Some(&self.system_type),
+            "target" => Some(&self.target),
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
         }
     }
@@ -217,6 +229,8 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// | `trigger.timestamp`               | `trigger_timestamp`       |
 /// | `trigger.emoji`                   | `trigger_emoji`           |
 /// | `trigger.message_id`              | `trigger_message_id`      |
+/// | `trigger.system_type`             | `trigger_system_type`     |
+/// | `trigger.target`                  | `trigger_target`          |
 /// | `trigger.is_reply`                | `trigger_is_reply` (bool) |
 /// | `steps.STEP_ID.output.FIELD`      | `steps_STEP_ID_output_FIELD` |
 ///
@@ -298,6 +312,8 @@ pub fn build_eval_context(
         ("trigger_timestamp", trigger_ctx.timestamp.as_str()),
         ("trigger_emoji", trigger_ctx.emoji.as_str()),
         ("trigger_message_id", trigger_ctx.message_id.as_str()),
+        ("trigger_system_type", trigger_ctx.system_type.as_str()),
+        ("trigger_target", trigger_ctx.target.as_str()),
     ];
 
     for (name, val) in &trigger_fields {
@@ -1323,8 +1339,45 @@ mod tests {
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
             is_reply: false,
+            system_type: String::new(),
+            target: String::new(),
             webhook_fields: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn resolve_trigger_system_type_and_target() {
+        let mut ctx = make_trigger();
+        ctx.system_type = "member_joined".to_owned();
+        ctx.target = "bb22cc33".to_owned();
+        let out = resolve_template(
+            "{{trigger.system_type}}: {{trigger.target}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "member_joined: bb22cc33");
+    }
+
+    #[test]
+    fn trigger_context_deserializes_without_system_fields() {
+        // Runs stored before the member_joined trigger patch carry no
+        // system_type/target keys in their trigger-context JSON — those rows
+        // must still deserialize (serde defaults).
+        let old_json = json!({
+            "text": "hi",
+            "author": "aa",
+            "channel_id": "c",
+            "timestamp": "1",
+            "emoji": "",
+            "message_id": "m",
+            "is_reply": false,
+            "webhook_fields": {},
+        });
+        let ctx: TriggerContext =
+            serde_json::from_value(old_json).expect("pre-patch trigger context JSON must parse");
+        assert_eq!(ctx.system_type, "");
+        assert_eq!(ctx.target, "");
     }
 
     #[test]

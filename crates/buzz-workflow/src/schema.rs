@@ -57,6 +57,15 @@ pub enum TriggerDef {
         #[serde(default)]
         filter: Option<String>,
     },
+    /// Fires when a member joins the workflow's channel (kind:40099 system
+    /// message whose content `type` is `member_joined`). The joining pubkey
+    /// is exposed to filters and templates as `trigger_target`; the event's
+    /// `type` discriminator as `trigger_system_type`.
+    MemberJoined {
+        /// Optional evalexpr filter (flat var names, e.g. `trigger_target`).
+        #[serde(default)]
+        filter: Option<String>,
+    },
     /// Fires on a cron schedule.
     Schedule {
         /// Cron expression (UTC). Mutually exclusive with `interval`.
@@ -221,6 +230,7 @@ impl WorkflowDef {
             TriggerDef::MessagePosted { .. }
                 | TriggerDef::ReactionAdded { .. }
                 | TriggerDef::DiffPosted { .. }
+                | TriggerDef::MemberJoined { .. }
         );
         if !trigger_has_message {
             for step in &self.steps {
@@ -233,7 +243,7 @@ impl WorkflowDef {
                 ) {
                     return Err(WorkflowError::InvalidDefinition(format!(
                         "step '{}': reply_in_thread requires a message-based trigger \
-                         (message_posted, reaction_added, or diff_posted); \
+                         (message_posted, reaction_added, diff_posted, or member_joined); \
                          schedule and webhook triggers have no message to reply to",
                         step.id
                     )));
@@ -345,6 +355,42 @@ mod tests {
             }
             other => panic!("unexpected trigger: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_member_joined_trigger() {
+        let yaml = "name: Welcome\ntrigger:\n  on: member_joined\nsteps:\n  - id: greet\n    action: send_message\n    text: 'welcome'\n";
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::MemberJoined { filter } => {
+                assert_eq!(filter.as_deref(), None);
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+
+        // The canonical JSON round-trips back to the same variant.
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        assert!(matches!(reparsed.trigger, TriggerDef::MemberJoined { .. }));
+    }
+
+    #[test]
+    fn parse_member_joined_trigger_with_filter() {
+        let yaml = "name: Welcome\ntrigger:\n  on: member_joined\n  filter: 'trigger_target != \"\"'\nsteps:\n  - id: greet\n    action: send_message\n    text: 'welcome'\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::MemberJoined { filter } => {
+                assert_eq!(filter.as_deref(), Some("trigger_target != \"\""));
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn member_joined_allows_reply_in_thread() {
+        // member_joined is a message-based trigger (a kind:40099 system message
+        // exists to reply to), so reply_in_thread must validate.
+        let yaml = "name: Welcome\ntrigger:\n  on: member_joined\nsteps:\n  - id: greet\n    action: send_message\n    text: 'welcome'\n    reply_in_thread: true\n";
+        parse_yaml(yaml).expect("member_joined + reply_in_thread should validate");
     }
 
     #[test]
