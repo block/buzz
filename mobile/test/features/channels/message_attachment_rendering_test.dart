@@ -76,7 +76,7 @@ void main() {
           );
           await tester.pumpWidget(
             _app(
-              'Look\n![photo](${angled ? '<$url>' : url})',
+              'Look\n![photo \\[Q4\\]](${angled ? '<$url>' : url})',
               tags: [
                 [
                   'imeta',
@@ -134,7 +134,7 @@ void main() {
         String? requested;
         await tester.pumpWidget(
           _app(
-            '![clip](<$url> $title)',
+            '![clip \\[Q4\\]](<$url> $title)',
             tags: [
               ['imeta', 'url $url', 'm ${item.$2}'],
             ],
@@ -156,44 +156,64 @@ void main() {
       });
     }
 
-    for (final extension in ['pdf', 'txt', 'zip', 'mp3', 'svg']) {
-      testWidgets(
-        '$extension attachment with title $title opens with auth and filename',
-        (tester) async {
-          final url = '$_base/media/report.$extension';
-          String? opened;
-          String? filename;
-          Map<String, String>? headers;
-          await tester.pumpWidget(
-            _app(
-              '[report.$extension](<$url> $title)',
-              overrides: [
-                mediaGetAuthServiceProvider.overrideWithValue(
-                  MediaGetAuthService(
-                    baseUrl: _base,
-                    nsec: nostr.Keys.generate().nsec,
+    for (final (stem, angled) in [
+      ('report [Q4]', false),
+      ('report [Q4]', true),
+      ('report [Q4', true),
+      ('report Q4]', true),
+      (r'report \ [Q4]', true),
+    ]) {
+      for (final extension in ['pdf', 'txt', 'zip', 'mp3', 'svg']) {
+        testWidgets(
+          '$stem.$extension angled=$angled title $title opens with auth and filename',
+          (tester) async {
+            final url = '$_base/media/report.$extension';
+            final blob = BlobDescriptor(
+              url: url,
+              sha256: 'a' * 64,
+              size: 1,
+              type: 'application/octet-stream',
+              uploaded: 0,
+              filename: '$stem.$extension',
+            );
+            final markdown = blob.toMarkdownImage().replaceFirst(
+              '($url)',
+              angled ? '(<$url> $title)' : '($url)',
+            );
+            String? opened;
+            String? filename;
+            Map<String, String>? headers;
+            await tester.pumpWidget(
+              _app(
+                markdown,
+                overrides: [
+                  mediaGetAuthServiceProvider.overrideWithValue(
+                    MediaGetAuthService(
+                      baseUrl: _base,
+                      nsec: nostr.Keys.generate().nsec,
+                    ),
                   ),
-                ),
-                openDownloadedFileProvider.overrideWithValue((
-                  url,
-                  auth,
-                  name,
-                ) async {
-                  opened = url;
-                  headers = auth;
-                  filename = name;
-                }),
-              ],
-            ),
-          );
-          await tester.tap(find.text('report.$extension'));
-          await tester.pump();
-          expect(opened, url);
-          expect(filename, 'report.$extension');
-          expect(headers?['Authorization'], startsWith('Nostr '));
-          expect(find.byType(MediaImage), findsNothing);
-        },
-      );
+                  openDownloadedFileProvider.overrideWithValue((
+                    url,
+                    auth,
+                    name,
+                  ) async {
+                    opened = url;
+                    headers = auth;
+                    filename = name;
+                  }),
+                ],
+              ),
+            );
+            await tester.tap(find.text('$stem.$extension'));
+            await tester.pump();
+            expect(opened, url);
+            expect(filename, '$stem.$extension');
+            expect(headers?['Authorization'], startsWith('Nostr '));
+            expect(find.byType(MediaImage), findsNothing);
+          },
+        );
+      }
     }
   }
 
@@ -209,7 +229,7 @@ void main() {
       );
       await tester.pumpWidget(
         _app(
-          'Gallery\n![first](<$first>)\n![second]($second)',
+          'Gallery\n![first](<$first>)\n![second \\[Q4\\]]($second)',
           tags: [
             [
               'imeta',
@@ -226,6 +246,7 @@ void main() {
       await _waitForImages(tester);
       await tester.pumpAndSettle();
       expect(find.text('2 images'), findsOneWidget);
+      expect(find.bySemanticsLabel('Open second [Q4]'), findsOneWidget);
       expect(find.bySemanticsLabel('Open First photo'), findsOneWidget);
       expect(find.text('Image unavailable'), findsNothing);
       await tester.tap(

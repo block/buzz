@@ -66,6 +66,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
       ),
+      _MarkdownLabelEntityMd(),
       ...MarkdownComponent.inlineComponents,
     ],
     [inputs],
@@ -140,4 +141,20 @@ class _InlineComponentInputs {
   @override
   int get hashCode =>
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
+}
+
+// Encoded label punctuation must remain literal even inside nested formatting.
+class _MarkdownLabelEntityMd extends InlineMd {
+  @override
+  RegExp get exp => RegExp(r'&#(?:91|92|93);');
+
+  @override
+  Set<MarkdownScope> get scopes => const {MarkdownScope.linkLabel};
+
+  @override
+  InlineSpan span(
+    BuildContext context,
+    String text,
+    GptMarkdownConfig config,
+  ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
 }
