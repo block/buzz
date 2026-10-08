@@ -1256,6 +1256,11 @@ pub async fn emit_group_discovery_events(
         // Channel type tag so clients can distinguish stream/forum/dm without
         // inference, then the creator. The same tags lead 39001 and 39002.
         tags.extend(group_state_identity_tags(&channel.identity())?);
+        // Creation time, so readers can pick the oldest of two channels. The
+        // event's own created_at changes on every edit.
+        tags.push(buzz_core::channel::channel_created_at_tag(
+            channel.created_at.timestamp(),
+        )?);
         // Optional topic / purpose for richer client UX
         if let Some(ref topic) = channel.topic {
             if !topic.is_empty() {

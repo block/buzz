@@ -57,7 +57,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed`, `["t", <channel_type>]` and `["P", <creator>]` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed`, `["t", <channel_type>]`, `["P", <creator>]` and `["created_at", <unix seconds>]` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags for all members |
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
@@ -106,7 +106,7 @@ All discovery events include a `d` tag set to the channel UUID (NIP-29 addressab
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `closed`, `t=<channel_type>`, `P=<creator>` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
+| **39000** | `d=<uuid>`, `name`, `closed`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
 | **39001** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags with role label (`owner`, `admin`) | Admin list |
 | **39002** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags for all members | Member list |
 
@@ -116,6 +116,10 @@ from the database, and it does not change when ownership moves. Uppercase
 `P` follows NIP-22, NIP-34 and NIP-72, where it names the author of the root
 object; lowercase `p` already lists members and DM participants on these
 kinds.
+
+kind:39000 also carries `["created_at", <unix seconds>]`: the time the
+channel was created. The event's own `created_at` is the time of the last
+edit, so use the tag to find the older of two channels.
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:

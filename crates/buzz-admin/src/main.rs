@@ -739,7 +739,7 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
-    use buzz_core::channel::group_state_identity_tags;
+    use buzz_core::channel::{channel_created_at_tag, group_state_identity_tags};
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
@@ -844,6 +844,7 @@ async fn reconcile_channels(
                     &channel.channel_type,
                     &channel.created_by,
                 )?);
+                tags.push(channel_created_at_tag(channel.created_at.timestamp())?);
 
                 let event = EventBuilder::new(Kind::Custom(39000), "")
                     .tags(tags)
