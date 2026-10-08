@@ -92,6 +92,16 @@ pub struct EventQuery {
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Restrict results to events that, for every `(name, values)` entry,
+    /// have a `[name, value]` tag for at least one of `values`. Uses JSONB
+    /// containment against `tags` (GIN-indexed) before SQL `LIMIT`.
+    ///
+    /// Containment can over-match: `[["t", "x"]]` is contained in any tag
+    /// array with an element holding both strings, such as `["name", "t",
+    /// "x"]`. It never under-matches, so it is a candidate filter; callers
+    /// that need exact NIP-01 semantics must post-filter. Entries with no
+    /// values are ignored.
+    pub tag_values: Vec<(String, Vec<String>)>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -152,6 +162,7 @@ impl EventQuery {
             e_tags: None,
             d_tag_values: None,
             custom_tag: None,
+            tag_values: Vec::new(),
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -741,6 +752,8 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
             .push_bind(containment);
     }
 
+    push_tag_value_filters(&mut qb, col_prefix, &q.tag_values);
+
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
             .push_bind(s);
@@ -863,6 +876,27 @@ fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_
     qb.push(format!(" AND {col_prefix}tags @> ANY("))
         .push_bind(containments)
         .push("::jsonb[])");
+}
+
+/// One `tags @> ANY(...)` containment test per [`EventQuery::tag_values`]
+/// entry, so each entry is an OR over its values and entries are ANDed.
+fn push_tag_value_filters(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    tag_values: &[(String, Vec<String>)],
+) {
+    for (name, values) in tag_values {
+        if values.is_empty() {
+            continue;
+        }
+        let containments: Vec<serde_json::Value> = values
+            .iter()
+            .map(|value| serde_json::json!([[name, value]]))
+            .collect();
+        qb.push(format!(" AND {col_prefix}tags @> ANY("))
+            .push_bind(containments)
+            .push("::jsonb[])");
+    }
 }
 
 /// Match `#d` on artifact rows before `LIMIT` while leaving other kinds to the
@@ -1062,6 +1096,8 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     if let Some(ref values) = q.d_tag_values {
         push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
     }
+
+    push_tag_value_filters(&mut qb, col_prefix, &q.tag_values);
 
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
