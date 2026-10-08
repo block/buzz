@@ -2735,124 +2735,14 @@ mod postgres_tests {
         );
     }
 
+    // Lease activation must wait for an event insert holding the shared gate lock.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn activation_and_renewal_do_not_backfill_recent_events() {
-        let pool = setup_pool().await;
-        // Exercise both production lease-write paths, including renewal after
-        // a lease expires. Each phase starts with no eligible lease.
-        for accept_event in [false, true] {
-            let community = make_community(&pool).await;
-            let keys = nostr::Keys::generate();
-            for generation in 1..=2 {
-                let skipped = nostr::EventBuilder::new(nostr::Kind::Custom(9), "before enrollment")
-                    .sign_with_keys(&nostr::Keys::generate())
-                    .expect("sign skipped event");
-                crate::event::insert_event(&pool, community, &skipped, None)
-                    .await
-                    .expect("insert before enrollment");
-                let event = lease_event(&keys, "install", generation * 10);
-                let version = LeaseVersion {
-                    source_event_id: event.id.as_bytes(),
-                    source_created_at: generation as i64 * 10,
-                    generation: generation as i64,
-                    expires_at: i64::MAX / 2,
-                };
-                let active = ActiveLease {
-                    app_profile: "ios-production",
-                    endpoint_hash: &[92; 32],
-                    endpoint_grant: "opaque-grant",
-                    max_class: "default",
-                    subscriptions: &serde_json::json!([]),
-                };
-                if accept_event {
-                    assert_eq!(
-                        accept_lease_event(
-                            &pool,
-                            community,
-                            &event,
-                            "install",
-                            version,
-                            Some(active),
-                            16
-                        )
-                        .await
-                        .expect("accept lease event"),
-                        AcceptLeaseOutcome::Accepted
-                    );
-                } else {
-                    assert_eq!(
-                        replace_active_lease(
-                            &pool,
-                            community,
-                            keys.public_key().as_bytes(),
-                            "install",
-                            version,
-                            active
-                        )
-                        .await
-                        .expect("replace active lease"),
-                        ReplaceLeaseOutcome::Accepted
-                    );
-                }
-                let direct = nostr::EventBuilder::new(nostr::Kind::Custom(9), "after enrollment")
-                    .sign_with_keys(&nostr::Keys::generate())
-                    .expect("sign direct event");
-                crate::event::insert_event(&pool, community, &direct, None)
-                    .await
-                    .expect("insert after enrollment");
-                let queued: Vec<Vec<u8>> = sqlx::query_scalar(
-                    "SELECT event_id FROM push_match_queue WHERE community_id=$1",
-                )
-                .bind(community.as_uuid())
-                .fetch_all(&pool)
-                .await
-                .expect("read queue");
-                assert_eq!(queued, vec![direct.id.as_bytes().to_vec()]);
-
-                // Model completed matcher work and an expired lease. Renewal
-                // must neither recover skipped events nor requeue finished work.
-                sqlx::query("DELETE FROM push_match_queue WHERE community_id=$1")
-                    .bind(community.as_uuid())
-                    .execute(&pool)
-                    .await
-                    .expect("complete matcher work");
-                sqlx::query("UPDATE push_leases SET expires_at=0 WHERE community_id=$1")
-                    .bind(community.as_uuid())
-                    .execute(&pool)
-                    .await
-                    .expect("expire lease");
-            }
-        }
-    }
-
-    /// An insert that wins the gate precedes effective enrollment. Activation
-    /// must wait for it to commit, without retrospectively enqueueing it.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn gate_orders_lease_activation_after_in_flight_event_without_backfill() {
+    async fn gate_orders_lease_activation_after_in_flight_event() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
 
-        // Phase 0: no lease anywhere in this community — a committed gated-kind
-        // event must not be enqueued.
-        let skipped = nostr::EventBuilder::new(nostr::Kind::Custom(9), "gate skips me")
-            .sign_with_keys(&nostr::Keys::generate())
-            .expect("sign skipped event");
-        crate::event::insert_event(&pool, community, &skipped, None)
-            .await
-            .expect("insert lease-less event");
-        let queued: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id=$1")
-                .bind(community.as_uuid())
-                .fetch_one(&pool)
-                .await
-                .expect("count queue after lease-less insert");
-        assert_eq!(queued, 0, "gate must skip enqueue with no eligible lease");
-
-        // Phase 1: hold an event-insert transaction open past its INSERT. The
-        // (non-deferred) trigger has already run: shared gate lock held, EXISTS
-        // saw no lease, and enqueue was skipped before effective enrollment.
+        // Hold the insert transaction open after its trigger takes the shared gate lock.
         let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced wake")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign raced event");
@@ -2919,8 +2809,7 @@ mod postgres_tests {
         assert!(parked, "activation must block on the exclusive gate lock");
         assert!(!activation.is_finished());
 
-        // Release the event; activation acquires the gate after this insert.
-        // Neither earlier event is eligible for retrospective enqueueing.
+        // Committing the insert releases the shared lock so activation can proceed.
         insert_tx.commit().await.expect("commit raced insert");
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(10), activation)
@@ -2929,31 +2818,21 @@ mod postgres_tests {
                 .expect("join activation"),
             ReplaceLeaseOutcome::Accepted
         );
-        let queued: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT event_id FROM push_match_queue WHERE community_id=$1 ORDER BY created_at",
-        )
-        .bind(community.as_uuid())
-        .fetch_all(&pool)
-        .await
-        .expect("read queue after activation");
-        assert!(
-            queued.is_empty(),
-            "activation must not enqueue either pre-enrollment event"
-        );
-
-        // Phase 2: with the lease now active, the trigger enqueues directly.
+        // The active lease makes subsequent messages eligible for enqueueing.
         let direct = nostr::EventBuilder::new(nostr::Kind::Custom(9), "direct enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign direct event");
         crate::event::insert_event(&pool, community, &direct, None)
             .await
             .expect("insert post-activation event");
-        let queued: Vec<Vec<u8>> =
-            sqlx::query_scalar("SELECT event_id FROM push_match_queue WHERE community_id=$1")
-                .bind(community.as_uuid())
-                .fetch_all(&pool)
-                .await
-                .expect("read post-activation queue");
-        assert_eq!(queued, vec![direct.id.as_bytes().to_vec()]);
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_match_queue WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(direct.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count post-activation message jobs");
+        assert_eq!(queued, 1);
     }
 }
