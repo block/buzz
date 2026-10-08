@@ -174,12 +174,10 @@ pub(super) async fn write(
         outcomes.push(outcome);
     }
     let mut body = json!({ "outcomes": outcomes });
-    // Committed outcomes stand even when their rows cannot be read: omit them.
-    if let Ok(Ok(channels)) = tokio::time::timeout(
-        Duration::from_secs(8),
-        refreshed(&state, &headers, &principal, &applied),
-    )
-    .await
+    // Committed outcomes stand even when their rows cannot be read in the
+    // remaining budget: omit them.
+    if let Ok(Ok(channels)) =
+        tokio::time::timeout_at(deadline, refreshed(&state, &headers, &principal, &applied)).await
     {
         body["channels"] = json!(channels);
     }

@@ -75,7 +75,8 @@ pub struct ChannelReadSummary {
     /// Unread top-level messages directed at the actor: every one in a DM,
     /// otherwise those that tag the actor with `p` or carry `broadcast=1`.
     pub mentions: u32,
-    /// The message the channel timeline was last marked through, if any.
+    /// The anchor of the timeline's frontier: the marked message that arrived
+    /// last. None until the timeline is marked.
     pub read_through_id: Option<String>,
     /// Last eligible top-level message to arrive, whatever its author or read
     /// progress: marking the timeline through it reads the timeline.
@@ -91,9 +92,11 @@ pub struct ThreadReadSummary {
     pub root_id: String,
     /// Whether an unread reply that counts was found.
     pub unread: bool,
-    /// Unread replies that count. Every one is directed at the actor.
+    /// Unread replies that count: directed at the actor, or in one of the
+    /// actor's conversations.
     pub mentions: u32,
-    /// The message the thread was last marked through, if any.
+    /// The anchor of the thread's frontier: the marked message that arrived
+    /// last. None until the thread is marked.
     pub read_through_id: Option<String>,
     /// Last counted reply to arrive: marking through it reads the thread.
     pub latest_id: String,

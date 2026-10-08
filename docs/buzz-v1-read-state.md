@@ -76,7 +76,7 @@ marking one never moves another.
 |---|---|---|
 | `unread` | an unread top-level message counts | an unread reply counts |
 | `mentions` | unread top-level messages directed at you | unread replies that count |
-| `read_through_id` | the message the timeline was last marked through, or null | the message the thread was last marked through, or null |
+| `read_through_id` | the anchor of the timeline's frontier, or null | the anchor of the thread's frontier, or null |
 | `latest_id` | the last eligible top-level message to arrive, or null | the last counted unread reply to arrive |
 
 A thread reply never makes the channel row unread and never becomes its
@@ -89,8 +89,10 @@ bounded scans found no top-level message, not that the channel is empty.
 `read_through_id` may name a message that has since been deleted.
 
 `threads` lists threads with unread replies that count, newest unread reply
-first by author time (then `root_id`), at most 5. A thread row's `unread` is
-always true in this version. No message bytes are included.
+first by author time (then `root_id`), at most 5. Threads past the fifth are
+omitted with their mentions, and nothing signals the omission: after marking
+the listed threads read, a refresh can list the next ones. A thread row's
+`unread` is always true in this version. No message bytes are included.
 
 A message is eligible when it is non-own, nondeleted, of the advertised
 `eligible_kinds` and inside the horizon. The same kinds alone define latest
@@ -146,8 +148,8 @@ request order. An ambiguous timeout/storage failure returns
 later failures. `channels` holds the updated sidebar row of each distinct
 channel with an applied intent, in the sidebar's row shape and ordered by ID;
 a channel you have not joined has no row. Replace those rows rather than
-re-deriving them. `channels` is omitted when the rows could not be read after
-the writes committed: refresh them with `?channel_ids=`. Retry the same
+re-deriving them. `channels` is omitted when the rows could not be read within
+the request's deadline after the writes committed: refresh them with `?channel_ids=`. Retry the same
 operands, never substitute latest. Keep pending intent durably on the client
 until its outcome is resolved.
 
@@ -186,9 +188,9 @@ microsecond resolution. Three limits follow, none of which strands a badge:
 
 A channel's `latest_id` is the last top-level message to arrive among those the
 unread count examined: the 4,096 most recent events by author time inside the
-horizon. So marking through it reads every top-level message counted. When the
-horizon holds no top-level message, it is the last to arrive among the
-channel's 256 most recent events.
+horizon. So marking through it reads every top-level message counted. When
+that scan holds no top-level message, it is the last top-level message to
+arrive among the channel's 256 most recent events.
 
 There is no import of earlier client read state. The relay records the
 account's `started_at` at its first applied read intent and never moves it.
@@ -211,8 +213,8 @@ device-local.
   500 ms savepoint budget. The lookup is exact, so its work grows with the
   replies under each parent. Past either bound a reply is undecided and left
   out.
-- DB statement/lock deadlines and HTTP read deadlines bound work; writes use a
-  shared eight-second intent-processing deadline after admission. Limits are
+- DB statement/lock deadlines and HTTP read deadlines bound work; a write's intents
+  and its row refresh share one eight-second deadline after admission. Limits are
   containment, not a production capacity claim.
 
 Apply migrations 0056 through 0058 (or the equivalent desired schema). 0056
