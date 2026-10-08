@@ -115,12 +115,7 @@ void bubbleContentTests() {
         tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
         linkColor,
       );
-      final link = tester.widget<Text>(
-        find.byWidgetPredicate(
-          (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
-        ),
-      );
-      expect(link.textSpan?.style?.color, linkColor);
+      expect(_linkSpans(tester, 'Website').single.style?.color, linkColor);
       await tester.tap(find.text('Alice'));
       expect(tapped, 'person');
       await tester.tap(find.text('Helper'));
