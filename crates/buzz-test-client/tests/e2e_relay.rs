@@ -3104,6 +3104,30 @@ async fn test_nip29_announce_channel_wire() {
         .expect("send member post");
     assert!(ok.accepted, "member post: {}", ok.message);
     member_client.disconnect().await.ok();
+    let member_post_id = ok.event_id;
+
+    // A reaction is a write: a guest cannot react to the member's post.
+    let reaction = EventBuilder::new(Kind::Custom(7), "+")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["e", &member_post_id]).unwrap(),
+        ])
+        .sign_with_keys(&outsider)
+        .unwrap();
+    let mut guest_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("connect guest");
+    let ok = guest_client
+        .send_event(reaction)
+        .await
+        .expect("send guest reaction");
+    assert!(!ok.accepted, "guest must not react");
+    assert!(
+        ok.message.contains("only members can post"),
+        "{}",
+        ok.message
+    );
+    guest_client.disconnect().await.ok();
 
     // Turning the rule off is explicit, and guests can post again.
     assert_eq!(
