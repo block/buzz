@@ -40,7 +40,7 @@ class _CommunitySwitcherRoute extends _SettingsPageRoute {
   _CommunitySwitcherRoute({
     required super.builder,
     required super.onTransitionProgress,
-  });
+  }) : super(opaque: false);
 
   bool flying = false;
 
