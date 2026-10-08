@@ -1161,35 +1161,80 @@ pub(crate) async fn admitted_writer(tx: &mut AdmittedTx) {
     );
 }
 
-#[test]
-fn admitted_tx_is_constructed_only_by_admitting_constructors() {
-    // The fields are private to `runtime/admitted_tx.rs`, so only that file can
-    // build the value. Pin that each function there that builds it also admits
-    // the transaction it wraps, so a new unguarded constructor cannot slip in.
-    let source = include_str!("../src/runtime/admitted_tx.rs");
-    let production: String = strip_cfg_test_items(source)
+/// Every function in `source` that builds an `AdmittedTx`, paired with whether
+/// it admits the transaction it wraps. The scan deliberately does not strip
+/// `#[cfg(test)]` items: a test-only forge would let crate tests run follow-ups
+/// on an unadmitted transaction, so it must admit like any other constructor.
+fn admitted_tx_constructors(source: &str) -> Vec<(String, bool)> {
+    let production: String = source
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
         // `impl … for AdmittedTx {` headers open a block, not a value.
         .filter(|line| !line.trim_start().starts_with("impl"))
         .map(|line| format!("{line}\n"))
         .collect();
-    let constructors: Vec<&str> = function_slices(&production)
+    function_slices(&production)
         .into_iter()
         .filter(|function| function.contains("Self {") || function.contains("AdmittedTx {"))
-        .collect();
+        .map(|function| {
+            let admits = function.contains(".guard_transaction(&mut tx, community)")
+                || function.contains(".guard_transaction_with_serving_lease(&mut tx, lease)");
+            (function.to_string(), admits)
+        })
+        .collect()
+}
+
+#[test]
+fn admitted_tx_is_constructed_only_by_admitting_constructors() {
+    // The fields are private to `runtime/admitted_tx.rs`, so only that file can
+    // build the value. Pin that each function there that builds it also admits
+    // the transaction it wraps, so a new unguarded constructor cannot slip in.
+    let constructors = admitted_tx_constructors(include_str!("../src/runtime/admitted_tx.rs"));
     assert_eq!(
         constructors.len(),
         2,
         "AdmittedTx must have exactly the two admitting constructors"
     );
-    for constructor in constructors {
+    for (constructor, admits) in constructors {
         assert!(
-            constructor.contains(".guard_transaction(&mut tx, community)")
-                || constructor.contains(".guard_transaction_with_serving_lease(&mut tx, lease)"),
+            admits,
             "AdmittedTx constructor must admit the transaction it wraps: {constructor}"
         );
     }
+}
+
+#[test]
+fn admitted_tx_constructor_scan_reports_test_only_forges() {
+    let source = r#"
+impl AdmittedTx {
+    pub(crate) async fn admit(mut tx: Tx, community: CommunityId) -> Result<Self> {
+        guard.guard_transaction(&mut tx, community).await?;
+        Ok(Self { tx, community })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forge_for_tests(tx: Tx, community: CommunityId) -> Self {
+        Self { tx, community }
+    }
+}
+"#;
+    let unadmitted: Vec<String> = admitted_tx_constructors(source)
+        .into_iter()
+        .filter(|(_, admits)| !admits)
+        .map(|(function, _)| {
+            function
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        unadmitted,
+        ["pub(crate) fn forge_for_tests(tx: Tx, community: CommunityId) -> Self {"],
+        "an indented `#[cfg(test)]` forge must still be reported as unadmitted"
+    );
 }
 
 #[test]
