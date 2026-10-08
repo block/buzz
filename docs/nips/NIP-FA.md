@@ -171,7 +171,7 @@ WebSocket connections send only `Nostr-Federated-Identity` on the upgrade reques
 
 ## Security Considerations
 
-- Clients MUST send `session_token` only to the adapter endpoints defined in this NIP, and MUST NOT send it to a relay or any other origin. A leaked session token lets its holder request assertions for a key they control until the adapter binds the user to a key.
+- Clients MUST send `session_token` only to the adapter's origin (the scheme, host, and port of `{adapter_base}`), and MUST NOT send it to a relay or any other origin. A leaked session token lets its holder request assertions for a key they control until the adapter binds the user to a key.
 - Clients and adapters MUST NOT log credentials: the `Authorization` and `Nostr-Authorization` header values on every adapter request, including `/v1/session`, and the `handoff_secret` and `session_token` values in the code exchange request and response.
 
 ## Privacy
