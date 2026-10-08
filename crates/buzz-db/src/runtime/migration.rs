@@ -705,7 +705,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations.len(), 58);
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -716,6 +716,11 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ALTER TABLE personal_read_accounts ADD COLUMN started_at"));
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN through_message_id"));
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -2229,6 +2234,18 @@ mod postgres_tests {
             .get("personal_read_accounts")
             .expect("schema.sql personal read accounts")
             .contains(started_at_column));
+        // 0058 replaces the frontier's whole-channel cut with its anchor ID.
+        let threads_through_column = "threads_through_timestamp timestamptz \
+            check (threads_through_timestamp is null or root_id = ''::bytea), ";
+        let through_message_column =
+            "through_message_id bytea check (octet_length(through_message_id) = 32), ";
+        let through_message = MIGRATOR
+            .iter()
+            .find(|m| m.version == 58)
+            .expect("personal read anchor migration")
+            .sql
+            .as_str();
+        assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
         for (table, definition) in personal.tables {
             let in_schema = schema.tables.get(&table).map(|schema_definition| {
                 if table == "personal_read_accounts" {
@@ -2237,6 +2254,11 @@ mod postgres_tests {
                     schema_definition.clone()
                 }
             });
+            let definition = if table == "personal_read_frontiers" {
+                definition.replacen(threads_through_column, through_message_column, 1)
+            } else {
+                definition
+            };
             assert_eq!(
                 in_schema.as_ref(),
                 Some(&definition),
