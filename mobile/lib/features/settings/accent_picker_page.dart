@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
@@ -74,7 +74,7 @@ class _AccentRow extends StatelessWidget {
       ),
       title: Text(label),
       trailing: selected
-          ? Icon(LucideIcons.check, size: 18, color: context.colors.primary)
+          ? Icon(BuzzIcons.check, size: 18, color: context.colors.primary)
           : null,
       onTap: onTap,
     );

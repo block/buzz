@@ -18,7 +18,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart' as audio;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -2403,7 +2403,7 @@ Photos
           ),
           findsOneWidget,
         );
-        expect(find.byIcon(LucideIcons.play), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.play), findsOneWidget);
       });
 
       testWidgets('derives a first frame for a posterless video event', (
@@ -2731,11 +2731,11 @@ Photos
           expect(find.text('engineering'), findsOneWidget);
           expect(find.text('buzz'), findsOneWidget);
           expect(find.text('buzz · cdcdcdcd'), findsNWidgets(2));
-          expect(find.byIcon(LucideIcons.messageSquare), findsOneWidget);
-          expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-          expect(find.byIcon(LucideIcons.folderGit2), findsOneWidget);
-          expect(find.byIcon(LucideIcons.gitPullRequest), findsOneWidget);
-          expect(find.byIcon(LucideIcons.circleDot), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.messageSquare), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.folderGit2), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.gitPullRequest), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.circleDot), findsOneWidget);
           expect(
             find.bySemanticsLabel(
               'Open message cdcdcdcd in channel engineering',
@@ -2813,7 +2813,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
         expect(find.text('@'), findsNothing);
         expect(find.text('Helper Bot'), findsOneWidget);
       });
@@ -2831,7 +2831,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
         expect(find.text('Helper Bot'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
@@ -2944,7 +2944,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('general'), findsOneWidget);
         expect(find.text('#general'), findsNothing);
       });
@@ -3014,7 +3014,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('unknown'), findsOneWidget);
         expect(find.text('#unknown'), findsNothing);
       });

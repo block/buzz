@@ -1,10 +1,11 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -74,11 +75,11 @@ void main() {
     expect(tester.getSize(bar), const Size(218, 56));
     expect(created.where((params) => params['usesGlass'] == true), isNotEmpty);
     expect(
-      find.descendant(of: bar, matching: find.byIcon(LucideIcons.house500)),
+      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.house500)),
       findsOneWidget,
     );
     expect(
-      find.descendant(of: bar, matching: find.byIcon(LucideIcons.inbox300)),
+      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.inbox300)),
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('Activity, unread'), findsOneWidget);
@@ -97,7 +98,7 @@ void main() {
           .widget<Icon>(
             find.descendant(
               of: launcherGlass,
-              matching: find.byIcon(LucideIcons.plus),
+              matching: find.byIcon(BuzzIcons.plus),
             ),
           )
           .color,
@@ -108,10 +109,7 @@ void main() {
       greaterThanOrEqualTo(2),
     );
     expect(
-      find.descendant(
-        of: launcherGlass,
-        matching: find.byIcon(LucideIcons.plus),
-      ),
+      find.descendant(of: launcherGlass, matching: find.byIcon(BuzzIcons.plus)),
       findsOneWidget,
     );
     await tester.tap(find.byTooltip('Create or start conversation'));
@@ -129,17 +127,33 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pump();
     expect(
-      find.descendant(of: bar, matching: find.byIcon(LucideIcons.inbox500)),
+      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.inbox500)),
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('Activity, unread'), findsNothing);
+    final semantics = tester.ensureSemantics();
+    expect(find.byType(SearchPage), findsNothing);
+    expect(
+      tester
+          .getSemantics(find.bySemanticsLabel('Search'))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isFalse',
+    );
     await tester.tap(find.byTooltip('Search'));
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pump();
+    expect(find.byType(SearchPage), findsOneWidget);
     expect(
-      find.descendant(of: bar, matching: find.byIcon(LucideIcons.search500)),
-      findsOneWidget,
+      tester
+          .getSemantics(find.bySemanticsLabel('Search'))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isTrue',
     );
+    semantics.dispose();
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     debugDefaultTargetPlatformOverride = null;

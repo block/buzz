@@ -261,7 +261,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             if (starredStreamChannels.isNotEmpty)
               _ChannelSection(
                 title: 'Starred',
-                icon: LucideIcons.star,
+                icon: BuzzIcons.star,
                 showTopDivider: false,
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
@@ -372,7 +372,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               ),
             _ChannelSection(
               title: 'Channels',
-              icon: LucideIcons.hash,
+              icon: BuzzIcons.hash,
               showTopDivider:
                   starredStreamChannels.isNotEmpty || userSections.isNotEmpty,
               expanded: channelsExpanded.value,
@@ -388,7 +388,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             ),
             _ChannelSection(
               title: 'DMs',
-              icon: LucideIcons.messagesSquare,
+              icon: BuzzIcons.messagesSquare,
               showTopDivider: true,
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,

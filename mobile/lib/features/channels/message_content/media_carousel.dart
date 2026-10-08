@@ -169,7 +169,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
                                         ),
                               errorBuilder: (_, _, _) =>
                                   const _MediaPreviewFallback(
-                                    icon: LucideIcons.imageOff,
+                                    icon: BuzzIcons.imageOff,
                                     label: 'Image unavailable',
                                   ),
                             ),

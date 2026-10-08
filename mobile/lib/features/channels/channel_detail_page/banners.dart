@@ -45,7 +45,7 @@ class _HeaderEphemeralBadge extends StatelessWidget {
     return Tooltip(
       message: display.tooltipLabel,
       child: Icon(
-        LucideIcons.clockFading,
+        BuzzIcons.clockFading,
         key: const Key('chat-ephemeral-badge'),
         size: 16,
         color: context.colors.onSurfaceVariant,

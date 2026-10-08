@@ -173,7 +173,7 @@ class _ThreadMessageList extends StatelessWidget {
                                     onPressed: onRetryReplies,
                                     tooltip: 'Retry',
                                     icon: const Icon(
-                                      LucideIcons.refreshCcw,
+                                      BuzzIcons.refreshCcw,
                                       size: 16,
                                     ),
                                   ),

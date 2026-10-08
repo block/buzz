@@ -341,7 +341,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                           if (error.value != null || snapshot.hasError) {
                             return const _MediaLoadFailure(
                               message: 'Failed to load video',
-                              icon: LucideIcons.videoOff,
+                              icon: BuzzIcons.videoOff,
                             );
                           }
 
@@ -482,7 +482,7 @@ class _VideoLoadingPoster extends StatelessWidget {
     return ColoredBox(
       color: context.colors.surfaceContainerHighest,
       child: Icon(
-        LucideIcons.video,
+        BuzzIcons.video,
         size: 40,
         color: context.colors.onSurfaceVariant,
       ),

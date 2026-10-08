@@ -89,7 +89,7 @@ class _FilterMenuButton extends StatelessWidget {
                         width: Grid.sm,
                         child: entry.key == filter
                             ? Icon(
-                                LucideIcons.check,
+                                BuzzIcons.check,
                                 size: 16,
                                 color: context.colors.primary,
                               )
@@ -128,7 +128,7 @@ class _FilterMenuButton extends StatelessWidget {
                 ),
                 const SizedBox(width: Grid.quarter),
                 Icon(
-                  LucideIcons.chevronDown,
+                  BuzzIcons.chevronDown,
                   size: 16,
                   color: navigationPrimaryForeground(context),
                 ),
@@ -168,7 +168,7 @@ class _InboxOptionsButton extends StatelessWidget {
           width: Grid.xl,
           height: Grid.xl,
         ),
-        icon: const Icon(LucideIcons.ellipsis, size: 20),
+        icon: const Icon(BuzzIcons.ellipsis, size: 20),
         onPressed: () async {
           final selected = await showAnchoredPopover<String>(
             context: buttonContext,
@@ -185,7 +185,7 @@ class _InboxOptionsButton extends StatelessWidget {
                     ),
                     if (unreadOnly)
                       Icon(
-                        LucideIcons.check,
+                        BuzzIcons.check,
                         size: 16,
                         color: context.colors.primary,
                       ),

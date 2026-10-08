@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/clipboard_utils.dart';
@@ -131,7 +131,7 @@ class NoteCard extends HookConsumerWidget {
                                   if (isAgent) ...[
                                     const SizedBox(width: Grid.half),
                                     Icon(
-                                      LucideIcons.bot,
+                                      BuzzIcons.bot,
                                       size: 13,
                                       color: context.colors.primary,
                                     ),
@@ -195,9 +195,7 @@ class NoteCard extends HookConsumerWidget {
                 Row(
                   children: [
                     _ActionButton(
-                      icon: effectiveUpvoted
-                          ? Icons.favorite
-                          : LucideIcons.heart,
+                      icon: effectiveUpvoted ? Icons.favorite : BuzzIcons.heart,
                       label: effectiveCount > 0 ? '$effectiveCount' : null,
                       color: effectiveUpvoted ? Colors.redAccent : null,
                       onTap: () async {
@@ -218,7 +216,7 @@ class NoteCard extends HookConsumerWidget {
                       },
                     ),
                     _ActionButton(
-                      icon: LucideIcons.messageCircle,
+                      icon: BuzzIcons.messageCircle,
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute<void>(
                           builder: (_) =>
@@ -227,7 +225,7 @@ class NoteCard extends HookConsumerWidget {
                       ),
                     ),
                     _ActionButton(
-                      icon: LucideIcons.share,
+                      icon: BuzzIcons.share,
                       onTap: () async {
                         await copyToClipboard(
                           context,
@@ -237,7 +235,7 @@ class NoteCard extends HookConsumerWidget {
                       },
                     ),
                     _ActionButton(
-                      icon: LucideIcons.mail,
+                      icon: BuzzIcons.mail,
                       onTap: () async {
                         final channel = await ref
                             .read(channelActionsProvider)

@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_page/onboarding_wordmark.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
@@ -307,7 +307,7 @@ void main() {
 
       expect(find.byType(AppBar), findsNothing);
       expect(find.text('Add Community'), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowLeft), findsNothing);
+      expect(find.byIcon(BuzzIcons.arrowLeft), findsNothing);
       expect(find.byKey(const Key('pairing-pop-scope')), findsOneWidget);
 
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
@@ -328,7 +328,7 @@ void main() {
       expect(appBar.surfaceTintColor, Colors.transparent);
       expect(appBar.elevation, 0);
       expect(appBar.scrolledUnderElevation, 0);
-      expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowLeft), findsOneWidget);
     });
 
     testWidgets('uses the native navigation bar on iOS', (tester) async {
@@ -635,7 +635,7 @@ void main() {
         ),
       );
 
-      expect(find.byIcon(LucideIcons.shieldCheck), findsNothing);
+      expect(find.byIcon(BuzzIcons.shieldCheck), findsNothing);
       expect(find.text('Enter pairing code'), findsOneWidget);
       expect(
         find.text(

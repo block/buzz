@@ -31,8 +31,9 @@ pub mod error;
 mod test_support;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, AdmittedTx, Db, DbConfig, DbConnectionOutcome,
-    DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome, ReadSession,
+    insert_mentions, migration, replica_fence, AdmittedTx, ColdStartError, Db, DbConfig,
+    DbConnectionOutcome, DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome,
+    ReadSession,
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.

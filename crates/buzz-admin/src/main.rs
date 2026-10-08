@@ -22,7 +22,6 @@
 
 mod communities;
 mod deletions;
-mod storage_snapshot_startup;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -196,6 +195,15 @@ async fn run(cli: Cli) -> Result<i32> {
     }
 }
 
+/// One session: the worker detaches its lock-owning connection, and the
+/// cold-start pool opens no idle replacements while it scans S3.
+fn storage_snapshot_db_config(base: DbConfig) -> DbConfig {
+    DbConfig {
+        max_connections: 1,
+        ..base
+    }
+}
+
 async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
     let max_objects_db = i64::try_from(max_objects)
         .map_err(|_| anyhow::anyhow!("--max-objects must be at most {}", i64::MAX))?;
@@ -203,7 +211,11 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
         return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
     }
 
-    let db = storage_snapshot_startup::connect_db().await?;
+    let db = Db::connect_cold_start(
+        storage_snapshot_db_config(db_config_from_env()),
+        "storage_snapshot",
+    )
+    .await?;
     let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
         anyhow::anyhow!("another storage-snapshot worker already holds the lease")
     })?;
@@ -886,6 +898,17 @@ mod storage_snapshot_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn storage_snapshot_holds_a_single_database_session() {
+        let config = storage_snapshot_db_config(DbConfig {
+            max_connections: 20,
+            lock_timeout_ms: 123,
+            ..DbConfig::default()
+        });
+        assert_eq!(config.max_connections, 1);
+        assert_eq!(config.lock_timeout_ms, 123);
+    }
 
     #[tokio::test]
     async fn failed_fold_never_invokes_snapshot_persistence() {

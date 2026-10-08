@@ -26,5 +26,5 @@ rand        = { workspace = true }
 metrics     = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 metrics-util = { workspace = true }

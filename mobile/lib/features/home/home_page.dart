@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
@@ -55,18 +55,18 @@ class HomePage extends HookConsumerWidget {
 
   static const _destinations = [
     _HomeDestination(
-      icon: LucideIcons.house300,
-      selectedIcon: LucideIcons.house500,
+      icon: BuzzIcons.house300,
+      selectedIcon: BuzzIcons.house500,
       label: 'Home',
     ),
     _HomeDestination(
-      icon: LucideIcons.inbox300,
-      selectedIcon: LucideIcons.inbox500,
+      icon: BuzzIcons.inbox300,
+      selectedIcon: BuzzIcons.inbox500,
       label: 'Activity',
     ),
     _HomeDestination(
-      icon: LucideIcons.search300,
-      selectedIcon: LucideIcons.search500,
+      icon: BuzzIcons.search300,
+      selectedIcon: BuzzIcons.search500,
       label: 'Search',
     ),
   ];
