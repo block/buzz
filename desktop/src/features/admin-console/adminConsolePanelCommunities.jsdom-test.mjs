@@ -196,8 +196,14 @@ test("communities-secret-more: Load more never sends key material typed over a p
       const propsKey = Object.keys(more).find((k) =>
         k.startsWith("__reactProps$"),
       );
-      const handlers = [];
+      assert.ok(propsKey, "React props key not found on Load more");
       let props = more[propsKey];
+      assert.equal(
+        typeof props?.onClick,
+        "function",
+        "no Load more handler captured before the secret was typed",
+      );
+      const handlers = [];
       Object.defineProperty(more, propsKey, {
         configurable: true,
         get: () => props,
