@@ -176,7 +176,7 @@ pub struct PartitionTableAudit {
     pub children: Vec<PartitionChildAudit>,
     /// Cached effective bounds for every routable leaf in the catalog tree.
     pub coverage_leaves: Vec<PartitionLeafAudit>,
-    /// Coverage of the current month and the requested future months.
+    /// Coverage of the current month, first, and the requested future months.
     pub months: Vec<MonthCoverage>,
     /// Whether a parseable routable leaf covers the audit timestamp.
     pub serving_safe: bool,
@@ -224,15 +224,18 @@ impl PartitionTableAudit {
     }
 
     /// Whether the table is serving but has state requiring operator attention.
+    ///
+    /// A legacy leaf that ends at or before the current month start is
+    /// historical: it stays in `children` but no longer degrades the table.
     pub fn degraded(&self) -> bool {
         !self.partition_key_valid
             || self.children.iter().any(|child| {
                 matches!(
                     child.kind,
-                    PartitionChildKind::LegacyLeaf
-                        | PartitionChildKind::Default
-                        | PartitionChildKind::Anomalous
-                ) || !child.missing_triggers.is_empty()
+                    PartitionChildKind::Default | PartitionChildKind::Anomalous
+                ) || (child.kind == PartitionChildKind::LegacyLeaf
+                    && !self.ends_by_current_month(child))
+                    || !child.missing_triggers.is_empty()
                     || !child.extra_triggers.is_empty()
                     || child.catch_all_nonempty == Some(true)
                     || child.default_nonempty == Some(true)
@@ -241,6 +244,18 @@ impl PartitionTableAudit {
                 .months
                 .iter()
                 .any(|month| month.kind != MonthCoverageKind::CoveredByMonthly)
+    }
+
+    /// Whether `child` has a finite upper bound at or before the audited month start.
+    ///
+    /// Without an audited month, no child is treated as historical.
+    fn ends_by_current_month(&self, child: &PartitionChildAudit) -> bool {
+        self.months.first().is_some_and(|current_month| {
+            matches!(
+                &child.upper,
+                Some(PartitionBound::Finite(upper)) if *upper <= current_month.start
+            )
+        })
     }
 
     /// Whether the catalog is understood well enough to authorize automatic DDL.
@@ -287,12 +302,39 @@ pub struct PartitionAuditReport {
     pub errors: Vec<PartitionAuditError>,
 }
 
+/// Operator-facing verdict for a best-effort catalog audit report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionAuditOutcome {
+    /// Every managed parent is serving safely without operator attention.
+    Ok,
+    /// Every managed parent is serving safely, but one needs operator attention.
+    Degraded,
+    /// The report is complete, but a managed parent is not serving safely.
+    Unsafe,
+    /// At least one managed parent could not be audited.
+    Error,
+}
+
 impl PartitionAuditReport {
     /// Whether the report is complete and every managed parent is serving safely.
     pub fn serving_safe(&self) -> bool {
         self.errors.is_empty()
             && self.tables.len() == PARTITIONED_TABLES.len()
             && self.tables.iter().all(|table| table.serving_safe)
+    }
+
+    /// Most severe verdict across audit errors, serving safety, and degradation.
+    pub fn outcome(&self) -> PartitionAuditOutcome {
+        if !self.errors.is_empty() {
+            PartitionAuditOutcome::Error
+        } else if !self.serving_safe() {
+            PartitionAuditOutcome::Unsafe
+        } else if self.tables.iter().any(PartitionTableAudit::degraded) {
+            PartitionAuditOutcome::Degraded
+        } else {
+            PartitionAuditOutcome::Ok
+        }
     }
 
     fn into_complete_audit(self) -> Result<PartitionAudit> {
@@ -411,6 +453,7 @@ async fn audit_partition_catalog_report_at_with_timeout(
                     "outcome" => "error"
                 )
                 .increment(1);
+                refresh_last_success_recency(table);
                 metrics::histogram!(
                     "buzz_partition_audit_duration_seconds",
                     "table" => table
@@ -428,6 +471,7 @@ async fn audit_partition_catalog_report_at_with_timeout(
                     "outcome" => "error"
                 )
                 .increment(1);
+                refresh_last_success_recency(table);
                 metrics::histogram!(
                     "buzz_partition_audit_duration_seconds",
                     "table" => table
@@ -975,17 +1019,7 @@ async fn audit_table_on(
         .map(|leaf| leaf.audit)
         .collect::<Vec<_>>();
 
-    let mut months = Vec::with_capacity(months_ahead as usize + 1);
-    for offset in 0..=months_ahead {
-        let (year, month) = add_months(now.year(), now.month(), offset)?;
-        let start = month_start(year, month)?;
-        let (end_year, end_month) = add_months(year, month, 1)?;
-        let end = month_start(end_year, end_month)?;
-        months.push(MonthCoverage {
-            start,
-            kind: coverage_for_range(&coverage_leaves, &start, &end),
-        });
-    }
+    let months = month_coverage(&coverage_leaves, months_ahead, now)?;
 
     let serving_safe = coverage_leaves
         .iter()
@@ -1001,6 +1035,26 @@ async fn audit_table_on(
         months,
         serving_safe,
     })
+}
+
+/// Classify the month containing `now`, then each lookahead month, in order.
+fn month_coverage(
+    coverage_leaves: &[PartitionLeafAudit],
+    months_ahead: i32,
+    now: DateTime<Utc>,
+) -> Result<Vec<MonthCoverage>> {
+    let mut months = Vec::with_capacity(months_ahead as usize + 1);
+    for offset in 0..=months_ahead {
+        let (year, month) = add_months(now.year(), now.month(), offset)?;
+        let start = month_start(year, month)?;
+        let (end_year, end_month) = add_months(year, month, 1)?;
+        let end = month_start(end_year, end_month)?;
+        months.push(MonthCoverage {
+            start,
+            kind: coverage_for_range(coverage_leaves, &start, &end),
+        });
+    }
+    Ok(months)
 }
 
 fn validated_months_ahead(months_ahead: u32) -> Result<i32> {
@@ -1037,6 +1091,35 @@ fn qualified_relation_name(schema: &str, relation: &str) -> String {
         quote_identifier(schema),
         quote_identifier(relation)
     )
+}
+
+/// Export every `buzz_partition_audit_runs_total` series at zero.
+///
+/// Prometheus `increase()` ignores the first sample of a new series, so an
+/// outcome first seen mid-run would otherwise be invisible to rate-based
+/// alerts. Call once at process start, before the first audit.
+pub fn initialize_audit_metric_series() {
+    for &table in PARTITIONED_TABLES {
+        for outcome in ["ok", "degraded", "error"] {
+            metrics::counter!(
+                "buzz_partition_audit_runs_total",
+                "table" => table,
+                "outcome" => outcome
+            )
+            .increment(0);
+        }
+    }
+}
+
+/// Keep a table's last success timestamp exported through failed audits
+/// without changing it, so the exporter's idle timeout cannot evict it. A
+/// table that never succeeded exports 0, which reads as maximally stale.
+fn refresh_last_success_recency(table: &'static str) {
+    metrics::gauge!(
+        "buzz_partition_audit_last_success_timestamp_seconds",
+        "table" => table
+    )
+    .increment(0.0);
 }
 
 fn emit_audit_metrics(audit: &PartitionTableAudit, duration_seconds: f64, now: DateTime<Utc>) {
@@ -1903,6 +1986,335 @@ mod tests {
         assert_eq!(extra, Some(1.0));
     }
 
+    fn month_bound(year: i32, month: u32) -> PartitionBound {
+        PartitionBound::Finite(Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap())
+    }
+
+    fn child_audit(
+        name: &str,
+        kind: PartitionChildKind,
+        lower: PartitionBound,
+        upper: PartitionBound,
+    ) -> PartitionChildAudit {
+        PartitionChildAudit {
+            schema: "public".to_string(),
+            name: name.to_string(),
+            relation_kind: "r".to_string(),
+            catch_all_nonempty: (upper == PartitionBound::MaxValue).then_some(false),
+            lower: Some(lower),
+            upper: Some(upper),
+            kind,
+            pending_detach: false,
+            default_nonempty: None,
+            missing_triggers: Vec::new(),
+            extra_triggers: Vec::new(),
+        }
+    }
+
+    /// The repaired incident catalog, classified and covered by production code at `now`.
+    fn repaired_incident_audit(table: &'static str, now: DateTime<Utc>) -> PartitionTableAudit {
+        let mut bounds = vec![
+            (
+                format!("{table}_p_past"),
+                PartitionBound::MinValue,
+                month_bound(2026, 7),
+            ),
+            (
+                format!("{table}_p2026_07_08_legacy"),
+                month_bound(2026, 7),
+                month_bound(2026, 9),
+            ),
+        ];
+        for month in 9..=12 {
+            let (end_year, end_month) = add_months(2026, month, 1).unwrap();
+            bounds.push((
+                format!("{table}_p2026_{month:02}"),
+                month_bound(2026, month),
+                month_bound(end_year, end_month),
+            ));
+        }
+        bounds.push((
+            format!("{table}_p_future_next"),
+            month_bound(2027, 1),
+            PartitionBound::MaxValue,
+        ));
+        let children = bounds
+            .iter()
+            .map(|(name, lower, upper)| {
+                let kind = classify_child("r", table, name, Some(lower), Some(upper));
+                child_audit(name, kind, lower.clone(), upper.clone())
+            })
+            .collect::<Vec<_>>();
+        let coverage_leaves = bounds
+            .into_iter()
+            .map(|(name, lower, upper)| PartitionLeafAudit {
+                schema: "public".to_string(),
+                root_child_schema: "public".to_string(),
+                root_child: name.clone(),
+                name,
+                catch_all_nonempty: (upper == PartitionBound::MaxValue).then_some(false),
+                lower,
+                upper,
+                nested: false,
+                is_default: false,
+                default_routed: false,
+                routing_exclusions: Vec::new(),
+                default_nonempty: None,
+            })
+            .collect::<Vec<_>>();
+        let months = month_coverage(&coverage_leaves, 3, now).expect("month coverage");
+        let serving_safe = coverage_leaves
+            .iter()
+            .any(|leaf| leaf_covers_timestamp(leaf, &now));
+        PartitionTableAudit {
+            table,
+            partition_key: expected_partition_key(table).map(str::to_string),
+            expected_partition_key: expected_partition_key(table).unwrap(),
+            partition_key_valid: true,
+            children,
+            coverage_leaves,
+            months,
+            serving_safe,
+        }
+    }
+
+    #[test]
+    fn repaired_incident_layout_is_historical_once_its_months_have_passed() {
+        for (now, degraded, outcome) in [
+            (
+                Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap(),
+                true,
+                PartitionAuditOutcome::Degraded,
+            ),
+            (
+                // The legacy upper bound equals the current month start.
+                Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+                false,
+                PartitionAuditOutcome::Ok,
+            ),
+            (
+                Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap(),
+                false,
+                PartitionAuditOutcome::Ok,
+            ),
+        ] {
+            let report = PartitionAuditReport {
+                audited_at: now,
+                tables: PARTITIONED_TABLES
+                    .iter()
+                    .map(|table| repaired_incident_audit(table, now))
+                    .collect(),
+                errors: Vec::new(),
+            };
+            assert!(report.serving_safe(), "{now}");
+            assert_eq!(report.outcome(), outcome, "{now}");
+            for table in &report.tables {
+                assert_eq!(table.degraded(), degraded, "{} at {now}", table.table);
+                assert!(table
+                    .months
+                    .iter()
+                    .all(|month| month.kind == MonthCoverageKind::CoveredByMonthly));
+                // Historical leaves stay visible to operators.
+                assert_eq!(
+                    table
+                        .children
+                        .iter()
+                        .filter(|child| child.kind == PartitionChildKind::LegacyLeaf)
+                        .map(|child| child.name.as_str())
+                        .collect::<Vec<_>>(),
+                    [format!("{}_p2026_07_08_legacy", table.table)]
+                );
+            }
+            let json = serde_json::to_value(&report).expect("serialize report");
+            assert!(json["tables"][0]["children"]
+                .as_array()
+                .expect("children")
+                .iter()
+                .any(|child| child["name"] == "events_p2026_07_08_legacy"
+                    && child["kind"] == "legacy_leaf"));
+
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            metrics::with_local_recorder(&recorder, || {
+                emit_audit_metrics(&report.tables[0], 0.01, now)
+            });
+            let run_outcome = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .find_map(|(key, _, _, _)| {
+                    (key.key().name() == "buzz_partition_audit_runs_total").then(|| {
+                        key.key()
+                            .labels()
+                            .find(|label| label.key() == "outcome")
+                            .map(|label| label.value().to_string())
+                    })
+                })
+                .flatten();
+            let expected = if degraded { "degraded" } else { "ok" };
+            assert_eq!(run_outcome.as_deref(), Some(expected), "{now}");
+        }
+    }
+
+    #[test]
+    fn report_outcome_ranks_errors_then_unsafe_then_degraded() {
+        let august = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let degraded_tables = || {
+            PARTITIONED_TABLES
+                .iter()
+                .map(|table| repaired_incident_audit(table, august))
+                .collect::<Vec<_>>()
+        };
+        let mut incomplete = degraded_tables();
+        incomplete.pop();
+        let error = PartitionAuditError {
+            table: "delivery_log",
+            error: "statement timeout".to_string(),
+        };
+        for (tables, errors, outcome) in [
+            (
+                degraded_tables(),
+                Vec::new(),
+                PartitionAuditOutcome::Degraded,
+            ),
+            (
+                incomplete.clone(),
+                Vec::new(),
+                PartitionAuditOutcome::Unsafe,
+            ),
+            (incomplete, vec![error], PartitionAuditOutcome::Error),
+        ] {
+            let report = PartitionAuditReport {
+                audited_at: august,
+                tables,
+                errors,
+            };
+            assert_eq!(report.outcome(), outcome);
+        }
+    }
+
+    #[test]
+    fn legacy_leaf_degrades_until_its_upper_bound_reaches_the_current_month() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap();
+        let september = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let historical = || {
+            child_audit(
+                "events_legacy",
+                PartitionChildKind::LegacyLeaf,
+                month_bound(2026, 6),
+                month_bound(2026, 8),
+            )
+        };
+        let with = |child: PartitionChildAudit| vec![child];
+        let mut missing_trigger = historical();
+        missing_trigger.missing_triggers = vec!["partition_probe".to_string()];
+        let mut extra_trigger = historical();
+        extra_trigger.extra_triggers = vec!["child_only_probe".to_string()];
+        let mut anomalous = historical();
+        anomalous.kind = PartitionChildKind::Anomalous;
+        let mut default = historical();
+        default.kind = PartitionChildKind::Default;
+        let cases = [
+            (
+                "ends before the current month",
+                with(historical()),
+                3,
+                false,
+            ),
+            (
+                "ends exactly at the current month start",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2026, 7),
+                    month_bound(2026, 9),
+                )),
+                3,
+                false,
+            ),
+            (
+                "ends one second into the current month",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2026, 7),
+                    PartitionBound::Finite(september + chrono::Duration::seconds(1)),
+                )),
+                3,
+                true,
+            ),
+            (
+                "covers lookahead months",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2026, 10),
+                    month_bound(2026, 12),
+                )),
+                3,
+                true,
+            ),
+            (
+                "starts beyond the lookahead",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2027, 6),
+                    month_bound(2027, 8),
+                )),
+                3,
+                true,
+            ),
+            (
+                "historical but missing a trigger",
+                with(missing_trigger),
+                3,
+                true,
+            ),
+            (
+                "historical but has an extra trigger",
+                with(extra_trigger),
+                3,
+                true,
+            ),
+            (
+                "historical bounds on an anomalous child",
+                with(anomalous),
+                3,
+                true,
+            ),
+            (
+                "historical bounds on a default child",
+                with(default),
+                3,
+                true,
+            ),
+            ("no audited month to compare", with(historical()), -1, true),
+        ];
+        for (case, children, months_ahead, degraded) in cases {
+            let months = (0..=months_ahead)
+                .map(|offset| {
+                    let (year, month) = add_months(2026, 9, offset).unwrap();
+                    MonthCoverage {
+                        start: month_start(year, month).unwrap(),
+                        kind: MonthCoverageKind::CoveredByMonthly,
+                    }
+                })
+                .collect();
+            let audit = PartitionTableAudit {
+                table: "events",
+                partition_key: Some("RANGE (created_at)".to_string()),
+                expected_partition_key: "RANGE (created_at)",
+                partition_key_valid: true,
+                children,
+                coverage_leaves: Vec::new(),
+                months,
+                serving_safe: true,
+            };
+            assert_eq!(audit.degraded(), degraded, "{case} at {now}");
+        }
+    }
+
     mod postgres_tests {
         use sqlx::postgres::PgPoolOptions;
         use uuid::Uuid;
@@ -2587,7 +2999,20 @@ mod tests {
                     .months
                     .iter()
                     .all(|month| month.kind == MonthCoverageKind::CoveredByMonthly));
+                assert!(
+                    !table.degraded(),
+                    "{} is historical in September",
+                    table.table
+                );
             }
+
+            let september = audit_partition_catalog_report_at(&pool, 3, fixed_now()).await;
+            assert_eq!(september.outcome(), PartitionAuditOutcome::Ok);
+            let august = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+            let august = audit_partition_catalog_report_at(&pool, 3, august).await;
+            assert!(august.serving_safe());
+            assert!(august.tables.iter().all(PartitionTableAudit::degraded));
+            assert_eq!(august.outcome(), PartitionAuditOutcome::Degraded);
             assert_eq!(catalog_snapshot(&pool).await, before);
             drop_schema(&admin, &schema).await;
         }

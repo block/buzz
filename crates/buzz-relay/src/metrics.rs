@@ -299,6 +299,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     describe_auth_metrics();
     crate::startup_steps::describe_metrics();
     initialize_auth_metric_series();
+    initialize_partition_audit_metric_series();
     tokio::spawn(exporter);
     Ok(())
 }
@@ -520,6 +521,13 @@ pub(crate) fn initialize_auth_metric_series() {
         .increment(0);
     }
     metrics::gauge!("buzz_ws_authenticated_connections_active").set(0.0);
+}
+
+/// Export the partition audit counters at zero before the first audit, so
+/// `increase()`-based alerts count the first failure and every new outcome.
+pub(crate) fn initialize_partition_audit_metric_series() {
+    buzz_db::partition::initialize_audit_metric_series();
+    metrics::counter!("buzz_partition_audit_failures_total").increment(0);
 }
 
 /// Record one issued NIP-42 challenge after it enters the connection writer.
@@ -1159,5 +1167,169 @@ mod tests {
             "metrics::tests::recorder_conflict_is_typed_in_an_isolated_process",
             CHILD_ENV,
         );
+    }
+}
+
+/// Fixtures for the partition audit alerts in
+/// `docs/partition-catalog-monitoring.md`: the production exporter configuration
+/// and audit metric emission export the series those rules read.
+#[cfg(test)]
+mod partition_alert_tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    const RUNS: &str = "buzz_partition_audit_runs_total";
+    const LAST_SUCCESS: &str = "buzz_partition_audit_last_success_timestamp_seconds";
+    const MANAGED_TABLES: [&str; 2] = ["delivery_log", "events"];
+
+    /// Sample value by `table` label for every sample of `metric` in a scrape.
+    /// Counters with several `outcome` labels keep the last sample per table.
+    fn samples(scrape: &str, metric: &str) -> BTreeMap<String, f64> {
+        scrape
+            .lines()
+            .filter_map(|line| line.strip_prefix(metric)?.strip_prefix('{'))
+            .filter_map(|labels| {
+                let (_, rest) = labels.split_once(r#"table=""#)?;
+                let (table, rest) = rest.split_once('"')?;
+                let (_, value) = rest.rsplit_once(' ')?;
+                Some((table.to_string(), value.parse().expect("numeric sample")))
+            })
+            .collect()
+    }
+
+    fn tables(scrape: &str, metric: &str) -> Vec<String> {
+        samples(scrape, metric).into_keys().collect()
+    }
+
+    fn managed_tables() -> Vec<String> {
+        MANAGED_TABLES
+            .iter()
+            .map(|table| table.to_string())
+            .collect()
+    }
+
+    fn unreachable_db() -> buzz_db::Db {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://127.0.0.1:1/buzz")
+            .expect("lazy test pool");
+        buzz_db::Db::from_pool(pool)
+    }
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+    }
+
+    #[test]
+    fn never_successful_audits_export_a_zero_success_timestamp() {
+        let (recorder, handle) = super::readiness_test_recorder_with_idle_timeout(1);
+        metrics::with_local_recorder(&recorder, || {
+            current_thread_runtime().block_on(async {
+                assert!(unreachable_db().audit_partitions(3).await.is_err());
+            });
+        });
+
+        let scrape = handle.render();
+        assert_eq!(tables(&scrape, RUNS), managed_tables(), "{scrape}");
+        let zero = MANAGED_TABLES
+            .iter()
+            .map(|table| (table.to_string(), 0.0))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(samples(&scrape, LAST_SUCCESS), zero, "{scrape}");
+    }
+
+    #[test]
+    fn audit_counters_export_zero_baselines_before_the_first_audit() {
+        let (recorder, handle) = super::readiness_test_recorder_with_idle_timeout(1);
+        metrics::with_local_recorder(&recorder, super::initialize_partition_audit_metric_series);
+
+        let scrape = handle.render();
+        let zero_runs = scrape
+            .lines()
+            .filter(|line| line.starts_with(&format!("{RUNS}{{")) && line.ends_with(" 0"))
+            .count();
+        assert_eq!(zero_runs, MANAGED_TABLES.len() * 3, "{scrape}");
+        assert!(
+            scrape
+                .lines()
+                .any(|line| line == "buzz_partition_audit_failures_total 0"),
+            "{scrape}"
+        );
+
+        // A first failure then reads as an increase from the zero baseline.
+        metrics::with_local_recorder(&recorder, || {
+            current_thread_runtime().block_on(async {
+                assert!(unreachable_db().audit_partitions(3).await.is_err());
+            });
+        });
+        let scrape = handle.render();
+        for table in MANAGED_TABLES {
+            for (outcome, value) in [("ok", 0), ("degraded", 0), ("error", 1)] {
+                let line = scrape
+                    .lines()
+                    .find(|line| {
+                        line.starts_with(&format!("{RUNS}{{"))
+                            && line.contains(&format!(r#"table="{table}""#))
+                            && line.contains(&format!(r#"outcome="{outcome}""#))
+                    })
+                    .unwrap_or_else(|| panic!("{table}/{outcome} missing:\n{scrape}"));
+                assert!(line.ends_with(&format!(" {value}")), "{line}");
+            }
+        }
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn failed_audits_keep_the_last_success_past_the_idle_timeout() {
+            let idle_timeout = Duration::from_secs(1);
+            let (recorder, handle) =
+                crate::metrics::readiness_test_recorder_with_idle_timeout(idle_timeout.as_secs());
+            let runtime = current_thread_runtime();
+            let (working, failing) = metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                        .await
+                        .expect("connect test database");
+                    let working = buzz_db::Db::from_pool(pool);
+                    working.audit_partitions(3).await.expect("successful audit");
+                    (working, unreachable_db())
+                })
+            });
+
+            let scrape = handle.render();
+            let first = samples(&scrape, LAST_SUCCESS);
+            assert_eq!(first.keys().cloned().collect::<Vec<_>>(), managed_tables());
+
+            let audit = |db: &buzz_db::Db| {
+                metrics::with_local_recorder(&recorder, || {
+                    runtime.block_on(async { db.audit_partitions(3).await.is_ok() })
+                })
+            };
+            // A failed audit never makes the last success look fresh, and
+            // sustained failures keep it exported past the idle timeout, so its
+            // age keeps rising instead of the series disappearing.
+            assert!(!audit(&failing));
+            assert_eq!(samples(&handle.render(), LAST_SUCCESS), first);
+            std::thread::sleep(idle_timeout + Duration::from_millis(250));
+            assert!(!audit(&failing));
+            assert_eq!(samples(&handle.render(), LAST_SUCCESS), first);
+
+            // When audits stop running altogether the timestamp is evicted,
+            // but the run counters remain for the not-running rule.
+            std::thread::sleep(idle_timeout + Duration::from_millis(250));
+            let scrape = handle.render();
+            assert!(tables(&scrape, LAST_SUCCESS).is_empty(), "{scrape}");
+            assert_eq!(tables(&scrape, RUNS), managed_tables(), "{scrape}");
+
+            // The next success exports a fresh timestamp again.
+            assert!(audit(&working));
+            assert_eq!(tables(&handle.render(), LAST_SUCCESS), managed_tables());
+        }
     }
 }

@@ -12,7 +12,7 @@ use uuid::Uuid;
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
-use buzz_db::{Db, DbConfig};
+use buzz_db::{partition::PartitionAudit, Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
@@ -249,6 +249,48 @@ impl FleetUsageSchedule {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
+/// Run one explicit partition catalog audit attempt.
+///
+/// `buzz_partition_audit_failures_total` counts failed explicit attempts: the
+/// startup fallback audit and each periodic audit. The audit inside
+/// `ensure_future_partitions` is not an explicit attempt; its failure is
+/// counted only through the fallback that follows it.
+async fn counted_partition_audit(
+    attempt: impl std::future::Future<Output = buzz_db::Result<PartitionAudit>>,
+) -> buzz_db::Result<PartitionAudit> {
+    let result = attempt.await;
+    if result.is_err() {
+        metrics::counter!("buzz_partition_audit_failures_total").increment(1);
+    }
+    result
+}
+
+/// Ensure startup partitions, falling back to a read-only audit on failure.
+///
+/// A creation failure alone never counts as an audit failure; a failed
+/// fallback audit counts once.
+async fn startup_partition_audit<F>(
+    ensure: impl std::future::Future<Output = buzz_db::Result<PartitionAudit>>,
+    fallback_audit: impl FnOnce() -> F,
+) -> Option<PartitionAudit>
+where
+    F: std::future::Future<Output = buzz_db::Result<PartitionAudit>>,
+{
+    match ensure.await {
+        Ok(audit) => Some(audit),
+        Err(error) => {
+            error!(%error, "Failed to ensure partitions");
+            match counted_partition_audit(fallback_audit()).await {
+                Ok(audit) => Some(audit),
+                Err(error) => {
+                    error!(%error, "Initial partition catalog audit failed");
+                    None
+                }
+            }
+        }
+    }
+}
+
 /// Retry missing diagnostics promptly, without tying audit recovery to readiness.
 /// Delays start after each attempt finishes, so slow audits cannot cause bursts.
 struct PartitionAuditSchedule {
@@ -481,23 +523,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
 
     let mut step = StepTimer::start(StartupStep::PartitionEnsure);
-    let startup_partition_audit = match db
-        .ensure_future_partitions(3, config.partition_manager_create_enabled)
-        .await
-    {
-        Ok(audit) => Some(audit),
-        Err(error) => {
-            step.degrade();
-            error!(%error, "Failed to ensure partitions");
-            match db.audit_partitions(3).await {
-                Ok(audit) => Some(audit),
-                Err(error) => {
-                    error!(%error, "Initial partition catalog audit failed");
-                    None
-                }
-            }
-        }
-    };
+    let startup_partition_audit = startup_partition_audit(
+        async {
+            db.ensure_future_partitions(3, config.partition_manager_create_enabled)
+                .await
+                .inspect_err(|_| step.degrade())
+        },
+        || db.audit_partitions(3),
+    )
+    .await;
     step.finish();
 
     let step = StepTimer::start(StartupStep::DeletionFenceVerify);
@@ -822,14 +856,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 PartitionAuditSchedule::new(audit_interval, has_startup_partition_audit);
             loop {
                 schedule.wait().await;
-                let result = partition_state.db.audit_partitions(3).await;
+                let result = counted_partition_audit(partition_state.db.audit_partitions(3)).await;
                 schedule.record_attempt(result.is_ok());
                 match result {
                     Ok(audit) => partition_state.record_partition_audit(audit),
-                    Err(error) => {
-                        metrics::counter!("buzz_partition_audit_failures_total").increment(1);
-                        warn!(%error, "Periodic partition catalog audit failed")
-                    }
+                    Err(error) => warn!(%error, "Periodic partition catalog audit failed"),
                 }
             }
         });
@@ -2998,12 +3029,12 @@ mod tests {
 
     use super::{
         apply_activity_refresh, apply_stock_refresh, buzz_auto_migrate_enabled, connect_audit_pool,
-        dropped_in_memory_keys, emit_cached_fleet_usage_metrics, idle_timeout_secs,
-        jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
+        counted_partition_audit, dropped_in_memory_keys, emit_cached_fleet_usage_metrics,
+        idle_timeout_secs, jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
         record_legacy_usage_collection, refresh_due_fleet_usage,
         refresh_legacy_active_gauge_recency, relay_keypair_from_config,
-        run_jwks_refresh_supervisor, run_periodic_until_cancelled, EmissionScope,
-        FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
+        run_jwks_refresh_supervisor, run_periodic_until_cancelled, startup_partition_audit,
+        EmissionScope, FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
         FLEET_ACTIVITY_COLLECTION_DEADLINE, FLEET_STOCK_COLLECTION_DEADLINE,
     };
     use buzz_db::DbConfig;
@@ -3165,6 +3196,135 @@ mod tests {
             tokio::time::Instant::now() - finished,
             Duration::from_secs(5)
         );
+    }
+
+    fn partition_audit_ok() -> buzz_db::Result<buzz_db::partition::PartitionAudit> {
+        Ok(buzz_db::partition::PartitionAudit {
+            audited_at: chrono::Utc::now(),
+            tables: Vec::new(),
+        })
+    }
+
+    fn partition_audit_err(detail: &str) -> buzz_db::Result<buzz_db::partition::PartitionAudit> {
+        Err(buzz_db::DbError::InvalidData(detail.to_string()))
+    }
+
+    /// One recorded counter: name, labels, and value.
+    type CounterSample = (String, Vec<(String, String)>, u64);
+
+    /// Drive `future` under a local recorder and return its counter values.
+    fn with_partition_counters<F: std::future::Future>(
+        future: F,
+    ) -> (F::Output, Vec<CounterSample>) {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let output = metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(future)
+        });
+        let counters = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| match value {
+                DebugValue::Counter(value) => Some((
+                    key.key().name().to_string(),
+                    key.key()
+                        .labels()
+                        .map(|label| (label.key().to_string(), label.value().to_string()))
+                        .collect(),
+                    value,
+                )),
+                _ => None,
+            })
+            .collect();
+        (output, counters)
+    }
+
+    fn aggregate_audit_failures(counters: &[CounterSample]) -> u64 {
+        counters
+            .iter()
+            .filter(|(name, _, _)| name == "buzz_partition_audit_failures_total")
+            .map(|(_, _, value)| value)
+            .sum()
+    }
+
+    #[test]
+    fn startup_partition_audit_counts_only_a_failed_fallback_once() {
+        let (audit, counters) = with_partition_counters(startup_partition_audit(
+            async { partition_audit_err("partition creation failed") },
+            || async { partition_audit_err("catalog audit failed") },
+        ));
+        assert!(audit.is_none());
+        assert_eq!(aggregate_audit_failures(&counters), 1);
+
+        // A DDL failure recovered by the fallback audit is not an audit failure.
+        let (audit, counters) = with_partition_counters(startup_partition_audit(
+            async { partition_audit_err("partition creation failed") },
+            || async { partition_audit_ok() },
+        ));
+        assert!(audit.is_some());
+        assert_eq!(aggregate_audit_failures(&counters), 0);
+
+        let (audit, counters) = with_partition_counters(startup_partition_audit(
+            async { partition_audit_ok() },
+            || async { panic!("successful ensure must not run the fallback audit") },
+        ));
+        assert!(audit.is_some());
+        assert_eq!(aggregate_audit_failures(&counters), 0);
+    }
+
+    #[test]
+    fn periodic_partition_audit_counts_each_failed_attempt() {
+        let (result, counters) =
+            with_partition_counters(counted_partition_audit(async { partition_audit_ok() }));
+        assert!(result.is_ok());
+        assert_eq!(aggregate_audit_failures(&counters), 0);
+
+        let ((), counters) = with_partition_counters(async {
+            for _ in 0..2 {
+                assert!(
+                    counted_partition_audit(async { partition_audit_err("timeout") })
+                        .await
+                        .is_err()
+                );
+            }
+        });
+        assert_eq!(aggregate_audit_failures(&counters), 2);
+    }
+
+    #[test]
+    fn unreachable_database_startup_counts_one_aggregate_audit_failure() {
+        let (audit, counters) = with_partition_counters(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(Duration::from_millis(200))
+                .connect_lazy("postgres://127.0.0.1:1/buzz")
+                .expect("lazy test pool");
+            let db = buzz_db::Db::from_pool(pool);
+            startup_partition_audit(db.ensure_future_partitions(3, true), || {
+                db.audit_partitions(3)
+            })
+            .await
+        });
+        assert!(audit.is_none());
+        assert_eq!(aggregate_audit_failures(&counters), 1);
+        // Each per-table attempt, including the one inside ensure, still has
+        // its own error outcome.
+        for table in ["events", "delivery_log"] {
+            let errors: u64 = counters
+                .iter()
+                .filter(|(name, labels, _)| {
+                    name == "buzz_partition_audit_runs_total"
+                        && labels.contains(&("table".to_string(), table.to_string()))
+                        && labels.contains(&("outcome".to_string(), "error".to_string()))
+                })
+                .map(|(_, _, value)| value)
+                .sum();
+            assert_eq!(errors, 2, "{table}");
+        }
     }
 
     #[test]

@@ -2012,7 +2012,7 @@ mod tests {
 
     #[test]
     fn partition_manager_config_has_bounded_interval_and_create_kill_switch() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous_interval = std::env::var_os("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
         let previous_create = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
 
@@ -2044,7 +2044,7 @@ mod tests {
 
     #[test]
     fn partition_manager_create_kill_switch_parses_false_values_strictly() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
 
         for value in ["FALSE", "off", "  false  "] {
