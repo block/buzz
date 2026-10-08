@@ -268,7 +268,7 @@ Kind `30178` is the **shareable projection of a team**: owner-authored, paramete
 
 **Content carries only sanitized fields.** No environment variables, no `respond_to` allowlist pubkeys, no source or local ids, no filesystem paths, no secrets. Sharing a team makes the team's and every member's instructions community-readable plaintext.
 
-**A share carries current instructions, never history.** A writer embeds the team's current instructions (see "Team instructions") and no `kind:44300` versions. A reader that adopts a shared team creates a new team with a new id; the adopted team starts its own instructions history.
+**A share is a snapshot, never history.** A writer embeds the team's current instructions at the time it publishes (see "Team instructions") and no `kind:44300` versions. Saving a version does not change an existing share; the owner updates a share by publishing a new head. A client MAY show the owner that a share is older than the team's current instructions. A reader that adopts a shared team creates a new team with a new id; the adopted team starts its own instructions history.
 
 ## Teams
 
@@ -300,14 +300,14 @@ Before a team has any version, a client MAY use instructions held in its private
 
 When an agent starts, the client resolves the current instructions of every team the agent is a member of and compares them after trimming leading and trailing whitespace. A team without instructions has empty instructions, which is a value like any other.
 
-- If every team's instructions are equal, the agent receives that text once, as its team layer.
+- If every team's instructions are equal, the agent receives the trimmed text once, as its team layer.
 - If any differ, or any are invalid, the client MUST NOT start the agent, and SHOULD name the teams involved. A running agent is not affected. The owner resolves a conflict by changing a team's instructions or removing a membership.
 
 An agent that is a member of no team has no team layer. The team layer is delivered after the agent's own instructions (see "Launch composition").
 
 ### Deleting a team
 
-A client that deletes a team SHOULD also delete the team's instructions versions (see "Deletion: kind:44300"). It MUST first confirm that the relay stored the deletion of its private team record, so the team never appears with an older version as current while versions are being deleted. After that, a client MUST NOT publish a version for the deleted team, including a save that was pending when the team was deleted.
+A client that deletes a team SHOULD also delete the team's instructions versions (see "Deletion: kind:44300"). It MUST first confirm that the deletion of its private team record is durable in the store that is authoritative for that record (for a record held on a relay, that the relay stored the deletion), so the team never appears with an older version as current while versions are being deleted. After that, a client MUST NOT publish a version for the deleted team, including a save that was pending when the team was deleted.
 
 At each member's next start, the client removes the deleted team's membership and resolves the team layer from the remaining teams. A running agent is not affected. Missing versions alone never mean that a team was deleted.
 
@@ -421,9 +421,11 @@ Instructions versions are readable only by their author. The agent's key has no 
 
 The relay still sees each event's subject tag, timestamp, and padded size, so it can observe how often each agent's or team's instructions change and roughly how long they are.
 
+Clients MUST publish instructions versions, and deletion requests for them, only to the relay community that holds the subject.
+
 ### Deletion: kind:44300
 
-Owners MAY publish [NIP-09](09.md) deletion requests for instructions versions, one `e` tag per version, with `["k", "44300"]`. A relay MAY accept only one target per request. Clients SHOULD publish one request per version, retry until every version is deleted, and MUST NOT report a subject's history deleted after deleting only part of it.
+Owners MAY publish [NIP-09](09.md) deletion requests for instructions versions, one `e` tag per version. A deletion request for a `kind:44300` event MUST carry `["k", "44300"]`; the relay classifies it by that tag, so it stays private after its target is removed (see "Access control: kind:44300 author-only"). A relay MAY accept only one target per request. Clients SHOULD publish one request per version, retry until every version is deleted, and MUST NOT report a subject's history deleted after deleting only part of it.
 
 - A client that deletes an agent SHOULD delete all of that agent's versions. It MUST NOT delete any team's versions.
 - A client that deletes a team follows "Deleting a team".
@@ -457,11 +459,14 @@ Kind `30178` is stored globally and its content is unvalidated, exactly as for `
 - The relay MUST reject, with `invalid:`, a `kind:44300` event that does not carry exactly one subject tag as defined in "Event envelope", whose `p` value is not 64-character lowercase hex, or whose `t` value does not match the team id grammar.
 - The relay MUST reject a `kind:44300` event with an empty `content` or a `content` longer than 218,548 bytes. It cannot validate the plaintext; that is a client responsibility.
 - The relay MUST reject a `kind:44300` event that carries an `h` tag.
+- The relay MUST reject a `kind:5` deletion request that targets a stored `kind:44300` event and does not carry `["k", "44300"]`.
 - The relay stores `kind:44300` events globally, outside any channel.
 
 ### Access control: kind:44300 author-only
 
 The relay MUST withhold `kind:44300` events, and their existence, from every reader except their authenticated author, on every read surface: historical REQ delivery, NIP-01 `ids` lookup, live fan-out, COUNT, and the HTTP bridge's query and count endpoints.
+
+The relay MUST apply the same rule, on the same read surfaces and in search results, to every `kind:5` deletion request that carries `["k", "44300"]`, whether or not its target is still stored. A deletion request reveals a version's id and the time it was deleted.
 
 The relay MUST exclude `kind:44300` from full-text search results for every reader, including the author.
 
